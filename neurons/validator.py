@@ -17,7 +17,6 @@
 # fmt: off
 
 # Global imports.
-import os
 import sys 
 import time
 import wandb
@@ -26,14 +25,10 @@ import random
 import asyncio
 import argparse
 import threading
-import traceback
+import numpy as np
 from tqdm import tqdm
 import bittensor as bt
-from typing import List
-import torch.optim as optim
-from dotenv import dotenv_values
 from transformers import LlamaForCausalLM
-from torch.optim.lr_scheduler import CosineAnnealingLR
 
 # Import local files.
 import templar as tplr
@@ -71,11 +66,12 @@ class Validator:
         tplr.logger.info(self.config)
 
         # Init bittensor objects.
-        self.wallet = bt.walletplr.T(config=self.config)
+        self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(netuid=self.config.netuid)
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
-            raise ValueError(f'Wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}')
+            tplr.logger.error(f'\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]. You need to register first with: [blue]`btcli subnet register`[/blue]\n')
+            sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         tplr.logger.info('\n' + '-' * 40 + ' Objects ' + '-' * 40)
         tplr.logger.info(f'\nWallet: {self.wallet}\nSubtensor: {self.subtensor}\nMetagraph: {self.metagraph}\nUID: {self.uid}')
@@ -100,7 +96,7 @@ class Validator:
 
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
-        self.hparams = load_hparams()
+        self.hparams = tplr.load_hparams()
         torch.manual_seed(42); np.random.seed(42); random.seed(42)
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         # self.model = LlamaForCausalLM.from_pretrained('TinyLlama/TinyLlama_v1.1')

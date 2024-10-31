@@ -17,10 +17,12 @@
 
 import time
 import logging
+import bittensor as bt
 from rich.logging import RichHandler
 from rich.highlighter import NullHighlighter
 
 # Configure loguru logger
+bt.logging.off()
 FORMAT = "%(message)s"
 logging.basicConfig( 
     level=logging.INFO, 

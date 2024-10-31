@@ -60,8 +60,6 @@ class Validator:
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
-        config.subtensor.network = 'test'
-        config.subtensor.chain_endpoint = 'wss://test.finney.opentensor.ai:443/'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
         return config

@@ -14,8 +14,7 @@ authors = [
 
 dependencies = [
     "aiohttp==3.9.2",
-    "bittensor==7.4.0",
-    "substrate-interface",
+    "bittensor",
     "boto3==1.34.131",
     "safetensors==0.4.5",
     "torch>=2.5.1",

@@ -60,8 +60,6 @@ class Miner:
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
-        config.subtensor.network = 'test'
-        config.subtensor.chain_endpoint = 'wss://test.finney.opentensor.ai:443/'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
         return config
@@ -69,18 +67,19 @@ class Miner:
     def __init__(self):
         # Init config.
         self.config = Miner.config()
-        tplr.tplr.logger.info('\n' + '-' * 40 + ' Config ' + '-' * 40)
-        tplr.tplr.logger.info(self.config)
+        tplr.logger.info('\n' + '-' * 40 + ' Config ' + '-' * 40)
+        tplr.logger.info(self.config)
 
         # Init bittensor objects.
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(netuid=self.config.netuid)
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
-            raise ValueError(f'Wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}')
+            tplr.logger.error(f'\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]. You need to register first with: [blue]`btcli subnet register`[/blue]\n')
+            sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-        tplr.tplr.logger.info('\n' + '-' * 40 + ' Objects ' + '-' * 40)
-        tplr.tplr.logger.info(f'\nWallet: {self.wallet}\nSubtensor: {self.subtensor}\nMetagraph: {self.metagraph}\nUID: {self.uid}')
+        tplr.logger.info('\n' + '-' * 40 + ' Objects ' + '-' * 40)
+        tplr.logger.info(f'\nWallet: {self.wallet}\nSubtensor: {self.subtensor}\nMetagraph: {self.metagraph}\nUID: {self.uid}')
 
         # Init bucket.
         try:
@@ -88,7 +87,7 @@ class Miner:
                 raise ValueError('')
         except:
             self.subtensor.commit(self.wallet, self.config.netuid, self.config.bucket)
-        tplr.tplr.logger.info('Bucket:' + self.config.bucket)
+        tplr.logger.info('Bucket:' + self.config.bucket)
 
         # Init Wandb.
         if self.config.use_wandb:
@@ -96,12 +95,12 @@ class Miner:
             try:
                 for run in wandb.Api().runs(path=self.config.project):
                     if run.name == f'M{self.uid}':
-                        tplr.tplr.logger.info(f'Deleting old run: {run}'); run.delete()
+                        tplr.logger.info(f'Deleting old run: {run}'); run.delete()
             except: pass
             wandb.init(project=self.config.project, resume='allow', name=f'M{self.uid}', config=self.config)
 
         # Init model.
-        tplr.tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
+        tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
         self.hparams = load_hparams()
         torch.manual_seed(42); np.random.seed(42); random.seed(42)
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
@@ -150,7 +149,7 @@ class Miner:
                 try: next_buckets.append(self.config.bucket if not self.config.remote else self.subtensor.get_commitment( self.config.netuid, uid ))
                 except: next_buckets.append(None)    
             self.buckets = next_buckets    
-            tplr.tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
+            tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
             await asyncio.sleep(60)
 
     async def run(self):
@@ -181,7 +180,7 @@ class Miner:
         while True:
             try:      
                 # Start the window step.     
-                tplr.tplr.logger.info('[bold]' + '\n' + '-' * 40 + f' Step: {self.global_step} ' + '-' * 40)
+                tplr.logger.info('[bold]' + '\n' + '-' * 40 + f' Step: {self.global_step} ' + '-' * 40)
                 self.global_step += 1
                 start_step = tplr.T()
                 window = self.current_window
@@ -195,7 +194,7 @@ class Miner:
                         key = 'state'
                     )
                     n_slices = len(state_slices[ window ]) if window in state_slices else 0
-                    tplr.tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_slices} window states.")
+                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_slices} window states.")
                     
                     # Download the delta from the previous window.
                     st = tplr.T()
@@ -205,7 +204,7 @@ class Miner:
                         key = 'delta'
                     )       
                     n_slices = len(delta_slices[ window - 1  ]) if window - 1 in delta_slices else 0
-                    tplr.tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Download {n_slices} window deltas.")
+                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Download {n_slices} window deltas.")
                     
                     # Apply the state for the current window.
                     st = tplr.T()
@@ -216,7 +215,7 @@ class Miner:
                         compression = self.hparams.compression,
                         key = 'state'
                     )
-                    tplr.tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state.")
+                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state.")
         
                 # Download the page for the current window.
                 st = tplr.T()

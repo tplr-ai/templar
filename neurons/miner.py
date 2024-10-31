@@ -46,7 +46,7 @@ class Miner:
     def config():
         parser = argparse.ArgumentParser(description='Miner script')
         parser.add_argument('--project', type=str, default='aesop2', help='Optional wandb project name')
-        parser.add_argument('--netuid', type=int, default=220, help='Bittensor network UID.')
+        parser.add_argument('--netuid', type=int, default=3, help='Bittensor network UID.')
         parser.add_argument('--bucket', type=str, default='decis', help='S3 bucket name')
         parser.add_argument('--actual_batch_size', type=int, default=8, help='Training batch size per accumulation.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training (e.g., cpu or cuda)')

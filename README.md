@@ -1,4 +1,4 @@
-# Templar: Incentivized Wide Internet Training
+# τemplar: Incentivized Wide Internet Training
 
 ## Getting Started
 

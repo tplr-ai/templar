@@ -69,7 +69,7 @@ def load_hparams() -> SimpleNamespace:
         print(hparams.hidden_size)
         print(hparams.model_config)
     """
-    github_url = f"https://raw.githubusercontent.com/unconst/cont/master/hparams.json?timestamp={int(time.time())}"
+    github_url = f"https://raw.githubusercontent.com/RaoFoundation/templar/main/hparams.json?timestamp={int(time.time())}"
     try:
         # Attempt to fetch from the GitHub file first
         response = requests.get(github_url, timeout=10, headers={'Cache-Control': 'no-cache'})

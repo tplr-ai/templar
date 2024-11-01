@@ -442,9 +442,9 @@ fi
 # Now run uv sync
 if [[ "$DEBUG" == "true" ]]; then
     # remove prerelease once bt decode is released
-    execute uv sync extra --all --prerelease=allow
+    execute uv sync --extra all --prerelease=allow
 else
-    execute uv sync extra --all --prerelease=allow  > /dev/null 2>&1
+    execute uv sync --extra all --prerelease=allow  > /dev/null 2>&1
 fi
 
 # Install flash-attn separately due to its special requirements

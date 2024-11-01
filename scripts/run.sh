@@ -201,10 +201,11 @@ clear
 echo ""
 echo ""
 echo ""
-echo ""___  _  _ _  _ | _  _  ""
-echo ""  | (/_| | ||_)|(_||   ""
-echo ""            |          ""
-
+cat << "EOF"
+___  _  _ _  _ | _  _  
+  | (/_| | ||_)|(_||   
+            |          
+EOF
 echo ""
 echo ""
 

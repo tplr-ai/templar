@@ -203,7 +203,7 @@ echo ""
 echo ""
 printf '%s\n' "___  _  _ _  _ | _  _  "
 printf '%s\n' "  | (/_| | ||_)|(_||   "
-printf '%s\n' "            |          "
+printf '%s\n' "  |         |          "
 echo ""
 echo ""
 

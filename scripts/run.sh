@@ -357,9 +357,9 @@ else
     if [ ! -d "τemplar" ]; then
         ohai "Cloning τemplar ..."
         execute git clone https://github.com/RaoFoundation/templar
-        REPO_PATH="templar/"
+        REPO_PATH="templar"
     else
-        REPO_PATH="templar/"
+        REPO_PATH="templar"
     fi
 fi
 pdone "τemplar repository is ready at $REPO_PATH"

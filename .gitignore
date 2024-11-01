@@ -34,5 +34,4 @@ venv/
 .DS_Store
 
 # Project specific
-uv.lock
 wandb

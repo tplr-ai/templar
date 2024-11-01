@@ -57,9 +57,13 @@ class Miner:
         parser.add_argument('--random', action='store_true', help='Train on random')
         parser.add_argument('--sync_state', action='store_true', help='Syncs the model state by pulling from the history.')
         parser.add_argument('--baseline', action='store_true', help='Dont perform syncing with other peers, just train.')
+        parser.add_argument('--test', action='store_true', help='Run on test network')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
+        if config.test:
+            config.subtensor.network = 'test'
+            config.subtensor.chain_endpoint = 'wss://test.finney.opentensor.ai:443/'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
         return config
@@ -101,10 +105,9 @@ class Miner:
 
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
-        self.hparams = load_hparams()
+        self.hparams = tplr.load_hparams()
         torch.manual_seed(42); np.random.seed(42); random.seed(42)
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
-        # self.model = LlamaForCausalLM.from_pretrained('TinyLlama/TinyLlama_v1.1')
         self.model.to(self.config.device)
         self.model.train()
         self.optimizer = optim.AdamW(
@@ -143,7 +146,7 @@ class Miner:
             st = tplr.T()
             self.subtensor = bt.subtensor(config=self.config)
             self.metagraph = self.subtensor.metagraph(self.config.netuid)
-            self.hparams = load_hparams()
+            self.hparams = tplr.load_hparams()
             next_buckets = []
             for uid in self.metagraph.uids:
                 try: next_buckets.append(self.config.bucket if not self.config.remote else self.subtensor.get_commitment( self.config.netuid, uid ))
@@ -227,7 +230,8 @@ class Miner:
                 random.shuffle( pages )
                 dataset = await tplr.dataset.DatasetLoader.create(
                     batch_size = self.config.actual_batch_size,
-                    sequence_length = self.hparams.sequence_length,
+                    # sequence_length = self.hparams.sequence_length,
+                    sequence_length = 8192,
                     pages_info = pages,
                     tokenizer = self.hparams.tokenizer
                 )
@@ -258,7 +262,8 @@ class Miner:
                 torch.cuda.empty_cache()
                 step_loss = total_loss/(full_steps+1)
                 train_duration = tplr.T() - train_start
-                tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
+                # tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
+                tokens_per_step = 8192 * self.config.actual_batch_size * (full_steps + 1)
                 tokens_per_second =  tokens_per_step / train_duration
                 tplr.logger.info(f"{tplr.P(window, train_duration)} Accumulated gradients:")
                 tplr.logger.info(f"{tplr.P(window, train_duration)} \tTotal steps: [tan]{full_steps}/{total_steps}[/tan], Rate: [tan]{(full_steps/total_steps):.2f}[/tan], Target: [tan]{self.sample_rate:.2f}[/tan]")

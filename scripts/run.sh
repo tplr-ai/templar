@@ -423,13 +423,40 @@ source $REPO_PATH/.venv/bin/activate
 pdone "Virtual environment activated"
 
 ohai "Installing Python requirements ..."
+cd "$REPO_PATH"
+
+# First, ensure uv is properly set up
 if [[ "$DEBUG" == "true" ]]; then
-    execute uv sync --extra all
+    execute uv pip install --upgrade pip
+else
+    execute uv pip install --upgrade pip > /dev/null 2>&1
+fi
+
+# Install PyTorch first
+if [[ "$DEBUG" == "true" ]]; then
+    execute uv pip install torch --index-url https://download.pytorch.org/whl/cu118
+else
+    execute uv pip install torch --index-url https://download.pytorch.org/whl/cu118 > /dev/null 2>&1
+fi
+
+# Now run uv sync
+if [[ "$DEBUG" == "true" ]]; then
+    execute uv pip install wheel setuptools
+    execute uv sync
+    execute uv pip install -e .
+else
+    execute uv pip install wheel setuptools > /dev/null 2>&1
+    execute uv sync > /dev/null 2>&1
+    execute uv pip install -e . > /dev/null 2>&1
+fi
+
+# Install flash-attn separately due to its special requirements
+if [[ "$DEBUG" == "true" ]]; then
     execute uv pip install flash-attn --no-build-isolation
 else
-    execute uv sync --extra all > /dev/null 2>&1
     execute uv pip install flash-attn --no-build-isolation > /dev/null 2>&1
 fi
+
 pdone "Python requirements installed"
 
 # Check for GPUs

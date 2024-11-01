@@ -52,9 +52,13 @@ class Validator:
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
         parser.add_argument('--sync_state', action='store_true', help='Syncs the model state by pulling from the history.')
+        parser.add_argument('--test', action='store_true', help='Run on test network')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
+        if config.test:
+            config.subtensor.network = 'test'
+            config.subtensor.chain_endpoint = 'wss://test.finney.opentensor.ai:443/'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
         return config
@@ -241,7 +245,8 @@ class Validator:
                 random.shuffle( eval_pages )    
                 eval_dataset = await tplr.dataset.DatasetLoader.create(
                     batch_size = self.config.actual_batch_size,
-                    sequence_length = self.hparams.sequence_length,
+                    # sequence_length = self.hparams.sequence_length,
+                    sequence_length = 8192,
                     pages_info = eval_pages,
                     tokenizer = self.hparams.tokenizer
                 )                
@@ -261,14 +266,16 @@ class Validator:
                             input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                             labels = input_ids.clone()
                             labels = torch.where(labels == self.hparams.tokenizer.pad_token_id, -100, labels)
-                            with torch.amp.autocastplr.T(device_type=self.model.device.type, dtype=torch.bfloat16):  # Enable autocasting
+                            with torch.amp.autocast(device_type=self.model.device.type, dtype=torch.bfloat16):  # Enable autocasting
                                 outputs = self.model(input_ids=input_ids, labels=labels)
                             total_loss += outputs.loss.item()
                             outputs.loss.backward()
                             if self.current_window - offset != window: exhuasted_window = True; continue
                 step_loss = total_loss/(full_steps+1)
                 eval_duration = tplr.T() - eval_start
-                tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
+                # tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
+                tokens_per_step = 8192 * self.config.actual_batch_size * (full_steps + 1)
+
                 tokens_per_second = tokens_per_step / eval_duration
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: Accumulated gradients:")
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tTotal steps: [tan]{full_steps}/{total_steps}[/tan], Rate: [tan]{(full_steps/total_steps):.2f}[/tan], Target: [tan]{self.sample_rate:.2f}[/tan]")
@@ -296,20 +303,47 @@ class Validator:
                 start_time = tplr.T()
                 self.step_scores[ eval_uid ] = score
                 self.scores[ eval_uid ] = (1 - self.hparams.validator_moving_alpha) * score + self.hparams.validator_moving_alpha * self.scores[eval_uid]
-                self.scores[ torch.isnan(self.scores) ] = 0
-                valid_score_indices = torch.nonzero((self.scores != 0) & (~torch.isnan(self.scores))).squeeze().view(-1, 1)
-                valid_scores = self.scores[valid_score_indices].view(-1, 1) if valid_score_indices.dim() == 1 else self.scores[valid_score_indices]
-                if valid_scores.numel() > 0:
-                    self.weights[valid_score_indices] = valid_scores / (valid_scores.sum() + 1e-8) # Weights are normalized scores.
+                # Store the original weights before adjustment.
+                total_score = torch.sum(self.scores).item()
+                if total_score == 0.0:
+                    tplr.logger.warning("Total score is zero; setting all weights to zero.")
+                    self.weights = torch.zeros_like(self.scores)
+                    original_weights = self.weights.clone()  # All zeros in this case
+                else:
+                    # Normalize scores to get initial weights
+                    self.weights = self.scores / total_score
+
+                    # Store the original weights before adjustment
+                    original_weights = self.weights.clone()
+
+                    # Set negative weights to zero
+                    negative_weights = self.weights < 0
+                    if negative_weights.any():
+                        tplr.logger.info("Negative weights detected; setting them to zero.")
+                        self.weights[negative_weights] = 0.0
+
+                        # Re-normalize the positive weights to ensure the sum is 1
+                        positive_total = torch.sum(self.weights).item()
+                        if positive_total == 0.0:
+                            tplr.logger.warning("All weights are zero after removing negative weights; cannot normalize.")
+                            # Weights remain zero
+                        else:
+                            self.weights = self.weights / positive_total
+
+                # Log updated scores and weights
+                valid_score_indices = torch.nonzero(self.scores != 0).squeeze().view(-1)
                 for uid_i in valid_score_indices:
-                    moving_score = self.scores[ uid_i ].item()
-                    weight = self.weights[ uid_i ].item()
-                    step_score = self.step_scores[ uid_i ].item()
+                    uid = uid_i.item()
+                    moving_score = self.scores[uid].item()
+                    weight = self.weights[uid].item()
+                    orig_weight = original_weights[uid].item()
+                    step_score = self.step_scores[uid].item()
                     tplr.logger.info(
-                        f"\tuid: [dark_sea_green]{uid_i.item()}[/dark_sea_green], "
-                        f"last: [dark_sea_green]{step_score:.3f}[/dark_sea_green], "
-                        f"moving: [dark_sea_green]{moving_score:.3f}[/dark_sea_green], "
-                        f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green]"
+                        f"\tuid: [dark_sea_green]{uid}[/dark_sea_green], "
+                        f"step_score: [dark_sea_green]{step_score:.3f}[/dark_sea_green], "
+                        f"moving_score: [dark_sea_green]{moving_score:.3f}[/dark_sea_green], "
+                        f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green], "
+                        f"original_weight: [dark_sea_green]{orig_weight:.3f}[/dark_sea_green]"
                     )
                 
                 # Apply all deltas to the model state.
@@ -334,7 +368,7 @@ class Validator:
                 # Finish step.
                 gs_end = tplr.T()
                 while self.current_window - offset == window:
-                    await asyncio.sleetplr.P(0.1)
+                    await asyncio.sleep(0.1)
                 window_time_delta = self.window_time - gs_end
                 window_delta_str = f"[red]{window_time_delta:.2f}[/red]" if window_time_delta < 0 else f"[green]+{window_time_delta:.2f}[/green]"
                 tplr.logger.info(f"{tplr.P(window, gs_end - gs_start)}[{window_delta_str}]: Finished step.")
@@ -350,9 +384,24 @@ class Validator:
                         wandb.log({
                             f"step_scores/{uid_i.item()}": self.step_scores[ uid_i ].item(),
                             f"moving_scores/{uid_i.item()}": self.scores[ uid_i ].item(),
-                            f"weights/{uid_i.item()}": self.weights[ uid_i ].item(),
+                            f"weights/{uid}": self.weights[uid].item(),
+                            f"original_weights/{uid}": original_weights[uid].item(),
                         })
-                    
+                # Set temperatured weights on the chain.
+                if self.current_block % 100 == 0:
+                    tplr.logger.info(f"Setting weights on chain: {self.weights[ self.metagraph.uids ]}")
+                    try:
+                        result = self.subtensor.set_weights(
+                            wallet = self.wallet,
+                            netuid = self.config.netuid,
+                            uids = self.metagraph.uids,
+                            weights = self.weights[ self.metagraph.uids ],
+                            wait_for_inclusion = True,
+                            wait_for_finalization = False,
+                        )
+                        tplr.logger.info(f"Successfully set weights on chain: {result}")
+                    except Exception as e:
+                        tplr.logger.error(f"Failed to set weights on chain: {e}")
                                                                 
             # Catch keyboard interrrupt.
             except KeyboardInterrupt:

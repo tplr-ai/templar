@@ -1,18 +1,21 @@
+<div align="center">
+
 # τemplar: Incentivized Wide-Internet Training
 
-## Getting Started
+</div>
 
-1. Install `uv`:
+<div align="center">
+<pre>
+___  _  _ _  _ | _  _  
+  | (/_| | ||_)|(_||   
+            |          
+</pre>
+</div>
 
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.cargo/env
-```
+## Quick Start
 
-2. Set up the environment:
-```bash
-uv venv
-source .venv/bin/activate
-uv sync --extra all
-uv pip install flash-attn --no-build-isolation
-```
+---
+
+<pre>
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/RaoFoundation/templar/main/scripts/run.sh)"
+</pre>

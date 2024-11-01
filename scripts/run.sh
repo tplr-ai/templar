@@ -524,11 +524,12 @@ pdone "wandb is configured"
 # Clean the bucket
 ohai "Cleaning bucket $BUCKET..."
 if [[ "$DEBUG" == "true" ]]; then
-    execute python3 $REPO_PATH/scripts/clean.py --bucket "$BUCKET"
+    execute python3 "$REPO_PATH/scripts/clean.py" --bucket "$BUCKET"
 else
-    execute python3 $REPO_PATH/scripts/clean.py  --bucket "$BUCKET" > /dev/null 2>&1
+    execute python3 "$REPO_PATH/scripts/clean.py" --bucket "$BUCKET" > /dev/null 2>&1
 fi
 pdone "Bucket '$BUCKET' cleaned"
+
 
 # Close down all previous processes and restart them
 if pm2 list | grep -q 'online'; then

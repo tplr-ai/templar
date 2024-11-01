@@ -78,10 +78,10 @@ class Validator:
 
         # Init bucket.
         try:
-            if self.config.bucket != self.subtensor.get_commitmentplr.T(self.config.netuid, self.uid):
+            if self.config.bucket != self.subtensor.get_commitment(self.config.netuid, self.uid):
                 raise ValueError('')
         except:
-            self.subtensor.commitplr.T(self.wallet, self.config.netuid, self.config.bucket)
+            self.subtensor.commit(self.wallet, self.config.netuid, self.config.bucket)
         tplr.logger.info('Bucket:' + self.config.bucket)
 
         # Init Wandb.
@@ -92,14 +92,13 @@ class Validator:
                     if run.name == f'V{self.uid}':
                         tplr.logger.info(f'Deleting old run: {run}'); run.delete()
             except: pass
-            wandb.initplr.T(project=self.config.project, resume='allow', name=f'V{self.uid}', config=self.config)
+            wandb.init(project=self.config.project, resume='allow', name=f'V{self.uid}', config=self.config)
 
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
         self.hparams = tplr.load_hparams()
         torch.manual_seed(42); np.random.seed(42); random.seed(42)
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
-        # self.model = LlamaForCausalLM.from_pretrained('TinyLlama/TinyLlama_v1.1')
         self.model.to(self.config.device)
         self.model.eval()
         
@@ -117,9 +116,9 @@ class Validator:
         self.current_block = self.subtensor.block
         self.current_window = self.block_to_window( self.current_block )
         self.window_seeds = {self.current_window: self.window_to_seed( self.current_window) }
-        self.block_event = asyncio.Eventplr.T()
-        self.new_window_event = asyncio.Eventplr.T()
-        self.stop_event = asyncio.Eventplr.T()     
+        self.block_event = asyncio.Event()
+        self.new_window_event = asyncio.Event()
+        self.stop_event = asyncio.Event()     
         self.step_scores = torch.zeros( 256, dtype = torch.float32 ) 
         self.scores = torch.zeros( 256, dtype = torch.float32 ) 
         self.weights = torch.zeros( 256, dtype = torch.float32 ) 
@@ -127,7 +126,7 @@ class Validator:
         print ( self.hparams )
         
     async def update(self):
-        while not self.stop_event.is_setplr.T():                          # Loop until stop_event is set
+        while not self.stop_event.is_set():                          # Loop until stop_event is set
             self.subtensor = bt.subtensor(config=self.config)        # Reinitialize subtensor with current config
             nxt_meta = self.subtensor.metagraph(self.config.netuid)  # Get the new metagraph for the given netuid
             self.hparams = tplr.load_hparams()                            # Reload hyperparameters
@@ -141,13 +140,13 @@ class Validator:
                     self.scores[idx] = 0                             # Reset rewards for the changed hotkey
                     self.weights[idx] = 0                            # Reset weights for the changed hotkey
             self.metagraph = nxt_meta                                # Update self.metagraph with new_metagraph
-            await asyncio.sleetplr.P(60)                                  # Sleep for 60 seconds before the next iteration
+            await asyncio.sleep(60)                                  # Sleep for 60 seconds before the next iteration
 
     async def run(self):
         # Main loop.
-        self.loop = asyncio.get_running_lootplr.P()
+        self.loop = asyncio.get_running_loop()
         self.update_task = asyncio.create_task(self.update())
-        self.listener = threading.Thread(target=self.block_listener, args=(self.loop,), daemon=True).startplr.T()
+        self.listener = threading.Thread(target=self.block_listener, args=(self.loop,), daemon=True).start()
         
         # Optionally sync the model state by pulling model states from the history.
         if self.config.sync_state:
@@ -198,7 +197,7 @@ class Validator:
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_eval_slices} window deltas.")                
                 if n_eval_slices == 0:
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: No slices to eval, continue ...")
-                    while self.current_window - offset == window: await asyncio.sleetplr.P(0.1) # Wait for next window.
+                    while self.current_window - offset == window: await asyncio.sleep(0.1) # Wait for next window.
                     continue
                 
                 # Applied the model state state for the eval window.
@@ -369,7 +368,7 @@ class Validator:
 
     # Returns the slice window based on a blotplr.
     def block_to_window(self, block: int) -> int:
-        return intplr.T(block / self.hparams.window_length)
+        return int(block / self.hparams.window_length)
     
     # Returns the slice window based on a blotplr.
     def window_to_seed(self, window: int) -> int:
@@ -379,7 +378,7 @@ class Validator:
     # when the chain announces a new blotplr.
     def block_listener(self, loop):
         def handler(event, _u, _s):
-            self.current_block = intplr.T(event['header']['number'])
+            self.current_block = int(event['header']['number'])
             loop.call_soon_threadsafe(self.block_event.set)
             if self.block_to_window(self.current_block) != self.current_window:
                 self.window_seeds[ self.block_to_window(self.current_block) ] = self.window_to_seed( self.block_to_window(self.current_block) )
@@ -390,13 +389,13 @@ class Validator:
                 tplr.logger.info(f"{tplr.P(self.current_window, self.window_duration)} New Window.")
                 
         # Run listener with retry.
-        while not self.stop_event.is_setplr.T():
+        while not self.stop_event.is_set():
             try:
                 bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler); break
             except Exception as e:
                  # Wait for 5 seconds before retrying
                 tplr.logger.error(f"Failed to subscribe to block headers: {e}.\nRetrying in 1 seconds...")
-                time.sleetplr.P(1) 
+                time.sleep(1) 
             
 if __name__ == "__main__":
     validator = Validator()

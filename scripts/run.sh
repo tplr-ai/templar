@@ -201,11 +201,9 @@ clear
 echo ""
 echo ""
 echo ""
-cat << "EOF"
-___  _  _ _  _ | _  _  
-  | (/_| | ||_)|(_||   
-            |          
-EOF
+printf '%s\n' "___  _  _ _  _ | _  _  "
+printf '%s\n' "  | (/_| | ||_)|(_||   "
+printf '%s\n' "            |          "
 echo ""
 echo ""
 

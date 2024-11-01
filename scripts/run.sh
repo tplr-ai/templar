@@ -441,13 +441,10 @@ fi
 
 # Now run uv sync
 if [[ "$DEBUG" == "true" ]]; then
-    execute uv pip install wheel setuptools
-    execute uv sync
-    execute uv pip install -e .
+    # remove prerelease once bt decode is released
+    execute uv sync extra --all --prerelease=allow
 else
-    execute uv pip install wheel setuptools > /dev/null 2>&1
-    execute uv sync > /dev/null 2>&1
-    execute uv pip install -e . > /dev/null 2>&1
+    execute uv sync extra --all --prerelease=allow  > /dev/null 2>&1
 fi
 
 # Install flash-attn separately due to its special requirements

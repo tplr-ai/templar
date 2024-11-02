@@ -86,29 +86,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# If NETWORK is not specified, prompt the user to select a network
-if [[ -z "$NETWORK" ]]; then
-    echo "Please select the network you want to use:"
-    echo "1) finney (Mainnet)"
-    echo "2) test (Testnet)"
-    echo "3) local"
-    read -p "Enter the number corresponding to your choice [1-3]: " network_choice
-    case "$network_choice" in
-        1)
-            NETWORK="finney"
-            ;;
-        2)
-            NETWORK="test"
-            ;;
-        3)
-            NETWORK="local"
-            ;;
-        *)
-            echo "Invalid choice. Exiting."
-            exit 1
-            ;;
-    esac
-fi
 
 # Set network-specific variables based on the selected network
 case "$NETWORK" in
@@ -281,6 +258,57 @@ echo "Please ensure you have a stable internet connection and sufficient permiss
 echo ""
 
 wait_for_user
+
+# If NETWORK is not specified, prompt the user to select a network
+if [[ -z "$NETWORK" ]]; then
+    echo "Please select the network you want to use:"
+    echo "1) finney (Mainnet)"
+    echo "2) test (Testnet)"
+    echo "3) local"
+    read -p "Enter the number corresponding to your choice [1-3]: " network_choice
+    case "$network_choice" in
+        1)
+            NETWORK="finney"
+            ;;
+        2)
+            NETWORK="test"
+            ;;
+        3)
+            NETWORK="local"
+            ;;
+        *)
+            echo "Invalid choice. Exiting."
+            exit 1
+            ;;
+    esac
+fi
+
+# Set network-specific variables based on the selected network
+case "$NETWORK" in
+    finney)
+        SUBTENSOR_NETWORK="main"
+        NETUID=3
+        SUBTENSOR_CHAIN_ENDPOINT=""
+        PM2_NETWORK_OPTIONS=""
+        ;;
+    test|testnet)
+        SUBTENSOR_NETWORK="test"
+        NETUID=223
+        SUBTENSOR_CHAIN_ENDPOINT="wss://test.finney.opentensor.ai:443/"
+        PM2_NETWORK_OPTIONS="--test"
+        ;;
+    local)
+        SUBTENSOR_NETWORK="local"
+        NETUID=1
+        SUBTENSOR_CHAIN_ENDPOINT="wss://localhost:9944"
+        PM2_NETWORK_OPTIONS=""
+        ;;
+    *)
+        echo "Unknown network: $NETWORK"
+        display_help
+        exit 1
+        ;;
+esac
 
 # Ensure ~/.bash_profile exists
 touch ~/.bash_profile

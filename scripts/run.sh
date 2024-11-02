@@ -25,6 +25,7 @@ PROJECT="templar"
 AWS_ACCESS_KEY_ID=""
 AWS_SECRET_ACCESS_KEY=""
 BUCKET=""
+NETWORK=""
 
 # Function to display help message
 display_help() {
@@ -33,14 +34,15 @@ Usage: $0 [options]
 
 Options:
     --debug                     Enable debug mode
-    --project <project_name>    Set the project name (default: aesop)
+    --project <project_name>    Set the project name (default: templar)
     --aws-access-key-id <key>   Set AWS Access Key ID
     --aws-secret-access-key <key> Set AWS Secret Access Key
     --bucket <bucket_name>      Set the S3 bucket name
+    --network <network_name>    Set the network (options: finney, test, local)
     -h, --help                  Display this help message
 
 Description:
-    Installs and runs a τemplar miner on your GPU.
+    Installs and runs a τemplar miner on your GPU. If the --network option is not provided, you will be prompted to select a network.
 EOF
 }
 
@@ -68,6 +70,10 @@ while [[ $# -gt 0 ]]; do
             BUCKET="$2"
             shift 2
             ;;
+        --network)
+            NETWORK="$2"
+            shift 2
+            ;;
         -h|--help|-help|--h)
             display_help
             exit 0
@@ -80,7 +86,58 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Set up colors and styles
+# If NETWORK is not specified, prompt the user to select a network
+if [[ -z "$NETWORK" ]]; then
+    echo "Please select the network you want to use:"
+    echo "1) finney (Mainnet)"
+    echo "2) test (Testnet)"
+    echo "3) local"
+    read -p "Enter the number corresponding to your choice [1-3]: " network_choice
+    case "$network_choice" in
+        1)
+            NETWORK="finney"
+            ;;
+        2)
+            NETWORK="test"
+            ;;
+        3)
+            NETWORK="local"
+            ;;
+        *)
+            echo "Invalid choice. Exiting."
+            exit 1
+            ;;
+    esac
+fi
+
+# Set network-specific variables based on the selected network
+case "$NETWORK" in
+    finney)
+        SUBTENSOR_NETWORK="main"
+        NETUID=3
+        SUBTENSOR_CHAIN_ENDPOINT=""
+        PM2_NETWORK_OPTIONS=""
+        ;;
+    test|testnet)
+        SUBTENSOR_NETWORK="test"
+        NETUID=223
+        SUBTENSOR_CHAIN_ENDPOINT="wss://test.finney.opentensor.ai:443/"
+        PM2_NETWORK_OPTIONS="--test"
+        ;;
+    local)
+        SUBTENSOR_NETWORK="local"
+        NETUID=1
+        SUBTENSOR_CHAIN_ENDPOINT="wss://localhost:9944"
+        PM2_NETWORK_OPTIONS=""
+        ;;
+    *)
+        echo "Unknown network: $NETWORK"
+        display_help
+        exit 1
+        ;;
+esac
+
+# Set up colors and styles for terminal output
 if [[ -t 1 ]]; then
     tty_escape() { printf "\033[%sm" "$1"; }
 else
@@ -94,7 +151,7 @@ tty_yellow="$(tty_mkbold 33)"
 tty_bold="$(tty_mkbold 39)"
 tty_reset="$(tty_escape 0)"
 
-# Logging functions
+# Logging functions for standardized output
 ohai() {
     printf "${tty_blue}==>${tty_bold} %s${tty_reset}\n" "$*"
 }
@@ -122,6 +179,7 @@ abort() {
 
 trap 'abort "An unexpected error occurred."' ERR
 
+# Function to get a single character input from the user
 getc() {
     local save_state
     save_state="$(/bin/stty -g)"
@@ -130,18 +188,19 @@ getc() {
     /bin/stty "${save_state}"
 }
 
+# Function to pause execution and wait for user confirmation
 wait_for_user() {
     local c
     echo
     echo "Press ${tty_bold}RETURN${tty_reset}/${tty_bold}ENTER${tty_reset} to continue or any other key to abort:"
     getc c
-    # we test for \r and \n because some stuff does \r instead
     if ! [[ "${c}" == $'\r' || "${c}" == $'\n' ]]
     then
         exit 1
     fi
 }
 
+# Function to execute a command with logging
 execute() {
     ohai "Running: $*"
     if ! "$@"; then
@@ -149,6 +208,7 @@ execute() {
     fi
 }
 
+# Function to check for sudo access
 have_sudo_access() {
     if ! command -v sudo &> /dev/null; then
         warn "sudo command not found. Please install sudo or run as root."
@@ -163,6 +223,7 @@ have_sudo_access() {
     return 0
 }
 
+# Function to execute commands with sudo if necessary
 execute_sudo() {
     if have_sudo_access; then
         ohai "sudo $*"
@@ -214,7 +275,7 @@ echo "3. Clone and set up the τemplar repository"
 echo "4. Create and register Bittensor wallets"
 echo "5. Configure wandb for logging"
 echo "6. Clean the specified S3 bucket"
-echo "7. Start τemplar miners on available GPUs"
+echo "7. Start τemplar miners on available GPUs on the '$NETWORK' network"
 echo ""
 echo "Please ensure you have a stable internet connection and sufficient permissions to install software."
 echo ""
@@ -231,7 +292,6 @@ cp ~/.bash_profile ~/.bash_profile.bak
 # Prompt the user for AWS credentials if not supplied via command-line
 ohai "Getting AWS credentials ..."
 if [[ -z "$AWS_ACCESS_KEY_ID" ]] || [[ -z "$AWS_SECRET_ACCESS_KEY" ]] || [[ -z "$BUCKET" ]]; then
-    # TODO: Consider securely storing AWS credentials rather than storing them in plain text
     warn "This script will store your AWS credentials in your ~/.bash_profile file."
     warn "This is not secure and is not recommended."
     read -p "Do you want to proceed? [y/N]: " proceed
@@ -290,9 +350,6 @@ if ! command -v git &> /dev/null; then
 else
     pdone "Git is already installed"
 fi
-
-# TODO: Add error handling for package installations
-# TODO: Ensure compatibility with different package managers
 
 # Check for Rust installation
 if ! command -v rustc &> /dev/null; then
@@ -493,23 +550,64 @@ if ! command -v btcli &> /dev/null; then
     abort "btcli command not found. Please ensure it is installed."
 fi
 
+# Check for GPUs
+ohai "Checking for GPUs..."
+if ! command -v nvidia-smi &> /dev/null; then
+    warn "nvidia-smi command not found. Please ensure NVIDIA drivers are installed."
+    NUM_GPUS=0
+else
+    NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
+
+    if [ "$NUM_GPUS" -gt 0 ]; then
+        nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | while read -r memory; do
+            pdone "Found GPU with $((memory / 1024)) GB of memory"
+        done
+    else
+        warn "No GPUs found on this machine."
+    fi
+fi
+
+# Create wallets and register them on the selected network
+ohai "Creating wallets ..."
+# Create the default coldkey if not exists
+if ! python3 -c "import bittensor as bt; w = bt.wallet(); print(w.coldkey_file.exists_on_device())" | grep -q "True"; then
+    execute btcli w new_coldkey --wallet.path ~/.bittensor/wallets --wallet.name default --n-words 12 
+fi
+pdone "Wallet 'default' is ready"
+
+# Ensure btcli is installed
+if ! command -v btcli &> /dev/null; then
+    abort "btcli command not found. Please ensure it is installed."
+fi
+
 # Create hotkeys and register them
 if [ "$NUM_GPUS" -gt 0 ]; then
     for i in $(seq 0 $((NUM_GPUS - 1))); do
-        # Check if the hotkey file exists on the device
-        exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='C$i'); print(w.hotkey_file.exists_on_device())" 2>/dev/null)
-        if [ "$exists_on_device" != "True" ]; then
-            echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey C$i --n-words 12 > /dev/null 2>&1;
-        fi
-        pdone "Created Hotkey 'C$i'"
+        HOTKEY_NAME="C$i"
 
-        # Check if the hotkey is registered on subnet 220
-        is_registered=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='C$i'); sub = bt.subtensor('test'); print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=220))" 2>/dev/null)
-        if [[ "$is_registered" != *"True"* ]]; then
-            ohai "Registering hotkey 'C$i' on subnet 220"
-            btcli subnet pow_register --wallet.name default --wallet.hotkey C$i --netuid 223 --subtensor.network test --no_prompt > /dev/null 2>&1;
+        # Check if the hotkey file exists on the device
+        exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); print(w.hotkey_file.exists_on_device())" 2>/dev/null)
+        if [ "$exists_on_device" != "True" ]; then
+            echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1;
+            pdone "Created Hotkey '$HOTKEY_NAME'"
         fi
-        pdone "Registered Hotkey 'C$i' on subnet 223"
+
+        # Check if the hotkey is registered on the specified netuid
+        is_registered=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); sub = bt.subtensor(network='$SUBTENSOR_NETWORK', chain_endpoint='$SUBTENSOR_CHAIN_ENDPOINT'); print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID))" 2>/dev/null)
+        if [[ "$is_registered" != *"True"* ]]; then
+            ohai "Registering hotkey '$HOTKEY_NAME' on netuid $NETUID"
+            REGISTER_CMD="btcli subnet pow_register --wallet.name default --wallet.hotkey $HOTKEY_NAME --netuid $NETUID --no_prompt"
+            if [[ -n "$SUBTENSOR_NETWORK" ]]; then
+                REGISTER_CMD="$REGISTER_CMD --subtensor.network $SUBTENSOR_NETWORK"
+            fi
+            if [[ -n "$SUBTENSOR_CHAIN_ENDPOINT" ]]; then
+                REGISTER_CMD="$REGISTER_CMD --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
+            fi
+            $REGISTER_CMD > /dev/null 2>&1
+            pdone "Registered Hotkey '$HOTKEY_NAME' on netuid $NETUID"
+        else
+            pdone "Hotkey '$HOTKEY_NAME' is already registered on netuid $NETUID"
+        fi
     done
 else
     warn "No GPUs found. Skipping hotkey creation."
@@ -517,20 +615,8 @@ else
 fi
 pdone "All hotkeys registered"
 
-ohai "Logging into wandb..."
-execute wandb login
-pdone "wandb is configured"
-
-# Clean the bucket
-ohai "Cleaning bucket $BUCKET..."
-if [[ "$DEBUG" == "true" ]]; then
-    execute python3 scripts/clean.py --bucket "$BUCKET"
-else
-    execute python3 scripts/clean.py --bucket "$BUCKET" > /dev/null 2>&1
-fi
-pdone "Bucket '$BUCKET' cleaned"
-
-
+# Start τemplar miners on available GPUs with network-specific settings
+ohai "Starting miners on network '$NETWORK' ..."
 # Close down all previous processes and restart them
 if pm2 list | grep -q 'online'; then
     ohai "Stopping old pm2 processes..."
@@ -543,6 +629,7 @@ if [ "$NUM_GPUS" -gt 0 ]; then
     for i in $(seq 0 $((NUM_GPUS - 1))); do
         # Adjust GPU index for zero-based numbering
         GPU_INDEX=$i
+        HOTKEY_NAME="C$i"
         GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | sed -n "$((i + 1))p")
         if [ -z "$GPU_MEMORY" ]; then
             warn "Could not get GPU memory for GPU $i"
@@ -559,10 +646,20 @@ if [ "$NUM_GPUS" -gt 0 ]; then
             BATCH_SIZE=1
         fi
         ohai "Starting miner on GPU $GPU_INDEX with batch size $BATCH_SIZE..."
+        MINER_ARGS="--actual_batch_size $BATCH_SIZE --wallet.name default --wallet.hotkey $HOTKEY_NAME --bucket \"$BUCKET\" --device cuda:$GPU_INDEX --use_wandb --project \"$PROJECT\" --netuid $NETUID"
+        if [[ -n "$PM2_NETWORK_OPTIONS" ]]; then
+            MINER_ARGS="$MINER_ARGS $PM2_NETWORK_OPTIONS"
+        fi
+        if [[ -n "$SUBTENSOR_NETWORK" ]]; then
+            MINER_ARGS="$MINER_ARGS --subtensor.network $SUBTENSOR_NETWORK"
+        fi
+        if [[ -n "$SUBTENSOR_CHAIN_ENDPOINT" ]]; then
+            MINER_ARGS="$MINER_ARGS --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
+        fi
         if [[ "$DEBUG" == "true" ]]; then
-            execute pm2 start neurons/miner.py --interpreter python3 --name C$i -- --actual_batch_size "$BATCH_SIZE" --wallet.name default --wallet.hotkey C$i --bucket "$BUCKET" --device cuda:$GPU_INDEX --use_wandb --project "$PROJECT" --subtensor.network test
+            execute pm2 start neurons/miner.py --interpreter python3 --name ${NETWORK}_$HOTKEY_NAME -- $MINER_ARGS
         else
-            execute pm2 start neurons/miner.py --interpreter python3 --name C$i -- --actual_batch_size "$BATCH_SIZE" --wallet.name default --wallet.hotkey C$i --bucket "$BUCKET" --device cuda:$GPU_INDEX --use_wandb --project "$PROJECT" --subtensor.network test > /dev/null 2>&1
+            execute pm2 start neurons/miner.py --interpreter python3 --name ${NETWORK}_$HOTKEY_NAME -- $MINER_ARGS > /dev/null 2>&1
         fi
     done
 else
@@ -575,5 +672,5 @@ echo ""
 pdone "SUCCESS"
 echo ""
 
-# Start logging process 1
-pm2 logs C0
+# Start logging the first miner process
+pm2 logs ${NETWORK}_C0

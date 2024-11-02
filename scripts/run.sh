@@ -622,15 +622,25 @@ fi
 if [ "$NUM_GPUS" -gt 0 ]; then
     for i in $(seq 0 $((NUM_GPUS - 1))); do
         HOTKEY_NAME="C$i"
+        
+        ohai "Processing hotkey '$HOTKEY_NAME'..."
 
         # Check if the hotkey file exists on the device
+        ohai "Checking if hotkey exists..."
         exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); print(w.hotkey_file.exists_on_device())" 2>/dev/null)
         if [ "$exists_on_device" != "True" ]; then
+            ohai "Creating new hotkey '$HOTKEY_NAME'..."
             echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1;
             pdone "Created Hotkey '$HOTKEY_NAME'"
+        else
+            info "Hotkey '$HOTKEY_NAME' already exists"
         fi
 
         # Check if the hotkey is registered on the specified netuid
+        ohai "Checking if hotkey is registered on netuid $NETUID..."
+        info "Network: $SUBTENSOR_NETWORK"
+        info "Chain endpoint: $SUBTENSOR_CHAIN_ENDPOINT"
+        
         is_registered=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); sub = bt.subtensor(network='$SUBTENSOR_NETWORK', chain_endpoint='$SUBTENSOR_CHAIN_ENDPOINT'); print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID))" 2>/dev/null)
         if [[ "$is_registered" != *"True"* ]]; then
             ohai "Registering hotkey '$HOTKEY_NAME' on netuid $NETUID"
@@ -641,11 +651,19 @@ if [ "$NUM_GPUS" -gt 0 ]; then
             if [[ -n "$SUBTENSOR_CHAIN_ENDPOINT" ]]; then
                 REGISTER_CMD="$REGISTER_CMD --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
             fi
-            $REGISTER_CMD > /dev/null 2>&1
+            info "Running registration command: $REGISTER_CMD"
+            if ! $REGISTER_CMD > /dev/null 2>&1; then
+                error "Failed to register hotkey '$HOTKEY_NAME'"
+                error "Registration command output:"
+                $REGISTER_CMD
+                continue
+            fi
             pdone "Registered Hotkey '$HOTKEY_NAME' on netuid $NETUID"
         else
             pdone "Hotkey '$HOTKEY_NAME' is already registered on netuid $NETUID"
         fi
+        
+        info "Completed processing for hotkey '$HOTKEY_NAME'"
     done
 else
     warn "No GPUs found. Skipping hotkey creation."

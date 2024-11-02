@@ -620,6 +620,62 @@ fi
 
 # Create hotkeys and register them
 if [ "$NUM_GPUS" -gt 0 ]; then
+    # Add network connectivity check
+    ohai "Checking network connectivity..."
+    
+    # Determine the endpoint to check based on network
+    ENDPOINT_TO_CHECK=""
+    case "$NETWORK" in
+        finney)
+            ENDPOINT_TO_CHECK="wss://finney.opentensor.ai:443"
+            ;;
+        test|testnet)
+            ENDPOINT_TO_CHECK="wss://test.finney.opentensor.ai:443"
+            ;;
+        local)
+            ENDPOINT_TO_CHECK="ws://localhost:9944"
+            ;;
+        *)
+            error "Unknown network: $NETWORK"
+            exit 1
+            ;;
+    esac
+
+    # Extract hostname from WebSocket URL
+    HOSTNAME=$(echo "$ENDPOINT_TO_CHECK" | sed -e 's|^[^/]*//||' -e 's|:.*||')
+    
+    info "Checking connectivity to $HOSTNAME..."
+    if ! ping -c 1 "$HOSTNAME" > /dev/null 2>&1; then
+        warn "Cannot connect to $HOSTNAME"
+        info "Checking general internet connectivity..."
+        if ! ping -c 1 google.com > /dev/null 2>&1; then
+            error "No internet connectivity detected"
+            exit 1
+        fi
+        warn "Internet is working but cannot connect to Subtensor endpoint ($HOSTNAME)"
+        warn "Please check if the endpoint $ENDPOINT_TO_CHECK is correct and accessible"
+    else
+        pdone "Successfully connected to $HOSTNAME"
+    fi
+
+    # Verify bittensor installation
+    ohai "Verifying bittensor installation..."
+    BT_VERSION=$(python3 -c "import bittensor as bt; print(bt.__version__)" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        error "Bittensor is not properly installed"
+        info "Attempting to reinstall bittensor..."
+        pip install --upgrade bittensor
+    else
+        info "Bittensor version: $BT_VERSION"
+    fi
+
+    # Set debug environment variables
+    export RUST_BACKTRACE=1
+    if [[ "$DEBUG" == "true" ]]; then
+        export PYTHONVERBOSE=1
+        export BITTENSOR_DEBUG=1
+    fi
+
     for i in $(seq 0 $((NUM_GPUS - 1))); do
         HOTKEY_NAME="C$i"
         
@@ -627,10 +683,27 @@ if [ "$NUM_GPUS" -gt 0 ]; then
 
         # Check if the hotkey file exists on the device
         ohai "Checking if hotkey exists..."
-        exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); print(w.hotkey_file.exists_on_device())" 2>/dev/null)
+        exists_on_device=$(python3 -c "
+try:
+    import bittensor as bt
+    w = bt.wallet(hotkey='$HOTKEY_NAME')
+    print(w.hotkey_file.exists_on_device())
+except Exception as e:
+    print(f'ERROR: {str(e)}')
+    exit(1)
+" 2>/dev/null)
+
+        if [[ "$exists_on_device" == ERROR:* ]]; then
+            error "Failed to check if hotkey exists: $exists_on_device"
+            continue
+        fi
+
         if [ "$exists_on_device" != "True" ]; then
             ohai "Creating new hotkey '$HOTKEY_NAME'..."
-            echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1;
+            if ! echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1; then
+                error "Failed to create hotkey '$HOTKEY_NAME'"
+                continue
+            fi
             pdone "Created Hotkey '$HOTKEY_NAME'"
         else
             info "Hotkey '$HOTKEY_NAME' already exists"
@@ -641,21 +714,63 @@ if [ "$NUM_GPUS" -gt 0 ]; then
         info "Network: $SUBTENSOR_NETWORK"
         info "Chain endpoint: $SUBTENSOR_CHAIN_ENDPOINT"
         
-        is_registered=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); sub = bt.subtensor(network='$SUBTENSOR_NETWORK', chain_endpoint='$SUBTENSOR_CHAIN_ENDPOINT'); print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID))" 2>/dev/null)
-        if [[ "$is_registered" != *"True"* ]]; then
+        # Function to check registration status
+        check_registration() {
+            python3 -c "
+try:
+    import bittensor as bt
+    import sys
+    w = bt.wallet(hotkey='$HOTKEY_NAME')
+    sub = bt.subtensor(network='$SUBTENSOR_NETWORK', chain_endpoint='$SUBTENSOR_CHAIN_ENDPOINT')
+    result = sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID)
+    print(f'RESULT:{result}')
+except Exception as e:
+    print(f'ERROR: {str(e)}', file=sys.stderr)
+    sys.exit(1)
+"
+        }
+
+        # Try registration check with retries
+        max_retries=3
+        retry_count=0
+        is_registered=""
+        
+        while [ $retry_count -lt $max_retries ]; do
+            is_registered=$(check_registration 2>&1)
+            
+            if [[ "$is_registered" == RESULT:* ]]; then
+                is_registered=${is_registered#RESULT:}
+                break
+            else
+                retry_count=$((retry_count + 1))
+                if [ $retry_count -lt $max_retries ]; then
+                    warn "Registration check failed (attempt $retry_count/$max_retries). Retrying in 5 seconds..."
+                    sleep 5
+                else
+                    error "Failed to check registration status after $max_retries attempts: $is_registered"
+                    continue 2  # Continue outer loop
+                fi
+            fi
+        done
+
+        if [[ "$is_registered" != "True" ]]; then
             ohai "Registering hotkey '$HOTKEY_NAME' on netuid $NETUID"
             REGISTER_CMD="btcli subnet pow_register --wallet.name default --wallet.hotkey $HOTKEY_NAME --netuid $NETUID --no_prompt"
+            
             if [[ -n "$SUBTENSOR_NETWORK" ]]; then
                 REGISTER_CMD="$REGISTER_CMD --subtensor.network $SUBTENSOR_NETWORK"
             fi
             if [[ -n "$SUBTENSOR_CHAIN_ENDPOINT" ]]; then
                 REGISTER_CMD="$REGISTER_CMD --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
             fi
+            
             info "Running registration command: $REGISTER_CMD"
-            if ! $REGISTER_CMD > /dev/null 2>&1; then
+            
+            if ! eval "$REGISTER_CMD" > /dev/null 2>&1; then
                 error "Failed to register hotkey '$HOTKEY_NAME'"
-                error "Registration command output:"
-                $REGISTER_CMD
+                if [[ "$DEBUG" == "true" ]]; then
+                    eval "$REGISTER_CMD"  # Run again to show output
+                fi
                 continue
             fi
             pdone "Registered Hotkey '$HOTKEY_NAME' on netuid $NETUID"
@@ -667,7 +782,7 @@ if [ "$NUM_GPUS" -gt 0 ]; then
     done
 else
     warn "No GPUs found. Skipping hotkey creation."
-    exit
+    exit 1
 fi
 pdone "All hotkeys registered"
 

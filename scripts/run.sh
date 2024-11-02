@@ -524,9 +524,9 @@ pdone "wandb is configured"
 # Clean the bucket
 ohai "Cleaning bucket $BUCKET..."
 if [[ "$DEBUG" == "true" ]]; then
-    execute python3 "$REPO_PATH/scripts/clean.py" --bucket "$BUCKET"
+    execute python3 scripts/clean.py --bucket "$BUCKET"
 else
-    execute python3 "$REPO_PATH/scripts/clean.py" --bucket "$BUCKET" > /dev/null 2>&1
+    execute python3 scripts/clean.py --bucket "$BUCKET" > /dev/null 2>&1
 fi
 pdone "Bucket '$BUCKET' cleaned"
 
@@ -560,9 +560,9 @@ if [ "$NUM_GPUS" -gt 0 ]; then
         fi
         ohai "Starting miner on GPU $GPU_INDEX with batch size $BATCH_SIZE..."
         if [[ "$DEBUG" == "true" ]]; then
-            execute pm2 start "$REPO_PATH/miner.py" --interpreter python3 --name C$i -- --actual_batch_size "$BATCH_SIZE" --wallet.name default --wallet.hotkey C$i --bucket "$BUCKET" --device cuda:$GPU_INDEX --use_wandb --project "$PROJECT" --subtensor.network test
+            execute pm2 start neurons/miner.py --interpreter python3 --name C$i -- --actual_batch_size "$BATCH_SIZE" --wallet.name default --wallet.hotkey C$i --bucket "$BUCKET" --device cuda:$GPU_INDEX --use_wandb --project "$PROJECT" --subtensor.network test
         else
-            execute pm2 start "$REPO_PATH/miner.py" --interpreter python3 --name C$i -- --actual_batch_size "$BATCH_SIZE" --wallet.name default --wallet.hotkey C$i --bucket "$BUCKET" --device cuda:$GPU_INDEX --use_wandb --project "$PROJECT" --subtensor.network test > /dev/null 2>&1
+            execute pm2 start neurons/miner.py --interpreter python3 --name C$i -- --actual_batch_size "$BATCH_SIZE" --wallet.name default --wallet.hotkey C$i --bucket "$BUCKET" --device cuda:$GPU_INDEX --use_wandb --project "$PROJECT" --subtensor.network test > /dev/null 2>&1
         fi
     done
 else

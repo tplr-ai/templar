@@ -588,18 +588,6 @@ else
     warn "Cannot determine system RAM. 'free' command not found."
 fi
 
-ohai "Creating wallets ..."
-# Create the default key
-if ! python3 -c "import bittensor as bt; w = bt.wallet(); print(w.coldkey_file.exists_on_device())" | grep -q "True"; then
-    execute btcli w new_coldkey --wallet.path ~/.bittensor/wallets --wallet.name default --n-words 12 
-fi
-pdone "Wallet 'default' is ready"
-
-# Ensure btcli is installed
-if ! command -v btcli &> /dev/null; then
-    abort "btcli command not found. Please ensure it is installed."
-fi
-
 # Check for GPUs
 ohai "Checking for GPUs..."
 if ! command -v nvidia-smi &> /dev/null; then

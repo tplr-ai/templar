@@ -46,19 +46,9 @@ Description:
 EOF
 }
 
-# Get the script name from $0 and shift it off if it starts with '--'
-if [[ "$0" == --* ]]; then
-    set -- "$0" "$@"
-fi
-
 # Parse command-line arguments
 while [[ $# -gt 0 ]]; do
     key="$1"
-    # Skip the first argument if it's just "_"
-    if [[ "$key" == "_" ]]; then
-        shift
-        continue
-    fi
     case $key in
         --debug)
             DEBUG=true
@@ -89,13 +79,9 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            # Only show usage if it's not the script name
-            if [[ "$key" != "$0" ]]; then
-                echo "Unknown option: $1"
-                display_help
-                exit 1
-            fi
-            shift
+            echo "Unknown option: $1"
+            display_help
+            exit 1
             ;;
     esac
 done

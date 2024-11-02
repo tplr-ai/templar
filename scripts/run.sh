@@ -79,12 +79,35 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            echo "Unknown option: $1"
-            display_help
-            exit 1
+            # Only error if not a network argument
+            if [[ "$1" != "--network" ]]; then
+                echo "Unknown option: $1"
+                display_help
+                exit 1
+            fi
+            shift
             ;;
     esac
 done
+
+# If network not provided, prompt user to select one
+if [[ -z "$NETWORK" ]]; then
+    echo "Please select a network:"
+    echo "1) finney"
+    echo "2) test"
+    echo "3) local"
+    read -p "Enter selection [1-3]: " network_choice
+    
+    case $network_choice in
+        1) NETWORK="finney" ;;
+        2) NETWORK="test" ;;
+        3) NETWORK="local" ;;
+        *) 
+            echo "Invalid selection"
+            exit 1
+            ;;
+    esac
+fi
 
 # Set network-specific variables based on the selected network
 case "$NETWORK" in

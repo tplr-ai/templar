@@ -230,27 +230,26 @@ RED='\033[0;31m'
 # Clear screen
 clear
 
-# Display the original logo with cyan color and bold
-echo -e "${RED}${BOLD}"
+# Display the logo
 printf '%s\n' "___  _  _ _  _ | _  _  "
 printf '%s\n' "  | (/_| | ||_)|(_||   "
 printf '%s\n' "  |         |          "
-echo -e "${NC}"
+echo ""
 
-echo -e "\n${BOLD}${BLUE}Welcome to the τemplar Installation Script${NC}\n"
+echo -e "\nWelcome to the τemplar Installation Script\n"
 
-echo -e "${YELLOW}This script will:${NC}\n"
-echo -e "${CYAN}1.${NC} Install required software ${GREEN}(Git, npm, pm2, rust, uv, Python 3.12)${NC}"
-echo -e "${CYAN}2.${NC} Set up ${GREEN}AWS credentials${NC}"
-echo -e "${CYAN}3.${NC} Clone and set up the ${GREEN}τemplar repository${NC}"
-echo -e "${CYAN}4.${NC} Create and register ${GREEN}Bittensor wallets${NC}"
-echo -e "${CYAN}5.${NC} Configure ${GREEN}wandb for logging${NC}"
-echo -e "${CYAN}6.${NC} Clean the specified ${GREEN}S3 bucket${NC}"
-echo -e "${CYAN}7.${NC} Start ${GREEN}τemplar neurons${NC} on available GPUs on your chosen network\n"
+echo -e "This script will:\n"
+echo -e "1. Install required software (Git, npm, pm2, rust, uv, Python 3.12)"
+echo -e "2. Set up AWS credentials"
+echo -e "3. Clone and set up the τemplar repository"
+echo -e "4. Create and register Bittensor wallets"
+echo -e "5. Configure wandb for logging"
+echo -e "6. Clean the specified S3 bucket"
+echo -e "7. Start τemplar neurons on available GPUs on your chosen network\n"
 
-echo -e "${YELLOW}⚠️  Please ensure you have:${NC}"
-echo -e "   ${GREEN}✓${NC} A stable internet connection"
-echo -e "   ${GREEN}✓${NC} Sufficient permissions to install software\n"
+echo -e "⚠️  Please ensure you have:"
+echo -e "   ✓ A stable internet connection"
+echo -e "   ✓ Sufficient permissions to install software\n"
 
 
 
@@ -661,7 +660,7 @@ fi
 if [ "$NEURON_TYPE" = "validator" ]
 then
     ohai "Starting validator on network '$NETWORK' ..."
-    VALIDATOR_ARGS="--actual_batch_size 6 --wallet.name default --wallet.hotkey validator --bucket \"$BUCKET\" --use_wandb --project \"$PROJECT\" --netuid $NETUID"
+    VALIDATOR_ARGS="--actual_batch_size 6 --wallet.name default --wallet.hotkey validator --bucket $BUCKET --use_wandb --project $PROJECT --netuid $NETUID"
     
     # Add network options
     [ -n "$PM2_NETWORK_OPTIONS" ] && VALIDATOR_ARGS="$VALIDATOR_ARGS $PM2_NETWORK_OPTIONS"
@@ -708,7 +707,7 @@ then
             fi
             
             ohai "Starting miner on GPU $GPU_INDEX with batch size $BATCH_SIZE..."
-            MINER_ARGS="--actual_batch_size $BATCH_SIZE --wallet.name default --wallet.hotkey $HOTKEY_NAME --bucket \"$BUCKET\" --device cuda:$GPU_INDEX --use_wandb --project \"$PROJECT\" --netuid $NETUID"
+            MINER_ARGS="--actual_batch_size $BATCH_SIZE --wallet.name default --wallet.hotkey $HOTKEY_NAME --bucket $BUCKET --device cuda:$GPU_INDEX --use_wandb --project $PROJECT --netuid $NETUID"
             
             # Add network options
             [ -n "$PM2_NETWORK_OPTIONS" ] && MINER_ARGS="$MINER_ARGS $PM2_NETWORK_OPTIONS"

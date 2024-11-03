@@ -715,42 +715,122 @@ except Exception as e:
         info "Chain endpoint: $SUBTENSOR_CHAIN_ENDPOINT"
         
         # Function to check registration status
-        check_registration() {
-            python3 -c "
+# Function to check registration status with comprehensive error handling
+check_registration() {
+    python3 -c "
 try:
     import bittensor as bt
     import sys
+    import websockets
+    import asyncio
+    import json
+    from loguru import logger
+    
+    # Enable debug logging
+    logger.enable('bittensor')
+    
+    # Initialize wallet
+    logger.debug(f'Initializing wallet with hotkey={HOTKEY_NAME}')
     w = bt.wallet(hotkey='$HOTKEY_NAME')
-    sub = bt.subtensor(network='$SUBTENSOR_NETWORK', chain_endpoint='$SUBTENSOR_CHAIN_ENDPOINT')
-    result = sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID)
-    print(f'RESULT:{result}')
+    
+    # Clean up the endpoint URL
+    chain_endpoint = '$SUBTENSOR_CHAIN_ENDPOINT'.rstrip('/')
+    logger.debug(f'Using chain endpoint: {chain_endpoint}')
+    
+    # Test WebSocket connection first
+    async def test_connection():
+        try:
+            async with websockets.connect(chain_endpoint, ping_timeout=10) as websocket:
+                logger.debug('Successfully connected to WebSocket endpoint')
+                return True
+        except Exception as e:
+            logger.error(f'WebSocket connection failed: {str(e)}')
+            return False
+    
+    # Run connection test
+    if not asyncio.get_event_loop().run_until_complete(test_connection()):
+        print('ERROR: Failed to connect to WebSocket endpoint', file=sys.stderr)
+        sys.exit(1)
+    
+    # Initialize subtensor with specific configuration
+    config = bt.subtensor.config()
+    config.netuid = $NETUID
+    config.network = '$SUBTENSOR_NETWORK'
+    config.chain_endpoint = chain_endpoint
+    
+    logger.debug('Initializing subtensor with config:', config)
+    sub = bt.subtensor(config=config)
+    
+    # Get hotkey address
+    hotkey_ss58 = w.hotkey.ss58_address
+    logger.debug(f'Checking registration for hotkey={hotkey_ss58}')
+    
+    # Check registration with timeout
+    try:
+        result = sub.is_hotkey_registered_on_subnet(
+            hotkey_ss58=hotkey_ss58,
+            netuid=$NETUID,
+            timeout=30
+        )
+        print(f'RESULT:{result}')
+    except Exception as e:
+        logger.error(f'Registration check failed: {str(e)}')
+        raise
+
+except ImportError as e:
+    print(f'ERROR: Missing required package - {str(e)}', file=sys.stderr)
+    print('Try running: pip install websockets', file=sys.stderr)
+    sys.exit(1)
 except Exception as e:
+    import traceback
     print(f'ERROR: {str(e)}', file=sys.stderr)
+    print('TRACEBACK:', file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 "
-        }
+}
 
-        # Try registration check with retries
-        max_retries=3
-        retry_count=0
-        is_registered=""
-        
-        while [ $retry_count -lt $max_retries ]; do
-            is_registered=$(check_registration 2>&1)
-            
-            if [[ "$is_registered" == RESULT:* ]]; then
-                is_registered=${is_registered#RESULT:}
-                break
-            else
-                retry_count=$((retry_count + 1))
-                if [ $retry_count -lt $max_retries ]; then
-                    warn "Registration check failed (attempt $retry_count/$max_retries). Retrying in 5 seconds..."
-                    sleep 5
-                else
-                    error "Failed to check registration status after $max_retries attempts: $is_registered"
-                    continue 2  # Continue outer loop
-                fi
-            fi
+# Try registration check with retries and better error handling
+max_retries=3
+retry_count=0
+is_registered=""
+
+# Ensure required Python packages are installed
+if ! python3 -c "import websockets" 2>/dev/null; then
+    ohai "Installing required Python package: websockets"
+    execute uv pip install websockets > /dev/null 2>&1
+fi
+
+while [ $retry_count -lt $max_retries ]; do
+    if [[ "$DEBUG" == "true" ]]; then
+        info "Attempting registration check (attempt $((retry_count + 1))/$max_retries)..."
+    fi
+    
+    is_registered=$(check_registration 2>&1)
+    
+    # Print debug output if debug mode is enabled
+    if [[ "$DEBUG" == "true" ]]; then
+        echo "Debug output from registration check:"
+        echo "$is_registered"
+    fi
+    
+    if [[ "$is_registered" == *"RESULT:"* ]]; then
+        is_registered=$(echo "$is_registered" | grep "RESULT:" | cut -d':' -f2-)
+        break
+    else
+        retry_count=$((retry_count + 1))
+        if [ $retry_count -lt $max_retries ]; then
+            warn "Registration check failed (attempt $retry_count/$max_retries). Error:"
+            echo "$is_registered"
+            warn "Retrying in 5 seconds..."
+            sleep 5
+        else
+            error "Failed to check registration status after $max_retries attempts:"
+            echo "$is_registered"
+            continue 2  # Continue outer loop
+        fi
+    fi
+done
         done
 
         if [[ "$is_registered" != "True" ]]; then

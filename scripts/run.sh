@@ -643,51 +643,33 @@ print(w.hotkey_file.exists_on_device())
             info "Hotkey '$HOTKEY_NAME' already exists"
         fi
 
-# Check registration status
-ohai "Checking if hotkey is registered on netuid $NETUID..."
-is_registered=$(python3 -c "
-import bittensor as bt
-import sys
+if [ "$NUM_GPUS" -gt 0 ]; then
+    for i in $(seq 0 $((NUM_GPUS - 1))); do
+        HOTKEY_NAME="C$i"
+        
+        # Simplified existence check (matching original)
+        exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); print(w.hotkey_file.exists_on_device())" 2>/dev/null)
+        
+        if [ "$exists_on_device" != "True" ]; then
+            ohai "Creating new hotkey '$HOTKEY_NAME'..."
+            # Match original silent creation
+            echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1
+            pdone "Created Hotkey '$HOTKEY_NAME'"
+        else
+            info "Hotkey '$HOTKEY_NAME' already exists"
+        fi
 
-try:
-    w = bt.wallet(hotkey='$HOTKEY_NAME')
-    sub = bt.subtensor('$SUBTENSOR_NETWORK')
-    
-    # Add connection check
-    status = sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID)
-    print('True' if status else 'False')
-except Exception as e:
-    print(f'Error: {str(e)}', file=sys.stderr)
-    print('False')
-" 2>&1)
-
-# Extract just the True/False value from potentially multi-line output
-is_registered_value=$(echo "$is_registered" | grep -E '^(True|False)$' || echo "False")
-
-if [[ "$DEBUG" == "true" ]]; then
-    echo "Full registration check output:"
-    echo "$is_registered"
-fi
-
-        if [[ "$is_registered_value" != "True" ]]; then
-            # Print registration status for debugging
-            echo "Registration status for hotkey '$HOTKEY_NAME': $is_registered_value"
+        # Simplified registration check (matching original)
+        is_registered=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); sub = bt.subtensor('$SUBTENSOR_NETWORK'); print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID))" 2>/dev/null)
+        
+        if [[ "$is_registered" != *"True"* ]]; then
             ohai "Registering hotkey '$HOTKEY_NAME' on netuid $NETUID"
-            REGISTER_CMD="yes | btcli subnet pow_register --wallet.name default --wallet.hotkey $HOTKEY_NAME --netuid $NETUID --subtensor.network $SUBTENSOR_NETWORK"
-            
-            if ! eval "$REGISTER_CMD" > /dev/null 2>&1; then
-                error "Failed to register hotkey '$HOTKEY_NAME'"
-                if [[ "$DEBUG" == "true" ]]; then
-                    eval "$REGISTER_CMD"  # Run again to show output
-                fi
-                continue
-            fi
+            # Match original silent registration
+            btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid $NETUID --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
             pdone "Registered Hotkey '$HOTKEY_NAME' on netuid $NETUID"
         else
             pdone "Hotkey '$HOTKEY_NAME' is already registered on netuid $NETUID"
         fi
-        
-        info "Completed processing for hotkey '$HOTKEY_NAME'"
     done
 else
     warn "No GPUs found. Skipping hotkey creation."

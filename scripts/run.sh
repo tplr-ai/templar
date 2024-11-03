@@ -709,12 +709,11 @@ except Exception as e:
             info "Hotkey '$HOTKEY_NAME' already exists"
         fi
 
-        # Check if the hotkey is registered on the specified netuid
-        ohai "Checking if hotkey is registered on netuid $NETUID..."
-        info "Network: $SUBTENSOR_NETWORK"
-        info "Chain endpoint: $SUBTENSOR_CHAIN_ENDPOINT"
-        
-        # Function to check registration status
+# Check if the hotkey is registered on the specified netuid
+ohai "Checking if hotkey is registered on netuid $NETUID..."
+info "Network: $SUBTENSOR_NETWORK"
+info "Chain endpoint: $SUBTENSOR_CHAIN_ENDPOINT"
+
 # Function to check registration status with comprehensive error handling
 check_registration() {
     python3 -c "
@@ -725,93 +724,93 @@ try:
     import asyncio
     import json
     from loguru import logger
+    import os
     
-    # Enable debug logging
-    logger.enable('bittensor')
+    # Set up detailed logging
+    logger.remove()  # Remove default handler
+    logger.add(sys.stderr, level='DEBUG')
+    logger.debug('Starting registration check')
     
-    # Initialize wallet
-    logger.debug(f'Initializing wallet with hotkey={HOTKEY_NAME}')
-    w = bt.wallet(hotkey='$HOTKEY_NAME')
-    
-    # Clean up the endpoint URL
-    chain_endpoint = '$SUBTENSOR_CHAIN_ENDPOINT'.rstrip('/')
-    logger.debug(f'Using chain endpoint: {chain_endpoint}')
-    
-    # Test WebSocket connection first
-    async def test_connection():
-        try:
-            async with websockets.connect(chain_endpoint, ping_timeout=10) as websocket:
-                logger.debug('Successfully connected to WebSocket endpoint')
-                return True
-        except Exception as e:
-            logger.error(f'WebSocket connection failed: {str(e)}')
-            return False
-    
-    # Run connection test
-    if not asyncio.get_event_loop().run_until_complete(test_connection()):
-        print('ERROR: Failed to connect to WebSocket endpoint', file=sys.stderr)
-        sys.exit(1)
-    
-    # Initialize subtensor with specific configuration
-    config = bt.subtensor.config()
-    config.netuid = $NETUID
-    config.network = '$SUBTENSOR_NETWORK'
-    config.chain_endpoint = chain_endpoint
-    
-    logger.debug('Initializing subtensor with config:', config)
-    sub = bt.subtensor(config=config)
-    
-    # Get hotkey address
-    hotkey_ss58 = w.hotkey.ss58_address
-    logger.debug(f'Checking registration for hotkey={hotkey_ss58}')
-    
-    # Check registration with timeout
     try:
-        result = sub.is_hotkey_registered_on_subnet(
-            hotkey_ss58=hotkey_ss58,
-            netuid=$NETUID,
-            timeout=30
-        )
-        print(f'RESULT:{result}')
+        logger.debug('Initializing wallet')
+        w = bt.wallet(hotkey='$HOTKEY_NAME')
+        logger.debug(f'Wallet initialized: {w.hotkey.ss58_address}')
     except Exception as e:
-        logger.error(f'Registration check failed: {str(e)}')
+        logger.error(f'Failed to initialize wallet: {str(e)}')
         raise
 
-except ImportError as e:
-    print(f'ERROR: Missing required package - {str(e)}', file=sys.stderr)
-    print('Try running: pip install websockets', file=sys.stderr)
-    sys.exit(1)
+    try:
+        logger.debug('Creating subtensor config')
+        config = bt.subtensor.config()
+        config.netuid = $NETUID
+        config.network = '$SUBTENSOR_NETWORK'
+        config.chain_endpoint = '$SUBTENSOR_CHAIN_ENDPOINT'.rstrip('/')
+        logger.debug(f'Config created: {config}')
+    except Exception as e:
+        logger.error(f'Failed to create config: {str(e)}')
+        raise
+
+    try:
+        logger.debug('Initializing subtensor')
+        sub = bt.subtensor(config=config)
+        logger.debug('Subtensor initialized')
+    except Exception as e:
+        logger.error(f'Failed to initialize subtensor: {str(e)}')
+        raise
+
+    try:
+        logger.debug(f'Checking registration for hotkey: {w.hotkey.ss58_address}')
+        result = sub.is_hotkey_registered_on_subnet(
+            hotkey_ss58=w.hotkey.ss58_address,
+            netuid=config.netuid
+        )
+        logger.debug(f'Registration check result: {result}')
+        print(f'RESULT:{result}')
+    except Exception as e:
+        logger.error(f'Failed during registration check: {str(e)}')
+        raise
+
 except Exception as e:
     import traceback
-    print(f'ERROR: {str(e)}', file=sys.stderr)
-    print('TRACEBACK:', file=sys.stderr)
+    logger.error(f'Error in registration check: {str(e)}')
+    logger.error('Full traceback:')
     traceback.print_exc(file=sys.stderr)
     sys.exit(1)
 "
 }
 
-# Try registration check with retries and better error handling
+# Try registration check with retries
 max_retries=3
 retry_count=0
 is_registered=""
 
 # Ensure required Python packages are installed
-if ! python3 -c "import websockets" 2>/dev/null; then
-    ohai "Installing required Python package: websockets"
-    execute uv pip install websockets > /dev/null 2>&1
-fi
+for package in websockets loguru; do
+    if ! python3 -c "import $package" 2>/dev/null; then
+        ohai "Installing required Python package: $package"
+        pip install $package > /dev/null 2>&1
+    fi
+done
+
+# Verify bittensor configuration
+ohai "Verifying bittensor configuration..."
+python3 -c "
+import bittensor as bt
+import sys
+print(f'Bittensor version: {bt.__version__}')
+print(f'Python version: {sys.version}')
+"
 
 while [ $retry_count -lt $max_retries ]; do
-    if [[ "$DEBUG" == "true" ]]; then
-        info "Attempting registration check (attempt $((retry_count + 1))/$max_retries)..."
-    fi
+    info "Attempting registration check (attempt $((retry_count + 1))/$max_retries)..."
     
-    is_registered=$(check_registration 2>&1)
-    
-    # Print debug output if debug mode is enabled
+    # Run the check with full output in debug mode
     if [[ "$DEBUG" == "true" ]]; then
-        echo "Debug output from registration check:"
+        is_registered=$(RUST_BACKTRACE=full RUST_LOG=debug check_registration 2>&1)
+        echo "Full debug output:"
         echo "$is_registered"
+    else
+        is_registered=$(check_registration 2>&1)
     fi
     
     if [[ "$is_registered" == *"RESULT:"* ]]; then

@@ -673,7 +673,6 @@ fi
             # Print registration status for debugging
             echo "Registration status for hotkey '$HOTKEY_NAME': $is_registered_value"
             ohai "Registering hotkey '$HOTKEY_NAME' on netuid $NETUID"
-            btcli config set --wallet-path ~/.bittensor/wallets/
             REGISTER_CMD="yes | btcli subnet pow_register --wallet.name default --wallet.hotkey $HOTKEY_NAME --netuid $NETUID --subtensor.network $SUBTENSOR_NETWORK"
             
             if ! eval "$REGISTER_CMD" > /dev/null 2>&1; then

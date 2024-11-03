@@ -618,57 +618,29 @@ if ! command -v btcli &> /dev/null; then
     abort "btcli command not found. Please ensure it is installed."
 fi
 
-# Create hotkeys and register them
+# Create wallets and register them
 if [ "$NUM_GPUS" -gt 0 ]; then
     for i in $(seq 0 $((NUM_GPUS - 1))); do
         HOTKEY_NAME="C$i"
         
-        ohai "Processing hotkey '$HOTKEY_NAME'..."
-
-        # Check if the hotkey exists
-        exists_on_device=$(python3 -c "
-import bittensor as bt
-w = bt.wallet(hotkey='$HOTKEY_NAME')
-print(w.hotkey_file.exists_on_device())
-" 2>/dev/null)
-
-        if [ "$exists_on_device" != "True" ]; then
-            ohai "Creating new hotkey '$HOTKEY_NAME'..."
-            if ! echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1; then
-                error "Failed to create hotkey '$HOTKEY_NAME'"
-                continue
-            fi
-            pdone "Created Hotkey '$HOTKEY_NAME'"
-        else
-            info "Hotkey '$HOTKEY_NAME' already exists"
-        fi
-
-if [ "$NUM_GPUS" -gt 0 ]; then
-    for i in $(seq 0 $((NUM_GPUS - 1))); do
-        HOTKEY_NAME="C$i"
-        
-        # Simplified existence check (matching original)
+        # Simplified existence check
         exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); print(w.hotkey_file.exists_on_device())" 2>/dev/null)
         
         if [ "$exists_on_device" != "True" ]; then
-            ohai "Creating new hotkey '$HOTKEY_NAME'..."
-            # Match original silent creation
+            # Create new hotkey silently
             echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1
             pdone "Created Hotkey '$HOTKEY_NAME'"
-        else
-            info "Hotkey '$HOTKEY_NAME' already exists"
         fi
 
-        # Simplified registration check (matching original)
-        is_registered=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); sub = bt.subtensor('$SUBTENSOR_NETWORK'); print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID))" 2>/dev/null)
+        # Check registration status
+        is_registered=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); sub = bt.subtensor('$SUBTENSOR_NETWORK'); print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID))")
         
         if [[ "$is_registered" != *"True"* ]]; then
             ohai "Registering hotkey '$HOTKEY_NAME' on netuid $NETUID"
-            # Match original silent registration
-            btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid $NETUID --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
+            btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
             pdone "Registered Hotkey '$HOTKEY_NAME' on netuid $NETUID"
         else
-            pdone "Hotkey '$HOTKEY_NAME' is already registered on netuid $NETUID"
+            pdone "Hotkey '$HOTKEY_NAME' already registered on netuid $NETUID"
         fi
     done
 else

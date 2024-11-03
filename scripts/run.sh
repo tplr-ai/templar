@@ -664,7 +664,7 @@ if pm2 list | grep -q 'online'; then
     pdone "Old processes stopped"
 fi
 
-# Start τemplar neurons on available GPUs with network-specific settings
+# Start τemplar neurons based on neuron type
 ohai "Stopping old pm2 processes..."
 if pm2 list | grep -q 'online'; then
     pm2 delete all
@@ -690,7 +690,8 @@ if [ "$NEURON_TYPE" = "validator" ]; then
         execute pm2 start neurons/validator.py --interpreter python3 --name ${NETWORK}_validator -- $VALIDATOR_ARGS > /dev/null 2>&1
     fi
     pdone "Validator started"
-else
+    
+elif [ "$NEURON_TYPE" = "miner" ]; then
     ohai "Starting miners on network '$NETWORK' ..."
     if [ "$NUM_GPUS" -gt 0 ]; then
         for i in $(seq 0 $((NUM_GPUS - 1))); do
@@ -702,6 +703,7 @@ else
                 warn "Could not get GPU memory for GPU $i"
                 continue
             fi
+            
             # Determine batch size based on GPU memory
             if [ "$GPU_MEMORY" -ge 80000 ]; then
                 BATCH_SIZE=6
@@ -712,6 +714,7 @@ else
             else
                 BATCH_SIZE=1
             fi
+            
             ohai "Starting miner on GPU $GPU_INDEX with batch size $BATCH_SIZE..."
             MINER_ARGS="--actual_batch_size $BATCH_SIZE --wallet.name default --wallet.hotkey $HOTKEY_NAME --bucket \"$BUCKET\" --device cuda:$GPU_INDEX --use_wandb --project \"$PROJECT\" --netuid $NETUID"
             if [[ -n "$PM2_NETWORK_OPTIONS" ]]; then
@@ -723,6 +726,7 @@ else
             if [[ -n "$SUBTENSOR_CHAIN_ENDPOINT" ]]; then
                 MINER_ARGS="$MINER_ARGS --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
             fi
+            
             if [[ "$DEBUG" == "true" ]]; then
                 execute pm2 start neurons/miner.py --interpreter python3 --name ${NETWORK}_$HOTKEY_NAME -- $MINER_ARGS
             else
@@ -735,12 +739,13 @@ else
     pdone "All miners started"
 fi
 
+# Display status and start logging
 pm2 list
 echo ""
 pdone "SUCCESS"
 echo ""
 
-# Start logging the appropriate process
+# Start logging based on neuron type
 if [ "$NEURON_TYPE" = "validator" ]; then
     pm2 logs ${NETWORK}_validator
 else

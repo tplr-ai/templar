@@ -654,12 +654,8 @@ try:
     sub = bt.subtensor('$SUBTENSOR_NETWORK')
     
     # Add connection check
-    if not sub.is_connected():
-        print('Error: Unable to connect to subtensor network', file=sys.stderr)
-        print('False')
-    else:
-        status = sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID)
-        print('True' if status else 'False')
+    status = sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID)
+    print('True' if status else 'False')
 except Exception as e:
     print(f'Error: {str(e)}', file=sys.stderr)
     print('False')

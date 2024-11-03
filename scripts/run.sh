@@ -236,7 +236,7 @@ echo "3. Clone and set up the τemplar repository"
 echo "4. Create and register Bittensor wallets"
 echo "5. Configure wandb for logging"
 echo "6. Clean the specified S3 bucket"
-echo "7. Start τemplar miners on available GPUs on the '$NETWORK' network"
+echo "7. Start τemplar neurons on available GPUs on your chosen network"
 echo ""
 echo "Please ensure you have a stable internet connection and sufficient permissions to install software."
 echo ""
@@ -264,19 +264,19 @@ fi
 
 # Set network-specific variables based on the selected network
 case "$NETWORK" in
-    finney)
+    finney|FINNEY|Finney)
         SUBTENSOR_NETWORK="main"
         NETUID=3
         SUBTENSOR_CHAIN_ENDPOINT=""
         PM2_NETWORK_OPTIONS=""
         ;;
-    test|testnet)
+    test|testnet|TEST|TESTNET|Testnet)
         SUBTENSOR_NETWORK="test"
         NETUID=223
         SUBTENSOR_CHAIN_ENDPOINT="wss://test.finney.opentensor.ai:443/"
         PM2_NETWORK_OPTIONS="--test"
         ;;
-    local)
+    local|LOCAL|Local)
         SUBTENSOR_NETWORK="local"
         NETUID=1
         SUBTENSOR_CHAIN_ENDPOINT="wss://localhost:9944"
@@ -289,56 +289,6 @@ case "$NETWORK" in
         ;;
 esac
 
-# If NETWORK is not specified, prompt the user to select a network
-if [[ -z "$NETWORK" ]]; then
-    echo "Please select the network you want to use:"
-    echo "1) Finney (Mainnet)"
-    echo "2) Testnet"
-    echo "3) Local Subtensor"
-    read -p "Enter the number corresponding to your choice [1-3]: " network_choice
-    case "$network_choice" in
-        1)
-            NETWORK="finney"
-            ;;
-        2)
-            NETWORK="test"
-            ;;
-        3)
-            NETWORK="local"
-            ;;
-        *)
-            echo "Invalid choice. Exiting."
-            exit 1
-            ;;
-    esac
-fi
-
-# Set network-specific variables based on the selected network
-case "$NETWORK" in
-    finney)
-        SUBTENSOR_NETWORK="main"
-        NETUID=3
-        SUBTENSOR_CHAIN_ENDPOINT=""
-        PM2_NETWORK_OPTIONS=""
-        ;;
-    test|testnet)
-        SUBTENSOR_NETWORK="test"
-        NETUID=223
-        SUBTENSOR_CHAIN_ENDPOINT="wss://test.finney.opentensor.ai:443/"
-        PM2_NETWORK_OPTIONS="--test"
-        ;;
-    local)
-        SUBTENSOR_NETWORK="local"
-        NETUID=1
-        SUBTENSOR_CHAIN_ENDPOINT="wss://localhost:9944"
-        PM2_NETWORK_OPTIONS=""
-        ;;
-    *)
-        echo "Unknown network: $NETWORK"
-        display_help
-        exit 1
-        ;;
-esac
 
 if [[ -z "$NEURON_TYPE" ]]; then
     echo "Please select a neuron type:"

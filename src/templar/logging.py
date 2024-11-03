@@ -21,17 +21,38 @@ import bittensor as bt
 from rich.logging import RichHandler
 from rich.highlighter import NullHighlighter
 
-# Configure loguru logger 
-# bt.logging.off()
+def T() -> float:
+    """
+    Returns the current time in seconds since the epoch.
+
+    Returns:
+        float: Current time in seconds.
+    """
+    return time.time()
+
+def P(window: int, duration: float) -> str:
+    """
+    Formats a log prefix with the window number and duration.
+
+    Args:
+        window (int): The current window index.
+        duration (float): The duration in seconds.
+
+    Returns:
+        str: A formatted string for log messages.
+    """
+    return f"[steel_blue]{window}[/steel_blue] ([grey63]{duration:.2f}s[/grey63])"
+
+# Configure the root logger
 FORMAT = "%(message)s"
-logging.basicConfig( 
-    level=logging.INFO, 
-    format=FORMAT, 
-    datefmt="[%X]", 
+logging.basicConfig(
+    level=logging.INFO,
+    format=FORMAT,
+    datefmt="[%X]",
     handlers=[
         RichHandler(
-            markup=True, 
-            rich_tracebacks=True, 
+            markup=False,  # Disable markup parsing to prevent MarkupError
+            rich_tracebacks=True,
             highlighter=NullHighlighter(),
             show_level=False,
             show_time=False,
@@ -39,12 +60,31 @@ logging.basicConfig(
         )
     ]
 )
-logger = logging.getLogger("rich")
+
+# Create a logger instance
+logger = logging.getLogger("templar")
 logger.setLevel(logging.INFO)
-def debug():
+
+def debug() -> None:
+    """
+    Sets the logger level to DEBUG.
+    """
     logger.setLevel(logging.DEBUG)
-def trace():
-    logger.setLevel(logging.TRACE)
-# Log helper.
-def T(): return time.time()
-def P( w, d ): return f"[steel_blue]{w}[/steel_blue] ([grey63]{d:.2f}s[/grey63])"
+
+def trace() -> None:
+    """
+    Sets the logger level to TRACE.
+
+    Note:
+        The TRACE level is not standard in the logging module.
+        You may need to add it explicitly if required.
+    """
+    # TRACE level is not standard; ensure it's defined if used
+    TRACE_LEVEL_NUM = 5
+    logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
+    def trace_method(self, message, *args, **kws) -> None:
+        if self.isEnabledFor(TRACE_LEVEL_NUM):
+            self._log(TRACE_LEVEL_NUM, message, args, **kws)
+    logging.Logger.trace = trace_method
+    logger.setLevel(TRACE_LEVEL_NUM)
+

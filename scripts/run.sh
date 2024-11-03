@@ -26,6 +26,7 @@ AWS_ACCESS_KEY_ID=""
 AWS_SECRET_ACCESS_KEY=""
 BUCKET=""
 NETWORK=""
+NEURON_TYPE=""
 
 # Function to display help message
 display_help() {
@@ -39,6 +40,7 @@ Options:
     --aws-secret-access-key <key> Set AWS Secret Access Key
     --bucket <bucket_name>      Set the S3 bucket name
     --network <network_name>    Set the network (options: finney, test, local)
+    --neuron <neuron_type>     Set the neuron type (options: miner, validator)
     -h, --help                  Display this help message
 
 Description:
@@ -74,6 +76,10 @@ while [[ $# -gt 0 ]]; do
             NETWORK="$2"
             shift 2
             ;;
+        --neuron)
+            NEURON_TYPE="$2"
+            shift 2
+            ;;
         -h|--help|-help|--h)
             display_help
             exit 0
@@ -90,51 +96,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# If network not provided, prompt user to select one
-if [[ -z "$NETWORK" ]]; then
-    echo "Please select a network:"
-    echo "1) finney"
-    echo "2) test"
-    echo "3) local"
-    read -p "Enter selection [1-3]: " network_choice
-    
-    case $network_choice in
-        1) NETWORK="finney" ;;
-        2) NETWORK="test" ;;
-        3) NETWORK="local" ;;
-        *) 
-            echo "Invalid selection"
-            exit 1
-            ;;
-    esac
-fi
 
-# Set network-specific variables based on the selected network
-case "$NETWORK" in
-    finney)
-        SUBTENSOR_NETWORK="main"
-        NETUID=3
-        SUBTENSOR_CHAIN_ENDPOINT=""
-        PM2_NETWORK_OPTIONS=""
-        ;;
-    test|testnet)
-        SUBTENSOR_NETWORK="test"
-        NETUID=223
-        SUBTENSOR_CHAIN_ENDPOINT="wss://test.finney.opentensor.ai:443/"
-        PM2_NETWORK_OPTIONS="--test"
-        ;;
-    local)
-        SUBTENSOR_NETWORK="local"
-        NETUID=1
-        SUBTENSOR_CHAIN_ENDPOINT="wss://localhost:9944"
-        PM2_NETWORK_OPTIONS=""
-        ;;
-    *)
-        echo "Unknown network: $NETWORK"
-        display_help
-        exit 1
-        ;;
-esac
 
 # Set up colors and styles for terminal output
 if [[ -t 1 ]]; then
@@ -281,12 +243,58 @@ echo ""
 
 wait_for_user
 
+# If network not provided, prompt user to select one
+if [[ -z "$NETWORK" ]]; then
+    echo "Please select a network:"
+    echo "1) Finney"
+    echo "2) Testnet"
+    echo "3) Local"
+    read -p "Enter selection [1-3]: " network_choice
+    
+    case $network_choice in
+        1) NETWORK="Finney" ;;
+        2) NETWORK="Testnet" ;;
+        3) NETWORK="Local" ;;
+        *) 
+            echo "Invalid selection"
+            exit 1
+            ;;
+    esac
+fi
+
+# Set network-specific variables based on the selected network
+case "$NETWORK" in
+    finney)
+        SUBTENSOR_NETWORK="main"
+        NETUID=3
+        SUBTENSOR_CHAIN_ENDPOINT=""
+        PM2_NETWORK_OPTIONS=""
+        ;;
+    test|testnet)
+        SUBTENSOR_NETWORK="test"
+        NETUID=223
+        SUBTENSOR_CHAIN_ENDPOINT="wss://test.finney.opentensor.ai:443/"
+        PM2_NETWORK_OPTIONS="--test"
+        ;;
+    local)
+        SUBTENSOR_NETWORK="local"
+        NETUID=1
+        SUBTENSOR_CHAIN_ENDPOINT="wss://localhost:9944"
+        PM2_NETWORK_OPTIONS=""
+        ;;
+    *)
+        echo "Unknown network: $NETWORK"
+        display_help
+        exit 1
+        ;;
+esac
+
 # If NETWORK is not specified, prompt the user to select a network
 if [[ -z "$NETWORK" ]]; then
     echo "Please select the network you want to use:"
-    echo "1) finney (Mainnet)"
-    echo "2) test (Testnet)"
-    echo "3) local"
+    echo "1) Finney (Mainnet)"
+    echo "2) Testnet"
+    echo "3) Local Subtensor"
     read -p "Enter the number corresponding to your choice [1-3]: " network_choice
     case "$network_choice" in
         1)
@@ -327,6 +335,33 @@ case "$NETWORK" in
         ;;
     *)
         echo "Unknown network: $NETWORK"
+        display_help
+        exit 1
+        ;;
+esac
+
+if [[ -z "$NEURON_TYPE" ]]; then
+    echo "Please select a neuron type:"
+    echo "1) Miner"
+    echo "2) Validator"
+    read -p "Enter selection [1-2]: " neuron_choice
+    
+    case $neuron_choice in
+        1) NEURON_TYPE="miner" ;;
+        2) NEURON_TYPE="validator" ;;
+        *) 
+            echo "Invalid selection"
+            exit 1
+            ;;
+    esac
+fi
+
+# Validate neuron type
+case "$NEURON_TYPE" in
+    miner|validator)
+        ;;
+    *)
+        echo "Invalid neuron type: $NEURON_TYPE"
         display_help
         exit 1
         ;;
@@ -618,6 +653,29 @@ if ! command -v btcli &> /dev/null; then
     abort "btcli command not found. Please ensure it is installed."
 fi
 
+if [ "$NEURON_TYPE" = "validator" ]; then
+    # Create single hotkey for validator
+    HOTKEY_NAME="validator"
+    
+    # Check if hotkey exists
+    exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); print(w.hotkey_file.exists_on_device())" 2>/dev/null)
+    
+    if [ "$exists_on_device" != "True" ]; then
+        echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1
+        pdone "Created Validator Hotkey '$HOTKEY_NAME'"
+    fi
+
+    # Check registration status
+    is_registered=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); sub = bt.subtensor('$SUBTENSOR_NETWORK'); print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID))")
+    
+    if [[ "$is_registered" != *"True"* ]]; then
+        ohai "Registering validator hotkey on netuid $NETUID"
+        btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
+        pdone "Registered Validator Hotkey on netuid $NETUID"
+    else
+        pdone "Validator Hotkey already registered on netuid $NETUID"
+    fi
+else
 # Create wallets and register them
 if [ "$NUM_GPUS" -gt 0 ]; then
     for i in $(seq 0 $((NUM_GPUS - 1))); do
@@ -658,53 +716,85 @@ if pm2 list | grep -q 'online'; then
     pdone "Old processes stopped"
 fi
 
-# Start all the processes again
-if [ "$NUM_GPUS" -gt 0 ]; then
-    for i in $(seq 0 $((NUM_GPUS - 1))); do
-        # Adjust GPU index for zero-based numbering
-        GPU_INDEX=$i
-        HOTKEY_NAME="C$i"
-        GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | sed -n "$((i + 1))p")
-        if [ -z "$GPU_MEMORY" ]; then
-            warn "Could not get GPU memory for GPU $i"
-            continue
-        fi
-        # Determine batch size based on GPU memory
-        if [ "$GPU_MEMORY" -ge 80000 ]; then
-            BATCH_SIZE=6
-        elif [ "$GPU_MEMORY" -ge 40000 ]; then
-            BATCH_SIZE=3
-        elif [ "$GPU_MEMORY" -ge 20000 ]; then
-            BATCH_SIZE=1
-        else
-            BATCH_SIZE=1
-        fi
-        ohai "Starting miner on GPU $GPU_INDEX with batch size $BATCH_SIZE..."
-        MINER_ARGS="--actual_batch_size $BATCH_SIZE --wallet.name default --wallet.hotkey $HOTKEY_NAME --bucket \"$BUCKET\" --device cuda:$GPU_INDEX --use_wandb --project \"$PROJECT\" --netuid $NETUID"
-        if [[ -n "$PM2_NETWORK_OPTIONS" ]]; then
-            MINER_ARGS="$MINER_ARGS $PM2_NETWORK_OPTIONS"
-        fi
-        if [[ -n "$SUBTENSOR_NETWORK" ]]; then
-            MINER_ARGS="$MINER_ARGS --subtensor.network $SUBTENSOR_NETWORK"
-        fi
-        if [[ -n "$SUBTENSOR_CHAIN_ENDPOINT" ]]; then
-            MINER_ARGS="$MINER_ARGS --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
-        fi
-        if [[ "$DEBUG" == "true" ]]; then
-            execute pm2 start neurons/miner.py --interpreter python3 --name ${NETWORK}_$HOTKEY_NAME -- $MINER_ARGS
-        else
-            execute pm2 start neurons/miner.py --interpreter python3 --name ${NETWORK}_$HOTKEY_NAME -- $MINER_ARGS > /dev/null 2>&1
-        fi
-    done
-else
-    warn "No GPUs found. Skipping miner startup."
+# Start τemplar neurons on available GPUs with network-specific settings
+ohai "Stopping old pm2 processes..."
+if pm2 list | grep -q 'online'; then
+    pm2 delete all
+    pdone "Old processes stopped"
 fi
-pdone "All miners started"
-pm2 list
 
+if [ "$NEURON_TYPE" = "validator" ]; then
+    ohai "Starting validator on network '$NETWORK' ..."
+    VALIDATOR_ARGS="--actual_batch_size 6 --wallet.name default --wallet.hotkey validator --bucket \"$BUCKET\" --use_wandb --project \"$PROJECT\" --netuid $NETUID"
+    if [[ -n "$PM2_NETWORK_OPTIONS" ]]; then
+        VALIDATOR_ARGS="$VALIDATOR_ARGS $PM2_NETWORK_OPTIONS"
+    fi
+    if [[ -n "$SUBTENSOR_NETWORK" ]]; then
+        VALIDATOR_ARGS="$VALIDATOR_ARGS --subtensor.network $SUBTENSOR_NETWORK"
+    fi
+    if [[ -n "$SUBTENSOR_CHAIN_ENDPOINT" ]]; then
+        VALIDATOR_ARGS="$VALIDATOR_ARGS --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
+    fi
+
+    if [[ "$DEBUG" == "true" ]]; then
+        execute pm2 start neurons/validator.py --interpreter python3 --name ${NETWORK}_validator -- $VALIDATOR_ARGS
+    else
+        execute pm2 start neurons/validator.py --interpreter python3 --name ${NETWORK}_validator -- $VALIDATOR_ARGS > /dev/null 2>&1
+    fi
+    pdone "Validator started"
+else
+    ohai "Starting miners on network '$NETWORK' ..."
+    if [ "$NUM_GPUS" -gt 0 ]; then
+        for i in $(seq 0 $((NUM_GPUS - 1))); do
+            # Adjust GPU index for zero-based numbering
+            GPU_INDEX=$i
+            HOTKEY_NAME="C$i"
+            GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | sed -n "$((i + 1))p")
+            if [ -z "$GPU_MEMORY" ]; then
+                warn "Could not get GPU memory for GPU $i"
+                continue
+            fi
+            # Determine batch size based on GPU memory
+            if [ "$GPU_MEMORY" -ge 80000 ]; then
+                BATCH_SIZE=6
+            elif [ "$GPU_MEMORY" -ge 40000 ]; then
+                BATCH_SIZE=3
+            elif [ "$GPU_MEMORY" -ge 20000 ]; then
+                BATCH_SIZE=1
+            else
+                BATCH_SIZE=1
+            fi
+            ohai "Starting miner on GPU $GPU_INDEX with batch size $BATCH_SIZE..."
+            MINER_ARGS="--actual_batch_size $BATCH_SIZE --wallet.name default --wallet.hotkey $HOTKEY_NAME --bucket \"$BUCKET\" --device cuda:$GPU_INDEX --use_wandb --project \"$PROJECT\" --netuid $NETUID"
+            if [[ -n "$PM2_NETWORK_OPTIONS" ]]; then
+                MINER_ARGS="$MINER_ARGS $PM2_NETWORK_OPTIONS"
+            fi
+            if [[ -n "$SUBTENSOR_NETWORK" ]]; then
+                MINER_ARGS="$MINER_ARGS --subtensor.network $SUBTENSOR_NETWORK"
+            fi
+            if [[ -n "$SUBTENSOR_CHAIN_ENDPOINT" ]]; then
+                MINER_ARGS="$MINER_ARGS --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
+            fi
+            if [[ "$DEBUG" == "true" ]]; then
+                execute pm2 start neurons/miner.py --interpreter python3 --name ${NETWORK}_$HOTKEY_NAME -- $MINER_ARGS
+            else
+                execute pm2 start neurons/miner.py --interpreter python3 --name ${NETWORK}_$HOTKEY_NAME -- $MINER_ARGS > /dev/null 2>&1
+            fi
+        done
+    else
+        warn "No GPUs found. Skipping miner startup."
+    fi
+    pdone "All miners started"
+fi
+
+pm2 list
 echo ""
 pdone "SUCCESS"
 echo ""
 
-# Start logging the first miner process
-pm2 logs ${NETWORK}_C0
+# Start logging the appropriate process
+if [ "$NEURON_TYPE" = "validator" ]; then
+    pm2 logs ${NETWORK}_validator
+else
+    pm2 logs ${NETWORK}_C0
+fi

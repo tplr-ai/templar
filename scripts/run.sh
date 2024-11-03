@@ -653,6 +653,8 @@ print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netu
 " 2>/dev/null)
 
         if [[ "$is_registered" != "True" ]]; then
+            # Print registration status for debugging
+            echo "Registration status for hotkey '$HOTKEY_NAME': $is_registered"
             ohai "Registering hotkey '$HOTKEY_NAME' on netuid $NETUID"
             btcli config set --wallet-path ~/.bittensor/wallets/
             REGISTER_CMD="yes | btcli subnet pow_register --wallet.name default --wallet.hotkey $HOTKEY_NAME --netuid $NETUID --subtensor.network $SUBTENSOR_NETWORK"

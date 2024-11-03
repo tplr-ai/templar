@@ -44,7 +44,7 @@ Options:
     -h, --help                  Display this help message
 
 Description:
-    Installs and runs a τemplar miner on your GPU. If the --network option is not provided, you will be prompted to select a network.
+    Installs and runs a τemplar neuron on your GPU. If the --network option is not provided, you will be prompted to select a network.
 EOF
 }
 
@@ -589,20 +589,17 @@ else
         warn "No GPUs found on this machine."
     fi
 fi
-
-# Create wallets and register them on the selected network
+# Create wallets section
 ohai "Creating wallets ..."
-# Create the default coldkey if not exists
-if ! python3 -c "import bittensor as bt; w = bt.wallet(); print(w.coldkey_file.exists_on_device())" | grep -q "True"; then
-    execute btcli w new_coldkey --wallet.path ~/.bittensor/wallets --wallet.name default --n-words 12 
+
+# Create coldkey if it doesn't exist
+exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(); print(w.coldkey_file.exists_on_device())" 2>/dev/null)
+if [ "$exists_on_device" != "True" ]; then
+    echo "n" | btcli wallet new_coldkey --wallet.name default --n-words 12 > /dev/null 2>&1
 fi
 pdone "Wallet 'default' is ready"
 
-# Ensure btcli is installed
-if ! command -v btcli &> /dev/null; then
-    abort "btcli command not found. Please ensure it is installed."
-fi
-
+# Create hotkeys based on neuron type
 if [ "$NEURON_TYPE" = "validator" ]; then
     # Create single hotkey for validator
     HOTKEY_NAME="validator"
@@ -626,38 +623,39 @@ if [ "$NEURON_TYPE" = "validator" ]; then
         pdone "Validator Hotkey already registered on netuid $NETUID"
     fi
 else
-# Create wallets and register them
-if [ "$NUM_GPUS" -gt 0 ]; then
-    for i in $(seq 0 $((NUM_GPUS - 1))); do
-        HOTKEY_NAME="C$i"
-        
-        # Simplified existence check
-        exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); print(w.hotkey_file.exists_on_device())" 2>/dev/null)
-        
-        if [ "$exists_on_device" != "True" ]; then
-            # Create new hotkey silently
-            echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1
-            pdone "Created Hotkey '$HOTKEY_NAME'"
-        fi
+    # Create miner hotkeys
+    if [ "$NUM_GPUS" -gt 0 ]; then
+        for i in $(seq 0 $((NUM_GPUS - 1))); do
+            HOTKEY_NAME="C$i"
+            
+            # Check if hotkey exists
+            exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); print(w.hotkey_file.exists_on_device())" 2>/dev/null)
+            
+            if [ "$exists_on_device" != "True" ]; then
+                echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1
+                pdone "Created Miner Hotkey '$HOTKEY_NAME'"
+            fi
 
-        # Check registration status
-        is_registered=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); sub = bt.subtensor('$SUBTENSOR_NETWORK'); print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID))")
-        
-        if [[ "$is_registered" != *"True"* ]]; then
-            ohai "Registering hotkey '$HOTKEY_NAME' on netuid $NETUID"
-            btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
-            pdone "Registered Hotkey '$HOTKEY_NAME' on netuid $NETUID"
-        else
-            pdone "Hotkey '$HOTKEY_NAME' already registered on netuid $NETUID"
-        fi
-    done
+            # Check registration status
+            is_registered=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); sub = bt.subtensor('$SUBTENSOR_NETWORK'); print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID))")
+            
+            if [[ "$is_registered" != *"True"* ]]; then
+                ohai "Registering miner hotkey $HOTKEY_NAME on netuid $NETUID"
+                btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
+                pdone "Registered Miner Hotkey $HOTKEY_NAME on netuid $NETUID"
+            else
+                pdone "Miner Hotkey $HOTKEY_NAME already registered on netuid $NETUID"
+            fi
+        done
+    fi
+fi
 else
     warn "No GPUs found. Skipping hotkey creation."
     exit 1
 fi
 pdone "All hotkeys registered"
 
-# Start τemplar miners on available GPUs with network-specific settings
+# Start τemplar neurons on available GPUs with network-specific settings
 ohai "Starting miners on network '$NETWORK' ..."
 # Close down all previous processes and restart them
 if pm2 list | grep -q 'online'; then

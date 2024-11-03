@@ -643,22 +643,39 @@ print(w.hotkey_file.exists_on_device())
             info "Hotkey '$HOTKEY_NAME' already exists"
         fi
 
-        # Check registration status
-        ohai "Checking if hotkey is registered on netuid $NETUID..."
-        is_registered=$(python3 -c "
-        import bittensor as bt
-        w = bt.wallet(hotkey='$HOTKEY_NAME')
-        sub = bt.subtensor('$SUBTENSOR_NETWORK')
-        try:
-            status = sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID)
-            print('True' if status else 'False')
-        except Exception as e:
-            print('False')
-        " 2>/dev/null | tail -n1)
+# Check registration status
+ohai "Checking if hotkey is registered on netuid $NETUID..."
+is_registered=$(python3 -c "
+import bittensor as bt
+import sys
 
-        if [[ "$is_registered" != "True" ]]; then
+try:
+    w = bt.wallet(hotkey='$HOTKEY_NAME')
+    sub = bt.subtensor('$SUBTENSOR_NETWORK')
+    
+    # Add connection check
+    if not sub.is_connected():
+        print('Error: Unable to connect to subtensor network', file=sys.stderr)
+        print('False')
+    else:
+        status = sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID)
+        print('True' if status else 'False')
+except Exception as e:
+    print(f'Error: {str(e)}', file=sys.stderr)
+    print('False')
+" 2>&1)
+
+# Extract just the True/False value from potentially multi-line output
+is_registered_value=$(echo "$is_registered" | grep -E '^(True|False)$' || echo "False")
+
+if [[ "$DEBUG" == "true" ]]; then
+    echo "Full registration check output:"
+    echo "$is_registered"
+fi
+
+        if [[ "$is_registered_value" != "True" ]]; then
             # Print registration status for debugging
-            echo "Registration status for hotkey '$HOTKEY_NAME': $is_registered"
+            echo "Registration status for hotkey '$HOTKEY_NAME': $is_registered_value"
             ohai "Registering hotkey '$HOTKEY_NAME' on netuid $NETUID"
             btcli config set --wallet-path ~/.bittensor/wallets/
             REGISTER_CMD="yes | btcli subnet pow_register --wallet.name default --wallet.hotkey $HOTKEY_NAME --netuid $NETUID --subtensor.network $SUBTENSOR_NETWORK"

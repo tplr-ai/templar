@@ -51,7 +51,7 @@ logging.basicConfig(
     datefmt="[%X]",
     handlers=[
         RichHandler(
-            markup=False,  # Disable markup parsing to prevent MarkupError
+            markup=True,  # Enable markup parsing to allow color rendering
             rich_tracebacks=True,
             highlighter=NullHighlighter(),
             show_level=False,
@@ -79,7 +79,6 @@ def trace() -> None:
         The TRACE level is not standard in the logging module.
         You may need to add it explicitly if required.
     """
-    # TRACE level is not standard; ensure it's defined if used
     TRACE_LEVEL_NUM = 5
     logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
     def trace_method(self, message, *args, **kws) -> None:
@@ -87,4 +86,3 @@ def trace() -> None:
             self._log(TRACE_LEVEL_NUM, message, args, **kws)
     logging.Logger.trace = trace_method
     logger.setLevel(TRACE_LEVEL_NUM)
-

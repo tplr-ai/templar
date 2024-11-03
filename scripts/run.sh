@@ -153,7 +153,7 @@ getc() {
 wait_for_user() {
     local c
     echo
-    echo "Press ${tty_bold}RETURN${tty_reset}/${tty_bold}ENTER${tty_reset} to continue or any other key to abort:"
+    echo -e "${tty_bold}Press ${tty_green}RETURN/ENTER${tty_reset} ${tty_bold}to continue or any other key to abort:${tty_reset}"
     getc c
     if ! [[ "${c}" == $'\r' || "${c}" == $'\n' ]]
     then
@@ -252,7 +252,7 @@ echo -e "${YELLOW}⚠️  Please ensure you have:${NC}"
 echo -e "   ${GREEN}✓${NC} A stable internet connection"
 echo -e "   ${GREEN}✓${NC} Sufficient permissions to install software\n"
 
-echo -e "${BOLD}Press ${GREEN}RETURN/ENTER${NC} ${BOLD}to continue or any other key to abort:${NC}"
+
 
 wait_for_user
 
@@ -668,64 +668,58 @@ else
 fi
 pdone "All hotkeys registered"
 
-# Start τemplar neurons on available GPUs with network-specific settings
-ohai "Starting miners on network '$NETWORK' ..."
-# Close down all previous processes and restart them
-if pm2 list | grep -q 'online'; then
-    ohai "Stopping old pm2 processes..."
-    pm2 delete all
-    pdone "Old processes stopped"
-fi
-
-# Start neurons based on type
+# Initialize PM2
 ohai "Stopping old pm2 processes..."
 if pm2 list | grep -q 'online'; then
     pm2 delete all
     pdone "Old processes stopped"
 fi
 
-# Handle validator case
-if [ "$NEURON_TYPE" = "validator" ]; then
+# Start neurons based on type
+if [ "$NEURON_TYPE" = "validator" ]
+then
     ohai "Starting validator on network '$NETWORK' ..."
     VALIDATOR_ARGS="--actual_batch_size 6 --wallet.name default --wallet.hotkey validator --bucket \"$BUCKET\" --use_wandb --project \"$PROJECT\" --netuid $NETUID"
     
-    # Add network options if present
-    if [[ -n "$PM2_NETWORK_OPTIONS" ]]; then
-        VALIDATOR_ARGS="$VALIDATOR_ARGS $PM2_NETWORK_OPTIONS"
-    fi
-    if [[ -n "$SUBTENSOR_NETWORK" ]]; then
-        VALIDATOR_ARGS="$VALIDATOR_ARGS --subtensor.network $SUBTENSOR_NETWORK"
-    fi
-    if [[ -n "$SUBTENSOR_CHAIN_ENDPOINT" ]]; then
-        VALIDATOR_ARGS="$VALIDATOR_ARGS --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
-    fi
+    # Add network options
+    [ -n "$PM2_NETWORK_OPTIONS" ] && VALIDATOR_ARGS="$VALIDATOR_ARGS $PM2_NETWORK_OPTIONS"
+    [ -n "$SUBTENSOR_NETWORK" ] && VALIDATOR_ARGS="$VALIDATOR_ARGS --subtensor.network $SUBTENSOR_NETWORK"
+    [ -n "$SUBTENSOR_CHAIN_ENDPOINT" ] && VALIDATOR_ARGS="$VALIDATOR_ARGS --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
 
-    # Start validator process
-    if [[ "$DEBUG" == "true" ]]; then
+    # Start validator
+    if [ "$DEBUG" = "true" ]
+    then
         execute pm2 start neurons/validator.py --interpreter python3 --name ${NETWORK}_validator -- $VALIDATOR_ARGS
     else
         execute pm2 start neurons/validator.py --interpreter python3 --name ${NETWORK}_validator -- $VALIDATOR_ARGS > /dev/null 2>&1
     fi
     pdone "Validator started"
+    LOGGING_TARGET="${NETWORK}_validator"
+fi
 
-# Handle miner case    
-elif [ "$NEURON_TYPE" = "miner" ]; then
+if [ "$NEURON_TYPE" = "miner" ]
+then
     ohai "Starting miners on network '$NETWORK' ..."
-    if [ "$NUM_GPUS" -gt 0 ]; then
-        for i in $(seq 0 $((NUM_GPUS - 1))); do
+    if [ "$NUM_GPUS" -gt 0 ]
+    then
+        for i in $(seq 0 $((NUM_GPUS - 1)))
+        do
             GPU_INDEX=$i
             HOTKEY_NAME="C$i"
             GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | sed -n "$((i + 1))p")
             
-            if [ -z "$GPU_MEMORY" ]; then
+            if [ -z "$GPU_MEMORY" ]
+            then
                 warn "Could not get GPU memory for GPU $i"
                 continue
             fi
             
-            # Set batch size based on GPU memory
-            if [ "$GPU_MEMORY" -ge 80000 ]; then
+            # Set batch size
+            if [ "$GPU_MEMORY" -ge 80000 ]
+            then
                 BATCH_SIZE=6
-            elif [ "$GPU_MEMORY" -ge 40000 ]; then
+            elif [ "$GPU_MEMORY" -ge 40000 ]
+            then
                 BATCH_SIZE=3
             else
                 BATCH_SIZE=1
@@ -734,39 +728,31 @@ elif [ "$NEURON_TYPE" = "miner" ]; then
             ohai "Starting miner on GPU $GPU_INDEX with batch size $BATCH_SIZE..."
             MINER_ARGS="--actual_batch_size $BATCH_SIZE --wallet.name default --wallet.hotkey $HOTKEY_NAME --bucket \"$BUCKET\" --device cuda:$GPU_INDEX --use_wandb --project \"$PROJECT\" --netuid $NETUID"
             
-            # Add network options if present
-            if [[ -n "$PM2_NETWORK_OPTIONS" ]]; then
-                MINER_ARGS="$MINER_ARGS $PM2_NETWORK_OPTIONS"
-            fi
-            if [[ -n "$SUBTENSOR_NETWORK" ]]; then
-                MINER_ARGS="$MINER_ARGS --subtensor.network $SUBTENSOR_NETWORK"
-            fi
-            if [[ -n "$SUBTENSOR_CHAIN_ENDPOINT" ]]; then
-                MINER_ARGS="$MINER_ARGS --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
-            fi
+            # Add network options
+            [ -n "$PM2_NETWORK_OPTIONS" ] && MINER_ARGS="$MINER_ARGS $PM2_NETWORK_OPTIONS"
+            [ -n "$SUBTENSOR_NETWORK" ] && MINER_ARGS="$MINER_ARGS --subtensor.network $SUBTENSOR_NETWORK"
+            [ -n "$SUBTENSOR_CHAIN_ENDPOINT" ] && MINER_ARGS="$MINER_ARGS --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
             
-            # Start miner process
-            if [[ "$DEBUG" == "true" ]]; then
+            # Start miner
+            if [ "$DEBUG" = "true" ]
+            then
                 execute pm2 start neurons/miner.py --interpreter python3 --name ${NETWORK}_$HOTKEY_NAME -- $MINER_ARGS
             else
                 execute pm2 start neurons/miner.py --interpreter python3 --name ${NETWORK}_$HOTKEY_NAME -- $MINER_ARGS > /dev/null 2>&1
             fi
         done
+        LOGGING_TARGET="${NETWORK}_C0"
     else
         warn "No GPUs found. Skipping miner startup."
     fi
     pdone "All miners started"
 fi
 
-# Display final status
+# Display status
 pm2 list
 echo ""
 pdone "SUCCESS"
 echo ""
 
-# Start appropriate logs
-if [ "$NEURON_TYPE" = "validator" ]; then
-    pm2 logs ${NETWORK}_validator
-else
-    pm2 logs ${NETWORK}_C0
-fi
+# Start logs
+pm2 logs $LOGGING_TARGET

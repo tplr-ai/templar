@@ -586,23 +586,6 @@ else
     warn "Cannot determine system RAM. 'free' command not found."
 fi
 
-# Check for GPUs
-ohai "Checking for GPUs..."
-if ! command -v nvidia-smi &> /dev/null; then
-    warn "nvidia-smi command not found. Please ensure NVIDIA drivers are installed."
-    NUM_GPUS=0
-else
-    NUM_GPUS=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
-
-    if [ "$NUM_GPUS" -gt 0 ]; then
-        nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | while read -r memory; do
-            pdone "Found GPU with $((memory / 1024)) GB of memory"
-        done
-    else
-        warn "No GPUs found on this machine."
-    fi
-fi
-# Create wallets section
 ohai "Creating wallets ..."
 
 # Create coldkey if it doesn't exist
@@ -660,11 +643,10 @@ else
                 pdone "Miner Hotkey $HOTKEY_NAME already registered on netuid $NETUID"
             fi
         done
+    else
+        warn "No GPUs found. Exiting"
+        exit 1
     fi
-fi
-else
-    warn "No GPUs found. Skipping hotkey creation."
-    exit 1
 fi
 pdone "All hotkeys registered"
 

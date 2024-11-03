@@ -831,7 +831,6 @@ while [ $retry_count -lt $max_retries ]; do
         fi
     fi
 done
-        done
 
         if [[ "$is_registered" != "True" ]]; then
             ohai "Registering hotkey '$HOTKEY_NAME' on netuid $NETUID"

@@ -218,28 +218,40 @@ set_or_replace_env_var() {
     fi
 }
 
-# Clear the screen and display the logo
+# Define color codes
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+GREEN='\033[0;32m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# Clear screen
 clear
-echo ""
-echo ""
-echo ""
+
+# Display the original logo with cyan color and bold
+echo -e "${RED}${BOLD}"
 printf '%s\n' "___  _  _ _  _ | _  _  "
 printf '%s\n' "  | (/_| | ||_)|(_||   "
 printf '%s\n' "  |         |          "
-echo ""
-echo ""
+echo -e "${NC}"
 
-echo "This script will do the following:"
-echo "1. Install required software (Git, npm, pm2, rust, uv, Python 3.12)"
-echo "2. Set up AWS credentials"
-echo "3. Clone and set up the τemplar repository"
-echo "4. Create and register Bittensor wallets"
-echo "5. Configure wandb for logging"
-echo "6. Clean the specified S3 bucket"
-echo "7. Start τemplar neurons on available GPUs on your chosen network"
-echo ""
-echo "Please ensure you have a stable internet connection and sufficient permissions to install software."
-echo ""
+echo -e "\n${BOLD}${BLUE}Welcome to the τemplar Installation Script${NC}\n"
+
+echo -e "${YELLOW}This script will:${NC}\n"
+echo -e "${CYAN}1.${NC} Install required software ${GREEN}(Git, npm, pm2, rust, uv, Python 3.12)${NC}"
+echo -e "${CYAN}2.${NC} Set up ${GREEN}AWS credentials${NC}"
+echo -e "${CYAN}3.${NC} Clone and set up the ${GREEN}τemplar repository${NC}"
+echo -e "${CYAN}4.${NC} Create and register ${GREEN}Bittensor wallets${NC}"
+echo -e "${CYAN}5.${NC} Configure ${GREEN}wandb for logging${NC}"
+echo -e "${CYAN}6.${NC} Clean the specified ${GREEN}S3 bucket${NC}"
+echo -e "${CYAN}7.${NC} Start ${GREEN}τemplar neurons${NC} on available GPUs on your chosen network\n"
+
+echo -e "${YELLOW}⚠️  Please ensure you have:${NC}"
+echo -e "   ${GREEN}✓${NC} A stable internet connection"
+echo -e "   ${GREEN}✓${NC} Sufficient permissions to install software\n"
+
+echo -e "${BOLD}Press ${GREEN}RETURN/ENTER${NC} ${BOLD}to continue or any other key to abort:${NC}"
 
 wait_for_user
 
@@ -664,16 +676,19 @@ if pm2 list | grep -q 'online'; then
     pdone "Old processes stopped"
 fi
 
-# Start τemplar neurons based on neuron type
+# Start neurons based on type
 ohai "Stopping old pm2 processes..."
 if pm2 list | grep -q 'online'; then
     pm2 delete all
     pdone "Old processes stopped"
 fi
 
+# Handle validator case
 if [ "$NEURON_TYPE" = "validator" ]; then
     ohai "Starting validator on network '$NETWORK' ..."
     VALIDATOR_ARGS="--actual_batch_size 6 --wallet.name default --wallet.hotkey validator --bucket \"$BUCKET\" --use_wandb --project \"$PROJECT\" --netuid $NETUID"
+    
+    # Add network options if present
     if [[ -n "$PM2_NETWORK_OPTIONS" ]]; then
         VALIDATOR_ARGS="$VALIDATOR_ARGS $PM2_NETWORK_OPTIONS"
     fi
@@ -684,39 +699,41 @@ if [ "$NEURON_TYPE" = "validator" ]; then
         VALIDATOR_ARGS="$VALIDATOR_ARGS --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
     fi
 
+    # Start validator process
     if [[ "$DEBUG" == "true" ]]; then
         execute pm2 start neurons/validator.py --interpreter python3 --name ${NETWORK}_validator -- $VALIDATOR_ARGS
     else
         execute pm2 start neurons/validator.py --interpreter python3 --name ${NETWORK}_validator -- $VALIDATOR_ARGS > /dev/null 2>&1
     fi
     pdone "Validator started"
-    
+
+# Handle miner case    
 elif [ "$NEURON_TYPE" = "miner" ]; then
     ohai "Starting miners on network '$NETWORK' ..."
     if [ "$NUM_GPUS" -gt 0 ]; then
         for i in $(seq 0 $((NUM_GPUS - 1))); do
-            # Adjust GPU index for zero-based numbering
             GPU_INDEX=$i
             HOTKEY_NAME="C$i"
             GPU_MEMORY=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | sed -n "$((i + 1))p")
+            
             if [ -z "$GPU_MEMORY" ]; then
                 warn "Could not get GPU memory for GPU $i"
                 continue
             fi
             
-            # Determine batch size based on GPU memory
+            # Set batch size based on GPU memory
             if [ "$GPU_MEMORY" -ge 80000 ]; then
                 BATCH_SIZE=6
             elif [ "$GPU_MEMORY" -ge 40000 ]; then
                 BATCH_SIZE=3
-            elif [ "$GPU_MEMORY" -ge 20000 ]; then
-                BATCH_SIZE=1
             else
                 BATCH_SIZE=1
             fi
             
             ohai "Starting miner on GPU $GPU_INDEX with batch size $BATCH_SIZE..."
             MINER_ARGS="--actual_batch_size $BATCH_SIZE --wallet.name default --wallet.hotkey $HOTKEY_NAME --bucket \"$BUCKET\" --device cuda:$GPU_INDEX --use_wandb --project \"$PROJECT\" --netuid $NETUID"
+            
+            # Add network options if present
             if [[ -n "$PM2_NETWORK_OPTIONS" ]]; then
                 MINER_ARGS="$MINER_ARGS $PM2_NETWORK_OPTIONS"
             fi
@@ -727,6 +744,7 @@ elif [ "$NEURON_TYPE" = "miner" ]; then
                 MINER_ARGS="$MINER_ARGS --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT"
             fi
             
+            # Start miner process
             if [[ "$DEBUG" == "true" ]]; then
                 execute pm2 start neurons/miner.py --interpreter python3 --name ${NETWORK}_$HOTKEY_NAME -- $MINER_ARGS
             else
@@ -739,13 +757,13 @@ elif [ "$NEURON_TYPE" = "miner" ]; then
     pdone "All miners started"
 fi
 
-# Display status and start logging
+# Display final status
 pm2 list
 echo ""
 pdone "SUCCESS"
 echo ""
 
-# Start logging based on neuron type
+# Start appropriate logs
 if [ "$NEURON_TYPE" = "validator" ]; then
     pm2 logs ${NETWORK}_validator
 else

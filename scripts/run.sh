@@ -646,11 +646,15 @@ print(w.hotkey_file.exists_on_device())
         # Check registration status
         ohai "Checking if hotkey is registered on netuid $NETUID..."
         is_registered=$(python3 -c "
-import bittensor as bt
-w = bt.wallet(hotkey='$HOTKEY_NAME')
-sub = bt.subtensor('$SUBTENSOR_NETWORK')
-print(sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID))
-" 2>/dev/null)
+        import bittensor as bt
+        w = bt.wallet(hotkey='$HOTKEY_NAME')
+        sub = bt.subtensor('$SUBTENSOR_NETWORK')
+        try:
+            status = sub.is_hotkey_registered_on_subnet(hotkey_ss58=w.hotkey.ss58_address, netuid=$NETUID)
+            print('True' if status else 'False')
+        except Exception as e:
+            print('False')
+        " 2>/dev/null | tail -n1)
 
         if [[ "$is_registered" != "True" ]]; then
             # Print registration status for debugging

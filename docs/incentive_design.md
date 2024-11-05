@@ -68,7 +68,12 @@ The coordination between miners and validators ensures that only beneficial upda
 
 - **Local Gradient**: $\hat{g}_i$, the gradient computed by the validator for miner $i$.
 - **Miner's Delta**: $\delta_i$, uploaded by miner $i$.
-- **Cosine Similarity**: $s_i = \frac{\delta_i \cdot \hat{g}_i}{\|\delta_i\| \|\hat{g}_i\|}$.
+- **Cosine Similarity**:
+
+  $$
+  s_i = \frac{\delta_i \cdot \hat{g}_i}{\|\delta_i\| \|\hat{g}_i\|}
+  $$
+
 - **Assigned Weight**: $w_i$, proportional to $s_i$.
 
 ## Incentive Mechanism
@@ -92,6 +97,7 @@ For each miner $i$:
    $$
    s_i = \frac{\delta_i \cdot \hat{g}_i}{\|\delta_i\| \|\hat{g}_i\|}
    $$
+
    - Measures the alignment between the miner's update and the true gradient.
 
 2. **Interpretation of $s_i$**:
@@ -102,20 +108,22 @@ For each miner $i$:
 #### Weight Assignment
 
 1. **Initial Weight Calculation**:
-   - Assign initial weights proportional to the similarity scores:
 
-     $$
-     w_i' = \max(s_i, 0)
-     $$
+   Assign initial weights proportional to the similarity scores:
+
+   $$
+   w_i' = \max(s_i, 0)
+   $$
 
 2. **Normalization**:
-   - Normalize the weights to ensure they sum up to 1:
 
-     $$
-     w_i = \frac{w_i'}{\sum_j w_j'}
-     $$
+   Normalize the weights to ensure they sum up to 1:
 
-   - This ensures the distribution of rewards is fair and proportional to positive contributions.
+   $$
+   w_i = \frac{w_i'}{\sum_j w_j'}
+   $$
+
+   This ensures the distribution of rewards is fair and proportional to positive contributions.
 
 #### Reward Distribution
 
@@ -125,7 +133,7 @@ For each miner $i$:
   $$
   R_i = R_{\text{total}} \times w_i
   $$
-  
+
 - Miners receive rewards based on their normalized weights.
 
 ### Formal Guarantees

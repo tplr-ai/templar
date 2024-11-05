@@ -258,15 +258,15 @@ wait_for_user
 # If network not provided, prompt user to select one
 if [[ -z "$NETWORK" ]]; then
     echo "Please select a network:"
-    echo "1) Finney"
-    echo "2) Testnet"
-    echo "3) Local"
+    echo "1) finney"
+    echo "2) testnet"
+    echo "3) local"
     read -p "Enter selection [1-3]: " network_choice
     
     case $network_choice in
-        1) NETWORK="Finney" ;;
-        2) NETWORK="Testnet" ;;
-        3) NETWORK="Local" ;;
+        1) NETWORK="finney" ;;
+        2) NETWORK="testnet" ;;
+        3) NETWORK="local" ;;
         *) 
             echo "Invalid selection"
             exit 1
@@ -304,8 +304,8 @@ esac
 
 if [[ -z "$NEURON_TYPE" ]]; then
     echo "Please select a neuron type:"
-    echo "1) Miner"
-    echo "2) Validator"
+    echo "1) miner"
+    echo "2) validator"
     read -p "Enter selection [1-2]: " neuron_choice
     
     case $neuron_choice in
@@ -612,7 +612,8 @@ if [ "$NEURON_TYPE" = "validator" ]; then
     
     if [[ "$is_registered" != *"True"* ]]; then
         ohai "Registering validator hotkey on netuid $NETUID"
-        btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
+        # btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
+                btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt
         pdone "Registered Validator Hotkey on netuid $NETUID"
     else
         pdone "Validator Hotkey already registered on netuid $NETUID"

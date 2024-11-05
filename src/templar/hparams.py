@@ -20,12 +20,13 @@ import time
 import requests
 from types import SimpleNamespace
 from transformers import AutoTokenizer, LlamaConfig
+import os
 
 # Import local tools
 from . import debug, trace, logger, T, P
 
 # Cache file path
-HPARAMS_FILE = "hparams.json"
+HPARAMS_FILE = os.path.join(os.path.dirname(__file__), "hparams.json")
 
 def create_namespace(hparams: dict) -> SimpleNamespace:
     """

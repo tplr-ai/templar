@@ -218,15 +218,6 @@ set_or_replace_env_var() {
     fi
 }
 
-# Define color codes
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-YELLOW='\033[1;33m'
-GREEN='\033[0;32m'
-NC='\033[0m' # No Color
-BOLD='\033[1m'
-RED='\033[0;31m'
-
 # Clear screen
 clear
 
@@ -590,7 +581,11 @@ ohai "Creating wallets ..."
 # Create coldkey if it doesn't exist
 exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(); print(w.coldkey_file.exists_on_device())" 2>/dev/null)
 if [ "$exists_on_device" != "True" ]; then
-    echo "n" | btcli wallet new_coldkey --wallet.name default --n-words 12 > /dev/null 2>&1
+    if [[ "$DEBUG" == "true" ]]; then
+        echo "n" | btcli wallet new_coldkey --wallet.name default --n-words 12
+    else
+        echo "n" | btcli wallet new_coldkey --wallet.name default --n-words 12 > /dev/null 2>&1
+    fi
 fi
 pdone "Wallet 'default' is ready"
 
@@ -603,7 +598,11 @@ if [ "$NEURON_TYPE" = "validator" ]; then
     exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); print(w.hotkey_file.exists_on_device())" 2>/dev/null)
     
     if [ "$exists_on_device" != "True" ]; then
-        echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1
+        if [[ "$DEBUG" == "true" ]]; then
+            echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12
+        else
+            echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1
+        fi
         pdone "Created Validator Hotkey '$HOTKEY_NAME'"
     fi
 
@@ -612,8 +611,11 @@ if [ "$NEURON_TYPE" = "validator" ]; then
     
     if [[ "$is_registered" != *"True"* ]]; then
         ohai "Registering validator hotkey on netuid $NETUID"
-        # btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
-                btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt
+        if [[ "$DEBUG" == "true" ]]; then
+            btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt
+        else
+            btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
+        fi
         pdone "Registered Validator Hotkey on netuid $NETUID"
     else
         pdone "Validator Hotkey already registered on netuid $NETUID"
@@ -628,7 +630,11 @@ else
             exists_on_device=$(python3 -c "import bittensor as bt; w = bt.wallet(hotkey='$HOTKEY_NAME'); print(w.hotkey_file.exists_on_device())" 2>/dev/null)
             
             if [ "$exists_on_device" != "True" ]; then
-                echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1
+                if [[ "$DEBUG" == "true" ]]; then
+                    echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12
+                else
+                    echo "n" | btcli wallet new_hotkey --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --n-words 12 > /dev/null 2>&1
+                fi
                 pdone "Created Miner Hotkey '$HOTKEY_NAME'"
             fi
 
@@ -637,7 +643,11 @@ else
             
             if [[ "$is_registered" != *"True"* ]]; then
                 ohai "Registering miner hotkey $HOTKEY_NAME on netuid $NETUID"
-                btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
+                if [[ "$DEBUG" == "true" ]]; then
+                    btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt
+                else
+                    btcli subnet pow_register --wallet.name default --wallet.hotkey "$HOTKEY_NAME" --netuid "$NETUID" --subtensor.network "$SUBTENSOR_NETWORK" --no_prompt > /dev/null 2>&1
+                fi
                 pdone "Registered Miner Hotkey $HOTKEY_NAME on netuid $NETUID"
             else
                 pdone "Miner Hotkey $HOTKEY_NAME already registered on netuid $NETUID"

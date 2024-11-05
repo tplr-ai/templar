@@ -12,7 +12,7 @@ ___  _  _ _  _ | _  _
 </pre>
 </div>
 <div align="center">
-<a href="docs/incentive_design.md">Incentive Design</a> • <a href="docs/miners.md">Miner Setup</a> • <a href="docs/validator.md">Validator Setup</a>
+<a href="https://github.com/RaoFoundation/templar/blob/main/docs/incentive_design.md">Incentive Design</a> • <a href="https://github.com/RaoFoundation/templar/blob/main/docs/miner.md">Miner</a> • <a href="https://github.com/RaoFoundation/templar/blob/main/docs/validator.md">Validator</a>
 </div>
 
 ## Quick Start

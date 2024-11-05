@@ -1,6 +1,6 @@
-# Validator Setup and Detailed Explanation
+# Validator Setup
 
-This document provides a comprehensive guide on how to set up and run a validator using `validator.py`. It explains the workflow, configuration options, and step-by-step instructions to get a validator up and running. We'll also highlight important flags such as `--sync_state` that are crucial for proper synchronization and operation within the network.
+This document provides a guide on how to set up and run a validator using `validator.py`. It explains the workflow, configuration options, and step-by-step instructions to get a validator up and running. We'll also highlight important flags such as `--sync_state` that are crucial for proper synchronization and operation within the network.
 
 ## Table of Contents
 

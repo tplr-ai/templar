@@ -1,6 +1,6 @@
-# Miner Setup and Detailed Explanation
+# Miner Setup
 
-This document provides a comprehensive guide on how to set up and run a miner using `miner.py`. It explains the workflow, configuration options, and step-by-step instructions to get a miner up and running. Additionally, it highlights important flags such as `--remote` and `--sync_state` that are crucial for proper synchronization and operation within the network.
+This document provides a guide on how to set up and run a miner using `miner.py`. It explains the workflow, configuration options, and step-by-step instructions to get a miner up and running. Additionally, it highlights important flags such as `--remote` and `--sync_state` that are crucial for proper synchronization and operation within the network.
 
 ## Table of Contents
 

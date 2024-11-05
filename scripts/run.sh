@@ -671,7 +671,7 @@ fi
 if [ "$NEURON_TYPE" = "validator" ]
 then
     ohai "Starting validator on network '$NETWORK' ..."
-    VALIDATOR_ARGS="--actual_batch_size 6 --wallet.name default --wallet.hotkey validator --bucket $BUCKET --use_wandb --project $PROJECT --netuid $NETUID"
+    VALIDATOR_ARGS="--actual_batch_size 6 --wallet.name default --wallet.hotkey validator --bucket $BUCKET --use_wandb --project $PROJECT --netuid $NETUID --autoupdate"
     
     # Add network options
     [ -n "$PM2_NETWORK_OPTIONS" ] && VALIDATOR_ARGS="$VALIDATOR_ARGS $PM2_NETWORK_OPTIONS"

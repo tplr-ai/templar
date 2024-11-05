@@ -21,3 +21,6 @@ from .logging import *
 from .dataset import *
 from .hparams import *
 from .comms import *
+from .autoupdate import *
+
+__version__ = "0.1.0"

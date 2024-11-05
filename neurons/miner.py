@@ -58,6 +58,7 @@ class Miner:
         parser.add_argument('--sync_state', action='store_true', help='Syncs the model state by pulling from the history.')
         parser.add_argument('--baseline', action='store_true', help='Dont perform syncing with other peers, just train.')
         parser.add_argument('--test', action='store_true', help='Run on test network')
+        parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -66,7 +67,12 @@ class Miner:
             config.subtensor.chain_endpoint = 'wss://test.finney.opentensor.ai:443/'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
+        if config.autoupdate:
+            from templar.autoupdate import AutoUpdate
+            autoupdater = AutoUpdate()
+            autoupdater.try_update()
         return config
+
 
     def __init__(self):
         # Init config.
@@ -230,8 +236,7 @@ class Miner:
                 random.shuffle( pages )
                 dataset = await tplr.dataset.DatasetLoader.create(
                     batch_size = self.config.actual_batch_size,
-                    # sequence_length = self.hparams.sequence_length,
-                    sequence_length = 8192,
+                    sequence_length = self.hparams.sequence_length,
                     pages_info = pages,
                     tokenizer = self.hparams.tokenizer
                 )
@@ -262,8 +267,7 @@ class Miner:
                 torch.cuda.empty_cache()
                 step_loss = total_loss/(full_steps+1)
                 train_duration = tplr.T() - train_start
-                # tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
-                tokens_per_step = 8192 * self.config.actual_batch_size * (full_steps + 1)
+                tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
                 tokens_per_second =  tokens_per_step / train_duration
                 tplr.logger.info(f"{tplr.P(window, train_duration)} Accumulated gradients:")
                 tplr.logger.info(f"{tplr.P(window, train_duration)} \tTotal steps: [tan]{full_steps}/{total_steps}[/tan], Rate: [tan]{(full_steps/total_steps):.2f}[/tan], Target: [tan]{self.sample_rate:.2f}[/tan]")

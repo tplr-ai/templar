@@ -175,14 +175,14 @@ Subject to:
 - **Update Constraint**: $\delta_i = \theta^{t+1}_i - \theta^t$
 - **Training Dynamics**: $\theta^{t+1}_i = \theta^t - \eta \hat{g}_i$ (using learning rate $\eta$)
 
-The miner's optimal strategy is to set \( \delta_i \) proportional to \( -\hat{g}_i \), aligning with the negative gradient descent direction.
+The miner's optimal strategy is to set $\( \delta_i \)$ proportional to $\( -\hat{g}_i \)$, aligning with the negative gradient descent direction.
 
 ### Validator Consistency
 
 Validators ensure that:
 
 - The evaluation is done fairly using consistent data subsets.
-- The local gradients \( \hat{g}_i \) are computed accurately.
+- The local gradients $\( \hat{g}_i \)$ are computed accurately.
 
 ### Security Considerations
 

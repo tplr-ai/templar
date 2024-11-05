@@ -111,9 +111,9 @@ $$
 
     Assign initial weights proportional to the similarity scores:
 
-    $$
-    w_i' = \max(s_i, 0)
-    $$
+$$
+w_i\prime = \max(s_i, 0)
+$$
 
 2. **Normalization**:
 
@@ -123,7 +123,7 @@ $$
 w_i = \frac{w_i'}{\sum_j w_j'}
 $$
 
-    This ensures the distribution of rewards is fair and proportional to positive contributions.
+   This ensures the distribution of rewards is fair and proportional to positive contributions.
 
 #### Reward Distribution
 

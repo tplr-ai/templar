@@ -70,9 +70,9 @@ The coordination between miners and validators ensures that only beneficial upda
 - **Miner's Delta**: $\delta_i$, uploaded by miner $i$.
 - **Cosine Similarity**:
 
-  $$
-  s_i = \frac{\delta_i \cdot \hat{g}_i}{\|\delta_i\| \|\hat{g}_i\|}
-  $$
+$$
+s_i = \frac{\delta_i \cdot \hat{g}_i}{|\delta_i| |\hat{g}_i|}
+$$
 
 - **Assigned Weight**: $w_i$, proportional to $s_i$.
 

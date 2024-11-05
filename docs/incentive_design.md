@@ -119,9 +119,9 @@ $$
 
     Normalize the weights to ensure they sum up to 1:
 
-    $$
-    w_i = \frac{w_i'}{\sum_j w_j'}
-    $$
+$$
+w_i = \frac{w_i'}{\sum_j w_j'}
+$$
 
     This ensures the distribution of rewards is fair and proportional to positive contributions.
 
@@ -130,9 +130,9 @@ $$
 - **Total Reward Pool**: Determined by network parameters and available tokens.
 - **Individual Reward**:
 
-  $$
-  R_i = R_{\text{total}} \times w_i
-  $$
+$$
+R_i = R_{\text{total}} \times w_i
+$$
 
 - Miners receive rewards based on their normalized weights.
 

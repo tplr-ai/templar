@@ -94,9 +94,9 @@ For each miner $i$:
 
 1. **Compute Cosine Similarity**:
 
-   $$
-   s_i = \frac{\delta_i \cdot \hat{g}_i}{\|\delta_i\| \|\hat{g}_i\|}
-   $$
+$$
+s_i = \frac{\delta_i \cdot \hat{g}_i}{|\delta_i| |\hat{g}_i|}
+$$
 
    - Measures the alignment between the miner's update and the true gradient.
 

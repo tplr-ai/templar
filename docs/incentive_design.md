@@ -109,21 +109,21 @@ For each miner $i$:
 
 1. **Initial Weight Calculation**:
 
-   Assign initial weights proportional to the similarity scores:
+    Assign initial weights proportional to the similarity scores:
 
-   $$
-   w_i' = \max(s_i, 0)
-   $$
+    $$
+    w_i' = \max(s_i, 0)
+    $$
 
 2. **Normalization**:
 
-   Normalize the weights to ensure they sum up to 1:
+    Normalize the weights to ensure they sum up to 1:
 
-   $$
-   w_i = \frac{w_i'}{\sum_j w_j'}
-   $$
+    $$
+    w_i = \frac{w_i'}{\sum_j w_j'}
+    $$
 
-   This ensures the distribution of rewards is fair and proportional to positive contributions.
+    This ensures the distribution of rewards is fair and proportional to positive contributions.
 
 #### Reward Distribution
 
@@ -164,7 +164,7 @@ For each miner $i$:
 
 ### Miner Utility Maximization
 
-Each miner seeks to maximize their expected reward $R_i$:
+Each miner seeks to maximize their expected reward \( R_i \):
 
 $$
 \max_{\delta_i} \quad R_i = R_{\text{total}} \times \frac{\max(s_i, 0)}{\sum_j \max(s_j, 0)}
@@ -172,17 +172,17 @@ $$
 
 Subject to:
 
-- **Update Constraint**: $\delta_i = \theta^{t+1}_i - \theta^t$
-- **Training Dynamics**: $\theta^{t+1}_i = \theta^t - \eta \hat{g}_i$ (using learning rate $\eta$)
+- **Update Constraint**: \( \delta_i = \theta^{t+1}_i - \theta^t \)
+- **Training Dynamics**: \( \theta^{t+1}_i = \theta^t - \eta \hat{g}_i \) (using learning rate \( \eta \))
 
-The miner's optimal strategy is to set $\delta_i$ proportional to $-\hat{g}_i$, aligning with the negative gradient descent direction.
+The miner's optimal strategy is to set \( \delta_i \) proportional to \( -\hat{g}_i \), aligning with the negative gradient descent direction.
 
 ### Validator Consistency
 
 Validators ensure that:
 
 - The evaluation is done fairly using consistent data subsets.
-- The local gradients $\hat{g}_i$ are computed accurately.
+- The local gradients \( \hat{g}_i \) are computed accurately.
 
 ### Security Considerations
 

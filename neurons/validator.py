@@ -53,6 +53,7 @@ class Validator:
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
         parser.add_argument('--sync_state', action='store_true', help='Syncs the model state by pulling from the history.')
         parser.add_argument('--test', action='store_true', help='Run on test network')
+        parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -61,6 +62,10 @@ class Validator:
             config.subtensor.chain_endpoint = 'wss://test.finney.opentensor.ai:443/'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
+        if config.autoupdate:
+            from templar.autoupdate import AutoUpdate
+            autoupdater = AutoUpdate()
+            autoupdater.try_update()
         return config
 
     def __init__(self):
@@ -245,8 +250,7 @@ class Validator:
                 random.shuffle( eval_pages )    
                 eval_dataset = await tplr.dataset.DatasetLoader.create(
                     batch_size = self.config.actual_batch_size,
-                    # sequence_length = self.hparams.sequence_length,
-                    sequence_length = 8192,
+                    sequence_length = self.hparams.sequence_length,
                     pages_info = eval_pages,
                     tokenizer = self.hparams.tokenizer
                 )                
@@ -273,8 +277,7 @@ class Validator:
                             if self.current_window - offset != window: exhuasted_window = True; continue
                 step_loss = total_loss/(full_steps+1)
                 eval_duration = tplr.T() - eval_start
-                # tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
-                tokens_per_step = 8192 * self.config.actual_batch_size * (full_steps + 1)
+                tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
 
                 tokens_per_second = tokens_per_step / eval_duration
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: Accumulated gradients:")

@@ -25,6 +25,7 @@ wheels/
 .venv/
 venv/
 .env/
+uv.lock
 
 # IDE
 .idea/

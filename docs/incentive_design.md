@@ -172,8 +172,8 @@ $$
 
 Subject to:
 
-- **Update Constraint**: \( \delta_i = \theta^{t+1}_i - \theta^t \)
-- **Training Dynamics**: \( \theta^{t+1}_i = \theta^t - \eta \hat{g}_i \) (using learning rate \( \eta \))
+- **Update Constraint**: $\delta_i = \theta^{t+1}_i - \theta^t$
+- **Training Dynamics**: $\theta^{t+1}_i = \theta^t - \eta \hat{g}_i$ (using learning rate $\eta$)
 
 The miner's optimal strategy is to set \( \delta_i \) proportional to \( -\hat{g}_i \), aligning with the negative gradient descent direction.
 

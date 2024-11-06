@@ -1,187 +1,252 @@
 # Validator Setup
 
-This document provides a guide on how to set up and run a validator using `validator.py`. It explains the workflow, configuration options, and step-by-step instructions to get a validator up and running. We'll also highlight important flags such as `--sync_state` that are crucial for proper synchronization and operation within the network.
+This document provides a guide on how to set up and run a validator using `validator.py`. Validators are crucial components of the protocol, responsible for evaluating miners' contributions by comparing their uploaded deltas with locally computed gradients.
 
 ## Table of Contents
 
-- [Introduction](#introduction)
 - [Prerequisites](#prerequisites)
-- [Understanding `validator.py`](#understanding-validatorpy)
-  - [Overview](#overview)
-  - [Key Components](#key-components)
-- [Setting Up a Validator](#setting-up-a-validator)
-  - [Step 1: Install Dependencies](#step-1-install-dependencies)
-  - [Step 2: Configure Wallet and Hotkey](#step-2-configure-wallet-and-hotkey)
-  - [Step 3: Running the Validator](#step-3-running-the-validator)
-  - [Example Command](#example-command)
-- [Important Flags](#important-flags)
-  - [`--sync_state`](#--sync_state)
-- [Additional Configuration](#additional-configuration)
-- [Logging and Monitoring](#logging-and-monitoring)
-- [Conclusion](#conclusion)
-
-## Introduction
-
-The validator is a crucial component of the protocol, responsible for evaluating miners' contributions by comparing their uploaded deltas with the validator's locally computed gradients. This ensures only high-quality updates are incorporated into the global model. This guide will help you set up a validator, understand its workflow, and ensure it operates correctly within the network.
+- [Installation](#installation)
+  - [Automated Installation](#automated-installation-recommended)
+  - [Manual Installation](#manual-installation)
+- [Running the Validator](#running-the-validator)
+  - [Using PM2](#using-pm2-recommended)
+  - [Important Flags](#important-flags)
+- [Configuration](#configuration)
+  - [Hardware Requirements](#hardware-requirements)
+  - [Network Options](#network-options)
+  - [AWS Setup](#aws-setup)
+- [Monitoring](#monitoring)
+  - [Logs](#logs)
+  - [Performance](#performance)
+- [Validator Operations](#validator-operations)
+  - [State Synchronization](#state-synchronization)
+  - [Evaluation Process](#evaluation-process)
+  - [Weight Setting](#weight-setting)
+- [Troubleshooting](#troubleshooting)
+- [Advanced Topics](#advanced-topics)
 
 ## Prerequisites
 
-- **Python 3.8 or higher**
-- **CUDA-compatible GPU** (if using GPU acceleration)
-- **Installation of Required Python Packages**:
-  - `bittensor`
-  - `torch`
-  - `transformers`
-  - `numpy`
-  - `wandb` (if using Weights and Biases for logging)
-- **Access to the Bittensor Network** (`subtensor`)
-- **Registered Wallet and Hotkey**
-- **Access to S3-Compatible Storage** (e.g., AWS S3 bucket)
-- **PM2 Process Manager** (if running multiple validators or for process management)
+- **NVIDIA GPU** with CUDA support
+  - Minimum 24GB VRAM recommended
+  - Single GPU typically sufficient
+- **Ubuntu** (or Ubuntu-based Linux distribution)
+- **Python 3.12**
+- **CUDA-compatible drivers**
+- **AWS S3 Credentials and Bucket**
+- **Git**
 
-## Understanding `validator.py`
+## Installation
 
-### Overview
+### Automated Installation (Recommended)
 
-The `validator.py` script initializes and runs a validator node that participates in the evaluation of miners' contributions. Here's what it does:
-
-- **Synchronizes the Model State**: Downloads the latest model state slices and applies miners' deltas from the previous window.
-- **Evaluation**: Computes local gradients on specific data subsets and compares them with miners' uploaded deltas.
-- **Scoring**: Calculates scores (e.g., cosine similarity) to evaluate the quality of miners' updates.
-- **Weight Assignment**: Sets weights on the chain based on the evaluation, influencing the aggregation of model updates.
-
-### Key Components
-
-- **Configuration (`config`)**: Sets up configuration parameters using `argparse` and `bittensor` utilities.
-- **Wallet and Subtensor**: Initializes the wallet and connects to the subtensor (blockchain node).
-- **Model Initialization**: Loads the Llama model using `transformers`.
-- **Buckets**: Manages the S3 buckets used for storing and retrieving model slices and deltas.
-- **Evaluation Loop**: The main asynchronous loop where evaluation and synchronization happen.
-- **Event Handling**: Listens to blockchain events to synchronize blocks and windows.
-
-## Setting Up a Validator
-
-### Step 1: Install Dependencies
-
-Ensure all required packages are installed:
+The easiest way to set up a validator is using the automated installation script:
 
 ```bash
-pip install bittensor torch transformers numpy wandb
+# Clone the repository
+git clone https://github.com/RaoFoundation/templar
+cd templar
+
+# Make the script executable
+chmod +x scripts/run.sh
+
+# Run the installation script
+./scripts/run.sh --neuron validator --network <network> \
+  --aws-access-key-id <your-key> \
+  --aws-secret-access-key <your-secret> \
+  --bucket <your-bucket>
 ```
 
-Alternatively, if your project has a `requirements.txt` file:
+The script will:
+1. Install all required dependencies (Git, npm, pm2, Rust, uv, Python 3.12)
+2. Set up AWS credentials
+3. Create and register Bittensor wallet and validator hotkey
+4. Configure wandb for logging
+5. Start the validator
 
+### Manual Installation
+
+If you prefer to install manually, follow these steps:
+
+1. **Install System Dependencies**:
 ```bash
-pip install -r requirements.txt
+# Add Python 3.12 repository
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt-get update
+
+# Install required packages
+sudo apt-get install python3.12 python3.12-venv git npm
 ```
 
-### Step 2: Configure Wallet and Hotkey
+2. **Install Node.js and PM2**:
+```bash
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo bash
+sudo apt-get install -y nodejs
+npm install pm2 -g
+```
 
-You need a registered wallet and hotkey on the network:
+3. **Install Rust and uv**:
+```bash
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
 
-1. **Create a Wallet**:
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
-   ```bash
-   btcli new_coldkey --name <wallet_name>
-   btcli new_hotkey --name <wallet_name> --hotkey <hotkey_name>
-   ```
+4. **Set Up Python Environment**:
+```bash
+# Create virtual environment
+uv venv .venv
+source .venv/bin/activate
 
-2. **Register on the Network** (if not already registered):
+# Install PyTorch
+uv pip install torch --index-url https://download.pytorch.org/whl/cu118
 
-   ```bash
-   btcli register --wallet.name <wallet_name> --wallet.hotkey <hotkey_name> --netuid <netuid>
-   ```
+# Install requirements
+uv sync --extra all --prerelease=allow
 
-   Replace `<netuid>` with the desired network UID (e.g., `223` for test networks).
+# Install flash-attn
+uv pip install flash-attn --no-build-isolation
+```
 
-### Step 3: Running the Validator
+5. **Configure AWS Credentials**:
+Add to your `~/.bash_profile`:
+```bash
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+export BUCKET="your-bucket-name"
+```
 
-Run the validator script using Python, providing the necessary arguments.
+6. **Create and Register Validator Wallet**:
+```bash
+# Create coldkey
+btcli wallet new_coldkey --wallet.name default --n-words 12
 
-#### Example Command
+# Create and register validator hotkey
+btcli wallet new_hotkey --wallet.name default --wallet.hotkey validator --n-words 12
+btcli subnet pow_register --wallet.name default --wallet.hotkey validator --netuid <netuid> --subtensor.network <network>
+```
 
-Using `start.sh` as inspiration:
+## Running the Validator
+
+### Using PM2 (Recommended)
+
+PM2 automatically manages your validator process and restarts it if it crashes:
 
 ```bash
-python3 neurons/validator.py \
-  --actual_batch_size 1 \
-  --wallet.name <wallet_name> \
-  --wallet.hotkey <hotkey_name> \
-  --bucket <bucket_name> \
-  --device cuda:0 \
+pm2 start neurons/validator.py --interpreter python3 --name validator -- \
+  --actual_batch_size 6 \
+  --wallet.name default \
+  --wallet.hotkey validator \
+  --bucket $BUCKET \
   --use_wandb \
-  --project <wandb_project_name> \
-  --netuid 223 \
-  --sync_state
+  --project <project_name> \
+  --netuid <netuid> \
+  --subtensor.network <network> \
+  --autoupdate
+
+# Monitor logs
+pm2 logs validator
+
+# Check status
+pm2 list
 ```
 
-Replace placeholders with your specific values:
+### Important Flags
 
-- `<wallet_name>`: Your wallet name.
-- `<hotkey_name>`: Your hotkey name.
-- `<bucket_name>`: The S3 bucket name you'll use.
-- `<wandb_project_name>`: Your Weights and Biases project name.
+- **`--sync_state`**: Synchronizes model state with network history (crucial)
+- **`--actual_batch_size`**: Set based on GPU memory:
+  - 80GB+ VRAM: batch size 6
+  - 40GB VRAM: batch size 3
+  - 24GB VRAM: batch size 1
+- **`--netuid`**: Network subnet ID (e.g., 223 for testnet)
+- **`--subtensor.network`**: Network name (finney/test/local)
+- **`--autoupdate`**: Enable automatic code updates
 
-### Running with PM2 (Optional)
+## Configuration
 
-If you plan to manage your validator processes using PM2:
+### Hardware Requirements
 
-```bash
-pm2 start neurons/validator.py --interpreter python3 --name Validator1 -- \
-  --actual_batch_size 1 \
-  --wallet.name <wallet_name> \
-  --wallet.hotkey <hotkey_name> \
-  --bucket <bucket_name> \
-  --device cuda:0 \
-  --use_wandb \
-  --project <wandb_project_name> \
-  --netuid 223 \
-  --sync_state
-```
+- **GPU Memory Requirements**:
+  - Minimum: 24GB VRAM
+  - Recommended: 40GB VRAM
+  - Optimal: 80GB VRAM
+- **Storage**: 200GB+ recommended for model and evaluation data
+- **RAM**: 32GB+ recommended
+- **Network**: High-bandwidth, stable connection for state synchronization
 
-## Important Flags
+### Network Options
 
-### `--sync_state`
+- **Mainnet (Finney)**:
+  - Network: `finney`
+  - Netuid: 3
+- **Testnet**:
+  - Network: `test`
+  - Netuid: 223
+  - Endpoint: `wss://test.finney.opentensor.ai:443/`
+- **Local**:
+  - Network: `local`
+  - Netuid: 1
+  - Endpoint: `wss://localhost:9944`
 
-- **Usage**: `--sync_state`
-- **Description**: When set, the validator synchronizes the model state by pulling from the history of uploaded states and deltas. This ensures your validator's model is up-to-date with the global state and can correctly evaluate miners' contributions.
-- **Default**: `False`
+### AWS Setup
 
-**Note**: It's important to use `--sync_state` to ensure your validator operates correctly within the network.
+1. Create an S3 bucket for storing validator data
+2. Configure bucket permissions for public read access
+3. Set up IAM user with S3 access
+4. Export credentials in environment
 
-## Additional Configuration
+## Monitoring
 
-- **Project Name (`--project`)**: Specify the Weights and Biases project name if you're using WandB for logging.
-- **Device (`--device`)**: Set to `cuda` or `cuda:<gpu_id>` to use GPU acceleration.
-- **Batch Size (`--actual_batch_size`)**: Determines the batch size for evaluation. Ensure it's appropriate for your GPU memory.
-- **Network UID (`--netuid`)**: Specify the network UID you are connecting to (e.g., `223` for test networks).
-- **Debugging Flags**:
-  - `--debug`: Enables debug-level logging.
-  - `--trace`: Enables trace-level logging (very verbose).
-- **Automatic Updates (`--autoupdate`)**: Enables automatic updates of the validator script.
+### Logs
 
-## Logging and Monitoring
+- **PM2 Logs**: `pm2 logs validator`
+- **System Monitoring**: `pm2 monit`
+- **Weights & Biases**: Enable with `--use_wandb`
+  - Training metrics
+  - Evaluation scores
+  - Network statistics
 
-- **Weights and Biases (WandB)**:
-  - If `--use_wandb` is set, the validator will log metrics to WandB.
-  - Log in to WandB using `wandb login` before running the validator.
-- **Console Logs**:
-  - The validator outputs logs to the console, including synchronization status, evaluation progress, and any errors.
-  - Monitor these logs to ensure your validator is operating correctly.
-- **PM2 Logs** (if using PM2):
-  - Use `pm2 logs <name>` to view real-time logs.
-  - Use `pm2 monit` for monitoring CPU and memory usage.
+### Performance
 
-## Conclusion
+Monitor key metrics:
+- GPU utilization
+- Memory usage
+- Network bandwidth
+- Evaluation throughput
+- Weight setting frequency
 
-By following this guide, you should be able to set up and run a validator that participates in the network's protocol by evaluating miners' contributions. Remember to use the `--sync_state` flag to ensure your validator stays synchronized with the global model state and performs accurate evaluations.
+## Validator Operations
 
-Feel free to customize the configurations and explore additional flags as needed. For any issues or further customization, refer to the `validator.py` code and adjust the configurations accordingly.
+### State Synchronization
 
----
+- Initial sync downloads full model state
+- Continuous sync with new updates
+- Delta application and verification
+- State consistency checks
 
-**Helpful Tips**:
+### Evaluation Process
 
-- **Synchronization**: The initial synchronization might take some time, especially if the model state is large. Ensure your network connection is stable.
-- **Testing**: Use the `--test` flag if you're connecting to a test network.
-- **Automatic Updates**: The `--autoupdate` flag enables automatic updates of the validator script.
+1. Download miner deltas
+2. Compute local gradients
+3. Compare and score contributions
+4. Update weights based on quality
+
+### Weight Setting
+
+- Scoring mechanisms
+- Weight update frequency
+- Impact on network consensus
+- Optimization strategies
+
+## Troubleshooting
+
+Common issues and solutions:
+- State synchronization failures
+- Out of memory errors
+- Network connectivity issues
+- Weight setting delays
+- AWS access problems
+

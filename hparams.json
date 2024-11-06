@@ -21,7 +21,7 @@
     "grad_clip": 1.0,
     "cosine_epoch_length": 5000,
     "num_warmup_steps": 1000,
-    "num_stable_steps": 10000,
+    "num_stable_steps": 1000000000000,
     "num_decay_steps": 5000,
     "eta_min": 1e-05,
     "max_history": 10,

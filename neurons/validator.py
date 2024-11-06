@@ -53,6 +53,7 @@ class Validator:
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
         parser.add_argument('--sync_state', action='store_true', help='Syncs the model state by pulling from the history.')
         parser.add_argument('--test', action='store_true', help='Run on test network')
+        parser.add_argument('--local', action='store_true', help='Run on local network')
         parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
@@ -60,6 +61,9 @@ class Validator:
         if config.test:
             config.subtensor.network = 'test'
             config.subtensor.chain_endpoint = 'wss://test.finney.opentensor.ai:443/'
+        elif config.local:
+            config.subtensor.network = 'local'
+            config.subtensor.chain_endpoint = 'ws://127.0.0.1:9944'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
         if config.autoupdate:

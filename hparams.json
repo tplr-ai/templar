@@ -26,7 +26,7 @@
     "eta_min": 1e-05,
     "max_history": 10,
     "window_speed": 100,
-    "validator_moving_alpha": 0.999,
+    "validator_moving_alpha": 0.85,
     "validator_norm_regularization": 0.01,
     "validator_weights_temperature": 10,
     "validator_window_eval_size": 3,

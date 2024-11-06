@@ -1,199 +1,226 @@
 # Miner Setup
 
-This document provides a guide on how to set up and run a miner using `miner.py`. It explains the workflow, configuration options, and step-by-step instructions to get a miner up and running. Additionally, it highlights important flags such as `--remote` and `--sync_state` that are crucial for proper synchronization and operation within the network.
+This document provides a guide on how to set up and run a miner using `miner.py`. It explains the workflow, configuration options, and step-by-step instructions to get a miner up and running.
 
 ## Table of Contents
 
-- [Introduction](#introduction)
 - [Prerequisites](#prerequisites)
-- [Understanding `miner.py`](#understanding-minerpy)
-  - [Overview](#overview)
-  - [Key Components](#key-components)
-- [Setting Up a Miner](#setting-up-a-miner)
-  - [Step 1: Install Dependencies](#step-1-install-dependencies)
-  - [Step 2: Configure Wallet and Hotkey](#step-2-configure-wallet-and-hotkey)
-  - [Step 3: Running the Miner](#step-3-running-the-miner)
-  - [Example Command](#example-command)
-- [Important Flags](#important-flags)
-  - [`--remote`](#--remote)
-  - [`--sync_state`](#--sync_state)
-- [Additional Configuration](#additional-configuration)
-- [Logging and Monitoring](#logging-and-monitoring)
-- [Conclusion](#conclusion)
-
-## Introduction
-
-The miner is a crucial component of the protocol, responsible for training the model on designated data subsets and uploading updates to be integrated into the global model. By following this guide, you'll learn how to set up a miner, understand its workflow, and ensure it operates correctly within the network.
+- [Installation](#installation)
+  - [Automated Installation](#automated-installation-recommended)
+  - [Manual Installation](#manual-installation)
+- [Running the Miner](#running-the-miner)
+  - [Using PM2](#using-pm2-recommended)
+  - [Important Flags](#important-flags)
+- [Configuration](#configuration)
+  - [Hardware Requirements](#hardware-requirements)
+  - [Network Options](#network-options)
+  - [AWS Setup](#aws-setup)
+- [Monitoring](#monitoring)
+  - [Logs](#logs)
+  - [Performance](#performance)
+- [Troubleshooting](#troubleshooting)
+- [Advanced Topics](#advanced-topics)
 
 ## Prerequisites
 
-- **Python 3.8 or higher**
-- **CUDA-compatible GPU** (if using GPU acceleration)
-- **Installation of Required Python Packages**:
-  - `bittensor`
-  - `torch`
-  - `transformers`
-  - `numpy`
-  - `wandb` (if using Weights and Biases for logging)
-- **Access to the Bittensor Network** (`subtensor`)
-- **Registered Wallet and Hotkey**
-- **Access to S3-Compatible Storage** (e.g., AWS S3 bucket)
-- **PM2 Process Manager** (if running multiple miners or for process management)
+- **NVIDIA GPU** with CUDA support
+  - Minimum 24GB VRAM recommended
+  - Multiple GPUs supported
+- **Ubuntu** (or Ubuntu-based Linux distribution)
+- **Python 3.12**
+- **CUDA-compatible drivers**
+- **AWS S3 Credentials and Bucket**: Public read access required for validators
+- **Git**
 
-## Understanding `miner.py`
+## Installation
 
-### Overview
+### Automated Installation (Recommended)
 
-The `miner.py` script initializes and runs a miner node that participates in collaborative model training. Here's what it does:
-
-- **Synchronizes the Model State**: Downloads the latest model state slices from other miners.
-- **Training**: Trains the model on assigned data subsets.
-- **Computes and Uploads Deltas**: Calculates the changes (deltas) in the model parameters and uploads them.
-- **Progresses Through Windows**: Operates in synchronized windows determined by the blockchain.
-- **Handles Network Interactions**: Manages connections to the Bittensor network, including the blockchain and other miners.
-
-### Key Components
-
-- **Configuration (`config`)**: Sets up configuration parameters using `argparse` and `bittensor` utilities.
-- **Wallet and Subtensor**: Initializes the wallet and connects to the subtensor (blockchain node).
-- **Model Initialization**: Loads the Llama model using `transformers`.
-- **Optimizer and Scheduler**: Sets up the optimizer (`AdamW`) and learning rate scheduler (`CosineAnnealingLR`).
-- **Buckets**: Manages the S3 buckets used for storing and retrieving model slices.
-- **Training Loop**: The main asynchronous loop where training and synchronization happen.
-- **Event Handling**: Listens to blockchain events to synchronize blocks and windows.
-
-## Setting Up a Miner
-
-### Step 1: Install Dependencies
-
-Ensure all required packages are installed. Use `pip` to install the necessary Python packages:
+The easiest way to set up a miner is using the automated installation script:
 
 ```bash
-pip install bittensor torch transformers numpy wandb
+# Clone the repository
+git clone https://github.com/RaoFoundation/templar
+cd templar
+
+# Make the script executable
+chmod +x scripts/run.sh
+
+# Run the installation script
+./scripts/run.sh --neuron miner --network <network> \
+  --aws-access-key-id <your-key> \
+  --aws-secret-access-key <your-secret> \
+  --bucket <your-bucket>
 ```
 
-Alternatively, if your project has a `requirements.txt` file:
+The script will:
+1. Install all required dependencies (Git, npm, pm2, Rust, uv, Python 3.12)
+2. Set up AWS credentials
+3. Create and register Bittensor wallets
+4. Configure wandb for logging
+5. Start miners on all available GPUs
+
+### Manual Installation
+
+If you prefer to install manually, follow these steps:
+
+1. **Install System Dependencies**:
+```bash
+# Add Python 3.12 repository
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt-get update
+
+# Install required packages
+sudo apt-get install python3.12 python3.12-venv git npm
+```
+
+2. **Install Node.js and PM2**:
+```bash
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo bash
+sudo apt-get install -y nodejs
+npm install pm2 -g
+```
+
+3. **Install Rust and uv**:
+```bash
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+4. **Set Up Python Environment**:
+```bash
+# Create virtual environment
+uv venv .venv
+source .venv/bin/activate
+
+# Install PyTorch
+uv pip install torch --index-url https://download.pytorch.org/whl/cu118
+
+# Install requirements
+uv sync --extra all --prerelease=allow
+
+# Install flash-attn
+uv pip install flash-attn --no-build-isolation
+```
+
+5. **Configure AWS Credentials**:
+Add to your `~/.bash_profile`:
+```bash
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+export BUCKET="your-bucket-name"
+```
+
+6. **Create and Register Wallets**:
+```bash
+# Create coldkey
+btcli wallet new_coldkey --wallet.name default --n-words 12
+
+# Create and register hotkeys for each GPU
+for i in $(seq 0 $(($(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l) - 1))); do
+  btcli wallet new_hotkey --wallet.name default --wallet.hotkey "C$i" --n-words 12
+  btcli subnet pow_register --wallet.name default --wallet.hotkey "C$i" --netuid <netuid> --subtensor.network <network>
+done
+```
+
+## Running the Miner
+
+### Using PM2 (Recommended)
+
+PM2 automatically manages your miner processes and restarts them if they crash:
 
 ```bash
-pip install -r requirements.txt
+# Start a miner on each GPU
+for i in $(seq 0 $(($(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l) - 1))); do
+  pm2 start neurons/miner.py --interpreter python3 --name miner_C$i -- \
+    --actual_batch_size <batch_size> \
+    --wallet.name default \
+    --wallet.hotkey "C$i" \
+    --bucket $BUCKET \
+    --device "cuda:$i" \
+    --use_wandb \
+    --project <project_name> \
+    --netuid <netuid> \
+    --subtensor.network <network>
+done
+
+# Monitor logs
+pm2 logs
+
+# Check status
+pm2 list
 ```
 
-### Step 2: Configure Wallet and Hotkey
+### Important Flags
 
-Before running the miner, you need a registered wallet and hotkey on the network:
+- **`--remote`**: Enables downloading updates from other miners' buckets
+- **`--sync_state`**: Synchronizes model state with network history
+- **`--actual_batch_size`**: Set based on GPU memory:
+  - 80GB+ VRAM: batch size 6
+  - 40GB VRAM: batch size 3
+  - 24GB VRAM: batch size 1
+- **`--netuid`**: Network subnet ID (e.g., 223 for testnet)
+- **`--subtensor.network`**: Network name (finney/test/local)
+- **`--autoupdate`**: Enable automatic code updates
 
-1. **Create a Wallet**:
+## Configuration
 
-   ```bash
-   btcli new_coldkey --name <wallet_name>
-   btcli new_hotkey --name <wallet_name> --hotkey <hotkey_name>
-   ```
+### Hardware Requirements
 
-2. **Register on the Network** (if not already registered):
+- **GPU Memory Requirements**:
+  - Minimum: 24GB VRAM
+  - Recommended: 40GB+ VRAM
+  - Optimal: 80GB+ VRAM
+- **Storage**: 100GB+ recommended for model and data
+- **RAM**: 32GB+ recommended
+- **Network**: Stable internet connection with good bandwidth
 
-   ```bash
-   btcli register --wallet.name <wallet_name> --wallet.hotkey <hotkey_name> --netuid <netuid>
-   ```
+### Network Options
 
-   Replace `<netuid>` with the desired network UID (e.g., `223` for test networks).
+- **Mainnet (Finney)**:
+  - Network: `finney`
+  - Netuid: 3
+- **Testnet**:
+  - Network: `test`
+  - Netuid: 223
+  - Endpoint: `wss://test.finney.opentensor.ai:443/`
+- **Local**:
+  - Network: `local`
+  - Netuid: 1
+  - Endpoint: `wss://localhost:9944`
 
-### Step 3: Running the Miner
+### AWS Setup
 
-You can run the miner script using Python, providing the necessary arguments.
+1. Create an S3 bucket with public read access
+2. Configure CORS for validator access
+3. Set up IAM user with S3 access
+4. Export credentials in environment
 
-#### Example Command
+## Monitoring
 
-Using the `start.sh` script as inspiration, here's how to run a single miner:
+### Logs
 
-```bash
-python3 neurons/miner.py \
-  --actual_batch_size 1 \
-  --wallet.name <wallet_name> \
-  --wallet.hotkey <hotkey_name> \
-  --bucket <bucket_name> \
-  --device cuda:0 \
-  --use_wandb \
-  --project <wandb_project_name> \
-  --netuid 223 \
-  --remote \
-  --sync_state
-```
+- **PM2 Logs**: `pm2 logs [miner_name]`
+- **System Monitoring**: `pm2 monit`
+- **Weights & Biases**: Enable with `--use_wandb`
 
-Replace placeholders with your specific values:
+### Performance
 
-- `<wallet_name>`: Your wallet name.
-- `<hotkey_name>`: Your hotkey name.
-- `<bucket_name>`: The S3 bucket name you'll use.
-- `<wandb_project_name>`: Your Weights and Biases project name.
+Monitor key metrics:
+- GPU utilization
+- Memory usage
+- Network bandwidth
+- Training progress
+- Rewards and weights
 
-### Running with PM2 (Optional)
+## Troubleshooting
 
-If you plan to manage your miner processes using PM2 (as in `start.sh`), you can start the miner like this:
-
-```bash
-pm2 start neurons/miner.py --interpreter python3 --name Miner1 -- \
-  --actual_batch_size 1 \
-  --wallet.name <wallet_name> \
-  --wallet.hotkey <hotkey_name> \
-  --bucket <bucket_name> \
-  --device cuda:0 \
-  --use_wandb \
-  --project <wandb_project_name> \
-  --netuid 223 \
-  --remote \
-  --sync_state
-```
-
-## Important Flags
-
-### `--remote`
-
-- **Usage**: `--remote`
-- **Description**: Enables the miner to connect to other miners' buckets. This allows your miner to download updates (model slices) from other miners, ensuring better synchronization and collaboration.
-- **Default**: `False` (If not specified, the miner will only connect to its own bucket)
-
-### `--sync_state`
-
-- **Usage**: `--sync_state`
-- **Description**: When set, the miner synchronizes the model state by pulling from the history of uploaded states. This ensures your miner's model is up-to-date with the global state and is crucial when joining an existing network.
-- **Default**: `False`
-
-**Note**: It's important to use both `--remote` and `--sync_state` to effectively participate in the collaborative training and maintain synchronization with other miners.
-
-## Additional Configuration
-
-- **Project Name (`--project`)**: Specify the Weights and Biases project name if you're using WandB for logging.
-- **Device (`--device`)**: Set to `cuda` or `cuda:<gpu_id>` to use GPU acceleration.
-- **Batch Size (`--actual_batch_size`)**: Determines the batch size for training. Ensure it's appropriate for your GPU memory.
-- **Network UID (`--netuid`)**: Specify the network UID you are connecting to (e.g., `223` for test networks).
-- **Debugging Flags**:
-  - `--debug`: Enables debug-level logging.
-  - `--trace`: Enables trace-level logging (very verbose).
-- **Random Training Data (`--random`)**: If set, the miner trains on random data subsets.
-- **Baseline Mode (`--baseline`)**: If set, the miner will not perform synchronization with other peers and will train independently.
-
-## Logging and Monitoring
-
-- **Weights and Biases (WandB)**:
-  - If `--use_wandb` is set, the miner will log metrics to WandB.
-  - Log in to WandB using `wandb login` before running the miner.
-- **Console Logs**:
-  - The miner outputs logs to the console, including synchronization status, training progress, and any errors.
-  - Monitor these logs to ensure your miner is operating correctly.
-- **PM2 Logs** (if using PM2):
-  - Use `pm2 logs <name>` to view real-time logs.
-  - Use `pm2 monit` for monitoring CPU and memory usage.
-
-## Conclusion
-
-By following this guide, you should be able to set up and run a miner that participates in the network's collaborative training protocol. Remember to use the `--remote` and `--sync_state` flags to ensure your miner stays synchronized with the global model state and contributes effectively.
-
-Feel free to customize the configurations and explore additional flags as needed. For any issues or further customization, refer to the `miner.py` code and adjust the configurations accordingly.
-
----
-
-**Helpful Tips**:
-
-- **Synchronization**: The initial synchronization might take some time, especially if the model state is large. Be patient and ensure your network connection is stable.
-- **Testing**: Use the `--test` flag if you're connecting to a test network.
-- **Automatic Updates**: The `--autoupdate` flag enables automatic updates of the miner script. Use it if you want your miner to stay up-to-date with the latest code changes.
+Common issues and solutions:
+- CUDA out of memory
+- Network synchronization issues
+- AWS permissions
+- Registration failures

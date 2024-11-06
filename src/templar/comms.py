@@ -28,6 +28,7 @@ from typing import List, Dict
 from types import SimpleNamespace
 from filelock import FileLock, Timeout
 from aiobotocore.session import get_session
+import re
 
 from . import *
 
@@ -400,6 +401,7 @@ async def load_files_for_window(window: int, key: str = 'slice') -> List[str]:
             logger.debug(f"Found file {filename} for window {window}")
     return window_files
 
+
 async def delete_files_before_window(window_max: int, key: str = 'slice'):
     """
     Deletes all files on the local machine which have a window id before a specific value window_max.
@@ -410,11 +412,12 @@ async def delete_files_before_window(window_max: int, key: str = 'slice'):
     """
     logger.debug(f"Deleting files with window id before {window_max}")
     temp_dir = tempfile.gettempdir()
+    pattern = re.compile(rf"^{re.escape(key)}-(\d+)-.*\.(pt|pt\.lock)$")
     for filename in os.listdir(temp_dir):
-        if filename.startswith(f"{key}-") and (filename.endswith(".pt") or filename.endswith(".pt.lock")):
+        match = pattern.match(filename)
+        if match:
             try:
-                parts = filename.split('-')
-                window_id = int(parts[1])
+                window_id = int(match.group(1))
                 if window_id < window_max:
                     file_path = os.path.join(temp_dir, filename)
                     if os.path.exists(file_path):
@@ -423,6 +426,7 @@ async def delete_files_before_window(window_max: int, key: str = 'slice'):
             except Exception as e:
                 logger.error(f"Error deleting file {filename}: {e}")
 
+
 async def delete_files_from_bucket_before_window(bucket: str, window_max: int, key: str = 'slice'):
     """
     Deletes all files in the specified S3 bucket which have a window id before a specific value window_max.
@@ -430,6 +434,7 @@ async def delete_files_from_bucket_before_window(bucket: str, window_max: int, k
     Args:
         bucket (str): The name of the S3 bucket.
         window_max (int): The maximum window id. Files with window ids less than this value will be deleted.
+        key (str): The prefix of the files to consider (default is 'slice').
     """
     logger.debug(f"Deleting files in bucket {bucket} with window id before {window_max}")
     session = get_session()
@@ -445,10 +450,10 @@ async def delete_files_from_bucket_before_window(bucket: str, window_max: int, k
             if 'Contents' in response:
                 for obj in response['Contents']:
                     filename = obj['Key']
-                    if filename.startswith(f"{key}-") and filename.endswith(".pt"):
+                    match = re.match(rf"^{re.escape(key)}-(\d+)-.*\.(pt|pt\.lock)$", filename)
+                    if match:
                         try:
-                            parts = filename.split('-')
-                            window_id = int(parts[1])
+                            window_id = int(match.group(1))
                             if window_id < window_max:
                                 await s3_client.delete_object(Bucket=bucket, Key=filename)
                                 logger.debug(f"Deleted file {filename} from bucket {bucket}")

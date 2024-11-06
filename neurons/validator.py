@@ -101,7 +101,7 @@ class Validator:
                     if run.name == f'V{self.uid}':
                         tplr.logger.info(f'Deleting old run: {run}'); run.delete()
             except: pass
-            wandb.init(project=self.config.project, resume='allow', name=f'V{self.uid}', config=self.config)
+            wandb.init(project=self.config.project, resume='allow', name=f'V{self.uid}', config=self.config,group='validator',job_type='validation')
 
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
@@ -376,20 +376,24 @@ class Validator:
                 window_delta_str = f"[red]{window_time_delta:.2f}[/red]" if window_time_delta < 0 else f"[green]+{window_time_delta:.2f}[/green]"
                 tplr.logger.info(f"{tplr.P(window, gs_end - gs_start)}[{window_delta_str}]: Finished step.")
                 if self.config.use_wandb:
+                    # Log main metrics
                     wandb.log({
-                        f"loss": step_loss,
-                        f"tokens_per_step": tokens_per_step,
-                        f"tokens_per_second": tokens_per_second,
-                        f"sample_rate": self.sample_rate,
-                        f"utilization": eval_duration / (gs_end - gs_start)
-                    })
+                        "validator/loss": step_loss,
+                        "validator/tokens_per_step": tokens_per_step,
+                        "validator/tokens_per_second": tokens_per_second,
+                        "validator/sample_rate": self.sample_rate,
+                        "validator/utilization": eval_duration / (gs_end - gs_start)
+                    }, step=self.global_step)
+
+                    # Log per-UID metrics
                     for uid_i in valid_score_indices:
+                        uid = uid_i.item()
                         wandb.log({
-                            f"step_scores/{uid_i.item()}": self.step_scores[ uid_i ].item(),
-                            f"moving_scores/{uid_i.item()}": self.scores[ uid_i ].item(),
-                            f"weights/{uid}": self.weights[uid].item(),
-                            f"original_weights/{uid}": original_weights[uid].item(),
-                        })
+                            f"validator/step_scores/{uid}": self.step_scores[uid_i].item(),
+                            f"validator/moving_scores/{uid}": self.scores[uid_i].item(),
+                            f"validator/weights/{uid}": self.weights[uid].item(),
+                            f"validator/original_weights/{uid}": original_weights[uid].item(),
+                        }, step=self.global_step)
                 # Set temperatured weights on the chain.
                 if self.current_block % 100 == 0:
                     tplr.logger.info(f"Setting weights on chain: {self.weights[ self.metagraph.uids ]}")

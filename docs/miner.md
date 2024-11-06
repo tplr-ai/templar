@@ -4,22 +4,23 @@ This document provides a guide on how to set up and run a miner using `miner.py`
 
 ## Table of Contents
 
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-  - [Automated Installation](#automated-installation-recommended)
-  - [Manual Installation](#manual-installation)
-- [Running the Miner](#running-the-miner)
-  - [Using PM2](#using-pm2-recommended)
-  - [Important Flags](#important-flags)
-- [Configuration](#configuration)
-  - [Hardware Requirements](#hardware-requirements)
-  - [Network Options](#network-options)
-  - [AWS Setup](#aws-setup)
-- [Monitoring](#monitoring)
-  - [Logs](#logs)
-  - [Performance](#performance)
-- [Troubleshooting](#troubleshooting)
-- [Advanced Topics](#advanced-topics)
+- [Miner Setup](#miner-setup)
+  - [Table of Contents](#table-of-contents)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+    - [Automated Installation (Recommended)](#automated-installation-recommended)
+    - [Manual Installation](#manual-installation)
+  - [Running the Miner](#running-the-miner)
+    - [Using PM2 (Recommended)](#using-pm2-recommended)
+    - [Important Flags](#important-flags)
+  - [Configuration](#configuration)
+    - [Hardware Requirements](#hardware-requirements)
+    - [Network Options](#network-options)
+    - [AWS Setup](#aws-setup)
+  - [Monitoring](#monitoring)
+    - [Logs](#logs)
+    - [Performance](#performance)
+  - [Troubleshooting](#troubleshooting)
 
 ## Prerequisites
 
@@ -29,7 +30,14 @@ This document provides a guide on how to set up and run a miner using `miner.py`
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Python 3.12**
 - **CUDA-compatible drivers**
-- **AWS S3 Credentials and Bucket**: Public read access required for validators
+- **AWS S3 Credentials and Bucket**: Public read access required for validators to access buckets , so that they can download slices, and evaluate them. The required settings are:
+  - Block all public access: Off
+  ![Allow Public Access](../assets/allow_public_access.png)
+
+  - Object Ownership:
+    - ACL enabled
+    - Object Ownership: Bucket Owner Preferred.
+    ![Bucket Ownership](../assets/object_owner_preferred.png)
 - **Git**
 
 ## Installation

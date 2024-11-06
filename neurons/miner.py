@@ -31,6 +31,7 @@ import bittensor as bt
 import torch.optim as optim
 from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from templar import get_wsd_scheduler
 
 # Import local files.
 import templar as tplr
@@ -123,11 +124,13 @@ class Miner:
             weight_decay=self.hparams.optimizer_weight_decay,  # Weight decay
             foreach=True,  # more memory usage, but faster
         )
-        self.scheduler = CosineAnnealingLR(
-            self.optimizer, T_max=self.hparams.cosine_epoch_length,
-            eta_min=self.hparams.eta_min, last_epoch=-1
+        # Initialize learning rate scheduler
+        self.scheduler = get_wsd_scheduler(
+            optimizer=self.optimizer,
+            num_warmup_steps=self.hparams.num_warmup_steps,
+            num_stable_steps=self.hparams.num_stable_steps,
+            num_decay_steps=self.hparams.num_decay_steps,
         )
-
         # Init buckets.
         self.buckets = []
         for uid in self.metagraph.uids:

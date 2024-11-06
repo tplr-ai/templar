@@ -42,6 +42,38 @@ This document provides a guide on how to set up and run a validator using `valid
     - ACL enabled
     - Object Ownership: Bucket Owner Preferred.
     ![Bucket Ownership](../assets/object_owner_preferred.png)
+- **Configure IAM Policy**:
+   - Create a new IAM policy:
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "VisualEditor0",
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObjectAcl",
+                "s3:GetObject",
+                "s3:PutObjectVersionAcl",
+                "s3:GetObjectAttributes",
+                "s3:PutObjectAcl"
+            ],
+            "Resource": "arn:aws:s3:::<your-bucket-name>/*"
+        }
+    ]
+}
+```
+   - Replace `<your-bucket-name>` with your actual bucket name
+   - This policy provides minimum required permissions:
+     - Read objects and their ACLs
+     - Write objects and set their ACLs
+     - Get object attributes
+- **Create IAM User**:
+   - Create new IAM user
+   - Attach the policy created above
+   - Generate access key and secret key
+   - Save credentials securely
 - **Git**
 
 ## Installation

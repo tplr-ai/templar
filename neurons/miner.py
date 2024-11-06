@@ -108,7 +108,7 @@ class Miner:
                     if run.name == f'M{self.uid}':
                         tplr.logger.info(f'Deleting old run: {run}'); run.delete()
             except: pass
-            wandb.init(project=self.config.project, resume='allow', name=f'M{self.uid}', config=self.config)
+            wandb.init(project=self.config.project, resume='allow', name=f'M{self.uid}', config=self.config,group='miner',job_type='training',)
 
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
@@ -335,13 +335,13 @@ class Miner:
                     tplr.logger.info(f"{tplr.P(window, end_step - start_step)}[{window_delta_str}]: Finished step.")
                     if self.config.use_wandb:
                         wandb.log({
-                            f"loss": step_loss,
-                            f"tokens_per_step": tokens_per_step,
-                            f"tokens_per_second": tokens_per_second,
-                            f"sample_rate": self.sample_rate,
-                            f"utilization": train_duration / (end_step - start_step),
-                            f"learning_rate": self.scheduler.get_last_lr()[0]
-                        })
+                            "miner/loss": step_loss,
+                            "miner/tokens_per_step": tokens_per_step,
+                            "miner/tokens_per_second": tokens_per_second,
+                            "miner/sample_rate": self.sample_rate,
+                            "miner/utilization": train_duration / (end_step - start_step),
+                            "miner/learning_rate": self.scheduler.get_last_lr()[0]
+                        }, step=self.global_step)
                                 
             # Catch keyboard interrrupt.
             except KeyboardInterrupt:

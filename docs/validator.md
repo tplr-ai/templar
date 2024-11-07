@@ -185,7 +185,8 @@ pm2 start neurons/validator.py --interpreter python3 --name validator -- \
   --project <project_name> \
   --netuid <netuid> \
   --subtensor.network <network> \
-  --autoupdate
+  --autoupdate \
+  --remote
 
 # Monitor logs
 pm2 logs validator

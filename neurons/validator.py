@@ -48,6 +48,7 @@ class Validator:
         parser.add_argument('--bucket', type=str, default='decis', help='S3 bucket name')
         parser.add_argument('--actual_batch_size', type=int, default=8, help='Training batch size per accumulation.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training (e.g., cpu or cuda)')
+        parser.add_argument('--remote', action='store_true', help='Connect to other buckets')
         parser.add_argument('--use_wandb', action='store_true', help='Use Weights and Biases for logging')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
@@ -119,9 +120,14 @@ class Validator:
         # Init buckets.
         self.buckets = []
         for uid in self.metagraph.uids:
-            # Use --remote to connect to other miners, other wise, only see's config.bucket.
-            try: self.buckets.append(self.config.bucket if not self.config.remote else self.subtensor.get_commitmentplr.T( self.config.netuid, uid ) )
-            except: self.buckets.append(None)
+            # Use --remote to connect to other miners, otherwise, only see's config.bucket.
+            try:
+                bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
+                tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket}")
+                self.buckets.append(bucket)
+            except Exception as e:
+                tplr.logger.debug(f"Failed to retrieve bucket for UID {uid}: {e}")
+                self.buckets.append(None)
 
         # Init run state.
         self.global_step = 0
@@ -152,7 +158,7 @@ class Validator:
                     if tplr.is_valid_bucket(bucket):
                         next_buckets.append(bucket)
                     else:
-                        logger.error(f"Skipping UID {uid} due to invalid bucket name: {bucket}")
+                        logger.debug(f"Skipping UID {uid} due to invalid bucket name: {bucket}")
                         next_buckets.append(None)
                 except Exception as e:
                     logger.exception(f"Error retrieving bucket for UID {uid}: {e}")

@@ -168,7 +168,7 @@ class Miner:
                     if tplr.is_valid_bucket(bucket):
                         next_buckets.append(bucket)
                     else:
-                        logger.error(f"Skipping UID {uid} due to invalid bucket name: {bucket}")
+                        logger.debug(f"Skipping UID {uid} due to invalid bucket name: {bucket}")
                         next_buckets.append(None)
                 except Exception as e:
                     logger.exception(f"Error retrieving bucket for UID {uid}: {e}")

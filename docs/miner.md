@@ -185,7 +185,8 @@ for i in $(seq 0 $(($(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
     --use_wandb \
     --project <project_name> \
     --netuid <netuid> \
-    --subtensor.network <network>
+    --subtensor.network <network> \
+    --remote
 done
 
 # Monitor logs

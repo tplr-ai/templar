@@ -519,5 +519,5 @@ def validate_bucket_or_exit(bucket_name: str):
     """
     logger.debug("Validating Bucket name")
     if not is_valid_bucket(bucket_name):
-        logger.info(f"Bucket name {bucket_name} is invalid. Please refer to the AWS documentation on naming conventions ")
+        logger.error(f"Bucket name {bucket_name} is invalid. Please refer to the AWS documentation on naming conventions ")
         sys.exit(1)

@@ -31,6 +31,7 @@ import bittensor as bt
 import torch.optim as optim
 from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from rich.markup import escape
 from templar import get_wsd_scheduler
 
 # Import local files.
@@ -356,7 +357,8 @@ class Miner:
             
             # Catch unknown.
             except Exception as e:
-                tplr.logger.exception(f"Exception during training loop: {e}")
+                message = f"Exception during training loop: {escape(str(e))}"
+                tplr.logger.exception(message)
                 continue
 
     # Returns the slice window based on a blotplr.

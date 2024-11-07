@@ -29,6 +29,8 @@ from types import SimpleNamespace
 from filelock import FileLock, Timeout
 from aiobotocore.session import get_session
 import re
+import sys
+from templar.logging import logger
 
 from . import *
 
@@ -297,7 +299,7 @@ async def handle_file(s3_client, bucket: str, filename: str, hotkey: str, window
         return SimpleNamespace(bucket=bucket, hotkey=hotkey, filename=filename, window=window, temp_file=temp_file)
     return None
 
-async def process_bucket(s3_client, bucket: str, windows: List[int], key:str = 'slice'):
+async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 'slice'):
     """
     Processes an S3 bucket to download files matching the given windows.
 
@@ -309,37 +311,58 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key:str = '
     Returns:
         List[SimpleNamespace]: A list of file metadata and paths for downloaded files.
     """
-    logger.debug(f"Processing bucket {bucket} for window {windows}")
+    # Validate the bucket name before processing
+    if not is_valid_bucket(bucket):
+        logger.error(f"Skipping invalid bucket: '{bucket}'")
+        return []
+
+    logger.debug(f"Processing bucket '{bucket}' for windows {windows}")
     files = []
     paginator = s3_client.get_paginator('list_objects_v2')
 
     for window in windows:
         prefix = f'{key}-{window}'
-        logger.debug(f"Listing objects with prefix {prefix}")
-        async for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-            logger.trace(f"Processing page for prefix {prefix}")
-            if 'Contents' not in page:
-                logger.trace(f"No contents found for prefix {prefix}")
-                continue
-            download_tasks = []
-            for obj in page.get('Contents', []):
-                filename = obj['Key']
-                logger.trace(f"Processing object with key {filename}")
-                try:
-                    parts = filename.split('-')
-                    slice_window = int(parts[1])
-                    slice_hotkey = parts[2].split('.')[0]
-                    logger.trace(f"Parsed filename {filename} into window {slice_window} and hotkey {slice_hotkey}")
-                    if slice_window == window:
-                        download_tasks.append(handle_file(s3_client, bucket, filename, slice_hotkey, slice_window))
-                except Exception:
-                    logger.exception(f"Error processing filename {filename}")
+        logger.debug(f"Listing objects with prefix '{prefix}' in bucket '{bucket}'")
+        try:
+            async for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                logger.trace(f"Processing page for prefix '{prefix}' in bucket '{bucket}'")
+                if 'Contents' not in page:
+                    logger.trace(f"No contents found for prefix '{prefix}' in bucket '{bucket}'")
                     continue
-            # Download the files concurrently
-            results = await asyncio.gather(*download_tasks)
-            files.extend([res for res in results if res])
-            logger.trace(f"Completed processing page for prefix {prefix}")
-    logger.trace(f"Completed processing bucket {bucket} for windows {windows}")
+                download_tasks = []
+                for obj in page.get('Contents', []):
+                    filename = obj['Key']
+                    logger.trace(f"Processing object with key '{filename}' in bucket '{bucket}'")
+                    try:
+                        parts = filename.split('-')
+                        if len(parts) < 3:
+                            logger.error(f"Filename '{filename}' does not conform to the expected format.")
+                            continue
+                        slice_window = int(parts[1])
+                        slice_hotkey = parts[2].split('.')[0]
+                        logger.trace(f"Parsed filename '{filename}' into window '{slice_window}' and hotkey '{slice_hotkey}'")
+                        if slice_window == window:
+                            download_tasks.append(handle_file(s3_client, bucket, filename, slice_hotkey, slice_window))
+                    except ValueError:
+                        logger.exception(f"Error parsing window ID in filename '{filename}'")
+                        continue
+                    except Exception as e:
+                        logger.exception(f"Unexpected error processing filename '{filename}': {e}")
+                        continue
+                # Download the files concurrently
+                try:
+                    results = await asyncio.gather(*download_tasks, return_exceptions=True)
+                    for res in results:
+                        if isinstance(res, Exception):
+                            logger.error(f"Download task failed: {res}")
+                        elif res:
+                            files.append(res)
+                except Exception as e:
+                    logger.exception(f"Error during asyncio.gather for prefix '{prefix}': {e}")
+                logger.trace(f"Completed processing page for prefix '{prefix}' in bucket '{bucket}'")
+        except Exception as e:
+            logger.error(f"Error listing objects in bucket '{bucket}' with prefix '{prefix}': {e}")
+    logger.trace(f"Completed processing bucket '{bucket}' for windows {windows}")
     return files
 
 async def download_slices_for_buckets_and_windows(buckets: List[str], windows: List[int], key:str = 'slice') -> Dict[int, List[SimpleNamespace]]:
@@ -462,3 +485,53 @@ async def delete_files_from_bucket_before_window(bucket: str, window_max: int, k
                             logger.error(f"Error deleting file {filename} from bucket {bucket}: {e}")
         except Exception as e:
             logger.error(f"Error listing objects in bucket {bucket}: {e}")
+
+BUCKET_REGEX = re.compile(
+    r'^(?=.{3,63}$)(?!.*\.\.)(?!\-)(?!\.)(?!.*\.$)[a-z0-9]+(?:[\.-][a-z0-9]+)*$'
+)
+
+ARN_REGEX = re.compile(
+    r'^arn:(aws|aws-cn|aws-us-gov):s3-object-lambda:[a-z0-9\-]+:\d{12}:accesspoint[/:][a-zA-Z0-9.\-_]{1,63}$'
+    r'|^arn:(aws|aws-cn|aws-us-gov):s3-outposts:[a-z0-9\-]+:\d{12}:outpost[/:][a-zA-Z0-9.\-_]{1,63}[/:]accesspoint[/:][a-zA-Z0-9\-]{1,63}$'
+)
+
+def is_valid_bucket(bucket_name: str) -> bool:
+    """
+    Validates the bucket name against AWS S3 naming conventions and ARN patterns.
+
+    Args:
+        bucket_name (str): The name of the S3 bucket.
+
+    Returns:
+        bool: True if valid, False otherwise.
+    """
+    if BUCKET_REGEX.match(bucket_name) or ARN_REGEX.match(bucket_name):
+        return True
+    logger.error(f"Invalid bucket name: {bucket_name}")
+    return False
+
+def validate_bucket_or_exit(bucket_name: str):
+    """
+    Validates the bucket name and exits the program if invalid.
+
+    Args:
+        bucket_name (str): The name of the S3 bucket.
+    """
+    logger.debug("Validating Bucket name")
+    if not is_valid_bucket(bucket_name):
+        logger.info(f"Bucket name {bucket_name} is invalid. Please refer to the AWS documentation on naming conventions ")
+        sys.exit(1)
+
+__all__ = [
+    'get_slices',
+    'apply_slices_to_model',
+    'upload_slice_for_window',
+    'upload_master',
+    'process_bucket',
+    'download_slices_for_buckets_and_windows',
+    'load_files_for_window',
+    'delete_files_before_window',
+    'delete_files_from_bucket_before_window',
+    'is_valid_bucket',
+    'validate_bucket_or_exit',
+]

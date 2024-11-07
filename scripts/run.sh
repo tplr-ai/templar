@@ -671,7 +671,7 @@ fi
 if [ "$NEURON_TYPE" = "validator" ]
 then
     ohai "Starting validator on network '$NETWORK' ..."
-    VALIDATOR_ARGS="--actual_batch_size 6 --wallet.name default --wallet.hotkey validator --bucket $BUCKET --use_wandb --project $PROJECT --netuid $NETUID --autoupdate"
+    VALIDATOR_ARGS="--actual_batch_size 6 --wallet.name default --wallet.hotkey validator --bucket $BUCKET --use_wandb --project $PROJECT --netuid $NETUID --autoupdate --remote"
     
     # Add network options
     [ -n "$PM2_NETWORK_OPTIONS" ] && VALIDATOR_ARGS="$VALIDATOR_ARGS $PM2_NETWORK_OPTIONS"
@@ -718,7 +718,7 @@ then
             fi
             
             ohai "Starting miner on GPU $GPU_INDEX with batch size $BATCH_SIZE..."
-            MINER_ARGS="--actual_batch_size $BATCH_SIZE --wallet.name default --wallet.hotkey $HOTKEY_NAME --bucket $BUCKET --device cuda:$GPU_INDEX --use_wandb --project $PROJECT --netuid $NETUID"
+            MINER_ARGS="--actual_batch_size $BATCH_SIZE --wallet.name default --wallet.hotkey $HOTKEY_NAME --bucket $BUCKET --device cuda:$GPU_INDEX --use_wandb --project $PROJECT --netuid $NETUID --remote"
             
             # Add network options
             [ -n "$PM2_NETWORK_OPTIONS" ] && MINER_ARGS="$MINER_ARGS $PM2_NETWORK_OPTIONS"

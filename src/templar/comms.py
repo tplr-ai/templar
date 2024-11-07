@@ -313,7 +313,7 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
     """
     # Validate the bucket name before processing
     if not is_valid_bucket(bucket):
-        logger.error(f"Skipping invalid bucket: '{bucket}'")
+        logger.debug(f"Skipping invalid bucket: '{bucket}'")
         return []
 
     logger.debug(f"Processing bucket '{bucket}' for windows {windows}")
@@ -507,7 +507,7 @@ def is_valid_bucket(bucket_name: str) -> bool:
     """
     if BUCKET_REGEX.match(bucket_name) or ARN_REGEX.match(bucket_name):
         return True
-    logger.error(f"Invalid bucket name: {bucket_name}")
+    logger.debug(f"Invalid bucket name: {bucket_name}")
     return False
 
 def validate_bucket_or_exit(bucket_name: str):
@@ -519,19 +519,5 @@ def validate_bucket_or_exit(bucket_name: str):
     """
     logger.debug("Validating Bucket name")
     if not is_valid_bucket(bucket_name):
-        logger.info(f"Bucket name {bucket_name} is invalid. Please refer to the AWS documentation on naming conventions ")
+        logger.error(f"Bucket name {bucket_name} is invalid. Please refer to the AWS documentation on naming conventions ")
         sys.exit(1)
-
-__all__ = [
-    'get_slices',
-    'apply_slices_to_model',
-    'upload_slice_for_window',
-    'upload_master',
-    'process_bucket',
-    'download_slices_for_buckets_and_windows',
-    'load_files_for_window',
-    'delete_files_before_window',
-    'delete_files_from_bucket_before_window',
-    'is_valid_bucket',
-    'validate_bucket_or_exit',
-]

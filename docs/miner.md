@@ -37,7 +37,7 @@ This document provides a guide on how to set up and run a miner using `miner.py`
   - Object Ownership:
     - ACL enabled
     - Object Ownership: Bucket Owner Preferred.
-    ![Bucket Ownership](../assets/object_owner_preferred.png)
+    ![Bucket Ownership](../assets/acl_perms.png)
 - **Configure IAM Policy**:
    - Create a new IAM policy:
 ```json
@@ -185,7 +185,8 @@ for i in $(seq 0 $(($(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
     --use_wandb \
     --project <project_name> \
     --netuid <netuid> \
-    --subtensor.network <network>
+    --subtensor.network <network> \
+    --remote
 done
 
 # Monitor logs

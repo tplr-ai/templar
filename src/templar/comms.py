@@ -313,7 +313,7 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
     """
     # Validate the bucket name before processing
     if not is_valid_bucket(bucket):
-        logger.error(f"Skipping invalid bucket: '{bucket}'")
+        logger.debug(f"Skipping invalid bucket: '{bucket}'")
         return []
 
     logger.debug(f"Processing bucket '{bucket}' for windows {windows}")

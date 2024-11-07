@@ -364,6 +364,7 @@ async def download_slices_for_buckets_and_windows(buckets: List[str], windows: L
     ) as s3_client:
         tasks = []
         for bucket in set(buckets):
+            logger.debug(f'bucket: {bucket}')
             if not bucket:
                 continue
             tasks.append(process_bucket(s3_client, bucket, windows, key))

@@ -70,6 +70,7 @@ class Validator:
             from templar.autoupdate import AutoUpdate
             autoupdater = AutoUpdate()
             autoupdater.try_update()
+        tplr.validate_bucket_or_exit(config.bucket)
         return config
 
     def __init__(self):
@@ -139,21 +140,26 @@ class Validator:
         print ( self.hparams )
         
     async def update(self):
-        while not self.stop_event.is_set():                          # Loop until stop_event is set
-            self.subtensor = bt.subtensor(config=self.config)        # Reinitialize subtensor with current config
-            nxt_meta = self.subtensor.metagraph(self.config.netuid)  # Get the new metagraph for the given netuid
-            self.hparams = tplr.load_hparams()                            # Reload hyperparameters
-            next_buckets = []                                        # Initialize the next_buckets list
-            for uid in nxt_meta.uids:                                # Iterate over new metagraph uids
-                try: next_buckets.append(self.config.bucket if not self.config.remote else self.subtensor.get_commitmentplr.T( self.config.netuid, uid ))
-                except: next_buckets.append(None)    
-            self.buckets = next_buckets                              # Update self.buckets with next_buckets
-            for idx, hotkey in enumerate(self.metagraph.hotkeys):    # Iterate over current metagraph hotkeys
-                if hotkey != nxt_meta.hotkeys[idx]:                  # Check if hotkey has changed in the new metagraph
-                    self.scores[idx] = 0                             # Reset rewards for the changed hotkey
-                    self.weights[idx] = 0                            # Reset weights for the changed hotkey
-            self.metagraph = nxt_meta                                # Update self.metagraph with new_metagraph
-            await asyncio.sleep(60)                                  # Sleep for 60 seconds before the next iteration
+        while not self.stop_event.is_set():
+            st = tplr.T()
+            self.subtensor = bt.subtensor(config=self.config)
+            self.metagraph = self.subtensor.metagraph(self.config.netuid)
+            self.hparams = tplr.load_hparams()
+            next_buckets = []
+            for uid in self.metagraph.uids:
+                try:
+                    bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
+                    if tplr.is_valid_bucket(bucket):
+                        next_buckets.append(bucket)
+                    else:
+                        logger.error(f"Skipping UID {uid} due to invalid bucket name: {bucket}")
+                        next_buckets.append(None)
+                except Exception as e:
+                    logger.exception(f"Error retrieving bucket for UID {uid}: {e}")
+                    next_buckets.append(None)
+            self.buckets = next_buckets
+            tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
+            await asyncio.sleep(60)
 
     async def run(self):
         # Main loop.

@@ -32,7 +32,6 @@ import torch.optim as optim
 from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from rich.markup import escape
-from templar import get_wsd_scheduler
 
 # Import local files.
 import templar as tplr
@@ -77,6 +76,7 @@ class Miner:
             from templar.autoupdate import AutoUpdate
             autoupdater = AutoUpdate()
             autoupdater.try_update()
+        tplr.validate_bucket_or_exit(config.bucket)
         return config
 
 
@@ -130,7 +130,7 @@ class Miner:
             foreach=True,  # more memory usage, but faster
         )
         # Initialize learning rate scheduler
-        self.scheduler = get_wsd_scheduler(
+        self.scheduler = tplr.get_wsd_scheduler(
             optimizer=self.optimizer,
             num_warmup_steps=self.hparams.num_warmup_steps,
             num_stable_steps=self.hparams.num_stable_steps,
@@ -163,9 +163,17 @@ class Miner:
             self.hparams = tplr.load_hparams()
             next_buckets = []
             for uid in self.metagraph.uids:
-                try: next_buckets.append(self.config.bucket if not self.config.remote else self.subtensor.get_commitment( self.config.netuid, uid ))
-                except: next_buckets.append(None)    
-            self.buckets = next_buckets    
+                try:
+                    bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
+                    if tplr.is_valid_bucket(bucket):
+                        next_buckets.append(bucket)
+                    else:
+                        logger.error(f"Skipping UID {uid} due to invalid bucket name: {bucket}")
+                        next_buckets.append(None)
+                except Exception as e:
+                    logger.exception(f"Error retrieving bucket for UID {uid}: {e}")
+                    next_buckets.append(None)
+            self.buckets = next_buckets
             tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
             await asyncio.sleep(60)
 

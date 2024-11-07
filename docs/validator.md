@@ -34,7 +34,7 @@ This document provides a guide on how to set up and run a validator using `valid
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Python 3.12**
 - **CUDA-compatible drivers**
-- **AWS S3 Credentials and Bucket**: Public read is required, so that they can download slices, and evaluate them. The required settings are:
+- **AWS S3 Credentials and Bucket**: Public read is required, so miners / evaluators can download slices. Please refer to this [guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html?icmpid=docs_amazons3_console) on s3 naming conventions. The required settings are:
   - Block all public access: Off
   ![Allow Public Access](../assets/allow_public_access.png)
 

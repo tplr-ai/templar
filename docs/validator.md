@@ -41,7 +41,7 @@ This document provides a guide on how to set up and run a validator using `valid
   - Object Ownership:
     - ACL enabled
     - Object Ownership: Bucket Owner Preferred.
-    ![Bucket Ownership](../assets/object_owner_preferred.png)
+    ![Bucket Ownership](../assets/acl_perms.png)
 - **Configure IAM Policy**:
    - Create a new IAM policy:
 ```json

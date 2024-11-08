@@ -69,7 +69,7 @@ class Validator:
         if config.trace: tplr.trace()
         if config.autoupdate:
             from templar.autoupdate import AutoUpdate
-            autoupdater = AutoUpdate()
+            autoupdater = AutoUpdate(process_name=config.process_name)
             autoupdater.start()
         tplr.validate_bucket_or_exit(config.bucket)
         return config

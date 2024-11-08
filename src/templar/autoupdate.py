@@ -63,7 +63,16 @@ class AutoUpdate(threading.Thread):
             logger.error("Failed to get remote version, skipping version check")
             return False
 
-        local_version = __version__
+        # Reload the version from __init__.py to get the latest version after updates
+        try:
+            from importlib import reload
+            from . import __init__
+            reload(__init__)
+            local_version = __init__.__version__
+        except Exception as e:
+            logger.error(f"Failed to reload local version: {e}")
+            # Fallback to imported version
+            local_version = __version__
 
         local_version_obj = version.parse(local_version)
         remote_version_obj = version.parse(remote_version)
@@ -186,6 +195,7 @@ class AutoUpdate(threading.Thread):
             # PM2 will restart the process if we exit
             logger.info(f"Detected PM2 environment. Restarting process: {self.process_name}")
             subprocess.check_call(["pm2", "restart", self.process_name])
+            time.sleep(5)  # Give PM2 time to restart the process
             sys.exit(1)
         # TODO: Not tested
         # elif os.getenv("RUNNING_IN_DOCKER") == "true" or os.path.exists('/.dockerenv'):

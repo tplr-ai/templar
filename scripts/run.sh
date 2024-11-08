@@ -268,7 +268,7 @@ fi
 # Set network-specific variables based on the selected network
 case "$NETWORK" in
     finney|FINNEY|Finney)
-        SUBTENSOR_NETWORK="main"
+        SUBTENSOR_NETWORK="finney"
         NETUID=3
         SUBTENSOR_CHAIN_ENDPOINT=""
         PM2_NETWORK_OPTIONS=""

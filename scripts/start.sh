@@ -20,17 +20,19 @@ pm2 sendSignal SIGINT all
 pm2 delete all
 # Delete items from bucket
 BUCKET=${1:-cont2}
-PROJECT=${2:-templar_run}
-# python3 tools/clean.py --bucket $BUCKET
+PROJECT=${2:-templar}
+python3 tools/clean.py --bucket $BUCKET
 
 # Start all the processes again.
-pm2 start neurons/validator.py --interpreter python3 --name V2 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey V1 --bucket $BUCKET --device cuda:0 --use_wandb --project $PROJECT --test --netuid 223
-pm2 start neurons/miner.py --interpreter python3 --name M1 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M111 --bucket $BUCKET --device cuda:1 --use_wandb --project $PROJECT --test --netuid 223
-pm2 start neurons/miner.py --interpreter python3 --name M2 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M222 --bucket $BUCKET --device cuda:2 --use_wandb --project $PROJECT --test --netuid 223
-pm2 start neurons/miner.py --interpreter python3 --name M3 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M333 --bucket $BUCKET --device cuda:3 --use_wandb --project $PROJECT --test --netuid 223
-pm2 start neurons/miner.py --interpreter python3 --name M4 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M444 --bucket $BUCKET --device cuda:4 --use_wandb --project $PROJECT --test --netuid 223
-pm2 start neurons/miner.py --interpreter python3 --name M5 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M555 --bucket $BUCKET --device cuda:5 --use_wandb --project $PROJECT --test --netuid 223
-pm2 start neurons/miner.py --interpreter python3 --name M6 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M666 --bucket $BUCKET --device cuda:6 --use_wandb --project $PROJECT --test --netuid 223
+pm2 start neurons/validator.py --interpreter python3 --name V2 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey V1 --bucket $BUCKET --device cuda:0 --use_wandb --project $PROJECT --test --netuid 223 --autoupdate --process_name V2
+pm2 start neurons/miner.py --interpreter python3 --name M1 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M111 --bucket $BUCKET --device cuda:1 --use_wandb --project $PROJECT --test --netuid 223 --autoupdate --process_name M1
+pm2 start neurons/miner.py --interpreter python3 --name M2 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M222 --bucket $BUCKET --device cuda:2 --use_wandb --project $PROJECT --test --netuid 223 --autoupdate --process_name M2
+pm2 start neurons/miner.py --interpreter python3 --name M3 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M333 --bucket $BUCKET --device cuda:3 --use_wandb --project $PROJECT --test --netuid 223 --autoupdate --process_name M3
+pm2 start neurons/miner.py --interpreter python3 --name M4 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M444 --bucket $BUCKET --device cuda:4 --use_wandb --project $PROJECT --test --netuid 223 --autoupdate --process_name M4
+pm2 start neurons/miner.py --interpreter python3 --name M5 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M555 --bucket $BUCKET --device cuda:5 --use_wandb --project $PROJECT --test --netuid 223 --autoupdate --process_name M5
+pm2 start neurons/miner.py --interpreter python3 --name M6 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M666 --bucket $BUCKET --device cuda:6 --use_wandb --project $PROJECT --test --netuid 223 --autoupdate --process_name M6
+
+
 
 
 

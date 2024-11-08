@@ -57,7 +57,8 @@ This document provides a guide on how to set up and run a validator using `valid
                 "s3:GetObject",
                 "s3:PutObjectVersionAcl",
                 "s3:GetObjectAttributes",
-                "s3:PutObjectAcl"
+                "s3:PutObjectAcl",
+                "s3:DeleteObject"
             ],
             "Resource": "arn:aws:s3:::<your-bucket-name>/*"
         }
@@ -78,7 +79,7 @@ This document provides a guide on how to set up and run a validator using `valid
 
 ## Installation
 
-### Automated Installation (Recommended)
+<!-- ### Automated Installation (Recommended)
 
 The easiest way to set up a validator is using the automated installation script:
 
@@ -102,7 +103,7 @@ The script will:
 2. Set up AWS credentials
 3. Create and register Bittensor wallet and validator hotkey
 4. Configure wandb for logging
-5. Start the validator
+5. Start the validator -->
 
 ### Manual Installation
 
@@ -185,8 +186,11 @@ pm2 start neurons/validator.py --interpreter python3 --name validator -- \
   --project <project_name> \
   --netuid <netuid> \
   --subtensor.network <network> \
+  --process_name validator \  # Must match PM2's --name
   --autoupdate \
   --remote
+
+> **Important**: When using PM2, the `--process_name` argument must match the PM2 process name specified by `--name`. In this example, PM2 process is named `validator`, so we use `--process_name validator`.
 
 # Monitor logs
 pm2 logs validator
@@ -197,6 +201,7 @@ pm2 list
 
 ### Important Flags
 
+- **`--process_name`**: (Required) Must match the PM2 process name when using PM2
 - **`--sync_state`**: Synchronizes model state with network history (crucial)
 - **`--actual_batch_size`**: Set based on GPU memory:
   - 80GB+ VRAM: batch size 6

@@ -43,7 +43,7 @@ class Validator:
     @staticmethod
     def config():
         parser = argparse.ArgumentParser(description='Validator script')
-        parser.add_argument('--project', type=str, default='aesop2', help='Optional wandb project name')
+        parser.add_argument('--project', type=str, default='templar', help='Optional wandb project name')
         parser.add_argument('--netuid', type=int, default=3, help='Bittensor network UID.')
         parser.add_argument('--bucket', type=str, default='decis', help='S3 bucket name')
         parser.add_argument('--actual_batch_size', type=int, default=8, help='Training batch size per accumulation.')
@@ -69,8 +69,8 @@ class Validator:
         if config.trace: tplr.trace()
         if config.autoupdate:
             from templar.autoupdate import AutoUpdate
-            autoupdater = AutoUpdate()
-            autoupdater.try_update()
+            autoupdater = AutoUpdate(process_name=config.process_name)
+            autoupdater.start()
         tplr.validate_bucket_or_exit(config.bucket)
         return config
 

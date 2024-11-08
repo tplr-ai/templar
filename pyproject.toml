@@ -31,6 +31,7 @@ dependencies = [
     "loguru==0.7.2",
     "uvloop==0.20.0",
     "aiofiles>=24.1.0",
+    "random2"
 ]
 
 [tool.uv]

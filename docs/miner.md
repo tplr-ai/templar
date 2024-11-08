@@ -182,7 +182,6 @@ PM2 automatically manages your miner processes and restarts them if they crash:
     --bucket $BUCKET \
     --device "cuda" \
     --use_wandb \
-    --project <project_name> \
     --netuid <netuid> \
     --subtensor.network <network> \
     --process_name miner \  # Must match PM2's --name

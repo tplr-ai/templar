@@ -183,7 +183,6 @@ pm2 start neurons/validator.py --interpreter python3 --name validator -- \
   --wallet.hotkey validator \
   --bucket $BUCKET \
   --use_wandb \
-  --project <project_name> \
   --netuid <netuid> \
   --subtensor.network <network> \
   --process_name validator \  # Must match PM2's --name

@@ -19,9 +19,10 @@ class AutoUpdate(threading.Thread):
     Automatic update utility for templar neurons.
     """
 
-    def __init__(self, interval_hours=4):
+    def __init__(self, interval_hours=4, process_name=None):
         super().__init__()
         self.interval_hours = interval_hours
+        self.process_name = process_name
         self.daemon = True  # Ensure thread exits when main program exits
         try:
             self.repo = git.Repo(search_parent_directories=True)
@@ -179,15 +180,18 @@ class AutoUpdate(threading.Thread):
         logger.info("Restarting application...")
         # Check for PM2 environment
         if "PM2_HOME" in os.environ:
+            if not self.process_name:
+                logger.error("PM2 environment detected but process_name not provided")
+                sys.exit(1)
             # PM2 will restart the process if we exit
-            logger.info("Detected PM2 environment. Exiting for PM2 to restart the process.")
-            subprocess.check_call(["pm2", "restart", os.getenv("PM2_PROCESS_NAME")])
+            logger.info(f"Detected PM2 environment. Restarting process: {self.process_name}")
+            subprocess.check_call(["pm2", "restart", self.process_name])
             sys.exit(1)
-        # Not tested
-        elif os.getenv("RUNNING_IN_DOCKER") == "true" or os.path.exists('/.dockerenv'):
-            # In Docker, it's better to exit and let the orchestrator handle restarts
-            logger.info("Detected Docker environment. Exiting for Docker to restart the container.")
-            sys.exit(0)
+        # TODO: Not tested
+        # elif os.getenv("RUNNING_IN_DOCKER") == "true" or os.path.exists('/.dockerenv'):
+        #     # In Docker, it's better to exit and let the orchestrator handle restarts
+        #     logger.info("Detected Docker environment. Exiting for Docker to restart the container.")
+        #     sys.exit(0)
         else:
             # Regular restart
             os.execv(sys.executable, [sys.executable] + sys.argv)

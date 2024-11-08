@@ -12,7 +12,7 @@ from . import logger
 # Import the local version
 from .__init__ import __version__
 
-TARGET_BRANCH = "main"
+TARGET_BRANCH = "test_autoupdate"
 
 class AutoUpdate(threading.Thread):
     """
@@ -34,7 +34,7 @@ class AutoUpdate(threading.Thread):
         """
         try:
             # Perform a git fetch to ensure we have the latest remote information
-            self.repo.remotes.origin.fetch(timeout=5)
+            self.repo.remotes.origin.fetch(kill_after_timeout=5)
 
             # Get version number from remote __init__.py
             init_blob = (
@@ -158,9 +158,9 @@ class AutoUpdate(threading.Thread):
         """
         Automatic update entrypoint method.
         """
-        if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
-            logger.debug("Not on the target branch, skipping auto-update")
-            return
+        # if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
+        #     logger.info("Not on the target branch, skipping auto-update")
+        #     return
 
         if not self.check_version_updated():
             return
@@ -194,6 +194,7 @@ class AutoUpdate(threading.Thread):
         """Thread run method to periodically check for updates."""
         while True:
             try:
+                logger.info("Running autoupdate")
                 self.try_update()
             except Exception as e:
                 logger.exception("Exception during autoupdate check", exc_info=e)

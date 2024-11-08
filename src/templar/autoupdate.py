@@ -168,9 +168,9 @@ class AutoUpdate(threading.Thread):
         """
         Automatic update entrypoint method.
         """
-        # if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
-        #     logger.info("Not on the target branch, skipping auto-update")
-        #     return
+        if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
+            logger.info("Not on the target branch, skipping auto-update")
+            return
 
         if not self.check_version_updated():
             return

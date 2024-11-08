@@ -53,7 +53,8 @@ This document provides a guide on how to set up and run a miner using `miner.py`
                 "s3:GetObject",
                 "s3:PutObjectVersionAcl",
                 "s3:GetObjectAttributes",
-                "s3:PutObjectAcl"
+                "s3:PutObjectAcl",
+                "s3:DeleteObject"
             ],
             "Resource": "arn:aws:s3:::<your-bucket-name>/*"
         }
@@ -74,7 +75,7 @@ This document provides a guide on how to set up and run a miner using `miner.py`
 
 ## Installation
 
-### Automated Installation (Recommended)
+<!-- ### Automated Installation (Recommended)
 
 The easiest way to set up a miner is using the automated installation script:
 
@@ -98,7 +99,7 @@ The script will:
 2. Set up AWS credentials
 3. Create and register Bittensor wallets
 4. Configure wandb for logging
-5. Start miners on all available GPUs
+5. Start miners on all available GPUs -->
 
 ### Manual Installation
 
@@ -141,7 +142,7 @@ source .venv/bin/activate
 uv pip install torch --index-url https://download.pytorch.org/whl/cu118
 
 # Install requirements
-uv sync --extra all --prerelease=allow
+uv sync --extra all 
 
 # Install flash-attn
 uv pip install flash-attn --no-build-isolation
@@ -160,11 +161,10 @@ export BUCKET="your-bucket-name"
 # Create coldkey
 btcli wallet new_coldkey --wallet.name default --n-words 12
 
-# Create and register hotkeys for each GPU
-for i in $(seq 0 $(($(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l) - 1))); do
-  btcli wallet new_hotkey --wallet.name default --wallet.hotkey "C$i" --n-words 12
-  btcli subnet pow_register --wallet.name default --wallet.hotkey "C$i" --netuid <netuid> --subtensor.network <network>
-done
+
+# Create and register hotkey
+btcli wallet new_hotkey --wallet.name default --wallet.hotkey <name> --n-words 12
+btcli subnet pow_register --wallet.name default --wallet.hotkey <name> --netuid <netuid> --subtensor.network <network>
 ```
 
 ## Running the Miner
@@ -175,19 +175,19 @@ PM2 automatically manages your miner processes and restarts them if they crash:
 
 ```bash
 # Start a miner on each GPU
-for i in $(seq 0 $(($(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l) - 1))); do
-  pm2 start neurons/miner.py --interpreter python3 --name miner_C$i -- \
+  pm2 start neurons/miner.py --interpreter python3 --name miner -- \
     --actual_batch_size <batch_size> \
     --wallet.name default \
-    --wallet.hotkey "C$i" \
+    --wallet.hotkey "name" \
     --bucket $BUCKET \
-    --device "cuda:$i" \
+    --device "cuda" \
     --use_wandb \
     --project <project_name> \
     --netuid <netuid> \
     --subtensor.network <network> \
+    --process_name miner \  # Must match PM2's --name
     --remote
-done
+
 
 # Monitor logs
 pm2 logs
@@ -196,8 +196,10 @@ pm2 logs
 pm2 list
 ```
 
-### Important Flags
+> **Important**: When using PM2, the `--process_name` argument must match the PM2 process name specified by `--name`. For example, if PM2 process is named `miner_C0`, use `--process_name miner_C0`.
 
+### Important Flags
+- **`--process_name`**: (Required) Must match the PM2 process name when using PM2
 - **`--remote`**: Enables downloading updates from other miners' buckets
 - **`--sync_state`**: Synchronizes model state with network history
 - **`--actual_batch_size`**: Set based on GPU memory:
@@ -231,7 +233,7 @@ pm2 list
   - Endpoint: `wss://test.finney.opentensor.ai:443/`
 - **Local**:
   - Network: `local`
-  - Netuid: 1
+  - Netuid: 3
   - Endpoint: `wss://localhost:9944`
 
 ### AWS Setup

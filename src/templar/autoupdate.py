@@ -12,7 +12,7 @@ from . import logger
 # Import the local version
 from .__init__ import __version__
 
-TARGET_BRANCH = "test_autoupdate"
+TARGET_BRANCH = "main"
 
 class AutoUpdate(threading.Thread):
     """
@@ -101,9 +101,9 @@ class AutoUpdate(threading.Thread):
                 )
                 return False
             try:
-                logger.info("Attempting to pull the latest changes...")
-                origin.pull(kill_after_timeout=10)
-                logger.info("Successfully pulled the latest changes")
+                logger.debug("Attempting to pull the latest changes...")
+                origin.pull(TARGET_BRANCH, kill_after_timeout=10, rebase=True)
+                logger.debug("Successfully pulled the latest changes")
                 return True
             except git.GitCommandError as e:
                 logger.exception(
@@ -214,5 +214,4 @@ class AutoUpdate(threading.Thread):
                 self.try_update()
             except Exception as e:
                 logger.exception("Exception during autoupdate check", exc_info=e)
-            # time.sleep(self.interval_hours * 3600)  # Sleep for specified hours
-            time.sleep(5)  # Sleep for specified hours
+            time.sleep(self.interval_hours * 3600)  # Sleep for specified hours

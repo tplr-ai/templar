@@ -92,7 +92,7 @@ class AutoUpdate(threading.Thread):
                 return False
             try:
                 logger.info("Attempting to pull the latest changes...")
-                origin.pull(timeout=10)
+                origin.pull(kill_after_timeout=10)
                 logger.info("Successfully pulled the latest changes")
                 return True
             except git.GitCommandError as e:

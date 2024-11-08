@@ -75,7 +75,7 @@ class Miner:
         if config.autoupdate:
             from templar.autoupdate import AutoUpdate
             autoupdater = AutoUpdate()
-            autoupdater.try_update()
+            autoupdater.start()
         tplr.validate_bucket_or_exit(config.bucket)
         return config
 

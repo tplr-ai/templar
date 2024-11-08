@@ -181,6 +181,7 @@ class AutoUpdate(threading.Thread):
         if "PM2_HOME" in os.environ:
             # PM2 will restart the process if we exit
             logger.info("Detected PM2 environment. Exiting for PM2 to restart the process.")
+            subprocess.check_call(["pm2", "restart", os.getenv("PM2_PROCESS_NAME")])
             sys.exit(1)
         elif os.getenv("RUNNING_IN_DOCKER") == "true" or os.path.exists('/.dockerenv'):
             # In Docker, it's better to exit and let the orchestrator handle restarts

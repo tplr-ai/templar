@@ -61,6 +61,8 @@ class Miner:
         parser.add_argument('--test', action='store_true', help='Run on test network')
         parser.add_argument('--local', action='store_true', help='Run on local network')
         parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
+        parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
+
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -74,7 +76,7 @@ class Miner:
         if config.trace: tplr.trace()
         if config.autoupdate:
             from templar.autoupdate import AutoUpdate
-            autoupdater = AutoUpdate()
+            autoupdater = AutoUpdate(process_name=config.process_name)
             autoupdater.start()
         tplr.validate_bucket_or_exit(config.bucket)
         return config

@@ -281,7 +281,7 @@ case "$NETWORK" in
         ;;
     local|LOCAL|Local)
         SUBTENSOR_NETWORK="local"
-        NETUID=1
+        NETUID=3
         SUBTENSOR_CHAIN_ENDPOINT="wss://localhost:9944"
         PM2_NETWORK_OPTIONS=""
         ;;

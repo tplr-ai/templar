@@ -46,7 +46,7 @@ class Miner:
     @staticmethod
     def config():
         parser = argparse.ArgumentParser(description='Miner script')
-        parser.add_argument('--project', type=str, default='aesop2', help='Optional wandb project name')
+        parser.add_argument('--project', type=str, default='templar', help='Optional wandb project name')
         parser.add_argument('--netuid', type=int, default=3, help='Bittensor network UID.')
         parser.add_argument('--bucket', type=str, default='decis', help='S3 bucket name')
         parser.add_argument('--actual_batch_size', type=int, default=8, help='Training batch size per accumulation.')
@@ -61,6 +61,8 @@ class Miner:
         parser.add_argument('--test', action='store_true', help='Run on test network')
         parser.add_argument('--local', action='store_true', help='Run on local network')
         parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
+        parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
+
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -74,8 +76,8 @@ class Miner:
         if config.trace: tplr.trace()
         if config.autoupdate:
             from templar.autoupdate import AutoUpdate
-            autoupdater = AutoUpdate()
-            autoupdater.try_update()
+            autoupdater = AutoUpdate(process_name=config.process_name)
+            autoupdater.start()
         tplr.validate_bucket_or_exit(config.bucket)
         return config
 

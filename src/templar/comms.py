@@ -520,3 +520,64 @@ def validate_bucket_or_exit(bucket_name: str):
     if not is_valid_bucket(bucket_name):
         logger.error(f"Bucket name {bucket_name} is invalid. Please refer to the AWS documentation on naming conventions ")
         sys.exit(1)
+
+
+async def save_checkpoint(filename, model, optimizer=None, scheduler=None, global_step=0, **kwargs):
+    """
+    Saves the checkpoint to the specified filename asynchronously.
+
+    Args:
+        filename (str): Path to save the checkpoint.
+        model (torch.nn.Module): The model to save.
+        optimizer (torch.optim.Optimizer, optional): Optimizer to save.
+        scheduler (torch.optim.lr_scheduler._LRScheduler, optional): Scheduler to save.
+        global_step (int): The current global step.
+        **kwargs: Additional state variables to save.
+    """
+    # Gather the checkpoint data
+    checkpoint = {
+        'global_step': global_step,
+        'model_state_dict': model.state_dict(),
+    }
+    if optimizer:
+        checkpoint['optimizer_state_dict'] = optimizer.state_dict()
+    if scheduler:
+        checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+    # Include additional state variables
+    for key, value in kwargs.items():
+        checkpoint[key] = value
+
+    # Save the checkpoint asynchronously to avoid blocking the main thread
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, torch.save, checkpoint, filename)
+    torch.save(checkpoint, filename)
+
+async def load_checkpoint(filename, model, optimizer=None, scheduler=None, device='cpu'):
+    """
+    Loads the checkpoint from the specified filename.
+
+    Args:
+        filename (str): Path to the checkpoint file.
+        model (torch.nn.Module): The model to load the state into.
+        optimizer (torch.optim.Optimizer, optional): Optimizer to load the state into.
+        scheduler (torch.optim.lr_scheduler._LRScheduler, optional): Scheduler to load the state into.
+        device (str): Device to map the checkpoint.
+    Returns:
+        global_step (int): The global step at which the checkpoint was saved.
+        additional_state (dict): Dictionary of additional state variables.
+    """
+    if os.path.exists(filename):
+        checkpoint = torch.load(filename, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        if optimizer and 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if scheduler and 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        global_step = checkpoint.get('global_step', 0)
+        additional_state = {
+            k: checkpoint[k] for k in checkpoint
+            if k not in ['global_step', 'model_state_dict', 'optimizer_state_dict', 'scheduler_state_dict']
+        }
+        return global_step, additional_state
+    else:
+        return 0, {}

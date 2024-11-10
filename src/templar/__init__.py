@@ -23,5 +23,4 @@ from .hparams import *
 from .comms import *
 from .autoupdate import *
 from .learning_rates import *
-
 __version__ = "0.1.1"

@@ -17,6 +17,7 @@
 # fmt: off
 
 # Global imports.
+from concurrent.futures import ThreadPoolExecutor
 import sys 
 import time
 import wandb
@@ -32,9 +33,11 @@ import torch.optim as optim
 from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from rich.markup import escape
+import os
 
 # Import local files.
 import templar as tplr
+from templar.comms import load_checkpoint, save_checkpoint
 
 # GPU optimizations.
 torch.backends.cudnn.benchmark = True
@@ -62,7 +65,7 @@ class Miner:
         parser.add_argument('--local', action='store_true', help='Run on local network')
         parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
         parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
-
+        parser.add_argument('--checkpoint_path', type=str, default='miner_checkpoint.pth', help='Path to save/load the checkpoint')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -138,6 +141,29 @@ class Miner:
             num_stable_steps=self.hparams.num_stable_steps,
             num_decay_steps=self.hparams.num_decay_steps,
         )
+
+
+            # Load checkpoint if it exists
+        self.checkpoint_path = self.config.checkpoint_path
+        if os.path.exists(self.checkpoint_path):
+            tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
+            global_step, _ = asyncio.run(load_checkpoint(
+                filename=self.checkpoint_path,
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                device=self.config.device
+            ))
+            if global_step > 0:
+                self.global_step = global_step
+                tplr.logger.info(f"Resumed from global step {self.global_step}")
+            else:
+                tplr.logger.info("No checkpoint found. Starting from scratch.")
+                self.global_step = 0
+        else:
+            tplr.logger.info("No checkpoint file found. Starting from scratch.")
+            self.global_step = 0
+
         # Init buckets.
         self.buckets = []
         for uid in self.metagraph.uids:
@@ -146,7 +172,6 @@ class Miner:
             except: self.buckets.append(None)
 
         # Init run state.
-        self.global_step = 0
         self.sample_rate = 1.0
         self.current_block = self.subtensor.block
         self.current_window = self.block_to_window( self.current_block )
@@ -163,27 +188,28 @@ class Miner:
             # Run the blocking update operations in a separate thread
             await asyncio.to_thread(self.perform_update)
             tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
-            await asyncio.sleep(60)
+            await asyncio.sleep(600)
 
     def perform_update(self):
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
         self.hparams = tplr.load_hparams()
-        next_buckets = []
-        for uid in self.metagraph.uids:
+
+        def get_bucket(uid):
             try:
-                if not self.config.remote:
-                    bucket = self.config.bucket
-                else:
-                    bucket = self.subtensor.get_commitment(self.config.netuid, uid)
+                bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
                 if tplr.is_valid_bucket(bucket):
-                    next_buckets.append(bucket)
+                    return bucket
                 else:
                     tplr.logger.debug(f"Skipping UID {uid} due to invalid or missing bucket name: {bucket}")
-                    next_buckets.append(None)
+                    return None
             except Exception as e:
                 tplr.logger.debug(f"Error retrieving bucket for UID {uid}: {e}")
-                next_buckets.append(None)
+                return None
+
+        with ThreadPoolExecutor() as executor:
+            next_buckets = list(executor.map(get_bucket, self.metagraph.uids))
+
         self.buckets = next_buckets
 
     async def run(self):
@@ -216,6 +242,18 @@ class Miner:
                 # Start the window step.     
                 tplr.logger.info('[bold]' + '\n' + '-' * 40 + f' Step: {self.global_step} ' + '-' * 40)
                 self.global_step += 1
+
+                # Save checkpoint every 500 steps
+                if self.global_step % 500 == 0:
+                    tplr.logger.info(f"Scheduling checkpoint save at global step {self.global_step}")
+                    # Schedule the save_checkpoint function to run asynchronously
+                    asyncio.create_task(save_checkpoint(
+                        filename=self.checkpoint_path,
+                        model=self.model,
+                        optimizer=self.optimizer,
+                        scheduler=self.scheduler,
+                        global_step=self.global_step
+                    ))
                 start_step = tplr.T()
                 window = self.current_window
                 

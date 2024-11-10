@@ -29,9 +29,11 @@ import numpy as np
 from tqdm import tqdm
 import bittensor as bt
 from transformers import LlamaForCausalLM
+import os
 
 # Import local files.
 import templar as tplr
+from templar.comms import load_checkpoint, save_checkpoint
 
 # GPU optimizations.
 torch.backends.cudnn.benchmark = True
@@ -56,6 +58,7 @@ class Validator:
         parser.add_argument('--test', action='store_true', help='Run on test network')
         parser.add_argument('--local', action='store_true', help='Run on local network')
         parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
+        parser.add_argument('--checkpoint_path', type=str, default='validator_checkpoint.pth', help='Path to save/load the checkpoint')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -116,6 +119,34 @@ class Validator:
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
         self.model.eval()
+
+        # Set checkpoint path
+        self.checkpoint_path = self.config.checkpoint_path
+
+        # Load checkpoint if it exists
+        if os.path.exists(self.checkpoint_path):
+            tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
+
+            # The load_checkpoint function updates the model's state in place
+            global_step, additional_state = asyncio.run(load_checkpoint(
+                filename=self.checkpoint_path,
+                model=self.model,            # Model state is updated inside load_checkpoint
+                device=self.config.device
+            ))
+
+            # Update global_step
+            self.global_step = global_step
+
+            # Load additional state variables
+            self.scores = additional_state.get('scores', torch.zeros(256, dtype=torch.float32))
+            self.weights = additional_state.get('weights', torch.zeros(256, dtype=torch.float32))
+
+            tplr.logger.info(f"Resumed from global step {self.global_step}")
+        else:
+            tplr.logger.info("No checkpoint found. Starting from scratch.")
+            self.global_step = 0
+            self.scores = torch.zeros(256, dtype=torch.float32)
+            self.weights = torch.zeros(256, dtype=torch.float32)
         
         # Init buckets.
         self.buckets = []
@@ -129,8 +160,7 @@ class Validator:
                 tplr.logger.debug(f"Failed to retrieve bucket for UID {uid}: {e}")
                 self.buckets.append(None)
 
-        # Init run state.
-        self.global_step = 0
+
         self.last_window = 0
         self.optimal_pages_per_step = 4
         self.current_block = self.subtensor.block
@@ -205,8 +235,25 @@ class Validator:
                 tplr.logger.info('[bold]' + '\n' + '-' * 40 + f' Step: {self.global_step} ' + '-' * 40)
                 gs_start = tplr.T()
                 self.global_step += 1
+                # Set checkpoint path
+                self.checkpoint_path = self.config.checkpoint_path
                 offset = 2
                 window = self.current_window - offset
+
+
+                # Save checkpoint every 500 steps
+                if self.global_step % 500 == 0:
+                    tplr.logger.info(f"Scheduling checkpoint save at block {self.global_step}")
+                    # Update last checkpoint block to avoid repeated saves at the same block
+                    self.last_checkpoint_block = self.global_step
+                    # Schedule the save_checkpoint function to run asynchronously
+                    asyncio.create_task(save_checkpoint(
+                        filename=self.checkpoint_path,
+                        model=self.model,
+                        global_step=self.global_step,
+                        scores=self.scores,
+                        weights=self.weights
+                    ))
                 
                 # Download the state for the eval window.
                 st = tplr.T()

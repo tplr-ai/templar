@@ -40,16 +40,15 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 # Define a semaphore to limit concurrent downloads (adjust as needed)
 semaphore = asyncio.Semaphore(1000)
 
-async def get_slices( filename:str, device:str ) -> Dict[str, torch.Tensor]:
-    # Attempt to acquire the lock with a timeout of 1 second.
+async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
     lock: FileLock = FileLock(f"{filename}.lock")
     with lock.acquire(timeout=5):
-        pass
-    return torch.load(
-        filename,
-        map_location=torch.device(device),
-        weights_only = True,
-    )
+        # Lock is held during the entire read operation
+        return torch.load(
+            filename,
+            map_location=torch.device(device),
+            weights_only=True,
+        )
 
 async def apply_slices_to_model(model: torch.nn.Module, window: int, seed: str, compression: int, key:str = 'slice') -> List[str]:
     """

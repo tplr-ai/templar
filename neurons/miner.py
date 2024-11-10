@@ -160,24 +160,31 @@ class Miner:
     async def update(self):
         while not self.stop_event.is_set():
             st = tplr.T()
-            self.subtensor = bt.subtensor(config=self.config)
-            self.metagraph = self.subtensor.metagraph(self.config.netuid)
-            self.hparams = tplr.load_hparams()
-            next_buckets = []
-            for uid in self.metagraph.uids:
-                try:
-                    bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
-                    if tplr.is_valid_bucket(bucket):
-                        next_buckets.append(bucket)
-                    else:
-                        logger.debug(f"Skipping UID {uid} due to invalid bucket name: {bucket}")
-                        next_buckets.append(None)
-                except Exception as e:
-                    logger.exception(f"Error retrieving bucket for UID {uid}: {e}")
-                    next_buckets.append(None)
-            self.buckets = next_buckets
+            # Run the blocking update operations in a separate thread
+            await asyncio.to_thread(self.perform_update)
             tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
             await asyncio.sleep(60)
+
+    def perform_update(self):
+        self.subtensor = bt.subtensor(config=self.config)
+        self.metagraph = self.subtensor.metagraph(self.config.netuid)
+        self.hparams = tplr.load_hparams()
+        next_buckets = []
+        for uid in self.metagraph.uids:
+            try:
+                if not self.config.remote:
+                    bucket = self.config.bucket
+                else:
+                    bucket = self.subtensor.get_commitment(self.config.netuid, uid)
+                if tplr.is_valid_bucket(bucket):
+                    next_buckets.append(bucket)
+                else:
+                    tplr.logger.debug(f"Skipping UID {uid} due to invalid or missing bucket name: {bucket}")
+                    next_buckets.append(None)
+            except Exception as e:
+                tplr.logger.debug(f"Error retrieving bucket for UID {uid}: {e}")
+                next_buckets.append(None)
+        self.buckets = next_buckets
 
     async def run(self):
         # Main loop.

@@ -221,13 +221,16 @@ class Validator:
                 key = 'state'
             )
             for window in tqdm(history_windows, desc="Syncing state"):
-                await tplr.apply_slices_to_model( 
-                    model = self.model, 
-                    window = window,
-                    seed = window,
-                    compression = self.hparams.compression,
-                    key = 'state'
+                max_global_step = await tplr.apply_slices_to_model( 
+                    model=self.model, 
+                    window=window,
+                    seed=window,
+                    compression=self.hparams.compression,
+                    key='state',
                 )
+                if max_global_step is not None:
+                    self.global_step = max(self.global_step, max_global_step)
+                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied historical state and updated global step to {self.global_step}.")
             torch.cuda.empty_cache()
 
         # Run validation.
@@ -281,16 +284,18 @@ class Validator:
                     while self.current_window - offset == window: await asyncio.sleep(0.1) # Wait for next window.
                     continue
                 
-                # Applied the model state state for the eval window.
+                # Applied the model  state for the eval window.
                 st = tplr.T()
-                await tplr.apply_slices_to_model( 
-                    model = self.model, 
-                    window = window,
-                    seed = window,
-                    compression = self.hparams.compression,
-                    key = 'state',
+                max_global_step = await tplr.apply_slices_to_model( 
+                    model=self.model, 
+                    window=window,
+                    seed=window,
+                    compression=self.hparams.compression,
+                    key='state',
                 )
-                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state.")
+                if max_global_step is not None:
+                    self.global_step = max(self.global_step, max_global_step)
+                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state and updated global step to {self.global_step}.")
                 
                 # Attain the indicies for the eval window.
                 st = tplr.T()
@@ -423,14 +428,16 @@ class Validator:
                 
                 # Apply all deltas to the model state.
                 st = tplr.T()
-                await tplr.apply_slices_to_model( 
-                    model = self.model, 
-                    window = window,
-                    seed = window,
-                    compression = self.hparams.compression,
-                    key = 'delta',
+                max_global_step = await tplr.apply_slices_to_model( 
+                    model=self.model, 
+                    window=window,
+                    seed=window,
+                    compression=self.hparams.compression,
+                    key='delta',
                 )
-                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window deltas.")
+                if max_global_step is not None:
+                    self.global_step = max(self.global_step, max_global_step)
+                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window delta and updated global step to {self.global_step}.")
                 
                 # Clean local and remote space from old slices.
                 st = tplr.T()

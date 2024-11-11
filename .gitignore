@@ -36,3 +36,5 @@ uv.lock
 
 # Project specific
 wandb
+validator_checkpoint.pth
+miner_checkpoint.pth

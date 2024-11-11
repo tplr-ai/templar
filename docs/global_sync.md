@@ -109,11 +109,10 @@ max_global_step = await apply_slices_to_model(
     key='state'
 )
 
-# Update local global_step if necessary
-if max_global_step is not None:
-    self.global_step = max(self.global_step, max_global_step)
-    self.scheduler.last_epoch = self.global_step - 1  # Update scheduler to match global_step
-    tplr.logger.info(f"Updated global step to {self.global_step}")
+# Update local global_step
+self.global_step = max(self.global_step, max_global_step)
+self.scheduler.last_epoch = self.global_step - 1  # Update scheduler to match global_step
+tplr.logger.info(f"Updated global step to {self.global_step}")
 ```
 
 ### Initializing or Loading `global_step` from Checkpoints

@@ -50,24 +50,11 @@ async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
             weights_only=True,
         )
 
-async def apply_slices_to_model(model: torch.nn.Module, window: int, seed: str, compression: int, key:str = 'slice') -> List[str]:
-    """
-    Applies slices from a specific window to the given model.
-
-    Args:
-        model (torch.nn.Module): The PyTorch model to which the slices will be applied.
-        window (int): The window identifier.
-        seed (str): The seed used for generating indices.
-        compression (int): The compression factor.
-
-    Returns:
-        List[str]: A list of all the slice files that were applied.
-    """
-    # First get the indices associated with the window given the model.
+async def apply_slices_to_model(model: torch.nn.Module, window: int, seed: str, compression: int, key: str = 'slice') -> int:
     indices_dict = await get_indices_for_window(model, seed, compression)
-    
+
     # Load all the slices associated with this window.
-    slice_files = await load_files_for_window(window=window, key = key)
+    slice_files = await load_files_for_window(window=window, key=key)
 
     # Dictionary to keep track of the number of slices applied per parameter.
     slices_per_param = {name: 0 for name, _ in model.named_parameters()}
@@ -75,11 +62,15 @@ async def apply_slices_to_model(model: torch.nn.Module, window: int, seed: str, 
     # Dictionary to accumulate the sum of values for each parameter.
     param_sums = {name: torch.zeros_like(param.data) for name, param in model.named_parameters()}
 
+    max_global_step = 0  # Initialize max_global_step
+
     # Iterate over each slice file and compute the sum of values.
     for file_i in slice_files:
-        # Create a file lock to ensure exclusive access to the slice file.
         try:
             slice_i = await get_slices(file_i, model.device)
+            slice_global_step = slice_i.get('global_step', 0)
+            max_global_step = max(max_global_step, slice_global_step)
+
             for name, param in model.named_parameters():
                 if name not in indices_dict or name not in slice_i:
                     continue
@@ -90,15 +81,14 @@ async def apply_slices_to_model(model: torch.nn.Module, window: int, seed: str, 
                 del values
             del slice_i
         except Timeout:
-            # The lock could not be acquired within the timeout.
             logger.error(f"Timeout occurred while trying to acquire lock on {file_i}")
-            continue  
+            continue
         except Exception as e:
             logger.exception(f"Error applying slice from {file_i}: {e}")
 
     # Apply the average to the parameters.
     for name, param in model.named_parameters():
-        if name not in slices_per_param or name not in indices_dict or slices_per_param[name] == 0:
+        if slices_per_param.get(name, 0) == 0 or name not in indices_dict:
             continue
         param_indices = indices_dict[name].to(param.data.device)
         avg_param = param_sums[name].view(-1)[param_indices] / slices_per_param[name]
@@ -106,33 +96,23 @@ async def apply_slices_to_model(model: torch.nn.Module, window: int, seed: str, 
         avg_param = avg_param.to(param.data.device)
         param.data.view(-1)[param_indices] = avg_param.clone()
 
-    # Return the list of the files applied.
-    return slice_files
+    return max_global_step
 
-async def upload_slice_for_window(bucket: str, model: torch.nn.Module, window: int, seed: str, wallet: 'bt.wallet', compression: int, key:str = 'slice'):
-    """
-    Uploads a compressed slice of a PyTorch model to an S3 bucket.
-
-    Args:
-        bucket (str): Name of the S3 bucket.
-        model (torch.nn.Module): The PyTorch model to be sliceed and uploaded.
-        window (int): The window identifier.
-        wallet (bt.wallet): The wallet object containing the hotkey.
-        compression (int): The compression factor.
-    """
+async def upload_slice_for_window(bucket: str, model: torch.nn.Module, window: int, seed: str, wallet: 'bt.wallet', compression: int, key: str = 'slice', global_step: int = 0):
     filename = f'{key}-{window}-{wallet.hotkey.ss58_address}.pt'
     logger.debug(f"Uploading slice to S3: {filename}")
 
     model_state_dict = model.state_dict()
     indices = await get_indices_for_window(model, seed, compression)
 
-    # Apply the slice to the model parameters
+    # Create the slice dictionary with global_step
+    slice_data = {'global_step': global_step}
     for name, param in model.named_parameters():
-        model_state_dict[name] = param.data.view(-1)[indices[name].to(model.device)].cpu()
+        slice_data[name] = param.data.view(-1)[indices[name].to(model.device)].cpu()
 
-    # Create a temporary file and write the sliceed model state dictionary to it
+    # Create a temporary file and write the sliced model state dictionary to it
     with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        torch.save(model_state_dict, temp_file)
+        torch.save(slice_data, temp_file)
         temp_file_name = temp_file.name  # Store the temporary file name
 
     # Upload the file to S3

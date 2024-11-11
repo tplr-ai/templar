@@ -127,23 +127,7 @@ class Miner:
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
         self.model.train()
-        self.optimizer = optim.AdamW(
-            self.model.parameters(),
-            lr=self.hparams.learning_rate,  # Peak learning rate
-            betas=(self.hparams.optimizer_beta1, self.hparams.optimizer_beta2),  # B1 and B2
-            weight_decay=self.hparams.optimizer_weight_decay,  # Weight decay
-            foreach=True,  # more memory usage, but faster
-        )
-        # Initialize learning rate scheduler
-        self.scheduler = tplr.get_wsd_scheduler(
-            optimizer=self.optimizer,
-            num_warmup_steps=self.hparams.num_warmup_steps,
-            num_stable_steps=self.hparams.num_stable_steps,
-            num_decay_steps=self.hparams.num_decay_steps,
-        )
-
-
-            # Load checkpoint if it exists
+        # Load checkpoint if it exists
         self.checkpoint_path = self.config.checkpoint_path
         if os.path.exists(self.checkpoint_path):
             tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
@@ -151,18 +135,38 @@ class Miner:
                 filename=self.checkpoint_path,
                 model=self.model,
                 optimizer=self.optimizer,
-                scheduler=self.scheduler,
+                scheduler=None,  # Initialize scheduler after loading checkpoint
                 device=self.config.device
             ))
-            if global_step > 0:
-                self.global_step = global_step
-                tplr.logger.info(f"Resumed from global step {self.global_step}")
-            else:
-                tplr.logger.info("No checkpoint found. Starting from scratch.")
-                self.global_step = 0
+            self.global_step = global_step
+            tplr.logger.info(f"Resumed from global step {self.global_step}")
         else:
             tplr.logger.info("No checkpoint file found. Starting from scratch.")
             self.global_step = 0
+
+        self.optimizer = optim.AdamW(
+            self.model.parameters(),
+            lr=self.hparams.learning_rate,  # Peak learning rate
+            betas=(self.hparams.optimizer_beta1, self.hparams.optimizer_beta2),  # B1 and B2
+            weight_decay=self.hparams.optimizer_weight_decay,  # Weight decay
+            foreach=True,  # more memory usage, but faster
+        )        
+        # Initialize learning rate scheduler with correct last_epoch
+        self.scheduler = tplr.get_wsd_scheduler(
+            optimizer=self.optimizer,
+            num_warmup_steps=self.hparams.num_warmup_steps,
+            num_stable_steps=self.hparams.num_stable_steps,
+            num_decay_steps=self.hparams.num_decay_steps,
+            last_epoch=self.global_step - 1  # Set last_epoch based on global_step
+        )
+
+        # Initialize learning rate scheduler
+        self.scheduler = tplr.get_wsd_scheduler(
+            optimizer=self.optimizer,
+            num_warmup_steps=self.hparams.num_warmup_steps,
+            num_stable_steps=self.hparams.num_stable_steps,
+            num_decay_steps=self.hparams.num_decay_steps,
+        )
 
         # Init buckets.
         self.buckets = []
@@ -227,13 +231,17 @@ class Miner:
                 key = 'state'
             )
             for window in tqdm(history_windows, desc="Syncing state"):
-                await tplr.apply_slices_to_model( 
+                max_global_step = await tplr.apply_slices_to_model( 
                     model = self.model, 
                     window = window,
                     seed = window,
                     compression = self.hparams.compression,
                     key = 'state'
                 )
+                if max_global_step is not None:
+                    self.global_step = max(self.global_step, max_global_step)
+                    self.scheduler.last_epoch = self.global_step - 1  # Update scheduler
+                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied history and updated global step to {self.global_step}.")
             torch.cuda.empty_cache()
             
         # Main training loop.
@@ -280,14 +288,17 @@ class Miner:
                     
                     # Apply the state for the current window.
                     st = tplr.T()
-                    await tplr.apply_slices_to_model( 
-                        model = self.model, 
-                        window = window,
-                        seed = window,
-                        compression = self.hparams.compression,
-                        key = 'state'
+                    max_global_step = await tplr.apply_slices_to_model( 
+                        model=self.model, 
+                        window=window,
+                        seed=window,
+                        compression=self.hparams.compression,
+                        key='state'
                     )
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state.")
+                    if max_global_step is not None:
+                        self.global_step = max(self.global_step, max_global_step)
+                        self.scheduler.last_epoch = self.global_step - 1  # Update scheduler
+                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state and updated global step to {self.global_step}.")
         
                 # Download the page for the current window.
                 st = tplr.T()
@@ -350,21 +361,25 @@ class Miner:
                         seed = window,
                         wallet = self.wallet, 
                         compression = self.hparams.compression,
-                        key = 'delta'
+                        key = 'delta',
+                        global_step=self.global_step 
                     )                
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Uploaded the delta.")
                     
                     # Apply the delta from the previous window.
                     st = tplr.T()
-                    await tplr.apply_slices_to_model(
-                        model = self.model, 
-                        window = window - 1,
-                        seed = window - 1,
-                        compression = self.hparams.compression,
-                        key = 'delta'
-                    )         
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window delta.")
-                
+                    max_global_step = await tplr.apply_slices_to_model(
+                        model=self.model, 
+                        window=window - 1,
+                        seed=window - 1,
+                        compression=self.hparams.compression,
+                        key='delta'
+                    )
+                    if max_global_step is not None:
+                        self.global_step = max(self.global_step, max_global_step)
+                        self.scheduler.last_epoch = self.global_step - 1  # Update scheduler
+                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window delta and updated global step to {self.global_step}.")
+                                    
                     # Upload the state for the current window.
                     st = tplr.T()
                     await tplr.upload_slice_for_window(
@@ -375,6 +390,7 @@ class Miner:
                         wallet = self.wallet, 
                         compression = self.hparams.compression,
                         key = 'state',
+                        global_step=self.global_step 
                     )
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Uploaded the state.")
                     

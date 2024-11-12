@@ -241,8 +241,6 @@ class Validator:
                 tplr.logger.info('[bold]' + '\n' + '-' * 40 + f' Step: {self.global_step} ' + '-' * 40)
                 gs_start = tplr.T()
                 self.global_step += 1
-                # Set checkpoint path
-                self.checkpoint_path = self.config.checkpoint_path
                 offset = 2
                 window = self.current_window - offset
 

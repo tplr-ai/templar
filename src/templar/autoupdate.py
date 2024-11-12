@@ -5,12 +5,12 @@ import time
 import git
 import subprocess
 from packaging import version
+import asyncio
+
 
 # Import local modules
-from . import logger
+from . import logger, delete_old_version_files, __version__
 
-# Import the local version
-from .__init__ import __version__
 
 TARGET_BRANCH = "main"
 
@@ -164,6 +164,15 @@ class AutoUpdate(threading.Thread):
         except Exception as e:
             logger.exception("Failed to synchronize dependencies with uv", exc_info=e)
 
+    async def cleanup_old_versions(self):
+        """
+        Cleans up old version slices from the S3 bucket.
+        """
+        from templar import __version__
+        bucket_name = 'your_bucket_name'  # Replace with your actual bucket name or configuration
+        logger.info(f"Cleaning up old versions from bucket {bucket_name}")
+        await delete_old_version_files(bucket_name, __version__)
+
     def try_update(self):
         """
         Automatic update entrypoint method.
@@ -180,6 +189,9 @@ class AutoUpdate(threading.Thread):
 
         # Synchronize dependencies
         self.attempt_package_update()
+
+        # Clean up old versions from the bucket
+        asyncio.run(self.cleanup_old_versions())
 
         # Restart application
         self.restart_app()
@@ -214,4 +226,4 @@ class AutoUpdate(threading.Thread):
                 self.try_update()
             except Exception as e:
                 logger.exception("Exception during autoupdate check", exc_info=e)
-            time.sleep(self.interval_hours * 3600)  # Sleep for specified hours
+            time.sleep(600)

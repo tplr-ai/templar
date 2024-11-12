@@ -17,22 +17,22 @@
 # fmt: off
 
 # Global imports.
-from concurrent.futures import ThreadPoolExecutor
-import sys 
-import time
-import wandb
-import torch
-import random
-import asyncio
 import argparse
-import threading
-import numpy as np
-from tqdm import tqdm
+import asyncio
 import bittensor as bt
-from transformers import LlamaForCausalLM
+from concurrent.futures import ThreadPoolExecutor
+import numpy as np
 import os
+import random
+import sys
+import threading
+import time
+import torch
+from tqdm import tqdm
+from transformers import LlamaForCausalLM
+import wandb
 
-# Import local files.
+# Local imports.
 import templar as tplr
 from templar.comms import load_checkpoint, save_checkpoint
 
@@ -71,11 +71,11 @@ class Validator:
             config.subtensor.chain_endpoint = 'ws://127.0.0.1:9944'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
+        tplr.validate_bucket_or_exit(config.bucket)
         if config.autoupdate:
             from templar.autoupdate import AutoUpdate
-            autoupdater = AutoUpdate(process_name=config.process_name)
+            autoupdater = AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
-        tplr.validate_bucket_or_exit(config.bucket)
         return config
 
     def __init__(self):
@@ -214,6 +214,7 @@ class Validator:
         
         # Optionally sync the model state by pulling model states from the history.
         if self.config.sync_state:
+            st = tplr.T()
             history_windows = [ self.current_window - i for i in range (self.hparams.max_history) ]
             state_slices = await tplr.download_slices_for_buckets_and_windows(
                 buckets = self.buckets,
@@ -297,19 +298,25 @@ class Validator:
                     self.global_step = max(self.global_step, max_global_step)
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state and updated global step to {self.global_step}.")
                 
-                # Attain the indicies for the eval window.
+                # Obtain the indicies for the eval window.
                 st = tplr.T()
                 indices = await tplr.get_indices_for_window(
                     model = self.model,
                     seed = window,
                     compression = self.hparams.compression
                 ) 
-                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Attained window indices.")
+                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Obtained window indices.")
                                
 
                 # Attain the UID of this slice.
                 st = tplr.T()
-                eval_slice_info = random.choice( eval_slices[ window ] )                
+                valid_eval_slices = [s for s in eval_slices[window] if s.version == __version__]
+                if not valid_eval_slices:
+                    tplr.logger.warning(f"{tplr.P(window, tplr.T() - st)}: No valid slices with matching version {__version__}, continuing...")
+                    while self.current_window - offset == window:
+                        await asyncio.sleep(0.1)  # Wait for next window.
+                    continue
+                eval_slice_info = random.choice( valid_eval_slices)                
                 try: eval_uid = self.metagraph.hotkeys.index(eval_slice_info.hotkey)
                 except ValueError:
                     tplr.logger.warning(f"{tplr.P(window, tplr.T() - st)}: {eval_slice_info.hotkey} not found in metagraph")

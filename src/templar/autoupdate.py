@@ -66,10 +66,11 @@ class AutoUpdate(threading.Thread):
 
         # Reload the version from __init__.py to get the latest version after updates
         try:
+            import templar
             from importlib import reload
             from . import __init__
             reload(__init__)
-            local_version = __init__.__version__
+            local_version = templar.__version__
         except Exception as e:
             logger.error(f"Failed to reload local version: {e}")
             # Fallback to imported version

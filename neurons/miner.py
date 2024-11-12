@@ -65,7 +65,7 @@ class Miner:
         parser.add_argument('--local', action='store_true', help='Run on local network')
         parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
         parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
-        parser.add_argument('--checkpoint_path', type=str, default='miner_checkpoint.pth', help='Path to save/load the checkpoint')
+        parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to save/load the checkpoint. If None, the path is set to checkpoint-M<UID>.pth.')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -128,7 +128,7 @@ class Miner:
         self.model.to(self.config.device)
         self.model.train()
         # Load checkpoint if it exists
-        self.checkpoint_path = self.config.checkpoint_path
+        self.checkpoint_path = f"checkpoint-M{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
         if os.path.exists(self.checkpoint_path):
             tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
             global_step, _ = asyncio.run(load_checkpoint(

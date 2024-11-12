@@ -10,16 +10,17 @@ import asyncio
 
 # Import local modules
 from . import *
+from . import __version__
 
 
-TARGET_BRANCH = "main"
+TARGET_BRANCH = "kaiju"
 
 class AutoUpdate(threading.Thread):
     """
     Automatic update utility for templar neurons.
     """
 
-    def __init__(self, interval_hours=4, process_name=None, bucket_name=None):
+    def __init__(self, process_name=None, bucket_name=None):
         super().__init__()
         self.process_name = process_name
         self.bucket_name = bucket_name
@@ -177,9 +178,9 @@ class AutoUpdate(threading.Thread):
         """
         Automatic update entrypoint method.
         """
-        if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
-            logger.info("Not on the target branch, skipping auto-update")
-            return
+        # if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
+        #     logger.info("Not on the target branch, skipping auto-update")
+        #     return
 
         if not self.check_version_updated():
             return
@@ -226,4 +227,4 @@ class AutoUpdate(threading.Thread):
                 self.try_update()
             except Exception as e:
                 logger.exception("Exception during autoupdate check", exc_info=e)
-            time.sleep(600)  # Sleep for 10 mins
+            time.sleep(30)  # Sleep for 10 mins

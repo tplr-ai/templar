@@ -37,7 +37,6 @@ import os
 
 # Import local files.
 import templar as tplr
-from templar.comms import load_checkpoint, save_checkpoint
 
 # GPU optimizations.
 torch.backends.cudnn.benchmark = True
@@ -131,7 +130,7 @@ class Miner:
         self.checkpoint_path = self.config.checkpoint_path
         if os.path.exists(self.checkpoint_path):
             tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
-            global_step, _ = asyncio.run(load_checkpoint(
+            global_step, _ = asyncio.run(tplr.load_checkpoint(
                 filename=self.checkpoint_path,
                 model=self.model,
                 optimizer=self.optimizer,
@@ -255,8 +254,8 @@ class Miner:
                 # Save checkpoint every 500 steps
                 if self.global_step % 500 == 0:
                     tplr.logger.info(f"Scheduling checkpoint save at global step {self.global_step}")
-                    # Schedule the save_checkpoint function to run asynchronously
-                    asyncio.create_task(save_checkpoint(
+                    # Schedule the tplr.save_checkpoint function to run asynchronously
+                    asyncio.create_task(tplr.save_checkpoint(
                         filename=self.checkpoint_path,
                         model=self.model,
                         optimizer=self.optimizer,

@@ -19,9 +19,10 @@ class AutoUpdate(threading.Thread):
     Automatic update utility for templar neurons.
     """
 
-    def __init__(self, process_name=None):
+    def __init__(self, interval_hours=4, process_name=None, bucket_name=None):
         super().__init__()
         self.process_name = process_name
+        self.bucket_name = bucket_name
         self.daemon = True  # Ensure thread exits when main program exits
         try:
             self.repo = git.Repo(search_parent_directories=True)

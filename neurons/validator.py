@@ -34,7 +34,6 @@ import wandb
 
 # Local imports.
 import templar as tplr
-from templar.comms import load_checkpoint, save_checkpoint
 
 # GPU optimizations.
 torch.backends.cudnn.benchmark = True
@@ -129,7 +128,7 @@ class Validator:
             tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
 
             # The load_checkpoint function updates the model's state in place
-            global_step, additional_state = asyncio.run(load_checkpoint(
+            global_step, additional_state = asyncio.run(tplr.load_checkpoint(
                 filename=self.checkpoint_path,
                 model=self.model,            # Model state is updated inside load_checkpoint
                 device=self.config.device
@@ -253,7 +252,7 @@ class Validator:
                     # Update last checkpoint block to avoid repeated saves at the same block
                     self.last_checkpoint_block = self.global_step
                     # Schedule the save_checkpoint function to run asynchronously
-                    asyncio.create_task(save_checkpoint(
+                    asyncio.create_task(tplr.save_checkpoint(
                         filename=self.checkpoint_path,
                         model=self.model,
                         global_step=self.global_step,
@@ -310,9 +309,9 @@ class Validator:
 
                 # Attain the UID of this slice.
                 st = tplr.T()
-                valid_eval_slices = [s for s in eval_slices[window] if s.version == __version__]
+                valid_eval_slices = [s for s in eval_slices[window] if getattr(s, 'version', None) == tplr.__version__]
                 if not valid_eval_slices:
-                    tplr.logger.warning(f"{tplr.P(window, tplr.T() - st)}: No valid slices with matching version {__version__}, continuing...")
+                    tplr.logger.warning(f"{tplr.P(window, tplr.T() - st)}: No valid slices with matching version {tplr.__version__}, continuing...")
                     while self.current_window - offset == window:
                         await asyncio.sleep(0.1)  # Wait for next window.
                     continue

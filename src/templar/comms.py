@@ -368,21 +368,40 @@ async def handle_file(s3_client, bucket: str, filename: str, hotkey: str, window
 
 async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 'slice'):
     """
-    Processes an S3 bucket to download files matching the given windows.
+    Processes a single S3 bucket to download files for specified windows.
 
     Args:
-        s3_client: The S3 client.
-        bucket (str): Name of the S3 bucket.
-        windows (List[int]): A list of window identifiers.
+        s3_client: The S3 client to use for operations
+        bucket (str): Name of the S3 bucket to process
+        windows (List[int]): List of window IDs to download files for
+        key (str, optional): Prefix to filter files by. Defaults to 'slice'
 
     Returns:
-        List[SimpleNamespace]: A list of file metadata and paths for downloaded files.
+        List[SimpleNamespace]: List of downloaded file metadata objects containing:
+            - bucket: The S3 bucket name
+            - hotkey: The hotkey identifier 
+            - filename: The original S3 object key
+            - window: The window ID
+            - temp_file: Path to the downloaded file
+
+    The function:
+    1. Validates the bucket name
+    2. For each window:
+        - Lists objects with matching prefix
+        - Parses filenames to extract metadata
+        - Downloads matching files concurrently
+        - Handles version checking and error cases
+    3. Returns list of successfully downloaded files
+
+    Example:
+        >>> files = await process_bucket(s3_client, "my-bucket", [123, 124], "state")
+        >>> print(files[0].temp_file)
+        '/tmp/state-123-abc-v1.0.0.pt'
     """
     # Validate the bucket name before processing
     if not is_valid_bucket(bucket):
         logger.debug(f"Skipping invalid bucket: '{bucket}'")
         return []
-
     logger.debug(f"Processing bucket '{bucket}' for windows {windows}")
     files = []
     paginator = s3_client.get_paginator('list_objects_v2')
@@ -401,13 +420,18 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
                     filename = obj['Key']
                     logger.trace(f"Processing object with key '{filename}' in bucket '{bucket}'")
                     try:
-                        parts = filename.split('-')
-                        if len(parts) < 3:
+                        # Extract window, hotkey, and version from the filename
+                        match = re.match(rf"^{key}-(\d+)-(.+)-v(.+)\.pt$", filename)
+                        if not match:
                             logger.error(f"Filename '{filename}' does not conform to the expected format.")
                             continue
-                        slice_window = int(parts[1])
-                        slice_hotkey = parts[2].split('.')[0]
-                        logger.trace(f"Parsed filename '{filename}' into window '{slice_window}' and hotkey '{slice_hotkey}'")
+                        slice_window = int(match.group(1))
+                        slice_hotkey = match.group(2)
+                        slice_version = match.group(3)
+                        if slice_version != __version__:
+                            logger.warning(f"Skipping file '{filename}' due to version mismatch (expected {__version__}, got {slice_version}).")
+                            continue
+                        logger.trace(f"Parsed filename '{filename}' into window '{slice_window}', hotkey '{slice_hotkey}', and version '{slice_version}'")
                         if slice_window == window:
                             download_tasks.append(handle_file(s3_client, bucket, filename, slice_hotkey, slice_window))
                     except ValueError:
@@ -424,9 +448,9 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
                             logger.error(f"Download task failed: {res}")
                         elif res:
                             files.append(res)
+                    logger.trace(f"Completed processing page for prefix '{prefix}' in bucket '{bucket}'")
                 except Exception as e:
                     logger.exception(f"Error during asyncio.gather for prefix '{prefix}': {e}")
-                logger.trace(f"Completed processing page for prefix '{prefix}' in bucket '{bucket}'")
         except Exception as e:
             logger.error(f"Error listing objects in bucket '{bucket}' with prefix '{prefix}': {e}")
     logger.trace(f"Completed processing bucket '{bucket}' for windows {windows}")

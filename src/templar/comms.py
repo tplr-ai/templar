@@ -33,6 +33,7 @@ import sys
 from templar.logging import logger
 
 from . import *
+from . import __version__
 
 # Set uvloop as the event loop policy
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())

@@ -34,7 +34,7 @@ Both miners and validators utilize asynchronous checkpoint saving to prevent blo
 
 - Checkpoints are saved asynchronously every 500 training steps.
 - The saving process uses asynchronous tasks to offload the I/O operations.
-- Default checkpoint file is `miner_checkpoint.pth`.
+- Default checkpoint file is `checkpoint-M<UID>.pth`.
 
 ### Restoring from Checkpoint
 
@@ -57,7 +57,7 @@ Both miners and validators utilize asynchronous checkpoint saving to prevent blo
 - Checkpoints are saved asynchronously every 500 blocks.
 - The checkpointing is triggered based on the blockchain's block number.
 - Uses asynchronous tasks to prevent blocking the evaluation loop.
-- Default checkpoint file is `validator_checkpoint.pth`.
+- Default checkpoint file is `checkpoint-V<UID>.pth`.
 
 ### Restoring from Checkpoint
 
@@ -79,7 +79,7 @@ Both miners and validators utilize asynchronous checkpoint saving to prevent blo
 
 ### Setting the Checkpoint Path
 
-By default, the checkpoint files are saved with the names `miner_checkpoint.pth` and `validator_checkpoint.pth`. You can customize the checkpoint path using the `--checkpoint_path` argument when running the miner or validator.
+By default, the checkpoint files are saved with the names `checkpoint-M<UID>.pth` and `checkpoint-V<UID>.pth`. You can customize the checkpoint path using the `--checkpoint_path` argument when running the miner or validator.
 
 **Example**:
 

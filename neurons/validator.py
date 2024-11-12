@@ -58,7 +58,7 @@ class Validator:
         parser.add_argument('--test', action='store_true', help='Run on test network')
         parser.add_argument('--local', action='store_true', help='Run on local network')
         parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
-        parser.add_argument('--checkpoint_path', type=str, default='validator_checkpoint.pth', help='Path to save/load the checkpoint')
+        parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to save/load the checkpoint. If None, the path is set to checkpoint-V<UID>.pth.')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -121,7 +121,7 @@ class Validator:
         self.model.eval()
 
         # Set checkpoint path
-        self.checkpoint_path = self.config.checkpoint_path
+        self.checkpoint_path = f"checkpoint-V{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
 
         # Load checkpoint if it exists
         if os.path.exists(self.checkpoint_path):
@@ -240,8 +240,6 @@ class Validator:
                 tplr.logger.info('[bold]' + '\n' + '-' * 40 + f' Step: {self.global_step} ' + '-' * 40)
                 gs_start = tplr.T()
                 self.global_step += 1
-                # Set checkpoint path
-                self.checkpoint_path = self.config.checkpoint_path
                 offset = 2
                 window = self.current_window - offset
 

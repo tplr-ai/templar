@@ -597,9 +597,6 @@ ARN_REGEX = re.compile(
     r'|^arn:(aws|aws-cn|aws-us-gov):s3-outposts:[a-z0-9\-]+:\d{12}:outpost[/:][a-zA-Z0-9.\-_]{1,63}[/:]accesspoint[/:][a-zA-Z0-9\-]{1,63}$'
 )
 
-import asyncio
-from aiobotocore.session import get_session
-from templar.comms import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
 
 async def delete_old_version_files(bucket_name: str, current_version: str):
     """

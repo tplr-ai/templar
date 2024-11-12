@@ -9,7 +9,7 @@ import asyncio
 
 
 # Import local modules
-from . import logger, delete_old_version_files, __version__
+from . import *
 
 
 TARGET_BRANCH = "main"
@@ -19,9 +19,8 @@ class AutoUpdate(threading.Thread):
     Automatic update utility for templar neurons.
     """
 
-    def __init__(self, interval_hours=4, process_name=None):
+    def __init__(self, process_name=None):
         super().__init__()
-        self.interval_hours = interval_hours
         self.process_name = process_name
         self.daemon = True  # Ensure thread exits when main program exits
         try:
@@ -226,4 +225,4 @@ class AutoUpdate(threading.Thread):
                 self.try_update()
             except Exception as e:
                 logger.exception("Exception during autoupdate check", exc_info=e)
-            time.sleep(600)
+            time.sleep(600)  # Sleep for 10 mins

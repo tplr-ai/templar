@@ -50,25 +50,75 @@ async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
             weights_only=True,
         )
 
-async def apply_slices_to_model(model: torch.nn.Module, window: int, seed: str, compression: int, key: str = 'slice') -> int:
-    indices_dict = await get_indices_for_window(model, seed, compression)
+async def apply_slices_to_model(
+    model: torch.nn.Module,
+    window: int,
+    seed: str,
+    compression: int,
+    key: str = 'slice'
+) -> int:
+    """
+    Applies downloaded model parameter slices to a model for a specific window.
 
-    # Load all the slices associated with this window.
+    Args:
+        model (torch.nn.Module): The PyTorch model to apply slices to
+        window (int): The window number to load slices for
+        seed (str): Seed used to determine which parameters to select
+        compression (int): Compression factor for parameter selection
+        key (str, optional): Prefix for the slice files. Defaults to 'slice'
+
+    Returns:
+        int: The maximum global step seen across all applied slices
+
+    The function:
+    1. Gets indices for parameter selection based on seed and compression
+    2. Loads all slice files for the given window
+    3. For each slice file:
+        - Verifies version matches
+        - Loads slice data and applies to model parameters
+        - Tracks max global step seen
+    4. Averages parameter values across all slices
+    5. Updates model parameters with averaged values
+
+    Example:
+        >>> max_step = await apply_slices_to_model(
+        ...     model=model,
+        ...     window=123,
+        ...     seed="abc",
+        ...     compression=10,
+        ...     key="state"
+        ... )
+        >>> print(max_step)
+        1000
+
+    Raises:
+        Timeout: If unable to acquire lock on slice file
+        Exception: For errors loading or applying slices
+    """
+    indices_dict = await get_indices_for_window(model, seed, compression)
     slice_files = await load_files_for_window(window=window, key=key)
 
-    # Dictionary to keep track of the number of slices applied per parameter.
     slices_per_param = {name: 0 for name, _ in model.named_parameters()}
-
-    # Dictionary to accumulate the sum of values for each parameter.
     param_sums = {name: torch.zeros_like(param.data) for name, param in model.named_parameters()}
-
     max_global_step = 0  # Initialize max_global_step
 
-    # Iterate over each slice file and compute the sum of values.
     for file_i in slice_files:
         try:
+            # Check if the filename contains the correct version
+            from templar import __version__  # Import the version number
+            match = re.match(rf"^{key}-{window}-.+-v{__version__}\.pt$", os.path.basename(file_i))
+            if not match:
+                logger.warning(f"Skipping file {file_i} due to version mismatch in filename.")
+                continue
+
             slice_i = await get_slices(file_i, model.device)
-            slice_global_step = slice_i.get('global_step', 0)
+            slice_global_step = slice_i.get('global_step')
+
+            # Skip the slice if 'global_step' is not present
+            if slice_global_step is None:
+                logger.warning(f"Skipping slice {file_i} because it has no global_step.")
+                continue
+
             max_global_step = max(max_global_step, slice_global_step)
 
             for name, param in model.named_parameters():
@@ -98,11 +148,49 @@ async def apply_slices_to_model(model: torch.nn.Module, window: int, seed: str, 
 
     return max_global_step
 
-async def upload_slice_for_window(bucket: str, model: torch.nn.Module, window: int, seed: str, wallet: 'bt.wallet', compression: int, key: str = 'slice', global_step: int = 0):
-    filename = f'{key}-{window}-{wallet.hotkey.ss58_address}.pt'
+async def upload_slice_for_window(
+    bucket: str,
+    model: torch.nn.Module,
+    window: int,
+    seed: str,
+    wallet: 'bt.wallet',
+    compression: int,
+    key: str = 'slice',
+    global_step: int = 0
+):
+    """
+    Uploads a slice of model parameters to S3 for a specific window.
+
+    Args:
+        bucket (str): Name of the S3 bucket to upload to
+        model (torch.nn.Module): The PyTorch model to slice and upload
+        window (int): The window number this slice belongs to
+        seed (str): Seed used to determine which parameters to slice
+        wallet (bt.wallet): Wallet containing hotkey for filename
+        compression (int): Compression factor for parameter selection
+        key (str, optional): Prefix for the filename. Defaults to 'slice'
+        global_step (int, optional): Global training step. Defaults to 0
+
+    The function:
+    1. Creates a filename incorporating window, hotkey and version
+    2. Gets indices for parameter selection based on seed and compression
+    3. Creates a slice dictionary with selected parameters and global_step
+    4. Saves slice to temp file and uploads to S3 with public-read access
+    5. Cleans up temp file after upload
+
+    Example filename format:
+        slice-123-0x123...abc-v1.0.0.pt
+
+    Raises:
+        Exception: If upload to S3 fails
+    """
+    from templar import __version__  # Import the version number
+
+    # Include version in the filename
+    filename = f'{key}-{window}-{wallet.hotkey.ss58_address}-v{__version__}.pt'
     logger.debug(f"Uploading slice to S3: {filename}")
 
-    model_state_dict = model.state_dict()
+    # Prepare the slice data
     indices = await get_indices_for_window(model, seed, compression)
 
     # Create the slice dictionary with global_step
@@ -387,19 +475,32 @@ async def download_slices_for_buckets_and_windows(buckets: List[str], windows: L
 
 async def load_files_for_window(window: int, key: str = 'slice') -> List[str]:
     """
-    Retrieves the paths to downloaded window files from the temporary directory.
+    Loads files for a specific window from the temporary directory.
 
     Args:
-        window (int): The window identifier.
+        window (int): The window identifier to load files for
+        key (str, optional): The prefix to filter files by. Defaults to 'slice'.
 
     Returns:
-        List[str]: A list of file paths corresponding to the window.
+        List[str]: A list of full file paths matching the window and key pattern
+
+    Example:
+        >>> files = await load_files_for_window(123, 'state')
+        >>> print(files)
+        ['/tmp/state-123-abc-v1.0.0.pt', '/tmp/state-123-def-v1.0.0.pt']
+
+    Note:
+        - Only returns files matching pattern: {key}-{window}-*-v{version}.pt
+        - Files must be in the system temp directory
+        - Version number is pulled from templar.__version__
     """
+    from templar import __version__  # Import the version number
     logger.debug(f"Retrieving files for window {window} from temporary directory")
     temp_dir = tempfile.gettempdir()
     window_files = []
+    pattern = re.compile(rf"^{key}-{window}-.+-v{__version__}\.pt$")
     for filename in os.listdir(temp_dir):
-        if filename.startswith(f"{key}-{window}-") and filename.endswith(".pt"):
+        if pattern.match(filename):
             window_files.append(os.path.join(temp_dir, filename))
             logger.debug(f"Found file {filename} for window {window}")
     return window_files
@@ -407,15 +508,26 @@ async def load_files_for_window(window: int, key: str = 'slice') -> List[str]:
 
 async def delete_files_before_window(window_max: int, key: str = 'slice'):
     """
-    Deletes all files on the local machine which have a window id before a specific value window_max.
+    Deletes temporary files with window IDs less than the specified maximum.
 
     Args:
-        window_max (int): The maximum window id. Files with window ids less than this value will be deleted.
-        key (str): The prefix of the files to consider (default is 'slice').
+        window_max (int): Maximum window ID to keep. Files with window IDs less than this will be deleted
+        key (str, optional): The prefix to filter files by. Defaults to 'slice'
+
+    Example:
+        >>> await delete_files_before_window(100, 'state') 
+        # Deletes all state-*.pt files with window < 100
+
+    Note:
+        - Deletes both .pt and .pt.lock files
+        - Only deletes files matching pattern: {key}-{window}-*-v{version}.pt
+        - Files must be in system temp directory
+        - Version number is pulled from templar.__version__
     """
+    from templar import __version__  # Import the version number
     logger.debug(f"Deleting files with window id before {window_max}")
     temp_dir = tempfile.gettempdir()
-    pattern = re.compile(rf"^{re.escape(key)}-(\d+)-.*\.(pt|pt\.lock)$")
+    pattern = re.compile(rf"^{re.escape(key)}-(\d+)-.+-v{__version__}\.(pt|pt\.lock)$")
     for filename in os.listdir(temp_dir):
         match = pattern.match(filename)
         if match:
@@ -432,13 +544,24 @@ async def delete_files_before_window(window_max: int, key: str = 'slice'):
 
 async def delete_files_from_bucket_before_window(bucket: str, window_max: int, key: str = 'slice'):
     """
-    Deletes all files in the specified S3 bucket which have a window id before a specific value window_max.
+    Deletes files from an S3 bucket with window IDs less than the specified maximum.
 
     Args:
-        bucket (str): The name of the S3 bucket.
-        window_max (int): The maximum window id. Files with window ids less than this value will be deleted.
-        key (str): The prefix of the files to consider (default is 'slice').
+        bucket (str): Name of the S3 bucket to delete files from
+        window_max (int): Maximum window ID to keep. Files with window IDs less than this will be deleted
+        key (str, optional): The prefix to filter files by. Defaults to 'slice'
+
+    Example:
+        >>> await delete_files_from_bucket_before_window('my-bucket', 100, 'state')
+        # Deletes all state-*.pt files with window < 100 from my-bucket
+
+    Note:
+        - Deletes both .pt and .pt.lock files
+        - Only deletes files matching pattern: {key}-{window}-*-v{version}.pt
+        - Version number is pulled from templar.__version__
+        - Requires valid AWS credentials and bucket permissions
     """
+    from templar import __version__  # Import the version number
     logger.debug(f"Deleting files in bucket {bucket} with window id before {window_max}")
     session = get_session()
     async with session.create_client(
@@ -453,7 +576,7 @@ async def delete_files_from_bucket_before_window(bucket: str, window_max: int, k
             if 'Contents' in response:
                 for obj in response['Contents']:
                     filename = obj['Key']
-                    match = re.match(rf"^{re.escape(key)}-(\d+)-.*\.(pt|pt\.lock)$", filename)
+                    match = re.match(rf"^{re.escape(key)}-(\d+)-.+-v{__version__}\.(pt|pt\.lock)$", filename)
                     if match:
                         try:
                             window_id = int(match.group(1))
@@ -473,6 +596,47 @@ ARN_REGEX = re.compile(
     r'^arn:(aws|aws-cn|aws-us-gov):s3-object-lambda:[a-z0-9\-]+:\d{12}:accesspoint[/:][a-zA-Z0-9.\-_]{1,63}$'
     r'|^arn:(aws|aws-cn|aws-us-gov):s3-outposts:[a-z0-9\-]+:\d{12}:outpost[/:][a-zA-Z0-9.\-_]{1,63}[/:]accesspoint[/:][a-zA-Z0-9\-]{1,63}$'
 )
+
+import asyncio
+from aiobotocore.session import get_session
+from templar.comms import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+
+async def delete_old_version_files(bucket_name: str, current_version: str):
+    """
+    Deletes files from the S3 bucket that do not match the current version.
+
+    Args:
+        bucket_name (str): The name of the S3 bucket.
+        current_version (str): The current version string.
+    """
+    session = get_session()
+    async with session.create_client(
+        's3',
+        region_name='us-east-1',
+        config=client_config,
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+    ) as s3_client:
+        paginator = s3_client.get_paginator('list_objects_v2')
+        async for page in paginator.paginate(Bucket=bucket_name):
+            to_delete = []
+            for obj in page.get('Contents', []):
+                filename = obj['Key']
+                # Check if the file version matches the current version
+                match = re.match(rf".+-v(.+)\.pt$", filename)
+                if match:
+                    file_version = match.group(1)
+                    if file_version != current_version:
+                        to_delete.append({'Key': filename})
+                        logger.debug(f"Scheduled for deletion: {filename}")
+            # Delete old versions in batches of 1000 (S3 limit for delete_objects)
+            if to_delete:
+                response = await s3_client.delete_objects(
+                    Bucket=bucket_name,
+                    Delete={'Objects': to_delete}
+                )
+                deleted = response.get('Deleted', [])
+                logger.info(f"Deleted {len(deleted)} old version files from bucket {bucket_name}")
 
 def is_valid_bucket(bucket_name: str) -> bool:
     """

@@ -77,11 +77,11 @@ class Miner:
             config.subtensor.chain_endpoint = 'ws://127.0.0.1:9944'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
+        tplr.validate_bucket_or_exit(config.bucket)
         if config.autoupdate:
             from templar.autoupdate import AutoUpdate
-            autoupdater = AutoUpdate(process_name=config.process_name)
+            autoupdater = AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
-        tplr.validate_bucket_or_exit(config.bucket)
         return config
 
 
@@ -224,6 +224,7 @@ class Miner:
         
         # Optionally sync the model state by pulling model states from the history.
         if self.config.sync_state:
+            st = tplr.T()
             history_windows = [ self.current_window - i for i in range (self.hparams.max_history) ]
             state_slices = await tplr.download_slices_for_buckets_and_windows(
                 buckets = self.buckets,

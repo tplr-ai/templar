@@ -107,7 +107,7 @@ async def apply_slices_to_model(
         try:
             # Check if the filename contains the correct version
             from templar import __version__  # Import the version number
-            match = re.match(rf"^{key}-{window}-.+-v{__version__}\.pt$", os.path.basename(file_i))
+            match = re.match(rf"^{key}-{window}-.+-v{re.escape(__version__)}\.pt$", os.path.basename(file_i))
             if not match:
                 logger.warning(f"Skipping file {file_i} due to version mismatch in filename.")
                 continue
@@ -347,7 +347,7 @@ async def download_file(s3_client, bucket: str, filename: str) -> str:
             # The lock is automatically released when exiting the 'with' block
             pass
 
-async def handle_file(s3_client, bucket: str, filename: str, hotkey: str, window: int):
+async def handle_file(s3_client, bucket: str, filename: str, hotkey: str, window: int, version: str):
     """
     Handles downloading a single file from S3.
 
@@ -357,14 +357,23 @@ async def handle_file(s3_client, bucket: str, filename: str, hotkey: str, window
         filename (str): The S3 object key (filename).
         hotkey (str): The hotkey identifier.
         window (int): The window identifier.
+        version (str): The version extracted from the filename.
 
     Returns:
-        SimpleNamespace: An object containing file metadata and the path to the downloaded file.
+        SimpleNamespace: An object containing file metadata and the path to the downloaded file,
+                         including the version.
     """
-    logger.debug(f"Handling file {filename} for window {window} and hotkey {hotkey}")
+    logger.debug(f"Handling file '{filename}' for window {window} and hotkey '{hotkey}'")
     temp_file = await download_file(s3_client, bucket, filename)
     if temp_file:
-        return SimpleNamespace(bucket=bucket, hotkey=hotkey, filename=filename, window=window, temp_file=temp_file)
+        return SimpleNamespace(
+            bucket=bucket,
+            hotkey=hotkey,
+            filename=filename,
+            window=window,
+            temp_file=temp_file,
+            version=version  # Attach the version here
+        )
     return None
 
 async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 'slice'):
@@ -372,33 +381,33 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
     Processes a single S3 bucket to download files for specified windows.
 
     Args:
-        s3_client: The S3 client to use for operations
-        bucket (str): Name of the S3 bucket to process
-        windows (List[int]): List of window IDs to download files for
-        key (str, optional): Prefix to filter files by. Defaults to 'slice'
+        s3_client: The S3 client to use for operations.
+        bucket (str): Name of the S3 bucket to process.
+        windows (List[int]): List of window IDs to download files for.
+        key (str, optional): Prefix to filter files by. Defaults to 'slice'.
 
     Returns:
         List[SimpleNamespace]: List of downloaded file metadata objects containing:
-            - bucket: The S3 bucket name
-            - hotkey: The hotkey identifier 
-            - filename: The original S3 object key
-            - window: The window ID
-            - temp_file: Path to the downloaded file
+            - bucket: The S3 bucket name.
+            - hotkey: The hotkey identifier.
+            - filename: The original S3 object key.
+            - window: The window ID.
+            - temp_file: Path to the downloaded file.
+            - version: Extracted version from the filename.
 
     The function:
-    1. Validates the bucket name
+    1. Validates the bucket name.
     2. For each window:
-        - Lists objects with matching prefix
-        - Parses filenames to extract metadata
-        - Downloads matching files concurrently
-        - Handles version checking and error cases
-    3. Returns list of successfully downloaded files
-
-    Example:
-        >>> files = await process_bucket(s3_client, "my-bucket", [123, 124], "state")
-        >>> print(files[0].temp_file)
-        '/tmp/state-123-abc-v1.0.0.pt'
+        - Lists objects with matching prefix.
+        - Parses filenames to extract metadata.
+        - Downloads matching files concurrently.
+        - Handles version checking and error cases.
+    3. Returns list of successfully downloaded files.
     """
+    # Import the required modules
+    import re
+    from templar import __version__  # Ensure __version__ is imported
+
     # Validate the bucket name before processing
     if not is_valid_bucket(bucket):
         logger.debug(f"Skipping invalid bucket: '{bucket}'")
@@ -421,22 +430,31 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
                     filename = obj['Key']
                     logger.trace(f"Processing object with key '{filename}' in bucket '{bucket}'")
                     try:
-                        # Extract window, hotkey, and version from the filename
-                        match = re.match(rf"^{key}-(\d+)-(.+)-v(.+)\.pt$", filename)
+                        # Extract hotkey and version from the filename using non-greedy matching
+                        match = re.match(rf"^{key}-{window}-(.+?)-v(.+)\.pt$", filename)
                         if not match:
                             logger.error(f"Filename '{filename}' does not conform to the expected format.")
                             continue
-                        slice_window = int(match.group(1))
-                        slice_hotkey = match.group(2)
-                        slice_version = match.group(3)
+                        slice_hotkey = match.group(1)
+                        slice_version = match.group(2)
+
+                        # Compare version with the expected version
                         if slice_version != __version__:
-                            logger.warning(f"Skipping file '{filename}' due to version mismatch (expected {__version__}, got {slice_version}).")
+                            logger.warning(
+                                f"Skipping file '{filename}' due to version mismatch "
+                                f"(expected {__version__}, got {slice_version})."
+                            )
                             continue
-                        logger.trace(f"Parsed filename '{filename}' into window '{slice_window}', hotkey '{slice_hotkey}', and version '{slice_version}'")
-                        if slice_window == window:
-                            download_tasks.append(handle_file(s3_client, bucket, filename, slice_hotkey, slice_window))
+                        logger.trace(
+                            f"Parsed filename '{filename}' into window '{window}', "
+                            f"hotkey '{slice_hotkey}', and version '{slice_version}'"
+                        )
+                        # Add the download task, passing the version
+                        download_tasks.append(
+                            handle_file(s3_client, bucket, filename, slice_hotkey, window, slice_version)
+                        )
                     except ValueError:
-                        logger.exception(f"Error parsing window ID in filename '{filename}'")
+                        logger.exception(f"Error parsing filename '{filename}'")
                         continue
                     except Exception as e:
                         logger.exception(f"Unexpected error processing filename '{filename}': {e}")

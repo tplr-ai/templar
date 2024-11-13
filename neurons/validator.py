@@ -188,7 +188,9 @@ class Validator:
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
         self.hparams = tplr.load_hparams()
 
-        def get_bucket(uid):
+    def get_bucket(uid):
+        max_retries = 5  # Number of times to retry
+        for attempt in range(1, max_retries + 1):
             try:
                 bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
                 if tplr.is_valid_bucket(bucket):
@@ -197,8 +199,10 @@ class Validator:
                     tplr.logger.debug(f"Skipping UID {uid} due to invalid or missing bucket name: {bucket}")
                     return None
             except Exception as e:
-                tplr.logger.debug(f"Error retrieving bucket for UID {uid}: {e}")
-                return None
+                tplr.logger.warning(f"Error retrieving bucket for UID {uid} on attempt {attempt}/{max_retries}: {e}")
+                time.sleep(1)  # Wait for a second before retrying
+        tplr.logger.error(f"Failed to retrieve bucket for UID {uid} after {max_retries} attempts")
+        return None
 
         with ThreadPoolExecutor() as executor:
             next_buckets = list(executor.map(get_bucket, self.metagraph.uids))

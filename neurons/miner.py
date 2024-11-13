@@ -134,7 +134,7 @@ class Miner:
             weight_decay=self.hparams.optimizer_weight_decay,  # Weight decay
             foreach=True,  # more memory usage, but faster
         )   
-        
+
         # Load checkpoint if it exists
         self.checkpoint_path = f"checkpoint-M{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
         if os.path.exists(self.checkpoint_path):
@@ -201,16 +201,20 @@ class Miner:
         self.hparams = tplr.load_hparams()
 
         def get_bucket(uid):
-            try:
-                bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
-                if tplr.is_valid_bucket(bucket):
-                    return bucket
-                else:
-                    tplr.logger.debug(f"Skipping UID {uid} due to invalid or missing bucket name: {bucket}")
-                    return None
-            except Exception as e:
-                tplr.logger.debug(f"Error retrieving bucket for UID {uid}: {e}")
-                return None
+            max_retries = 5  # Number of times to retry
+            for attempt in range(1, max_retries + 1):
+                try:
+                    bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
+                    if tplr.is_valid_bucket(bucket):
+                        return bucket
+                    else:
+                        tplr.logger.debug(f"Skipping UID {uid} due to invalid or missing bucket name: {bucket}")
+                        return None
+                except Exception as e:
+                    tplr.logger.warning(f"Error retrieving bucket for UID {uid} on attempt {attempt}/{max_retries}: {e}")
+                    time.sleep(1)  # Wait for a second before retrying
+            tplr.logger.error(f"Failed to retrieve bucket for UID {uid} after {max_retries} attempts")
+            return None
 
         with ThreadPoolExecutor() as executor:
             next_buckets = list(executor.map(get_bucket, self.metagraph.uids))

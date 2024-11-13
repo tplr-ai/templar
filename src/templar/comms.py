@@ -32,6 +32,7 @@ import re
 import sys
 from templar.logging import logger
 from templar.constants import CF_REGION_NAME
+from templar.schemas import Bucket
 
 from . import __version__
 from .config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, client_config
@@ -476,46 +477,47 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
     logger.trace(f"Completed processing bucket '{bucket}' for windows {windows}")
     return files
 
-async def download_slices_for_buckets_and_windows(buckets: List[str], windows: List[int], key:str = 'slice') -> Dict[int, List[SimpleNamespace]]:
+async def download_slices_for_buckets_and_windows(buckets: List[Bucket], windows: List[int], key:str = 'slice') -> Dict[int, List[SimpleNamespace]]:
     """
     Downloads files from multiple S3 buckets for the given windows.
 
     Args:
-        buckets (List[str]): A list of S3 bucket names.
+        buckets (List[Bucket]): A list of Bucket objects, holding name and
+            creds for a cloudflare bucket.
         windows (List[int]): A list of window identifiers.
 
     Returns:
         Dict[int, List[SimpleNamespace]]: A dictionary mapping windows to lists of file metadata and paths.
     """
-    logger.debug(f"Downloading files for buckets {set(buckets)} and windows {windows}")
+    logger.debug(f"Downloading files for buckets {set([b.name for b in buckets])} and windows {windows}")
     session = get_session()
-    async with session.create_client(
-        's3',
-        region_name=CF_REGION_NAME,
-        config=client_config,
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
-    ) as s3_client:
-        tasks = []
-        for bucket in set(buckets):
-            logger.debug(f'bucket: {bucket}')
+    tasks = []
+    for bucket in set(buckets):
+        async with session.create_client(
+            's3',
+            region_name=CF_REGION_NAME,
+            config=client_config,
+            aws_access_key_id=bucket.access_key_id,
+            aws_secret_access_key=bucket.secret_access_key
+        ) as s3_client:
+            logger.debug(f'bucket: {bucket.name}')
             if not bucket:
                 continue
-            tasks.append(process_bucket(s3_client, bucket, windows, key))
-        results = await asyncio.gather(*tasks)
-        # Flatten the list of lists
-        files = [item for sublist in results for item in sublist]
+            tasks.append(process_bucket(s3_client, bucket.name, windows, key))
+    results = await asyncio.gather(*tasks)
+    # Flatten the list of lists
+    files = [item for sublist in results for item in sublist]
 
-        # Create a dictionary with windows as keys and list of files as values
-        windows_dict = {}
-        for file in files:
-            window = file.window
-            if window not in windows_dict:
-                windows_dict[window] = []
-            windows_dict[window].append(file)
+    # Create a dictionary with windows as keys and list of files as values
+    windows_dict = {}
+    for file in files:
+        window = file.window
+        if window not in windows_dict:
+            windows_dict[window] = []
+        windows_dict[window].append(file)
 
-        logger.debug(f"Downloaded all files grouped by windows: {windows}")
-        return windows_dict
+    logger.debug(f"Downloaded all files grouped by windows: {windows}")
+    return windows_dict
 
 async def load_files_for_window(window: int, key: str = 'slice') -> List[str]:
     """

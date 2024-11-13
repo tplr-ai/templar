@@ -31,11 +31,15 @@ from aiobotocore.session import get_session
 import re
 import sys
 from templar.logging import logger
+from templar.config import BUCKET_SECRETS
 from templar.constants import CF_REGION_NAME
 from templar.schemas import Bucket
 
 from . import __version__
 from .config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, client_config
+
+def get_base_url(account_id: str) -> str:
+    return f"https://{account_id}.r2.cloudflarestorage.com"
 
 # Set uvloop as the event loop policy
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -210,10 +214,11 @@ async def upload_slice_for_window(
     session = get_session()
     async with session.create_client(
         's3',
+        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
     ) as s3_client:
         try:
             with open(temp_file_name, 'rb') as f:
@@ -247,10 +252,11 @@ async def upload_master(bucket: str, model: torch.nn.Module, wallet: 'bt.wallet'
     session = get_session()
     async with session.create_client(
         's3',
+        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
     ) as s3_client:
         try:
             # Create a temporary file and write the model state dictionary to it
@@ -495,6 +501,7 @@ async def download_slices_for_buckets_and_windows(buckets: List[Bucket], windows
     for bucket in set(buckets):
         async with session.create_client(
             's3',
+            endpoint_url=get_base_url(bucket.account_id),
             region_name=CF_REGION_NAME,
             config=client_config,
             aws_access_key_id=bucket.access_key_id,
@@ -612,10 +619,11 @@ async def delete_files_from_bucket_before_window(bucket: str, window_max: int, k
     session = get_session()
     async with session.create_client(
         's3',
+        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
     ) as s3_client:
         try:
             response = await s3_client.list_objects_v2(Bucket=bucket)
@@ -707,7 +715,6 @@ def validate_bucket_or_exit(bucket_name: str):
     if not is_valid_bucket(bucket_name):
         logger.error(f"Bucket name {bucket_name} is invalid. Please refer to the AWS documentation on naming conventions ")
         sys.exit(1)
-
 
 async def save_checkpoint(filename, model, optimizer=None, scheduler=None, global_step=0, **kwargs):
     """

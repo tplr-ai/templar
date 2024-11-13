@@ -126,6 +126,15 @@ class Miner:
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
         self.model.train()
+
+        self.optimizer = optim.AdamW(
+            self.model.parameters(),
+            lr=self.hparams.learning_rate,  # Peak learning rate
+            betas=(self.hparams.optimizer_beta1, self.hparams.optimizer_beta2),  # B1 and B2
+            weight_decay=self.hparams.optimizer_weight_decay,  # Weight decay
+            foreach=True,  # more memory usage, but faster
+        )   
+        
         # Load checkpoint if it exists
         self.checkpoint_path = f"checkpoint-M{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
         if os.path.exists(self.checkpoint_path):
@@ -142,14 +151,7 @@ class Miner:
         else:
             tplr.logger.info("No checkpoint file found. Starting from scratch.")
             self.global_step = 0
-
-        self.optimizer = optim.AdamW(
-            self.model.parameters(),
-            lr=self.hparams.learning_rate,  # Peak learning rate
-            betas=(self.hparams.optimizer_beta1, self.hparams.optimizer_beta2),  # B1 and B2
-            weight_decay=self.hparams.optimizer_weight_decay,  # Weight decay
-            foreach=True,  # more memory usage, but faster
-        )        
+     
         # Initialize learning rate scheduler with correct last_epoch
         self.scheduler = tplr.get_wsd_scheduler(
             optimizer=self.optimizer,

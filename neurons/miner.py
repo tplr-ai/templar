@@ -103,7 +103,8 @@ class Miner:
 
         # Init bucket.
         try:
-            if BUCKET_SECRETS["bucket_name"] != self.subtensor.get_commitment(self.config.netuid, self.uid):
+            bucket = self.get_commitment(self.uid)
+            if BUCKET_SECRETS["bucket_name"] != bucket.name:
                 raise ValueError('')
         except Exception as e:
             tplr.logger.warning(f"Committing to the network due to the following exception: {e}")
@@ -191,13 +192,12 @@ class Miner:
         self.buckets = []
         for uid in self.metagraph.uids:
             try:
-                bucket =  self.subtensor.get_commitment(self.config.netuid, uid)
-                tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket}")
+                bucket =  self.get_commitment(uid)
+                tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket.name}")
                 self.buckets.append(bucket)
             except Exception as e:
                 tplr.logger.debug(f"Failed to retrieve bucket for UID {uid}: {e}")
                 self.buckets.append(None)
-
 
         # Init run state.
         self.sample_rate = 1.0
@@ -228,12 +228,12 @@ class Miner:
         next_buckets = []
         for uid in self.metagraph.uids:
             try:
-                bucket = self.subtensor.get_commitment(self.config.netuid, uid)
-                if tplr.is_valid_bucket(bucket):
-                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
+                bucket = self.get_commitment(uid)
+                if tplr.is_valid_bucket(bucket.name):
+                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket.name}")
                     next_buckets.append(bucket)
                 else:
-                    tplr.logger.debug(f"UID {uid}: Invalid or missing bucket name: {bucket}")
+                    tplr.logger.debug(f"UID {uid}: Invalid or missing bucket name: {bucket.name}")
                     next_buckets.append(None)
             except Exception as e:
                 tplr.logger.warning(f"UID {uid}: Error retrieving bucket: {e}")

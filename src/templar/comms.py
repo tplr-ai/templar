@@ -31,6 +31,7 @@ from aiobotocore.session import get_session
 import re
 import sys
 from templar.logging import logger
+from templar.constants import CF_REGION_NAME
 
 from . import __version__
 from .config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, client_config
@@ -208,7 +209,7 @@ async def upload_slice_for_window(
     session = get_session()
     async with session.create_client(
         's3',
-        region_name='us-east-1',
+        region_name=CF_REGION_NAME,
         config=client_config,
         aws_access_key_id=AWS_ACCESS_KEY_ID,
         aws_secret_access_key=AWS_SECRET_ACCESS_KEY
@@ -245,7 +246,7 @@ async def upload_master(bucket: str, model: torch.nn.Module, wallet: 'bt.wallet'
     session = get_session()
     async with session.create_client(
         's3',
-        region_name='us-east-1',
+        region_name=CF_REGION_NAME,
         config=client_config,
         aws_access_key_id=AWS_ACCESS_KEY_ID,
         aws_secret_access_key=AWS_SECRET_ACCESS_KEY
@@ -490,7 +491,7 @@ async def download_slices_for_buckets_and_windows(buckets: List[str], windows: L
     session = get_session()
     async with session.create_client(
         's3',
-        region_name='us-east-1',
+        region_name=CF_REGION_NAME,
         config=client_config,
         aws_access_key_id=AWS_ACCESS_KEY_ID,
         aws_secret_access_key=AWS_SECRET_ACCESS_KEY
@@ -609,7 +610,7 @@ async def delete_files_from_bucket_before_window(bucket: str, window_max: int, k
     session = get_session()
     async with session.create_client(
         's3',
-        region_name='us-east-1',
+        region_name=CF_REGION_NAME,
         config=client_config,
         aws_access_key_id=AWS_ACCESS_KEY_ID,
         aws_secret_access_key=AWS_SECRET_ACCESS_KEY

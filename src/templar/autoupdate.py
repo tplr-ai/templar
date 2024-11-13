@@ -74,7 +74,7 @@ class AutoUpdate(threading.Thread):
         except Exception as e:
             logger.error(f"Failed to reload local version: {e}")
             # Fallback to imported version
-            local_version = __version__
+            local_version = templar.__version__
 
         local_version_obj = version.parse(local_version)
         remote_version_obj = version.parse(remote_version)

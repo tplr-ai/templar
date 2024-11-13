@@ -35,6 +35,7 @@ import os
 
 # Import local files.
 import templar as tplr
+from templar.config import BUCKET_SECRETS
 
 # GPU optimizations.
 torch.backends.cudnn.benchmark = True
@@ -48,7 +49,6 @@ class Miner:
         parser = argparse.ArgumentParser(description='Miner script')
         parser.add_argument('--project', type=str, default='templar', help='Optional wandb project name')
         parser.add_argument('--netuid', type=int, default=3, help='Bittensor network UID.')
-        parser.add_argument('--bucket', type=str, default='decis', help='S3 bucket name')
         parser.add_argument('--actual_batch_size', type=int, default=8, help='Training batch size per accumulation.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training (e.g., cpu or cuda)')
         parser.add_argument('--remote', action='store_true', help='Connect to other buckets')
@@ -73,7 +73,7 @@ class Miner:
             config.subtensor.chain_endpoint = 'ws://127.0.0.1:9944'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
-        tplr.validate_bucket_or_exit(config.bucket)
+        tplr.validate_bucket_or_exit(BUCKET_SECRETS["bucket_name"])
         if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
@@ -99,11 +99,11 @@ class Miner:
 
         # Init bucket.
         try:
-            if self.config.bucket != self.subtensor.get_commitment(self.config.netuid, self.uid):
+            if BUCKET_SECRETS["bucket_name"] != self.subtensor.get_commitment(self.config.netuid, self.uid):
                 raise ValueError('')
         except:
-            self.subtensor.commit(self.wallet, self.config.netuid, self.config.bucket)
-        tplr.logger.info('Bucket:' + self.config.bucket)
+            self.subtensor.commit(self.wallet, self.config.netuid, BUCKET_SECRETS["bucket_name"])
+        tplr.logger.info('Bucket:' + BUCKET_SECRETS["bucket_name"])
 
         # Init Wandb.
         # Ensure the wandb directory exists
@@ -371,7 +371,7 @@ class Miner:
                     # Upload the delta for the previous window.
                     st = tplr.T()
                     await tplr.upload_slice_for_window(
-                        bucket = self.config.bucket, 
+                        bucket = BUCKET_SECRETS["bucket_name"],
                         model = self.model, 
                         window = window,
                         seed = window,
@@ -399,7 +399,7 @@ class Miner:
                     # Upload the state for the current window.
                     st = tplr.T()
                     await tplr.upload_slice_for_window(
-                        bucket = self.config.bucket, 
+                        bucket = BUCKET_SECRETS["bucket_name"],
                         model = self.model, 
                         window = window + 1,
                         seed = window + 1, 
@@ -414,8 +414,8 @@ class Miner:
                     st = tplr.T()
                     await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'state')
                     await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'delta')
-                    await tplr.delete_files_from_bucket_before_window( bucket = self.config.bucket, window_max = window - self.hparams.max_history, key = 'state' )
-                    await tplr.delete_files_from_bucket_before_window( bucket = self.config.bucket, window_max = window - self.hparams.max_history, key = 'delta' )
+                    await tplr.delete_files_from_bucket_before_window( bucket = BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'state' )
+                    await tplr.delete_files_from_bucket_before_window( bucket = BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Cleaned file history.")
                     
                     # Wait until we are on a new window.

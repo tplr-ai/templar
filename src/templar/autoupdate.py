@@ -68,8 +68,8 @@ class AutoUpdate(threading.Thread):
         try:
             import templar
             from importlib import reload
-            from . import __init__
-            reload(__init__)
+            # from . import __init__
+            reload(templar)
             local_version = templar.__version__
         except Exception as e:
             logger.error(f"Failed to reload local version: {e}")

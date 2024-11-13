@@ -19,13 +19,14 @@ import os
 import boto3
 import typer
 from dotenv import dotenv_values
+from templar.constants import CF_REGION_NAME
 
 env_config = {**dotenv_values(".env"), **os.environ}
 AWS_ACCESS_KEY_ID = env_config.get('AWS_ACCESS_KEY_ID')
 AWS_SECRET_ACCESS_KEY = env_config.get('AWS_SECRET_ACCESS_KEY')
 CLIENT: boto3.client = boto3.client(
     's3',
-    region_name='us-east-1',
+    region_name=CF_REGION_NAME,
     aws_access_key_id = AWS_ACCESS_KEY_ID,
     aws_secret_access_key = AWS_SECRET_ACCESS_KEY
 )
@@ -36,7 +37,7 @@ def main(
     # Create your S3 connection.
     client: boto3.client = boto3.client(
         's3',
-        region_name = 'us-east-1',
+        region_name = CF_REGION_NAME,
         aws_access_key_id = AWS_ACCESS_KEY_ID,
         aws_secret_access_key = AWS_SECRET_ACCESS_KEY
     )

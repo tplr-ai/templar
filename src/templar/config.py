@@ -18,10 +18,26 @@
 import os
 import botocore.config
 from dotenv import dotenv_values
+import yaml
+from pathlib import Path
+from loguru import logger
+import sys
+
 # Load environment variables
 env_config = {**dotenv_values(".env"), **os.environ}
-AWS_ACCESS_KEY_ID = env_config.get('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = env_config.get('AWS_SECRET_ACCESS_KEY')
+AWS_ACCESS_KEY_ID = env_config.get("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = env_config.get("AWS_SECRET_ACCESS_KEY")
+
+envfile_path = Path(__file__).parents[2] / ".env.yaml"
+try:
+    with open(envfile_path, "r") as file:
+        BUCKET_SECRETS = yaml.safe_load(file)
+except FileNotFoundError:
+    logger.error(
+        f"{envfile_path} not found. Please create it with the help of `.env-template.yaml`."
+    )
+    sys.exit()
+BUCKET_SECRETS["bucket_name"] = BUCKET_SECRETS["account_id"]
 
 # Configure the S3 client
 client_config = botocore.config.Config(

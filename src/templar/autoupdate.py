@@ -14,7 +14,7 @@ from .comms import delete_old_version_files
 
 
 
-TARGET_BRANCH = "kaiju"
+TARGET_BRANCH = "main"
 
 class AutoUpdate(threading.Thread):
     """

@@ -76,8 +76,7 @@ class Miner:
         if config.trace: tplr.trace()
         tplr.validate_bucket_or_exit(config.bucket)
         if config.autoupdate:
-            from templar.autoupdate import AutoUpdate
-            autoupdater = AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
+            autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
         return config
 

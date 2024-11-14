@@ -7,9 +7,10 @@ import subprocess
 from packaging import version
 import asyncio
 
-
 # Import local modules
-from . import logger, __version__, delete_old_version_files
+from .logging import logger
+from . import __version__
+from .comms import delete_old_version_files
 
 
 

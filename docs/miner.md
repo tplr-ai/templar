@@ -45,7 +45,15 @@ This document provides a guide on how to set up and run a miner using `miner.py`
     "Version": "2012-10-17",
     "Statement": [
         {
-            "Sid": "VisualEditor0",
+            "Sid": "BucketListPermissions",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket"
+            ],
+            "Resource": "arn:aws:s3:::templar*"
+        },
+        {
+            "Sid": "ObjectPermissions",
             "Effect": "Allow",
             "Action": [
                 "s3:PutObject",
@@ -56,7 +64,7 @@ This document provides a guide on how to set up and run a miner using `miner.py`
                 "s3:PutObjectAcl",
                 "s3:DeleteObject"
             ],
-            "Resource": "arn:aws:s3:::<your-bucket-name>/*"
+            "Resource": "arn:aws:s3:::<your-bucket-name>*/*"
         }
     ]
 }

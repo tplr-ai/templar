@@ -17,9 +17,8 @@
 # fmt: off
 
 # Global imports.
-from concurrent.futures import ThreadPoolExecutor
-import sys 
-import time
+import sys
+import time 
 import wandb
 import torch
 import random
@@ -31,7 +30,6 @@ from tqdm import tqdm
 import bittensor as bt
 import torch.optim as optim
 from transformers import LlamaForCausalLM
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from rich.markup import escape
 import os
 
@@ -188,36 +186,32 @@ class Miner:
         print ( self.hparams )
         
     async def update(self):
+        """Continuously updates the global state by polling every 10 minutes."""
         while not self.stop_event.is_set():
             st = tplr.T()
-            # Run the blocking update operations in a separate thread
             await asyncio.to_thread(self.perform_update)
             tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
             await asyncio.sleep(600)
 
     def perform_update(self):
+        """Updates subtensor connection, metagraph, hyperparameters and buckets."""
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
         self.hparams = tplr.load_hparams()
 
-        def get_bucket(uid):
-            max_retries = 5  # Number of times to retry
-            for attempt in range(1, max_retries + 1):
-                try:
-                    bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
-                    if tplr.is_valid_bucket(bucket):
-                        return bucket
-                    else:
-                        tplr.logger.debug(f"Skipping UID {uid} due to invalid or missing bucket name: {bucket}")
-                        return None
-                except Exception as e:
-                    tplr.logger.warning(f"Error retrieving bucket for UID {uid} on attempt {attempt}/{max_retries}: {e}")
-                    time.sleep(1)  # Wait for a second before retrying
-            tplr.logger.error(f"Failed to retrieve bucket for UID {uid} after {max_retries} attempts")
-            return None
-
-        with ThreadPoolExecutor() as executor:
-            next_buckets = list(executor.map(get_bucket, self.metagraph.uids))
+        next_buckets = []
+        for uid in self.metagraph.uids:
+            try:
+                bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
+                if tplr.is_valid_bucket(bucket):
+                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
+                    next_buckets.append(bucket)
+                else:
+                    tplr.logger.debug(f"UID {uid}: Invalid or missing bucket name: {bucket}")
+                    next_buckets.append(None)
+            except Exception as e:
+                tplr.logger.warning(f"UID {uid}: Error retrieving bucket: {e}")
+                next_buckets.append(None)
 
         self.buckets = next_buckets
 
@@ -326,7 +320,7 @@ class Miner:
                 train_start = tplr.T()
                 self.model.zero_grad(); self.model.eval()
                 total_loss = 0.0
-                full_steps = 0; total_steps = 0; 
+                full_steps = 0; total_steps = 0 
                 exhuasted_window = False
                 for batch in dataset:
                     total_steps += 1
@@ -464,7 +458,7 @@ class Miner:
             try:
                 bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler); break
             except Exception as e:
-                 # Wait for 5 seconds before retrying
+                 # Wait for 1 second before retrying
                 tplr.logger.error(f"Failed to subscribe to block headers: {e}.\nRetrying in 1 seconds...")
                 time.sleep(1) 
             

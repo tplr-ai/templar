@@ -16,13 +16,8 @@
 # DEALINGS IN THE SOFTWARE.
 
 import json
-import time
-import requests
 from types import SimpleNamespace
 from transformers import AutoTokenizer, LlamaConfig
-
-# Import local tools
-from . import debug, trace, logger, T, P
 
 # Cache file path
 HPARAMS_FILE = "hparams.json"
@@ -59,7 +54,7 @@ def create_namespace(hparams: dict) -> SimpleNamespace:
 
 def load_hparams() -> SimpleNamespace:
     """
-    Load hyperparameters from a GitHub file, with caching and fallback mechanisms.
+    Load hyperparameters from local hparams.json file.
 
     Returns:
         SimpleNamespace: A namespace containing the hyperparameters and model configuration.
@@ -69,19 +64,6 @@ def load_hparams() -> SimpleNamespace:
         print(hparams.hidden_size)
         print(hparams.model_config)
     """
-    github_url = f"https://raw.githubusercontent.com/RaoFoundation/templar/main/hparams.json?timestamp={int(time.time())}"
-    try:
-        # Attempt to fetch from the GitHub file first
-        response = requests.get(github_url, timeout=10, headers={'Cache-Control': 'no-cache'})
-        response.raise_for_status()
-        hparams = json.loads(response.text)
-        logger.debug("Successfully loaded parameters from GitHub.")
-    except (requests.RequestException, json.JSONDecodeError) as e:
-        logger.debug(f"Error loading parameters from GitHub: {e}")
-        logger.debug("Attempting to load from cache...")
-        with open(HPARAMS_FILE, "r") as f:
-            hparams = json.load(f)
-    # Cache the new parameters
-    with open(HPARAMS_FILE, "w") as f:
-        json.dump(hparams, f, indent=4)
+    with open(HPARAMS_FILE, "r") as f:
+        hparams = json.load(f)
     return create_namespace(hparams)

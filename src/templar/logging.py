@@ -17,7 +17,6 @@
 
 import time
 import logging
-import bittensor as bt
 from rich.logging import RichHandler
 from rich.highlighter import NullHighlighter
 
@@ -86,3 +85,5 @@ def trace() -> None:
             self._log(TRACE_LEVEL_NUM, message, args, **kws)
     logging.Logger.trace = trace_method
     logger.setLevel(TRACE_LEVEL_NUM)
+
+__all__ = ['logger', 'debug', 'trace', 'P', 'T']

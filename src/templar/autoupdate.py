@@ -5,12 +5,14 @@ import time
 import git
 import subprocess
 from packaging import version
+import asyncio
 
 # Import local modules
-from . import logger
+from .logging import logger
+from . import __version__
+from .comms import delete_old_version_files
 
-# Import the local version
-from .__init__ import __version__
+
 
 TARGET_BRANCH = "main"
 
@@ -19,10 +21,10 @@ class AutoUpdate(threading.Thread):
     Automatic update utility for templar neurons.
     """
 
-    def __init__(self, interval_hours=4, process_name=None):
+    def __init__(self, process_name=None, bucket_name=None):
         super().__init__()
-        self.interval_hours = interval_hours
         self.process_name = process_name
+        self.bucket_name = bucket_name
         self.daemon = True  # Ensure thread exits when main program exits
         try:
             self.repo = git.Repo(search_parent_directories=True)
@@ -65,14 +67,15 @@ class AutoUpdate(threading.Thread):
 
         # Reload the version from __init__.py to get the latest version after updates
         try:
+            import templar
             from importlib import reload
-            from . import __init__
-            reload(__init__)
-            local_version = __init__.__version__
+            # from . import __init__
+            reload(templar)
+            local_version = templar.__version__
         except Exception as e:
             logger.error(f"Failed to reload local version: {e}")
             # Fallback to imported version
-            local_version = __version__
+            local_version = templar.__version__
 
         local_version_obj = version.parse(local_version)
         remote_version_obj = version.parse(remote_version)
@@ -164,13 +167,22 @@ class AutoUpdate(threading.Thread):
         except Exception as e:
             logger.exception("Failed to synchronize dependencies with uv", exc_info=e)
 
+    async def cleanup_old_versions(self):
+        """
+        Cleans up old version slices from the S3 bucket.
+        """
+        from templar import __version__
+        bucket_name = self.bucket_name
+        logger.info(f"Cleaning up old versions from bucket {bucket_name}")
+        await delete_old_version_files(bucket_name, __version__)
+
     def try_update(self):
         """
         Automatic update entrypoint method.
         """
-        if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
-            logger.info("Not on the target branch, skipping auto-update")
-            return
+        # if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
+        #     logger.info("Not on the target branch, skipping auto-update")
+        #     return
 
         if not self.check_version_updated():
             return
@@ -180,6 +192,12 @@ class AutoUpdate(threading.Thread):
 
         # Synchronize dependencies
         self.attempt_package_update()
+
+        # Clean up old versions from the bucket
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.cleanup_old_versions())
+        loop.close()
 
         # Restart application
         self.restart_app()
@@ -214,4 +232,4 @@ class AutoUpdate(threading.Thread):
                 self.try_update()
             except Exception as e:
                 logger.exception("Exception during autoupdate check", exc_info=e)
-            time.sleep(self.interval_hours * 3600)  # Sleep for specified hours
+            time.sleep(900)  # Sleep for 15 mins

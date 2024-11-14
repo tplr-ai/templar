@@ -15,26 +15,10 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-import io
 import os
-import sys
-import copy
-import json
-import time
-import types
 import boto3
-import torch
 import typer
-import wandb
-import random
-import argparse
-import tempfile
-from tqdm import tqdm
-import torch.optim as optim
 from dotenv import dotenv_values
-from types import SimpleNamespace
-from transformers import AutoTokenizer
-from transformers import GPT2Config, GPT2LMHeadModel
 
 env_config = {**dotenv_values(".env"), **os.environ}
 AWS_ACCESS_KEY_ID = env_config.get('AWS_ACCESS_KEY_ID')

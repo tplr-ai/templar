@@ -36,3 +36,4 @@ uv.lock
 
 # Project specific
 wandb
+checkpoint-*

@@ -20,7 +20,6 @@ import random
 import asyncio
 import aiohttp
 import numpy as np
-from tqdm import tqdm
 from transformers import AutoTokenizer
 from torch.utils.data import IterableDataset
 
@@ -104,7 +103,7 @@ class SubsetLoader(IterableDataset):
                         self.pages.append((config_name, page_number, split))
                     break  # Success, exit retry loop
 
-            except aiohttp.ClientResponseError as e:
+            except aiohttp.ClientResponseError:
                 attempt += 1
                 if attempt < retry_limit:
                     await asyncio.sleep(5)
@@ -385,7 +384,7 @@ class DatasetLoader(SubsetLoader):
                     # Collect the rows
                     return [row["row"]["text"] for row in data["rows"]]
 
-            except aiohttp.ClientResponseError as e:
+            except aiohttp.ClientResponseError:
                 attempt += 1
                 if attempt < retry_limit:
                     await asyncio.sleep(self.retry_delay)
@@ -461,7 +460,7 @@ class DatasetLoader(SubsetLoader):
 
                         return configs_data
 
-            except aiohttp.ClientResponseError as e:
+            except aiohttp.ClientResponseError:
                 attempt += 1
                 if attempt < DatasetLoader.retry_limit:
                     await asyncio.sleep(DatasetLoader.retry_delay)

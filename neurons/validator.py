@@ -32,6 +32,7 @@ from tqdm import tqdm
 from transformers import LlamaForCausalLM
 import pandas as pd
 import wandb
+import wandb.plot
 
 # Local imports.
 import templar as tplr
@@ -113,7 +114,7 @@ class Validator:
                         tplr.logger.info(f'Deleting old run: {run}'); run.delete()
             except: pass
             wandb.init(project=self.config.project, resume='allow', name=f'V{self.uid}', config=self.config,group='validator',job_type='validation')
-
+        self.metrics_history = pd.DataFrame()
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
         self.hparams = tplr.load_hparams()
@@ -470,13 +471,13 @@ class Validator:
                         "validator/utilization": eval_duration / (gs_end - gs_start)
                     }, step=self.global_step)                   
 
-                    # Prepare a list of dictionaries to hold metrics for all UIDs
+                    # Prepare a list to hold metrics for all UIDs
                     metrics_list = []
 
                     # Collect metrics for all UIDs
                     for uid_i in valid_score_indices:
-                        uid = uid_i.item()        # Integer for tensor indexing
-                        uid_str = str(uid)        # String for dictionary keys
+                        uid = uid_i.item()
+                        uid_str = str(uid)
 
                         # Extract metrics
                         step_score = self.step_scores[uid].item()
@@ -484,7 +485,7 @@ class Validator:
                         weight = self.weights[uid].item()
                         orig_weight = original_weights[uid].item()
 
-                        # Append metrics to the list
+                        # Append to metrics list for aggregation
                         metrics_list.append({
                             'global_step': self.global_step,
                             'uid': uid_str,
@@ -494,13 +495,44 @@ class Validator:
                             'original_weight': orig_weight,
                         })
 
-                    # Convert the list to a DataFrame
+                    # Convert metrics list to DataFrame
                     metrics_df = pd.DataFrame(metrics_list)
 
-                    if self.config.use_wandb:
-                        # Log the DataFrame as a Table to Wandb
-                        table = wandb.Table(dataframe=metrics_df)
-                        wandb.log({'validator_metrics': table}, step=self.global_step)
+                    # Append to metrics history
+                    self.metrics_history = pd.concat([self.metrics_history, metrics_df], ignore_index=True)
+
+                    # Drop duplicates to avoid multiple entries for the same step and UID
+                    self.metrics_history.drop_duplicates(subset=['global_step', 'uid'], keep='last', inplace=True)
+
+                    # List of metrics to plot
+                    metrics_to_plot = ['step_score', 'moving_score', 'weight', 'original_weight']
+
+                    # Create aggregated plots for each metric
+                    for metric_name in metrics_to_plot:
+                        # Pivot the DataFrame to have UIDs as columns
+                        pivot_df = self.metrics_history.pivot(index='global_step', columns='uid', values=metric_name).reset_index()
+
+                        # Create wandb.Table
+                        table = wandb.Table(dataframe=pivot_df)
+
+                        # Get the list of UIDs (column names excluding 'global_step')
+                        uids = pivot_df.columns.drop('global_step').tolist()
+
+                        # Prepare xs (global steps) and ys (metric values per UID)
+                        xs = pivot_df['global_step'].values.tolist()
+                        ys = [pivot_df[uid].values.tolist() for uid in uids]
+
+                        # Create the line plot
+                        line_plot = wandb.plot.line_series(
+                            xs=xs,
+                            ys=ys,
+                            keys=uids,
+                            title=f"Validator {metric_name.replace('_', ' ').title()}",
+                            xname="Global Step"
+                        )
+                        # Log the plot
+                        if self.config.use_wandb:
+                            wandb.log({f"validator/{metric_name}": line_plot}, step=self.global_step)
                 # Set temperatured weights on the chain.
                 if self.current_block % 100 == 0:
                     tplr.logger.info(f"Setting weights on chain: {self.weights[ self.metagraph.uids ]}")

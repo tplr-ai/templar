@@ -17,24 +17,23 @@
 # fmt: off
 
 # Global imports.
-from concurrent.futures import ThreadPoolExecutor
-import sys 
-import time
-import wandb
-import torch
-import random
-import asyncio
 import argparse
-import threading
-import numpy as np
-from tqdm import tqdm
+import asyncio
 import bittensor as bt
-from transformers import LlamaForCausalLM
+from concurrent.futures import ThreadPoolExecutor
+import numpy as np
 import os
+import random
+import sys
+import threading
+import time
+import torch
+from tqdm import tqdm
+from transformers import LlamaForCausalLM
+import wandb
 
-# Import local files.
+# Local imports.
 import templar as tplr
-from templar.comms import load_checkpoint, save_checkpoint
 
 # GPU optimizations.
 torch.backends.cudnn.benchmark = True
@@ -59,7 +58,8 @@ class Validator:
         parser.add_argument('--test', action='store_true', help='Run on test network')
         parser.add_argument('--local', action='store_true', help='Run on local network')
         parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
-        parser.add_argument('--checkpoint_path', type=str, default='validator_checkpoint.pth', help='Path to save/load the checkpoint')
+        parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
+        parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to save/load the checkpoint. If None, the path is set to checkpoint-V<UID>.pth.')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -71,11 +71,11 @@ class Validator:
             config.subtensor.chain_endpoint = 'ws://127.0.0.1:9944'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
+        tplr.validate_bucket_or_exit(config.bucket)
         if config.autoupdate:
             from templar.autoupdate import AutoUpdate
-            autoupdater = AutoUpdate(process_name=config.process_name)
+            autoupdater = AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
-        tplr.validate_bucket_or_exit(config.bucket)
         return config
 
     def __init__(self):
@@ -122,14 +122,14 @@ class Validator:
         self.model.eval()
 
         # Set checkpoint path
-        self.checkpoint_path = self.config.checkpoint_path
+        self.checkpoint_path = f"checkpoint-V{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
 
         # Load checkpoint if it exists
         if os.path.exists(self.checkpoint_path):
             tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
 
             # The load_checkpoint function updates the model's state in place
-            global_step, additional_state = asyncio.run(load_checkpoint(
+            global_step, additional_state = asyncio.run(tplr.load_checkpoint(
                 filename=self.checkpoint_path,
                 model=self.model,            # Model state is updated inside load_checkpoint
                 device=self.config.device
@@ -177,32 +177,32 @@ class Validator:
         print ( self.hparams )
         
     async def update(self):
+        """Continuously updates the global state by polling every 10 minutes."""
         while not self.stop_event.is_set():
             st = tplr.T()
-            # Run the blocking update operations in a separate thread
             await asyncio.to_thread(self.perform_update)
             tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
             await asyncio.sleep(600)
 
     def perform_update(self):
+        """Updates subtensor connection, metagraph, hyperparameters and buckets."""
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
         self.hparams = tplr.load_hparams()
 
-        def get_bucket(uid):
+        next_buckets = []
+        for uid in self.metagraph.uids:
             try:
                 bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
                 if tplr.is_valid_bucket(bucket):
-                    return bucket
+                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
+                    next_buckets.append(bucket)
                 else:
-                    tplr.logger.debug(f"Skipping UID {uid} due to invalid or missing bucket name: {bucket}")
-                    return None
+                    tplr.logger.debug(f"UID {uid}: Invalid or missing bucket name: {bucket}")
+                    next_buckets.append(None)
             except Exception as e:
-                tplr.logger.debug(f"Error retrieving bucket for UID {uid}: {e}")
-                return None
-
-        with ThreadPoolExecutor() as executor:
-            next_buckets = list(executor.map(get_bucket, self.metagraph.uids))
+                tplr.logger.warning(f"UID {uid}: Error retrieving bucket: {e}")
+                next_buckets.append(None)
 
         self.buckets = next_buckets
 
@@ -214,6 +214,7 @@ class Validator:
         
         # Optionally sync the model state by pulling model states from the history.
         if self.config.sync_state:
+            st = tplr.T()
             history_windows = [ self.current_window - i for i in range (self.hparams.max_history) ]
             state_slices = await tplr.download_slices_for_buckets_and_windows(
                 buckets = self.buckets,
@@ -221,13 +222,16 @@ class Validator:
                 key = 'state'
             )
             for window in tqdm(history_windows, desc="Syncing state"):
-                await tplr.apply_slices_to_model( 
-                    model = self.model, 
-                    window = window,
-                    seed = window,
-                    compression = self.hparams.compression,
-                    key = 'state'
+                max_global_step = await tplr.apply_slices_to_model( 
+                    model=self.model, 
+                    window=window,
+                    seed=window,
+                    compression=self.hparams.compression,
+                    key='state',
                 )
+                if max_global_step is not None:
+                    self.global_step = max(self.global_step, max_global_step)
+                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied historical state and updated global step to {self.global_step}.")
             torch.cuda.empty_cache()
 
         # Run validation.
@@ -237,8 +241,6 @@ class Validator:
                 tplr.logger.info('[bold]' + '\n' + '-' * 40 + f' Step: {self.global_step} ' + '-' * 40)
                 gs_start = tplr.T()
                 self.global_step += 1
-                # Set checkpoint path
-                self.checkpoint_path = self.config.checkpoint_path
                 offset = 2
                 window = self.current_window - offset
 
@@ -249,7 +251,7 @@ class Validator:
                     # Update last checkpoint block to avoid repeated saves at the same block
                     self.last_checkpoint_block = self.global_step
                     # Schedule the save_checkpoint function to run asynchronously
-                    asyncio.create_task(save_checkpoint(
+                    asyncio.create_task(tplr.save_checkpoint(
                         filename=self.checkpoint_path,
                         model=self.model,
                         global_step=self.global_step,
@@ -281,30 +283,38 @@ class Validator:
                     while self.current_window - offset == window: await asyncio.sleep(0.1) # Wait for next window.
                     continue
                 
-                # Applied the model state state for the eval window.
+                # Applied the model  state for the eval window.
                 st = tplr.T()
-                await tplr.apply_slices_to_model( 
-                    model = self.model, 
-                    window = window,
-                    seed = window,
-                    compression = self.hparams.compression,
-                    key = 'state',
+                max_global_step = await tplr.apply_slices_to_model( 
+                    model=self.model, 
+                    window=window,
+                    seed=window,
+                    compression=self.hparams.compression,
+                    key='state',
                 )
-                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state.")
+                if max_global_step is not None:
+                    self.global_step = max(self.global_step, max_global_step)
+                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state and updated global step to {self.global_step}.")
                 
-                # Attain the indicies for the eval window.
+                # Obtain the indicies for the eval window.
                 st = tplr.T()
                 indices = await tplr.get_indices_for_window(
                     model = self.model,
                     seed = window,
                     compression = self.hparams.compression
                 ) 
-                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Attained window indices.")
+                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Obtained window indices.")
                                
 
                 # Attain the UID of this slice.
                 st = tplr.T()
-                eval_slice_info = random.choice( eval_slices[ window ] )                
+                valid_eval_slices = [s for s in eval_slices[window] if getattr(s, 'version', None) == tplr.__version__]
+                if not valid_eval_slices:
+                    tplr.logger.warning(f"{tplr.P(window, tplr.T() - st)}: No valid slices with matching version {tplr.__version__}, continuing...")
+                    while self.current_window - offset == window:
+                        await asyncio.sleep(0.1)  # Wait for next window.
+                    continue
+                eval_slice_info = random.choice( valid_eval_slices)                
                 try: eval_uid = self.metagraph.hotkeys.index(eval_slice_info.hotkey)
                 except ValueError:
                     tplr.logger.warning(f"{tplr.P(window, tplr.T() - st)}: {eval_slice_info.hotkey} not found in metagraph")
@@ -423,14 +433,16 @@ class Validator:
                 
                 # Apply all deltas to the model state.
                 st = tplr.T()
-                await tplr.apply_slices_to_model( 
-                    model = self.model, 
-                    window = window,
-                    seed = window,
-                    compression = self.hparams.compression,
-                    key = 'delta',
+                max_global_step = await tplr.apply_slices_to_model( 
+                    model=self.model, 
+                    window=window,
+                    seed=window,
+                    compression=self.hparams.compression,
+                    key='delta',
                 )
-                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window deltas.")
+                if max_global_step is not None:
+                    self.global_step = max(self.global_step, max_global_step)
+                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window delta and updated global step to {self.global_step}.")
                 
                 # Clean local and remote space from old slices.
                 st = tplr.T()

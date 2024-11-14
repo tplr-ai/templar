@@ -17,9 +17,8 @@
 # fmt: off
 
 # Global imports.
-from concurrent.futures import ThreadPoolExecutor
-import sys 
-import time
+import sys
+import time 
 import wandb
 import torch
 import random
@@ -31,13 +30,11 @@ from tqdm import tqdm
 import bittensor as bt
 import torch.optim as optim
 from transformers import LlamaForCausalLM
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from rich.markup import escape
 import os
 
 # Import local files.
 import templar as tplr
-from templar.comms import load_checkpoint, save_checkpoint
 
 # GPU optimizations.
 torch.backends.cudnn.benchmark = True
@@ -65,7 +62,7 @@ class Miner:
         parser.add_argument('--local', action='store_true', help='Run on local network')
         parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
         parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
-        parser.add_argument('--checkpoint_path', type=str, default='miner_checkpoint.pth', help='Path to save/load the checkpoint')
+        parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to save/load the checkpoint. If None, the path is set to checkpoint-M<UID>.pth.')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -77,11 +74,10 @@ class Miner:
             config.subtensor.chain_endpoint = 'ws://127.0.0.1:9944'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
-        if config.autoupdate:
-            from templar.autoupdate import AutoUpdate
-            autoupdater = AutoUpdate(process_name=config.process_name)
-            autoupdater.start()
         tplr.validate_bucket_or_exit(config.bucket)
+        if config.autoupdate:
+            autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
+            autoupdater.start()
         return config
 
 
@@ -127,13 +123,32 @@ class Miner:
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
         self.model.train()
+
         self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=self.hparams.learning_rate,  # Peak learning rate
             betas=(self.hparams.optimizer_beta1, self.hparams.optimizer_beta2),  # B1 and B2
             weight_decay=self.hparams.optimizer_weight_decay,  # Weight decay
             foreach=True,  # more memory usage, but faster
-        )
+        )   
+
+        # Load checkpoint if it exists
+        self.checkpoint_path = f"checkpoint-M{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
+        if os.path.exists(self.checkpoint_path):
+            tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
+            global_step, _ = asyncio.run(tplr.load_checkpoint(
+                filename=self.checkpoint_path,
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=None,  # Initialize scheduler after loading checkpoint
+                device=self.config.device
+            ))
+            self.global_step = global_step
+            tplr.logger.info(f"Resumed from global step {self.global_step}")
+        else:
+            tplr.logger.info("No checkpoint file found. Starting from scratch.")
+            self.global_step = 0
+
         # Initialize learning rate scheduler
         self.scheduler = tplr.get_wsd_scheduler(
             optimizer=self.optimizer,
@@ -141,28 +156,6 @@ class Miner:
             num_stable_steps=self.hparams.num_stable_steps,
             num_decay_steps=self.hparams.num_decay_steps,
         )
-
-
-            # Load checkpoint if it exists
-        self.checkpoint_path = self.config.checkpoint_path
-        if os.path.exists(self.checkpoint_path):
-            tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
-            global_step, _ = asyncio.run(load_checkpoint(
-                filename=self.checkpoint_path,
-                model=self.model,
-                optimizer=self.optimizer,
-                scheduler=self.scheduler,
-                device=self.config.device
-            ))
-            if global_step > 0:
-                self.global_step = global_step
-                tplr.logger.info(f"Resumed from global step {self.global_step}")
-            else:
-                tplr.logger.info("No checkpoint found. Starting from scratch.")
-                self.global_step = 0
-        else:
-            tplr.logger.info("No checkpoint file found. Starting from scratch.")
-            self.global_step = 0
 
         # Init buckets.
         self.buckets = []
@@ -183,32 +176,32 @@ class Miner:
         print ( self.hparams )
         
     async def update(self):
+        """Continuously updates the global state by polling every 10 minutes."""
         while not self.stop_event.is_set():
             st = tplr.T()
-            # Run the blocking update operations in a separate thread
             await asyncio.to_thread(self.perform_update)
             tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
             await asyncio.sleep(600)
 
     def perform_update(self):
+        """Updates subtensor connection, metagraph, hyperparameters and buckets."""
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
         self.hparams = tplr.load_hparams()
 
-        def get_bucket(uid):
+        next_buckets = []
+        for uid in self.metagraph.uids:
             try:
                 bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
                 if tplr.is_valid_bucket(bucket):
-                    return bucket
+                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
+                    next_buckets.append(bucket)
                 else:
-                    tplr.logger.debug(f"Skipping UID {uid} due to invalid or missing bucket name: {bucket}")
-                    return None
+                    tplr.logger.debug(f"UID {uid}: Invalid or missing bucket name: {bucket}")
+                    next_buckets.append(None)
             except Exception as e:
-                tplr.logger.debug(f"Error retrieving bucket for UID {uid}: {e}")
-                return None
-
-        with ThreadPoolExecutor() as executor:
-            next_buckets = list(executor.map(get_bucket, self.metagraph.uids))
+                tplr.logger.warning(f"UID {uid}: Error retrieving bucket: {e}")
+                next_buckets.append(None)
 
         self.buckets = next_buckets
 
@@ -220,6 +213,7 @@ class Miner:
         
         # Optionally sync the model state by pulling model states from the history.
         if self.config.sync_state:
+            st = tplr.T()
             history_windows = [ self.current_window - i for i in range (self.hparams.max_history) ]
             state_slices = await tplr.download_slices_for_buckets_and_windows(
                 buckets = self.buckets,
@@ -227,13 +221,17 @@ class Miner:
                 key = 'state'
             )
             for window in tqdm(history_windows, desc="Syncing state"):
-                await tplr.apply_slices_to_model( 
+                max_global_step = await tplr.apply_slices_to_model( 
                     model = self.model, 
                     window = window,
                     seed = window,
                     compression = self.hparams.compression,
                     key = 'state'
                 )
+                if max_global_step is not None:
+                    self.global_step = max(self.global_step, max_global_step)
+                    self.scheduler.last_epoch = self.global_step - 1  # Update scheduler
+                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied history and updated global step to {self.global_step}.")
             torch.cuda.empty_cache()
             
         # Main training loop.
@@ -246,8 +244,8 @@ class Miner:
                 # Save checkpoint every 500 steps
                 if self.global_step % 500 == 0:
                     tplr.logger.info(f"Scheduling checkpoint save at global step {self.global_step}")
-                    # Schedule the save_checkpoint function to run asynchronously
-                    asyncio.create_task(save_checkpoint(
+                    # Schedule the tplr.save_checkpoint function to run asynchronously
+                    asyncio.create_task(tplr.save_checkpoint(
                         filename=self.checkpoint_path,
                         model=self.model,
                         optimizer=self.optimizer,
@@ -280,14 +278,17 @@ class Miner:
                     
                     # Apply the state for the current window.
                     st = tplr.T()
-                    await tplr.apply_slices_to_model( 
-                        model = self.model, 
-                        window = window,
-                        seed = window,
-                        compression = self.hparams.compression,
-                        key = 'state'
+                    max_global_step = await tplr.apply_slices_to_model( 
+                        model=self.model, 
+                        window=window,
+                        seed=window,
+                        compression=self.hparams.compression,
+                        key='state'
                     )
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state.")
+                    if max_global_step is not None:
+                        self.global_step = max(self.global_step, max_global_step)
+                        self.scheduler.last_epoch = self.global_step - 1  # Update scheduler
+                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state and updated global step to {self.global_step}.")
         
                 # Download the page for the current window.
                 st = tplr.T()
@@ -309,7 +310,7 @@ class Miner:
                 train_start = tplr.T()
                 self.model.zero_grad(); self.model.eval()
                 total_loss = 0.0
-                full_steps = 0; total_steps = 0; 
+                full_steps = 0; total_steps = 0 
                 exhuasted_window = False
                 for batch in dataset:
                     total_steps += 1
@@ -350,21 +351,25 @@ class Miner:
                         seed = window,
                         wallet = self.wallet, 
                         compression = self.hparams.compression,
-                        key = 'delta'
+                        key = 'delta',
+                        global_step=self.global_step 
                     )                
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Uploaded the delta.")
                     
                     # Apply the delta from the previous window.
                     st = tplr.T()
-                    await tplr.apply_slices_to_model(
-                        model = self.model, 
-                        window = window - 1,
-                        seed = window - 1,
-                        compression = self.hparams.compression,
-                        key = 'delta'
-                    )         
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window delta.")
-                
+                    max_global_step = await tplr.apply_slices_to_model(
+                        model=self.model, 
+                        window=window - 1,
+                        seed=window - 1,
+                        compression=self.hparams.compression,
+                        key='delta'
+                    )
+                    if max_global_step is not None:
+                        self.global_step = max(self.global_step, max_global_step)
+                        self.scheduler.last_epoch = self.global_step - 1  # Update scheduler
+                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window delta and updated global step to {self.global_step}.")
+                                    
                     # Upload the state for the current window.
                     st = tplr.T()
                     await tplr.upload_slice_for_window(
@@ -375,6 +380,7 @@ class Miner:
                         wallet = self.wallet, 
                         compression = self.hparams.compression,
                         key = 'state',
+                        global_step=self.global_step 
                     )
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Uploaded the state.")
                     
@@ -442,7 +448,7 @@ class Miner:
             try:
                 bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler); break
             except Exception as e:
-                 # Wait for 5 seconds before retrying
+                 # Wait for 1 second before retrying
                 tplr.logger.error(f"Failed to subscribe to block headers: {e}.\nRetrying in 1 seconds...")
                 time.sleep(1) 
             

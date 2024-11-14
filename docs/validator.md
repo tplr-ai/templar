@@ -45,11 +45,19 @@ This document provides a guide on how to set up and run a validator using `valid
 - **Configure IAM Policy**:
    - Create a new IAM policy:
 ```json
-{
+`{
     "Version": "2012-10-17",
     "Statement": [
         {
-            "Sid": "VisualEditor0",
+            "Sid": "BucketListPermissions",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket"
+            ],
+            "Resource": "arn:aws:s3:::templar*"
+        },
+        {
+            "Sid": "ObjectPermissions",
             "Effect": "Allow",
             "Action": [
                 "s3:PutObject",
@@ -60,10 +68,10 @@ This document provides a guide on how to set up and run a validator using `valid
                 "s3:PutObjectAcl",
                 "s3:DeleteObject"
             ],
-            "Resource": "arn:aws:s3:::<your-bucket-name>/*"
+            "Resource": "arn:aws:s3:::<your-bucket-name>*/*"
         }
     ]
-}
+}`
 ```
    - Replace `<your-bucket-name>` with your actual bucket name
    - This policy provides minimum required permissions:

@@ -468,10 +468,7 @@ class Validator:
                         "validator/tokens_per_second": tokens_per_second,
                         "validator/sample_rate": self.sample_rate,
                         "validator/utilization": eval_duration / (gs_end - gs_start)
-                    }, step=self.global_step)
-
-                    # At the top of your file, import pandas
-                   
+                    }, step=self.global_step)                   
 
                     # Prepare a list of dictionaries to hold metrics for all UIDs
                     metrics_list = []

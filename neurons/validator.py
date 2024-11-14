@@ -30,6 +30,7 @@ import time
 import torch
 from tqdm import tqdm
 from transformers import LlamaForCausalLM
+import pandas as pd
 import wandb
 
 # Local imports.
@@ -469,15 +470,40 @@ class Validator:
                         "validator/utilization": eval_duration / (gs_end - gs_start)
                     }, step=self.global_step)
 
-                    # Log per-UID metrics
+                    # At the top of your file, import pandas
+                   
+
+                    # Prepare a list of dictionaries to hold metrics for all UIDs
+                    metrics_list = []
+
+                    # Collect metrics for all UIDs
                     for uid_i in valid_score_indices:
-                        uid = uid_i.item()
-                        wandb.log({
-                            f"validator/step_scores/{uid}": self.step_scores[uid_i].item(),
-                            f"validator/moving_scores/{uid}": self.scores[uid_i].item(),
-                            f"validator/weights/{uid}": self.weights[uid].item(),
-                            f"validator/original_weights/{uid}": original_weights[uid].item(),
-                        }, step=self.global_step)
+                        uid = uid_i.item()        # Integer for tensor indexing
+                        uid_str = str(uid)        # String for dictionary keys
+
+                        # Extract metrics
+                        step_score = self.step_scores[uid].item()
+                        moving_score = self.scores[uid].item()
+                        weight = self.weights[uid].item()
+                        orig_weight = original_weights[uid].item()
+
+                        # Append metrics to the list
+                        metrics_list.append({
+                            'global_step': self.global_step,
+                            'uid': uid_str,
+                            'step_score': step_score,
+                            'moving_score': moving_score,
+                            'weight': weight,
+                            'original_weight': orig_weight,
+                        })
+
+                    # Convert the list to a DataFrame
+                    metrics_df = pd.DataFrame(metrics_list)
+
+                    if self.config.use_wandb:
+                        # Log the DataFrame as a Table to Wandb
+                        table = wandb.Table(dataframe=metrics_df)
+                        wandb.log({'validator_metrics': table}, step=self.global_step)
                 # Set temperatured weights on the chain.
                 if self.current_block % 100 == 0:
                     tplr.logger.info(f"Setting weights on chain: {self.weights[ self.metagraph.uids ]}")

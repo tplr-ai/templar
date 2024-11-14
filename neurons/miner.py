@@ -148,15 +148,6 @@ class Miner:
         else:
             tplr.logger.info("No checkpoint file found. Starting from scratch.")
             self.global_step = 0
-     
-        # Initialize learning rate scheduler with correct last_epoch
-        self.scheduler = tplr.get_wsd_scheduler(
-            optimizer=self.optimizer,
-            num_warmup_steps=self.hparams.num_warmup_steps,
-            num_stable_steps=self.hparams.num_stable_steps,
-            num_decay_steps=self.hparams.num_decay_steps,
-            last_epoch=self.global_step - 1  # Set last_epoch based on global_step
-        )
 
         # Initialize learning rate scheduler
         self.scheduler = tplr.get_wsd_scheduler(

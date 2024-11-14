@@ -231,12 +231,6 @@ async def upload_slice_for_window(
         try:
             with open(temp_file_name, 'rb') as f:
                 await s3_client.put_object(Bucket=bucket, Key=filename, Body=f)
-            # Set the object ACL to public-read
-            await s3_client.put_object_acl(
-                Bucket=bucket,
-                Key=filename,
-                ACL='public-read'
-            )
             logger.debug(f"Successfully uploaded slice to S3: {filename}")
         except Exception:
             logger.exception(f"Failed to upload slice {filename} to S3")
@@ -275,12 +269,6 @@ async def upload_master(bucket: str, model: torch.nn.Module, wallet: 'bt.wallet'
             # Upload the file to S3
             with open(temp_file_name, 'rb') as f:
                 await s3_client.put_object(Bucket=bucket, Key=upload_filename, Body=f)
-            # Set the object ACL to public-read
-            await s3_client.put_object_acl(
-                Bucket=bucket,
-                Key=upload_filename,
-                ACL='public-read'
-            )
             logger.debug(f"Successfully uploaded master model to S3: {upload_filename}")
         except Exception:
             logger.exception(f"Failed to upload master model {upload_filename} to S3")

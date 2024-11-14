@@ -172,7 +172,7 @@ class AutoUpdate(threading.Thread):
         Cleans up old version slices from the S3 bucket.
         """
         from templar import __version__
-        bucket_name = 'your_bucket_name'  # Replace with your actual bucket name or configuration
+        bucket_name = self.bucket_name
         logger.info(f"Cleaning up old versions from bucket {bucket_name}")
         await delete_old_version_files(bucket_name, __version__)
 
@@ -194,7 +194,10 @@ class AutoUpdate(threading.Thread):
         self.attempt_package_update()
 
         # Clean up old versions from the bucket
-        asyncio.run(self.cleanup_old_versions())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self.cleanup_old_versions())
+        loop.close()
 
         # Restart application
         self.restart_app()

@@ -176,36 +176,32 @@ class Validator:
         print ( self.hparams )
         
     async def update(self):
+        """Continuously updates the global state by polling every 10 minutes."""
         while not self.stop_event.is_set():
             st = tplr.T()
-            # Run the blocking update operations in a separate thread
             await asyncio.to_thread(self.perform_update)
             tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
             await asyncio.sleep(600)
 
     def perform_update(self):
+        """Updates subtensor connection, metagraph, hyperparameters and buckets."""
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
         self.hparams = tplr.load_hparams()
 
-    def get_bucket(uid):
-        max_retries = 5  # Number of times to retry
-        for attempt in range(1, max_retries + 1):
+        next_buckets = []
+        for uid in self.metagraph.uids:
             try:
                 bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
                 if tplr.is_valid_bucket(bucket):
-                    return bucket
+                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
+                    next_buckets.append(bucket)
                 else:
-                    tplr.logger.debug(f"Skipping UID {uid} due to invalid or missing bucket name: {bucket}")
-                    return None
+                    tplr.logger.debug(f"UID {uid}: Invalid or missing bucket name: {bucket}")
+                    next_buckets.append(None)
             except Exception as e:
-                tplr.logger.warning(f"Error retrieving bucket for UID {uid} on attempt {attempt}/{max_retries}: {e}")
-                time.sleep(1)  # Wait for a second before retrying
-        tplr.logger.error(f"Failed to retrieve bucket for UID {uid} after {max_retries} attempts")
-        return None
-
-        with ThreadPoolExecutor() as executor:
-            next_buckets = list(executor.map(get_bucket, self.metagraph.uids))
+                tplr.logger.warning(f"UID {uid}: Error retrieving bucket: {e}")
+                next_buckets.append(None)
 
         self.buckets = next_buckets
 

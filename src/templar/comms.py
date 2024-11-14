@@ -32,8 +32,8 @@ import re
 import sys
 from templar.logging import logger
 
-from . import *
 from . import __version__
+from .config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, client_config
 
 # Set uvloop as the event loop policy
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -372,7 +372,7 @@ async def handle_file(s3_client, bucket: str, filename: str, hotkey: str, window
             filename=filename,
             window=window,
             temp_file=temp_file,
-            version=version  # Attach the version here
+            version=version
         )
     return None
 
@@ -663,7 +663,7 @@ async def delete_old_version_files(bucket_name: str, current_version: str):
             for obj in page.get('Contents', []):
                 filename = obj['Key']
                 # Check if the file version matches the current version
-                match = re.match(rf".+-v(.+)\.pt$", filename)
+                match = re.match(r".+-v(.+)\.pt$", filename)
                 if match:
                     file_version = match.group(1)
                     if file_version != current_version:

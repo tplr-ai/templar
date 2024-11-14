@@ -18,10 +18,10 @@
 __version__ = "0.1.4"
 
 # Import package.
+from .autoupdate import *
+from .comms import *
 from .config import *
-from .logging import *
 from .dataset import *
 from .hparams import *
-from .comms import *
-from .autoupdate import *
 from .learning_rates import *
+from .logging import *

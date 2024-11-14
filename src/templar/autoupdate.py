@@ -9,8 +9,8 @@ import asyncio
 
 
 # Import local modules
-from . import *
-from . import __version__
+from . import logger, __version__, delete_old_version_files
+
 
 
 TARGET_BRANCH = "kaiju"

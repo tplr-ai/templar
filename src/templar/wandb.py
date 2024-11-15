@@ -50,7 +50,7 @@ def initialize_wandb(run_prefix, uid, config, group, job_type):
         config=config,
         group=group,
         job_type=job_type,
-        dir=wandb_dir,  # Specify the wandb directory
+        dir=wandb_dir,
         anonymous='allow',
     )
 

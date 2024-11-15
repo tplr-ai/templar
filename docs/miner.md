@@ -45,26 +45,28 @@ This document provides a guide on how to set up and run a miner using `miner.py`
     "Version": "2012-10-17",
     "Statement": [
         {
-            "Sid": "BucketListPermissions",
+            "Sid": "PublicBucketReadAccess",
             "Effect": "Allow",
             "Action": [
-                "s3:ListBucket"
+                "s3:ListBucket",
+                "s3:GetObject",
+                "s3:GetObjectAttributes"
             ],
-            "Resource": "arn:aws:s3:::templar*"
+            "Resource": [
+                "arn:aws:s3:::*/*",
+                "arn:aws:s3:::*"
+            ]
         },
         {
-            "Sid": "ObjectPermissions",
+            "Sid": "PrivateBucketFullAccess",
             "Effect": "Allow",
             "Action": [
-                "s3:PutObject",
-                "s3:GetObjectAcl",
-                "s3:GetObject",
-                "s3:PutObjectVersionAcl",
-                "s3:GetObjectAttributes",
-                "s3:PutObjectAcl",
-                "s3:DeleteObject"
+                "s3:*"
             ],
-            "Resource": "arn:aws:s3:::<your-bucket-name>*/*"
+            "Resource": [
+                "arn:aws:s3:::<your-bucket-name>",
+                "arn:aws:s3:::<your-bucket-name>*/*"
+            ]
         }
     ]
 }

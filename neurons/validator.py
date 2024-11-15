@@ -106,14 +106,42 @@ class Validator:
         tplr.logger.info('Bucket:' + self.config.bucket)
 
         # Init Wandb.
-        if self.config.use_wandb:
-            # Delete all runs with my name and create a new one.
-            try:
-                for run in wandb.Api().runs(path=self.config.project):
-                    if run.name == f'V{self.uid}':
-                        tplr.logger.info(f'Deleting old run: {run}'); run.delete()
-            except: pass
-            wandb.init(project=self.config.project, resume='allow', name=f'V{self.uid}', config=self.config,group='validator',job_type='validation')
+        # Ensure the wandb directory exists
+        wandb_dir = os.path.join(os.getcwd(), 'wandb')
+        os.makedirs(wandb_dir, exist_ok=True)
+
+        # Define the run ID file path inside the wandb directory
+        run_id_file = os.path.join(wandb_dir, f"wandb_run_id_V{self.uid}_{tplr.__version__}.txt")
+
+        # Attempt to read the existing run ID
+        if os.path.exists(run_id_file):
+            with open(run_id_file, 'r') as f:
+                run_id = f.read().strip()
+            tplr.logger.info(f"Resuming WandB run with id {run_id}")
+        else:
+            run_id = None
+            tplr.logger.info("Starting a new WandB run.")
+
+        # Initialize WandB
+        wandb.init(
+            project=f"{self.config.project}-{tplr.__version__}",
+            entity='tplr',
+            resume='allow',
+            id=run_id,
+            name=f'V{self.uid}',
+            config=self.config,
+            group='validator',
+            job_type='validation',
+            dir=wandb_dir,  # Specify the wandb directory
+            anonymous='allow',
+        )
+
+        # Save the run ID if starting a new run
+        if run_id is None:
+            run_id = wandb.run.id
+            with open(run_id_file, 'w') as f:
+                f.write(run_id)
+            tplr.logger.info(f"Started new WandB run with id {run_id}")
         self.metrics_history = pd.DataFrame()
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
@@ -461,78 +489,77 @@ class Validator:
                 window_time_delta = self.window_time - gs_end
                 window_delta_str = f"[red]{window_time_delta:.2f}[/red]" if window_time_delta < 0 else f"[green]+{window_time_delta:.2f}[/green]"
                 tplr.logger.info(f"{tplr.P(window, gs_end - gs_start)}[{window_delta_str}]: Finished step.")
-                if self.config.use_wandb:
-                    # Log main metrics
-                    wandb.log({
-                        "validator/loss": step_loss,
-                        "validator/tokens_per_step": tokens_per_step,
-                        "validator/tokens_per_second": tokens_per_second,
-                        "validator/sample_rate": self.sample_rate,
-                        "validator/utilization": eval_duration / (gs_end - gs_start)
-                    }, step=self.global_step)                   
+                # Log main metrics
+                wandb.log({
+                    "validator/loss": step_loss,
+                    "validator/tokens_per_step": tokens_per_step,
+                    "validator/tokens_per_second": tokens_per_second,
+                    "validator/sample_rate": self.sample_rate,
+                    "validator/utilization": eval_duration / (gs_end - gs_start)
+                }, step=self.global_step)                   
 
-                    # Prepare a list to hold metrics for all UIDs
-                    metrics_list = []
+                # Prepare a list to hold metrics for all UIDs
+                metrics_list = []
 
-                    # Collect metrics for all UIDs
-                    for uid_i in valid_score_indices:
-                        uid = uid_i.item()
-                        uid_str = str(uid)
+                # Collect metrics for all UIDs
+                for uid_i in valid_score_indices:
+                    uid = uid_i.item()
+                    uid_str = str(uid)
 
-                        # Extract metrics
-                        step_score = self.step_scores[uid].item()
-                        moving_score = self.scores[uid].item()
-                        weight = self.weights[uid].item()
-                        orig_weight = original_weights[uid].item()
+                    # Extract metrics
+                    step_score = self.step_scores[uid].item()
+                    moving_score = self.scores[uid].item()
+                    weight = self.weights[uid].item()
+                    orig_weight = original_weights[uid].item()
 
-                        # Append to metrics list for aggregation
-                        metrics_list.append({
-                            'global_step': self.global_step,
-                            'uid': uid_str,
-                            'step_score': step_score,
-                            'moving_score': moving_score,
-                            'weight': weight,
-                            'original_weight': orig_weight,
-                        })
+                    # Append to metrics list for aggregation
+                    metrics_list.append({
+                        'global_step': self.global_step,
+                        'uid': uid_str,
+                        'step_score': step_score,
+                        'moving_score': moving_score,
+                        'weight': weight,
+                        'original_weight': orig_weight,
+                    })
 
-                    # Convert metrics list to DataFrame
-                    metrics_df = pd.DataFrame(metrics_list)
+                # Convert metrics list to DataFrame
+                metrics_df = pd.DataFrame(metrics_list)
 
-                    # Append to metrics history
-                    self.metrics_history = pd.concat([self.metrics_history, metrics_df], ignore_index=True)
+                # Append to metrics history
+                self.metrics_history = pd.concat([self.metrics_history, metrics_df], ignore_index=True)
 
-                    # Drop duplicates to avoid multiple entries for the same step and UID
-                    self.metrics_history.drop_duplicates(subset=['global_step', 'uid'], keep='last', inplace=True)
+                # Drop duplicates to avoid multiple entries for the same step and UID
+                self.metrics_history.drop_duplicates(subset=['global_step', 'uid'], keep='last', inplace=True)
 
-                    # List of metrics to plot
-                    metrics_to_plot = ['step_score', 'moving_score', 'weight', 'original_weight']
+                # List of metrics to plot
+                metrics_to_plot = ['step_score', 'moving_score', 'weight', 'original_weight']
 
-                    # Create aggregated plots for each metric
-                    for metric_name in metrics_to_plot:
-                        # Pivot the DataFrame to have UIDs as columns
-                        pivot_df = self.metrics_history.pivot(index='global_step', columns='uid', values=metric_name).reset_index()
+                # Create aggregated plots for each metric
+                for metric_name in metrics_to_plot:
+                    # Pivot the DataFrame to have UIDs as columns
+                    pivot_df = self.metrics_history.pivot(index='global_step', columns='uid', values=metric_name).reset_index()
 
-                        # Create wandb.Table
-                        table = wandb.Table(dataframe=pivot_df)
+                    # Create wandb.Table
+                    table = wandb.Table(dataframe=pivot_df)
 
-                        # Get the list of UIDs (column names excluding 'global_step')
-                        uids = pivot_df.columns.drop('global_step').tolist()
+                    # Get the list of UIDs (column names excluding 'global_step')
+                    uids = pivot_df.columns.drop('global_step').tolist()
 
-                        # Prepare xs (global steps) and ys (metric values per UID)
-                        xs = pivot_df['global_step'].values.tolist()
-                        ys = [pivot_df[uid].values.tolist() for uid in uids]
+                    # Prepare xs (global steps) and ys (metric values per UID)
+                    xs = pivot_df['global_step'].values.tolist()
+                    ys = [pivot_df[uid].values.tolist() for uid in uids]
 
-                        # Create the line plot
-                        line_plot = wandb.plot.line_series(
-                            xs=xs,
-                            ys=ys,
-                            keys=uids,
-                            title=f"Validator {metric_name.replace('_', ' ').title()}",
-                            xname="Global Step"
-                        )
-                        # Log the plot
-                        if self.config.use_wandb:
-                            wandb.log({f"validator/{metric_name}": line_plot}, step=self.global_step)
+                    # Create the line plot
+                    line_plot = wandb.plot.line_series(
+                        xs=xs,
+                        ys=ys,
+                        keys=uids,
+                        title=f"Validator {metric_name.replace('_', ' ').title()}",
+                        xname="Global Step"
+                    )
+                    # Log the plot
+                    
+                    wandb.log({f"validator/{metric_name}": line_plot}, step=self.global_step)
                 # Set temperatured weights on the chain.
                 if self.current_block % 100 == 0:
                     tplr.logger.info(f"Setting weights on chain: {self.weights[ self.metagraph.uids ]}")

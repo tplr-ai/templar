@@ -5,7 +5,16 @@ class Bucket(BaseModel):
     """Configuration for a bucket, including name and access credentials."""
 
     def __hash__(self):
-        return hash(self.account_id)
+        # Use all fields to generate a unique hash
+        return hash(
+            (self.name, self.account_id, self.access_key_id, self.secret_access_key)
+        )
+
+    def __eq__(self, other):
+        # Compare all fields to determine equality
+        if isinstance(other, Bucket):
+            return self.dict() == other.dict()
+        return False
 
     name: str
     account_id: str

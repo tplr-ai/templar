@@ -41,6 +41,14 @@ from .config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, client_config
 def get_base_url(account_id: str) -> str:
     return f"https://{account_id}.r2.cloudflarestorage.com"
 
+def get_bucket(bucket_secrets: dict[str, str | dict[str, str]]) -> Bucket:
+    return Bucket(
+        name=bucket_secrets["bucket_name"],
+        account_id=bucket_secrets["account_id"],
+        access_key_id=bucket_secrets["read"]["access_key_id"],
+        secret_access_key=bucket_secrets["read"]["secret_access_key"],
+    )
+
 # Set uvloop as the event loop policy
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 

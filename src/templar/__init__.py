@@ -25,3 +25,4 @@ from .dataset import *
 from .hparams import *
 from .learning_rates import *
 from .logging import *
+from .wandb import *

@@ -123,25 +123,13 @@ class Validator:
             tplr.logger.info("Starting a new WandB run.")
 
         # Initialize WandB
-        wandb.init(
-            project=f"{self.config.project}-{tplr.__version__}",
-            entity='tplr',
-            resume='allow',
-            id=run_id,
-            name=f'V{self.uid}',
+        self.wandb = tplr.initialize_wandb(
+            run_prefix='V',
+            uid=self.uid,
             config=self.config,
             group='validator',
-            job_type='validation',
-            dir=wandb_dir,  # Specify the wandb directory
-            anonymous='allow',
+            job_type='validation'
         )
-
-        # Save the run ID if starting a new run
-        if run_id is None:
-            run_id = wandb.run.id
-            with open(run_id_file, 'w') as f:
-                f.write(run_id)
-            tplr.logger.info(f"Started new WandB run with id {run_id}")
         self.metrics_history = pd.DataFrame()
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)

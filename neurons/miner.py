@@ -51,7 +51,6 @@ class Miner:
         parser.add_argument('--bucket', type=str, default='decis', help='S3 bucket name')
         parser.add_argument('--actual_batch_size', type=int, default=8, help='Training batch size per accumulation.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training (e.g., cpu or cuda)')
-        parser.add_argument('--use_wandb', action='store_true', help='Use Weights and Biases for logging')
         parser.add_argument('--remote', action='store_true', help='Connect to other buckets')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
@@ -107,14 +106,43 @@ class Miner:
         tplr.logger.info('Bucket:' + self.config.bucket)
 
         # Init Wandb.
-        if self.config.use_wandb:
-            # Delete all runs with my name and create a new one.
-            try:
-                for run in wandb.Api().runs(path=self.config.project):
-                    if run.name == f'M{self.uid}':
-                        tplr.logger.info(f'Deleting old run: {run}'); run.delete()
-            except: pass
-            wandb.init(project=self.config.project, resume='allow', name=f'M{self.uid}', config=self.config,group='miner',job_type='training',)
+        # Ensure the wandb directory exists
+        wandb_dir = os.path.join(os.getcwd(), 'wandb')
+        os.makedirs(wandb_dir, exist_ok=True)
+
+        # Define the run ID file path inside the wandb directory
+        run_id_file = os.path.join(wandb_dir, f"wandb_run_id_M{self.uid}_{tplr.__version__}.txt")
+
+        # Attempt to read the existing run ID
+        if os.path.exists(run_id_file):
+            with open(run_id_file, 'r') as f:
+                run_id = f.read().strip()
+            tplr.logger.info(f"Resuming WandB run with id {run_id}")
+        else:
+            run_id = None
+            tplr.logger.info("Starting a new WandB run.")
+
+        # Initialize WandB
+        wandb.init(
+            project=f"{self.config.project}-{tplr.__version__}",
+            entity='tplr',
+            resume='allow',
+            id=run_id,
+            name=f'M{self.uid}',
+            config=self.config,
+            group='miner',
+            job_type='training',
+            dir=wandb_dir,  # Specify the wandb directory
+            anonymous='allow',
+        )
+
+        # Save the run ID if starting a new run
+        if run_id is None:
+            run_id = wandb.run.id
+            with open(run_id_file, 'w') as f:
+                f.write(run_id)
+            tplr.logger.info(f"Started new WandB run with id {run_id}")
+
 
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
@@ -399,15 +427,14 @@ class Miner:
                     window_time_delta = self.window_time - end_step
                     window_delta_str = f"[red]{window_time_delta:.2f}[/red]" if window_time_delta < 0 else f"[green]+{window_time_delta:.2f}[/green]"
                     tplr.logger.info(f"{tplr.P(window, end_step - start_step)}[{window_delta_str}]: Finished step.")
-                    if self.config.use_wandb:
-                        wandb.log({
-                            "miner/loss": step_loss,
-                            "miner/tokens_per_step": tokens_per_step,
-                            "miner/tokens_per_second": tokens_per_second,
-                            "miner/sample_rate": self.sample_rate,
-                            "miner/utilization": train_duration / (end_step - start_step),
-                            "miner/learning_rate": self.scheduler.get_last_lr()[0]
-                        }, step=self.global_step)
+                    wandb.log({
+                        "miner/loss": step_loss,
+                        "miner/tokens_per_step": tokens_per_step,
+                        "miner/tokens_per_second": tokens_per_second,
+                        "miner/sample_rate": self.sample_rate,
+                        "miner/utilization": train_duration / (end_step - start_step),
+                        "miner/learning_rate": self.scheduler.get_last_lr()[0]
+                    }, step=self.global_step)
                                 
             # Catch keyboard interrrupt.
             except KeyboardInterrupt:

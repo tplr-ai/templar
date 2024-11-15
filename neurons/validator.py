@@ -33,10 +33,12 @@ from transformers import LlamaForCausalLM
 import pandas as pd
 import wandb
 import wandb.plot
+from pydantic import ValidationError
 
 # Local imports.
 import templar as tplr
 from templar.config import BUCKET_SECRETS
+from templar.schemas import Bucket
 
 # GPU optimizations.
 torch.backends.cudnn.benchmark = True
@@ -72,11 +74,10 @@ class Validator:
             config.subtensor.chain_endpoint = 'ws://127.0.0.1:9944'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
-        tplr.validate_bucket_or_exit(config.bucket)
+        tplr.validate_bucket_or_exit(BUCKET_SECRETS["bucket_name"])
         if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
-        tplr.validate_bucket_or_exit(BUCKET_SECRETS["BUCKET_NAME"])
         return config
 
     def __init__(self):
@@ -98,11 +99,11 @@ class Validator:
 
         # Init bucket.
         try:
-            if BUCKET_SECRETS["BUCKET_NAME"] != self.subtensor.get_commitment(self.config.netuid, self.uid):
+            if BUCKET_SECRETS["bucket_name"] != self.subtensor.get_commitment(self.config.netuid, self.uid):
                 raise ValueError('')
         except:
-            self.subtensor.commit(self.wallet, self.config.netuid, BUCKET_SECRETS["BUCKET_NAME"])
-        tplr.logger.info('Bucket:' + BUCKET_SECRETS["BUCKET_NAME"])
+            self.subtensor.commit(self.wallet, self.config.netuid, BUCKET_SECRETS["bucket_name"])
+        tplr.logger.info('Bucket:' + BUCKET_SECRETS["bucket_name"])
 
         # Init Wandb.
         # Ensure the wandb directory exists
@@ -170,12 +171,12 @@ class Validator:
         self.buckets = []
         for uid in self.metagraph.uids:
             try:
-                bucket =  self.subtensor.get_commitment(self.config.netuid, uid)
-                tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket}")
+                bucket =  self.get_commitment(uid)
+                tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket.name}")
                 self.buckets.append(bucket)
             except Exception as e:
-                tplr.logger.debug(f"Failed to retrieve bucket for UID {uid}: {e}")
-                self.buckets.append(None)
+                tplr.logger.warning(f"Skipping appending bucket for uid {uid} due to {e}")
+        tplr.logger.info(f"Created {len(self.buckets)} bucket objects: {(b.name for b in self.buckets)}")
 
 
         self.last_window = 0
@@ -209,18 +210,21 @@ class Validator:
         next_buckets = []
         for uid in self.metagraph.uids:
             try:
-                bucket = self.subtensor.get_commitment(self.config.netuid, uid)
-                if tplr.is_valid_bucket(bucket):
-                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
+                bucket = self.get_commitment(uid)
+                if tplr.is_valid_bucket(bucket.name):
+                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket.name}")
                     next_buckets.append(bucket)
                 else:
-                    tplr.logger.debug(f"UID {uid}: Invalid or missing bucket name: {bucket}")
+                    tplr.logger.warning(f"Skipping addition of bucket for UID {uid}: Invalid or missing bucket name: {bucket.name}")
                     next_buckets.append(None)
             except Exception as e:
-                tplr.logger.warning(f"UID {uid}: Error retrieving bucket: {e}")
-                next_buckets.append(None)
-
+                tplr.logger.warning(f"Skipping addition of bucket for UID {uid}: Error retrieving bucket for UID {uid}: {e}")
+        old_num_buckets = len(self.buckets)
         self.buckets = next_buckets
+        tplr.logger.info(
+            f"Bucket list updated. Number of buckets changed from {old_num_buckets} to {len(self.buckets)}."
+            f"Current buckets: {(b.name for b in self.buckets)}"
+        )
 
     async def run(self):
         # Main loop.
@@ -481,8 +485,8 @@ class Validator:
                 st = tplr.T()
                 await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'state')
                 await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'delta')
-                await tplr.delete_files_from_bucket_before_window( bucket = BUCKET_SECRETS["BUCKET_NAME"], window_max = window - self.hparams.max_history, key = 'state' )
-                await tplr.delete_files_from_bucket_before_window( bucket = BUCKET_SECRETS["BUCKET_NAME"], window_max = window - self.hparams.max_history, key = 'delta' )
+                await tplr.delete_files_from_bucket_before_window( bucket = BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'state' )
+                await tplr.delete_files_from_bucket_before_window( bucket = BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Cleaned file history.")
 
                 # Finish step.
@@ -622,6 +626,66 @@ class Validator:
                  # Wait for 5 seconds before retrying
                 tplr.logger.error(f"Failed to subscribe to block headers: {e}.\nRetrying in 1 seconds...")
                 time.sleep(1) 
+
+    def get_commitment(self, uid: int) -> Bucket:
+        """Retrieves and parses committed bucket configuration data for a given
+        UID.
+
+        This method fetches commitment data for a specific UID from the
+        subtensor network and decodes it into a structured format. The
+        retrieved data is split into the following fields:
+        - Account ID: A string of fixed length 32 characters.
+        - Access key ID: A string of fixed length 32 characters.
+        - Secret access key: A string of variable length (up to 64 characters).
+
+        The parsed fields are then mapped to an instance of the `Bucket` class.
+        When initializing the Bucket object, the account ID is also used as the
+        bucket name.
+
+        The retrieval process involves:
+        - Fetching the commitment data for the specified UID using the
+          configured `netuid` from the subtensor network.
+        - Splitting the concatenated string into individual fields based on
+          their expected lengths and order.
+        - Mapping the parsed fields to a `Bucket` instance.
+
+        **Note:** The order of fields (bucket name, account ID, access key ID,
+        secret access key) in the concatenated string is critical for accurate
+        parsing.
+
+        Args:
+            uid: The UID of the neuron whose commitment data is being
+                retrieved.
+
+        Returns:
+            Bucket: An instance of the `Bucket` class containing the parsed
+                bucket configuration details.
+
+        Raises:
+            ValueError: If the parsed data does not conform to the expected
+                format for the `Bucket` class.
+            Exception: If an error occurs while retrieving the commitment data
+                from the subtensor network.
+        """
+        try:
+            concatenated = self.subtensor.get_commitment(self.config.netuid, uid)
+            tplr.logger.success(f"Commitment fetched: {concatenated}")
+        except Exception as e:
+            raise Exception(f"Couldn't get commitment from uid {uid} because {e}")
+        if len(concatenated) != 128:
+            raise ValueError(
+                f"Commitment '{concatenated}' is of length {len(concatenated)} but should be of length 128."
+            )
+
+        try:
+            return Bucket(
+                name=concatenated[:32],
+                account_id=concatenated[:32],
+                access_key_id=concatenated[32:64],
+                secret_access_key=concatenated[64:],
+            )
+        except ValidationError as e:
+            raise ValueError(f"Invalid data in commitment: {e}")
             
 if __name__ == "__main__":
     validator = Validator()

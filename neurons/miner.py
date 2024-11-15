@@ -196,8 +196,8 @@ class Miner:
                 tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket.name}")
                 self.buckets.append(bucket)
             except Exception as e:
-                tplr.logger.debug(f"Failed to retrieve bucket for UID {uid}: {e}")
-                self.buckets.append(None)
+                tplr.logger.debug(f"Skipping appending bucket for uid {uid} due to {e}")
+        tplr.logger.info(f"Created {len(self.buckets)} bucket objects: {(b.name for b in self.buckets)}")
 
         # Init run state.
         self.sample_rate = 1.0
@@ -233,13 +233,16 @@ class Miner:
                     tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket.name}")
                     next_buckets.append(bucket)
                 else:
-                    tplr.logger.debug(f"UID {uid}: Invalid or missing bucket name: {bucket.name}")
+                    tplr.logger.debug(f"Skipping addition of bucket for UID {uid}: Invalid or missing bucket name: {bucket.name}")
                     next_buckets.append(None)
             except Exception as e:
-                tplr.logger.warning(f"UID {uid}: Error retrieving bucket: {e}")
-                next_buckets.append(None)
-
+                tplr.logger.warning(f"Skipping addition of bucket for UID {uid}: Error retrieving bucket for UID {uid}: {e}")
+        old_num_buckets = len(self.buckets)
         self.buckets = next_buckets
+        tplr.logger.info(
+            f"Bucket list updated. Number of buckets changed from {old_num_buckets} to {len(self.buckets)}."
+            f"Current buckets: {(b.name for b in self.buckets)}"
+        )
 
     async def run(self):
         # Main loop.

@@ -40,6 +40,7 @@ from bittensor.extrinsics.serving import publish_metadata
 import templar as tplr
 from templar.config import BUCKET_SECRETS
 from templar.schemas import Bucket
+from templar.comms import get_bucket
 
 # GPU optimizations.
 torch.backends.cudnn.benchmark = True
@@ -104,8 +105,19 @@ class Miner:
         # Init bucket.
         try:
             bucket = self.get_commitment(self.uid)
-            if BUCKET_SECRETS["bucket_name"] != bucket.name:
-                raise ValueError('')
+            bucket_from_secrets = get_bucket(BUCKET_SECRETS)
+            if bucket != bucket_from_secrets:
+                tplr.logger.info(
+                    "Your bucket secrets with read permission have changed. "
+                    "Committing new bucket secrets to the network."
+                )
+                tplr.logger.debug(
+                    f"Bucket using data from commitment is: {bucket}."
+                )
+                tplr.logger.debug(
+                    f"Bucket using data from secrets is: {bucket_from_secrets}"
+                )
+                self.commit()
         except Exception as e:
             tplr.logger.warning(f"Committing to the network due to the following exception: {e}")
             self.commit()

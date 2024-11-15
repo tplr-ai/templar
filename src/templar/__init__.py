@@ -15,7 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 # Import package.
 from .autoupdate import *
@@ -25,3 +25,4 @@ from .dataset import *
 from .hparams import *
 from .learning_rates import *
 from .logging import *
+from .wandb import *

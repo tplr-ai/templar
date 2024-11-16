@@ -155,11 +155,21 @@ class Miner:
                 filename=self.checkpoint_path,
                 model=self.model,
                 optimizer=self.optimizer,
-                scheduler=None,  # Initialize scheduler after loading checkpoint
+                scheduler=None,
                 device=self.config.device
             ))
+            
             self.global_step = global_step
-            tplr.logger.info(f"Resumed from global step {self.global_step}")
+            if global_step is None:
+                tplr.logger.warning(f"Corrupt checkpoint detected at {self.checkpoint_path}. Removing file and starting fresh.")
+                try:
+                    os.remove(self.checkpoint_path)
+                    tplr.logger.info(f"Removed corrupt checkpoint: {self.checkpoint_path}")
+                except OSError as e:
+                    tplr.logger.error(f"Failed to remove corrupt checkpoint: {e}")
+                global_step = 0
+            else:
+                tplr.logger.info(f"Resumed from global step {self.global_step}")
         else:
             tplr.logger.info("No checkpoint file found. Starting from scratch.")
             self.global_step = 0

@@ -156,10 +156,7 @@ source .venv/bin/activate
 uv pip install torch --index-url https://download.pytorch.org/whl/cu118
 
 # Install requirements
-uv sync --extra all --prerelease=allow
-
-# Install flash-attn
-uv pip install flash-attn --no-build-isolation
+uv sync --extra all
 ```
 
 5. **Configure AWS Credentials**:
@@ -197,7 +194,8 @@ pm2 start neurons/validator.py --interpreter python3 --name validator -- \
   --subtensor.network <network> \
   --process_name validator \  # Must match PM2's --name
   --autoupdate \
-  --remote
+  --remote  \
+  --sync_state
 
 > **Important**: When using PM2, the `--process_name` argument must match the PM2 process name specified by `--name`. In this example, PM2 process is named `validator`, so we use `--process_name validator`.
 

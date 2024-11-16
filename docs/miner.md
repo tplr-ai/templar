@@ -195,7 +195,8 @@ PM2 automatically manages your miner processes and restarts them if they crash:
     --netuid <netuid> \
     --subtensor.network <network> \
     --process_name miner \  # Must match PM2's --name
-    --remote
+    --remote \
+    --sync_state
 
 
 # Monitor logs

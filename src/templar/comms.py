@@ -750,7 +750,7 @@ async def load_checkpoint(filename, model, optimizer=None, scheduler=None, devic
         global_step (int): The global step at which the checkpoint was saved.
         additional_state (dict): Dictionary of additional state variables.
     """
-    if os.path.exists(filename):
+    try:
         checkpoint = torch.load(filename, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         if optimizer and 'optimizer_state_dict' in checkpoint:
@@ -763,5 +763,6 @@ async def load_checkpoint(filename, model, optimizer=None, scheduler=None, devic
             if k not in ['global_step', 'model_state_dict', 'optimizer_state_dict', 'scheduler_state_dict']
         }
         return global_step, additional_state
-    else:
-        return 0, {}
+    except (torch.serialization.pickle.UnpicklingError, RuntimeError, EOFError) as e:
+        logger.error(f"Checkpoint at {filename} is corrupt: {e}")
+        return None, {}  # Indicate corruption

@@ -187,7 +187,8 @@ class Miner:
         self.new_block_event = asyncio.Event()
         self.new_window_event = asyncio.Event()
         self.stop_event = asyncio.Event()    
-        self.last_full_steps = self.hparams.desired_batch_size // self.config.actual_batch_size    
+        self.last_full_steps = self.hparams.desired_batch_size // self.config.actual_batch_size
+        bt.logging.off    
         print ( self.hparams )
         
     async def update(self):
@@ -196,7 +197,7 @@ class Miner:
             st = tplr.T()
             await asyncio.to_thread(self.perform_update)
             tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
-            await asyncio.sleep(600)
+            await asyncio.sleep(3600)
 
     def perform_update(self):
         """Updates subtensor connection, metagraph, hyperparameters and buckets."""

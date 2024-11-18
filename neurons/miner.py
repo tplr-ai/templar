@@ -59,7 +59,7 @@ class Miner:
         parser.add_argument('--baseline', action='store_true', help='Dont perform syncing with other peers, just train.')
         parser.add_argument('--test', action='store_true', help='Run on test network')
         parser.add_argument('--local', action='store_true', help='Run on local network')
-        parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
+        parser.add_argument('--no_autoupdate', action='store_true', help='Disable automatic updates')
         parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
         parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to save/load the checkpoint. If None, the path is set to checkpoint-M<UID>.pth.')
         bt.wallet.add_args(parser)
@@ -74,7 +74,7 @@ class Miner:
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
         tplr.validate_bucket_or_exit(config.bucket)
-        if config.autoupdate:
+        if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
         return config
@@ -185,9 +185,14 @@ class Miner:
         # Init buckets.
         self.buckets = []
         for uid in self.metagraph.uids:
-            # Use --remote to connect to other miners, other wise, only see's config.bucket.
-            try: self.buckets.append(self.config.bucket if not self.config.remote else self.subtensor.get_commitment( self.config.netuid, uid ) )
-            except: self.buckets.append(None)
+            try:
+                bucket =  self.subtensor.get_commitment(self.config.netuid, uid)
+                tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket}")
+                self.buckets.append(bucket)
+            except Exception as e:
+                tplr.logger.debug(f"Failed to retrieve bucket for UID {uid}: {e}")
+                self.buckets.append(None)
+
 
         # Init run state.
         self.sample_rate = 1.0
@@ -197,7 +202,8 @@ class Miner:
         self.new_block_event = asyncio.Event()
         self.new_window_event = asyncio.Event()
         self.stop_event = asyncio.Event()    
-        self.last_full_steps = self.hparams.desired_batch_size // self.config.actual_batch_size    
+        self.last_full_steps = self.hparams.desired_batch_size // self.config.actual_batch_size
+        bt.logging.off    
         print ( self.hparams )
         
     async def update(self):
@@ -206,7 +212,7 @@ class Miner:
             st = tplr.T()
             await asyncio.to_thread(self.perform_update)
             tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
-            await asyncio.sleep(600)
+            await asyncio.sleep(3600)
 
     def perform_update(self):
         """Updates subtensor connection, metagraph, hyperparameters and buckets."""
@@ -217,7 +223,7 @@ class Miner:
         next_buckets = []
         for uid in self.metagraph.uids:
             try:
-                bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
+                bucket = self.subtensor.get_commitment(self.config.netuid, uid)
                 if tplr.is_valid_bucket(bucket):
                     tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
                     next_buckets.append(bucket)

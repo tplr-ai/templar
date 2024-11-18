@@ -52,14 +52,13 @@ class Validator:
         parser.add_argument('--bucket', type=str, default='decis', help='S3 bucket name')
         parser.add_argument('--actual_batch_size', type=int, default=8, help='Training batch size per accumulation.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training (e.g., cpu or cuda)')
-        parser.add_argument('--remote', action='store_true', help='Connect to other buckets')
         parser.add_argument('--use_wandb', action='store_true', help='Use Weights and Biases for logging')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
         parser.add_argument('--sync_state', action='store_true', help='Syncs the model state by pulling from the history.')
         parser.add_argument('--test', action='store_true', help='Run on test network')
         parser.add_argument('--local', action='store_true', help='Run on local network')
-        parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
+        parser.add_argument('--no_autoupdate', action='store_true', help='Disable automatic updates')
         parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
         parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to save/load the checkpoint. If None, the path is set to checkpoint-V<UID>.pth.')
         bt.wallet.add_args(parser)
@@ -74,9 +73,8 @@ class Validator:
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
         tplr.validate_bucket_or_exit(config.bucket)
-        if config.autoupdate:
-            from templar.autoupdate import AutoUpdate
-            autoupdater = AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
+        if not config.no_autoupdate:
+            autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
         return config
 
@@ -170,9 +168,8 @@ class Validator:
         # Init buckets.
         self.buckets = []
         for uid in self.metagraph.uids:
-            # Use --remote to connect to other miners, otherwise, only see's config.bucket.
             try:
-                bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
+                bucket =  self.subtensor.get_commitment(self.config.netuid, uid)
                 tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket}")
                 self.buckets.append(bucket)
             except Exception as e:
@@ -211,7 +208,7 @@ class Validator:
         next_buckets = []
         for uid in self.metagraph.uids:
             try:
-                bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
+                bucket = self.subtensor.get_commitment(self.config.netuid, uid)
                 if tplr.is_valid_bucket(bucket):
                     tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
                     next_buckets.append(bucket)
@@ -295,7 +292,17 @@ class Validator:
                     key = 'delta'
                 ) 
                 n_eval_slices = len(eval_slices[ window ]) if window in eval_slices else 0
-                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_eval_slices} window deltas.")                
+                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_eval_slices} window deltas.")
+                # Collect UIDs of miners who submitted slices
+                submitted_uids = set()
+                if window in eval_slices:
+                    for slice_info in eval_slices[window]:
+                        if getattr(slice_info, 'version', None) == tplr.__version__:
+                            try:
+                                uid = self.metagraph.hotkeys.index(slice_info.hotkey)
+                                submitted_uids.add(uid)
+                            except ValueError:
+                                tplr.logger.warning(f"Hotkey {slice_info.hotkey} not found in metagraph")                
                 if n_eval_slices == 0:
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: No slices to eval, continue ...")
                     while self.current_window - offset == window: await asyncio.sleep(0.1) # Wait for next window.
@@ -404,8 +411,18 @@ class Validator:
 
                 # Assign and log scores.
                 start_time = tplr.T()
-                self.step_scores[ eval_uid ] = score
-                self.scores[ eval_uid ] = (1 - self.hparams.validator_moving_alpha) * score + self.hparams.validator_moving_alpha * self.scores[eval_uid]
+                # Apply decay to miners who did not submit slices
+                all_uids = set(self.metagraph.uids.tolist())
+                non_submitted_uids = all_uids - submitted_uids
+
+                decay_factor = self.hparams.validator_non_submission_decay  # e.g., 0.9
+                for uid in non_submitted_uids:
+                    self.scores[uid] *= decay_factor
+
+                # Update the score for the evaluated miner
+                self.step_scores[eval_uid] = score
+                self.scores[eval_uid] = (1 - self.hparams.validator_moving_alpha) * score + self.hparams.validator_moving_alpha * self.scores[eval_uid]
+
                 # Store the original weights before adjustment.
                 total_score = torch.sum(self.scores).item()
                 if total_score == 0.0:
@@ -415,16 +432,13 @@ class Validator:
                 else:
                     # Normalize scores to get initial weights
                     self.weights = self.scores / total_score
-
                     # Store the original weights before adjustment
                     original_weights = self.weights.clone()
-
                     # Set negative weights to zero
                     negative_weights = self.weights < 0
                     if negative_weights.any():
                         tplr.logger.info("Negative weights detected; setting them to zero.")
                         self.weights[negative_weights] = 0.0
-
                         # Re-normalize the positive weights to ensure the sum is 1
                         positive_total = torch.sum(self.weights).item()
                         if positive_total == 0.0:

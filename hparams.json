@@ -30,5 +30,6 @@
     "validator_norm_regularization": 0.01,
     "validator_weights_temperature": 10,
     "validator_window_eval_size": 3,
-    "valdiator_sample_rate": 0.01
+    "valdiator_sample_rate": 0.01,
+    "validator_non_submission_decay": 0.9
 }

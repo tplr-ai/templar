@@ -213,7 +213,7 @@ class Miner:
         next_buckets = []
         for uid in self.metagraph.uids:
             try:
-                bucket = self.config.bucket if not self.config.remote else self.subtensor.get_commitment(self.config.netuid, uid)
+                bucket = self.subtensor.get_commitment(self.config.netuid, uid)
                 if tplr.is_valid_bucket(bucket):
                     tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
                     next_buckets.append(bucket)

@@ -56,7 +56,6 @@ class Miner:
         parser.add_argument('--netuid', type=int, default=3, help='Bittensor network UID.')
         parser.add_argument('--actual_batch_size', type=int, default=8, help='Training batch size per accumulation.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training (e.g., cpu or cuda)')
-        parser.add_argument('--remote', action='store_true', help='Connect to other buckets')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
         parser.add_argument('--random', action='store_true', help='Train on random')

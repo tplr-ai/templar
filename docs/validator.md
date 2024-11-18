@@ -193,8 +193,6 @@ pm2 start neurons/validator.py --interpreter python3 --name validator -- \
   --netuid <netuid> \
   --subtensor.network <network> \
   --process_name validator \  # Must match PM2's --name
-  --autoupdate \
-  --remote  \
   --sync_state
 
 > **Important**: When using PM2, the `--process_name` argument must match the PM2 process name specified by `--name`. In this example, PM2 process is named `validator`, so we use `--process_name validator`.
@@ -216,7 +214,7 @@ pm2 list
   - 24GB VRAM: batch size 1
 - **`--netuid`**: Network subnet ID (e.g., 223 for testnet)
 - **`--subtensor.network`**: Network name (finney/test/local)
-- **`--autoupdate`**: Enable automatic code updates
+- **`--no_autoupdate`**: Disable automatic code updates
 
 ## Configuration
 

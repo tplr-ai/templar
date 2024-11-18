@@ -195,7 +195,6 @@ PM2 automatically manages your miner processes and restarts them if they crash:
     --netuid <netuid> \
     --subtensor.network <network> \
     --process_name miner \  # Must match PM2's --name
-    --remote \
     --sync_state
 
 
@@ -210,7 +209,6 @@ pm2 list
 
 ### Important Flags
 - **`--process_name`**: (Required) Must match the PM2 process name when using PM2
-- **`--remote`**: Enables downloading updates from other miners' buckets
 - **`--sync_state`**: Synchronizes model state with network history
 - **`--actual_batch_size`**: Set based on GPU memory:
   - 80GB+ VRAM: batch size 6
@@ -218,7 +216,7 @@ pm2 list
   - 24GB VRAM: batch size 1
 - **`--netuid`**: Network subnet ID (e.g., 223 for testnet)
 - **`--subtensor.network`**: Network name (finney/test/local)
-- **`--autoupdate`**: Enable automatic code updates
+- **`--no_autoupdate`**: Disable automatic code updates
 
 ## Configuration
 

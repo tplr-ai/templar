@@ -59,7 +59,7 @@ class Miner:
         parser.add_argument('--baseline', action='store_true', help='Dont perform syncing with other peers, just train.')
         parser.add_argument('--test', action='store_true', help='Run on test network')
         parser.add_argument('--local', action='store_true', help='Run on local network')
-        parser.add_argument('--autoupdate', action='store_true', help='Enable automatic updates')
+        parser.add_argument('--no_autoupdate', action='store_true', help='Disable automatic updates')
         parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
         parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to save/load the checkpoint. If None, the path is set to checkpoint-M<UID>.pth.')
         bt.wallet.add_args(parser)
@@ -74,7 +74,7 @@ class Miner:
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
         tplr.validate_bucket_or_exit(config.bucket)
-        if config.autoupdate:
+        if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
         return config
@@ -175,9 +175,14 @@ class Miner:
         # Init buckets.
         self.buckets = []
         for uid in self.metagraph.uids:
-            # Use --remote to connect to other miners, other wise, only see's config.bucket.
-            try: self.buckets.append(self.config.bucket if not self.config.remote else self.subtensor.get_commitment( self.config.netuid, uid ) )
-            except: self.buckets.append(None)
+            try:
+                bucket =  self.subtensor.get_commitment(self.config.netuid, uid)
+                tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket}")
+                self.buckets.append(bucket)
+            except Exception as e:
+                tplr.logger.debug(f"Failed to retrieve bucket for UID {uid}: {e}")
+                self.buckets.append(None)
+
 
         # Init run state.
         self.sample_rate = 1.0

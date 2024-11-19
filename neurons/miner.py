@@ -246,11 +246,6 @@ class Miner:
         if self.config.sync_state:
             st = tplr.T()
             history_windows = [self.current_window - i for i in range(self.hparams.max_history - 1, -1, -1)]
-            state_slices = await tplr.download_slices_for_buckets_and_windows(
-                buckets = self.buckets,
-                windows = history_windows,
-                key = 'state'
-            )
             for window in tqdm(history_windows, desc="Syncing state"):
                 max_global_step = await tplr.apply_slices_to_model( 
                     model = self.model, 

@@ -245,7 +245,7 @@ class Miner:
         # Optionally sync the model state by pulling model states from the history.
         if self.config.sync_state:
             st = tplr.T()
-            history_windows = [ self.current_window - i for i in range (self.hparams.max_history) ]
+            history_windows = [self.current_window - i for i in range(self.hparams.max_history - 1, -1, -1)]
             state_slices = await tplr.download_slices_for_buckets_and_windows(
                 buckets = self.buckets,
                 windows = history_windows,

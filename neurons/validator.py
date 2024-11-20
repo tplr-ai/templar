@@ -37,7 +37,6 @@ from pydantic import ValidationError
 
 # Local imports.
 import templar as tplr
-from templar.config import BUCKET_SECRETS
 from templar.schemas import Bucket
 
 # GPU optimizations.
@@ -74,7 +73,7 @@ class Validator:
             config.subtensor.chain_endpoint = 'ws://127.0.0.1:9944'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
-        tplr.validate_bucket_or_exit(BUCKET_SECRETS["bucket_name"])
+        tplr.validate_bucket_or_exit(tplr.config.BUCKET_SECRETS["bucket_name"])
         if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
@@ -99,11 +98,11 @@ class Validator:
 
         # Init bucket.
         try:
-            if BUCKET_SECRETS["bucket_name"] != self.subtensor.get_commitment(self.config.netuid, self.uid):
+            if tplr.config.BUCKET_SECRETS["bucket_name"] != self.subtensor.get_commitment(self.config.netuid, self.uid):
                 raise ValueError('')
         except:
-            self.subtensor.commit(self.wallet, self.config.netuid, BUCKET_SECRETS["bucket_name"])
-        tplr.logger.info('Bucket:' + BUCKET_SECRETS["bucket_name"])
+            self.subtensor.commit(self.wallet, self.config.netuid, tplr.config.BUCKET_SECRETS["bucket_name"])
+        tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
 
         # Init Wandb.
         # Ensure the wandb directory exists
@@ -485,8 +484,8 @@ class Validator:
                 st = tplr.T()
                 await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'state')
                 await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'delta')
-                await tplr.delete_files_from_bucket_before_window( bucket = BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'state' )
-                await tplr.delete_files_from_bucket_before_window( bucket = BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
+                await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'state' )
+                await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Cleaned file history.")
 
                 # Finish step.

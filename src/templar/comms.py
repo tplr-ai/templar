@@ -31,7 +31,6 @@ from aiobotocore.session import get_session
 import re
 import sys
 from templar.logging import logger
-from templar.config import BUCKET_SECRETS
 from templar.constants import CF_REGION_NAME
 from templar.schemas import Bucket
 
@@ -222,11 +221,11 @@ async def upload_slice_for_window(
     session = get_session()
     async with session.create_client(
         's3',
-        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
+        endpoint_url=get_base_url(tplr.config.BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
-        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+        aws_access_key_id=tplr.config.BUCKET_SECRETS["write"]["access_key_id"],
+        aws_secret_access_key=tplr.config.BUCKET_SECRETS["write"]["secret_access_key"],
     ) as s3_client:
         try:
             with open(temp_file_name, 'rb') as f:
@@ -254,11 +253,11 @@ async def upload_master(bucket: str, model: torch.nn.Module, wallet: 'bt.wallet'
     session = get_session()
     async with session.create_client(
         's3',
-        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
+        endpoint_url=get_base_url(tplr.config.BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
-        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+        aws_access_key_id=tplr.config.BUCKET_SECRETS["write"]["access_key_id"],
+        aws_secret_access_key=tplr.config.BUCKET_SECRETS["write"]["secret_access_key"],
     ) as s3_client:
         try:
             # Create a temporary file and write the model state dictionary to it
@@ -615,11 +614,11 @@ async def delete_files_from_bucket_before_window(bucket: str, window_max: int, k
     session = get_session()
     async with session.create_client(
         's3',
-        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
+        endpoint_url=get_base_url(tplr.config.BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
-        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+        aws_access_key_id=tplr.config.BUCKET_SECRETS["write"]["access_key_id"],
+        aws_secret_access_key=tplr.config.BUCKET_SECRETS["write"]["secret_access_key"],
     ) as s3_client:
         try:
             response = await s3_client.list_objects_v2(Bucket=bucket)

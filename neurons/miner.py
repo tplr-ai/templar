@@ -38,7 +38,6 @@ from bittensor.extrinsics.serving import publish_metadata
 
 # Import local files.
 import templar as tplr
-from templar.config import BUCKET_SECRETS
 from templar.schemas import Bucket
 from templar.comms import get_bucket
 
@@ -77,7 +76,7 @@ class Miner:
             config.subtensor.chain_endpoint = 'ws://127.0.0.1:9944'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
-        tplr.validate_bucket_or_exit(BUCKET_SECRETS["bucket_name"])
+        tplr.validate_bucket_or_exit(tplr.config.BUCKET_SECRETS["bucket_name"])
         if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
@@ -104,7 +103,7 @@ class Miner:
         # Init bucket.
         try:
             bucket = self.get_commitment(self.uid)
-            bucket_from_secrets = get_bucket(BUCKET_SECRETS)
+            bucket_from_secrets = get_bucket(tplr.config.BUCKET_SECRETS)
             if bucket != bucket_from_secrets:
                 tplr.logger.info(
                     "Your bucket secrets with read permission have changed. "
@@ -120,7 +119,7 @@ class Miner:
         except Exception as e:
             tplr.logger.warning(f"Committing to the network due to the following exception: {e}")
             self.commit()
-        tplr.logger.info('Bucket:' + BUCKET_SECRETS["bucket_name"])
+        tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
 
         # Init Wandb.
         # Ensure the wandb directory exists
@@ -390,7 +389,7 @@ class Miner:
                     # Upload the delta for the previous window.
                     st = tplr.T()
                     await tplr.upload_slice_for_window(
-                        bucket = BUCKET_SECRETS["bucket_name"],
+                        bucket = tplr.config.BUCKET_SECRETS["bucket_name"],
                         model = self.model, 
                         window = window,
                         seed = window,
@@ -418,7 +417,7 @@ class Miner:
                     # Upload the state for the current window.
                     st = tplr.T()
                     await tplr.upload_slice_for_window(
-                        bucket = BUCKET_SECRETS["bucket_name"],
+                        bucket = tplr.config.BUCKET_SECRETS["bucket_name"],
                         model = self.model, 
                         window = window + 1,
                         seed = window + 1, 
@@ -433,8 +432,8 @@ class Miner:
                     st = tplr.T()
                     await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'state')
                     await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'delta')
-                    await tplr.delete_files_from_bucket_before_window( bucket = BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'state' )
-                    await tplr.delete_files_from_bucket_before_window( bucket = BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
+                    await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'state' )
+                    await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Cleaned file history.")
                     
                     # Wait until we are on a new window.
@@ -506,7 +505,7 @@ class Miner:
         - Secret access key: A string of variable length (up to 64 characters).
 
         The commitment process involves:
-        - Fetching the required configuration details from the `BUCKET_SECRETS`
+        - Fetching the required configuration details from the `tplr.config.BUCKET_SECRETS`
           dictionary.
         - Concatenating the account ID, access key ID, and secret access key
           into a single string, in this exact order.
@@ -524,9 +523,9 @@ class Miner:
             communication are propagated.
         """
         concatenated = (
-            BUCKET_SECRETS["account_id"]
-            + BUCKET_SECRETS["read"]["access_key_id"]
-            + BUCKET_SECRETS["read"]["secret_access_key"]
+            tplr.config.BUCKET_SECRETS["account_id"]
+            + tplr.config.BUCKET_SECRETS["read"]["access_key_id"]
+            + tplr.config.BUCKET_SECRETS["read"]["secret_access_key"]
         )
         self.subtensor.commit(self.wallet, self.config.netuid, concatenated)
         tplr.logger.info(f"Committed {type(concatenated)} data of type to the network: {concatenated}")

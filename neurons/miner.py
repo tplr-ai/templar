@@ -32,13 +32,9 @@ import torch.optim as optim
 from transformers import LlamaForCausalLM
 from rich.markup import escape
 import os
-import gzip
-from pydantic import ValidationError
-from bittensor.extrinsics.serving import publish_metadata
 
 # Import local files.
 import templar as tplr
-from templar.schemas import Bucket
 from templar.comms import get_bucket
 
 # GPU optimizations.
@@ -93,6 +89,9 @@ class Miner:
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(netuid=self.config.netuid)
+        self.chain_manager = tplr.chain.ChainManager(
+            subtensor=self.subtensor, wallet=self.wallet, netuid=self.config.netuid
+        )
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             tplr.logger.error(f'\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]. You need to register first with: [blue]`btcli subnet register`[/blue]\n')
             sys.exit()
@@ -102,7 +101,7 @@ class Miner:
 
         # Init bucket.
         try:
-            bucket = self.get_commitment(self.uid)
+            bucket = self.chain_manager.get_commitment(self.uid)
             bucket_from_secrets = get_bucket(tplr.config.BUCKET_SECRETS)
             if bucket != bucket_from_secrets:
                 tplr.logger.info(
@@ -115,10 +114,10 @@ class Miner:
                 tplr.logger.debug(
                     f"Bucket using data from secrets is: {bucket_from_secrets}"
                 )
-                self.commit()
+                self.chain_manager.commit()
         except Exception as e:
             tplr.logger.warning(f"Committing to the network due to the following exception: {e}")
-            self.commit()
+            self.chain_manager.commit()
         tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
 
         # Init Wandb.
@@ -202,7 +201,7 @@ class Miner:
         self.buckets = []
         for uid in self.metagraph.uids:
             try:
-                bucket =  self.get_commitment(uid)
+                bucket =  self.chain_manager.get_commitment(uid)
                 tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket.name}")
                 self.buckets.append(bucket)
             except Exception as e:
@@ -238,7 +237,7 @@ class Miner:
         next_buckets = []
         for uid in self.metagraph.uids:
             try:
-                bucket = self.get_commitment(uid)
+                bucket = self.chain_manager.get_commitment(uid)
                 if tplr.is_valid_bucket(bucket.name):
                     tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket.name}")
                     next_buckets.append(bucket)
@@ -494,103 +493,6 @@ class Miner:
                  # Wait for 1 second before retrying
                 tplr.logger.error(f"Failed to subscribe to block headers: {e}.\nRetrying in 1 seconds...")
                 time.sleep(1) 
-
-    def commit(self) -> None:
-        """Commits bucket configuration data to the subtensor network.
-
-        This method prepares and commits bucket configuration data associated
-        with the wallet to the subtensor network. The data includes:
-        - Account ID: A string of fixed length 32 characters.
-        - Access key ID: A string of fixed length 32 characters.
-        - Secret access key: A string of variable length (up to 64 characters).
-
-        The commitment process involves:
-        - Fetching the required configuration details from the `tplr.config.BUCKET_SECRETS`
-          dictionary.
-        - Concatenating the account ID, access key ID, and secret access key
-          into a single string, in this exact order.
-        - Committing the concatenated data to the subtensor network using the
-          configured `netuid` and wallet.
-
-        **Note:** The order of concatenation (account ID, access key ID, secret
-        access key) is critical for correct parsing when the data is retrieved.
-
-        Logs provide visibility into the data type and structure before
-        committing.
-
-        Raises:
-            Any exceptions that might arise from the subtensor network
-            communication are propagated.
-        """
-        concatenated = (
-            tplr.config.BUCKET_SECRETS["account_id"]
-            + tplr.config.BUCKET_SECRETS["read"]["access_key_id"]
-            + tplr.config.BUCKET_SECRETS["read"]["secret_access_key"]
-        )
-        self.subtensor.commit(self.wallet, self.config.netuid, concatenated)
-        tplr.logger.info(f"Committed {type(concatenated)} data of type to the network: {concatenated}")
-
-    
-    def get_commitment(self, uid: int) -> Bucket:
-        """Retrieves and parses committed bucket configuration data for a given
-        UID.
-
-        This method fetches commitment data for a specific UID from the
-        subtensor network and decodes it into a structured format. The
-        retrieved data is split into the following fields:
-        - Account ID: A string of fixed length 32 characters.
-        - Access key ID: A string of fixed length 32 characters.
-        - Secret access key: A string of variable length (up to 64 characters).
-
-        The parsed fields are then mapped to an instance of the `Bucket` class.
-        When initializing the Bucket object, the account ID is also used as the
-        bucket name.
-
-        The retrieval process involves:
-        - Fetching the commitment data for the specified UID using the
-          configured `netuid` from the subtensor network.
-        - Splitting the concatenated string into individual fields based on
-          their expected lengths and order.
-        - Mapping the parsed fields to a `Bucket` instance.
-
-        **Note:** The order of fields (bucket name, account ID, access key ID,
-        secret access key) in the concatenated string is critical for accurate
-        parsing.
-
-        Args:
-            uid: The UID of the neuron whose commitment data is being
-                retrieved.
-
-        Returns:
-            Bucket: An instance of the `Bucket` class containing the parsed
-                bucket configuration details.
-
-        Raises:
-            ValueError: If the parsed data does not conform to the expected
-                format for the `Bucket` class.
-            Exception: If an error occurs while retrieving the commitment data
-                from the subtensor network.
-        """
-        try:
-            concatenated = self.subtensor.get_commitment(self.config.netuid, uid)
-            tplr.logger.success(f"Commitment fetched: {concatenated}")
-        except Exception as e:
-            raise Exception(f"Couldn't get commitment from uid {uid} because {e}")
-        if len(concatenated) != 128:
-            raise ValueError(
-                f"Commitment '{concatenated}' is of length {len(concatenated)} but should be of length 128."
-            )
-
-        try:
-            return Bucket(
-                name=concatenated[:32],
-                account_id=concatenated[:32],
-                access_key_id=concatenated[32:64],
-                secret_access_key=concatenated[64:],
-            )
-        except ValidationError as e:
-            raise ValueError(f"Invalid data in commitment: {e}")
-
 
 if __name__ == "__main__":
     asyncio.run(Miner().run())

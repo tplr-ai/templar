@@ -563,16 +563,17 @@ class Validator:
                     
                     wandb.log({f"validator/{metric_name}": line_plot}, step=self.global_step)
                 # Set temperatured weights on the chain.
-                if self.current_block % 100 == 0:
+                if self.global_step % 100 == 0:
                     tplr.logger.info(f"Setting weights on chain: {self.weights[ self.metagraph.uids ]}")
                     try:
-                        result = self.subtensor.set_weights(
-                            wallet = self.wallet,
-                            netuid = self.config.netuid,
-                            uids = self.metagraph.uids,
-                            weights = self.weights[ self.metagraph.uids ],
-                            wait_for_inclusion = True,
-                            wait_for_finalization = False,
+                        result = await asyncio.to_thread(
+                            self.subtensor.set_weights,
+                            wallet=self.wallet,
+                            netuid=self.config.netuid,
+                            uids=self.metagraph.uids,
+                            weights=self.weights[self.metagraph.uids],
+                            wait_for_inclusion=True,
+                            wait_for_finalization=False,
                         )
                         tplr.logger.info(f"Successfully set weights on chain: {result}")
                     except Exception as e:
@@ -583,7 +584,7 @@ class Validator:
                 tplr.logger.info("Training interrupted by user. Stopping the run.")
                 self.stop_event.setplr.T()
                 await self.update_task
-                sys.exitplr.T(0)
+                sys.exit(0)
             
             # Catch unknown.
             except Exception as e:

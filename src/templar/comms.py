@@ -409,11 +409,6 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
     # Import the required modules
     import re
     from templar import __version__  # Ensure __version__ is imported
-
-    # Validate the bucket name before processing
-    if not is_valid_bucket(bucket):
-        logger.debug(f"Skipping invalid bucket: '{bucket}'")
-        return []
     logger.debug(f"Processing bucket '{bucket}' for windows {windows}")
     files = []
     paginator = s3_client.get_paginator('list_objects_v2')

@@ -183,16 +183,18 @@ class Miner:
         )
 
         # Init buckets.
+        buckets = tplr.get_all_commitments(self.subtensor.substrate, self.config.netuid, self.metagraph)
         self.buckets = []
         for uid in self.metagraph.uids:
-            try:
-                bucket =  self.subtensor.get_commitment(self.config.netuid, uid)
-                tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket}")
+            bucket = buckets.get(uid)
+            if isinstance(bucket, bytes):
+                bucket = bucket.decode('utf-8')
+            if bucket is not None and tplr.is_valid_bucket(bucket):
+                tplr.logger.debug(f"Retrieved valid bucket for UID {uid}: {bucket}")
                 self.buckets.append(bucket)
-            except Exception as e:
-                tplr.logger.debug(f"Failed to retrieve bucket for UID {uid}: {e}")
+            else:
+                tplr.logger.debug(f"No valid bucket found for UID {uid}")
                 self.buckets.append(None)
-
 
         # Init run state.
         self.sample_rate = 1.0
@@ -214,27 +216,29 @@ class Miner:
             tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
             await asyncio.sleep(3600)
 
-    def perform_update(self):
-        """Updates subtensor connection, metagraph, hyperparameters and buckets."""
+    async def perform_update(self):
+        """Updates subtensor connection, metagraph, hyperparameters, and buckets."""
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
-        self.hparams = tplr.load_hparams()
 
-        next_buckets = []
+        # Fetch all commitments at once
+        buckets = tplr.get_all_commitments(
+            substrate=self.subtensor.substrate,
+            netuid=self.config.netuid,
+            metagraph=self.metagraph
+        )
+
+        self.buckets = []
         for uid in self.metagraph.uids:
-            try:
-                bucket = self.subtensor.get_commitment(self.config.netuid, uid)
-                if tplr.is_valid_bucket(bucket):
-                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
-                    next_buckets.append(bucket)
-                else:
-                    tplr.logger.debug(f"UID {uid}: Invalid or missing bucket name: {bucket}")
-                    next_buckets.append(None)
-            except Exception as e:
-                tplr.logger.warning(f"UID {uid}: Error retrieving bucket: {e}")
-                next_buckets.append(None)
-
-        self.buckets = next_buckets
+            bucket = buckets.get(uid)
+            if isinstance(bucket, bytes):
+                bucket = bucket.decode('utf-8')
+            if bucket is not None and tplr.is_valid_bucket(bucket):
+                tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
+                self.buckets.append(bucket)
+            else:
+                tplr.logger.debug(f"UID {uid}: Invalid or missing bucket: {bucket}")
+                self.buckets.append(None)
 
     async def run(self):
         # Main loop.

@@ -1,4 +1,3 @@
-import logging
 from substrateinterface import SubstrateInterface
 from retry import retry
 from typing import Optional, Dict

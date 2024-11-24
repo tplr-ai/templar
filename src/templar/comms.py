@@ -31,6 +31,8 @@ from aiobotocore.session import get_session
 import re
 import sys
 from templar.logging import logger
+import boto3
+from botocore.exceptions import ClientError
 
 from . import __version__
 from .config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, client_config
@@ -680,18 +682,52 @@ async def delete_old_version_files(bucket_name: str, current_version: str):
 
 def is_valid_bucket(bucket_name: str) -> bool:
     """
-    Validates the bucket name against AWS S3 naming conventions and ARN patterns.
+    Validates if the bucket name matches AWS S3 bucket naming rules
+    and checks if the bucket exists and is accessible.
 
     Args:
-        bucket_name (str): The name of the S3 bucket.
+        bucket_name (str): The bucket name to validate.
 
     Returns:
-        bool: True if valid, False otherwise.
+        bool: True if valid and accessible, False otherwise.
     """
-    if BUCKET_REGEX.match(bucket_name) or ARN_REGEX.match(bucket_name):
-        return True
-    logger.debug(f"Invalid bucket name: {bucket_name}")
-    return False
+    # Ensure bucket_name is a string
+    if isinstance(bucket_name, bytes):
+        bucket_name = bucket_name.decode('utf-8')
+
+    # Check if the bucket name matches the regex
+    if not (BUCKET_REGEX.match(bucket_name) or ARN_REGEX.match(bucket_name)):
+        logger.debug(f"Invalid bucket name format: {bucket_name}")
+        return False
+
+    # Create S3 client
+    s3_client = boto3.client(
+        's3',
+        region_name='us-east-1',
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+    )
+
+    # Check if the bucket exists and is accessible
+    try:
+        # Try to list objects in the bucket
+        s3_client.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
+        logger.debug(f"Bucket '{bucket_name}' exists and is accessible.")
+        return True  # Bucket exists and is accessible
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        if error_code in ['NoSuchBucket', '404']:
+            logger.debug(f"Bucket '{bucket_name}' does not exist.")
+        elif error_code in ['AccessDenied', '403']:
+            logger.debug(f"Access denied for bucket '{bucket_name}'.")
+        elif error_code == 'AllAccessDisabled':
+            logger.debug(f"All access disabled for bucket '{bucket_name}'.")
+        else:
+            logger.debug(f"Error accessing bucket '{bucket_name}': {e}")
+        return False
+    except Exception as e:
+        logger.debug(f"Unexpected error when accessing bucket '{bucket_name}': {e}")
+        return False
 
 def validate_bucket_or_exit(bucket_name: str):
     """

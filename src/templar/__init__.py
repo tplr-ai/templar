@@ -21,6 +21,7 @@ __version__ = "0.1.5"
 from .autoupdate import *
 from .comms import *
 from .config import *
+from .commitment import *
 from .dataset import *
 from .hparams import *
 from .learning_rates import *

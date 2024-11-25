@@ -8,7 +8,7 @@ import threading
 import time
 from packaging import version
 
-# Local imports 
+# Local imports
 from .comms import delete_old_version_files
 from .logging import logger
 

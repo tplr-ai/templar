@@ -15,12 +15,16 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+# Global imports
 import json
 from types import SimpleNamespace
+
+# Local imports
 from transformers import AutoTokenizer, LlamaConfig
 
 # Cache file path
 HPARAMS_FILE = "hparams.json"
+
 
 def create_namespace(hparams: dict) -> SimpleNamespace:
     """
@@ -51,6 +55,7 @@ def create_namespace(hparams: dict) -> SimpleNamespace:
     )
 
     return hparams_ns
+
 
 def load_hparams() -> SimpleNamespace:
     """

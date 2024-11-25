@@ -17,8 +17,11 @@
 # fmt: off
 
 
+# Global imports
 import os
 import wandb
+
+# Local imports
 from templar import __version__, logger
 
 def initialize_wandb(run_prefix, uid, config, group, job_type):

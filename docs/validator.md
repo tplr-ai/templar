@@ -34,57 +34,28 @@ This document provides a guide on how to set up and run a validator using `valid
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Python 3.12**
 - **CUDA-compatible drivers**
-- **AWS S3 Credentials and Bucket**: Public read is required, so miners / evaluators can download slices. Please refer to this [guide](https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html?icmpid=docs_amazons3_console) on s3 naming conventions. The required settings are:
-  - Block all public access: Off
-  ![Allow Public Access](../assets/allow_public_access.png)
+- **Cloudflare R2 Bucket Configuration**:
+  
+  To use buckets for sharing model slices, do the following:
+  1. **Navigate to R2 Object Storage and Create a Bucket**:
+     - Name the bucket the same as your **account ID**.
+     - Set the **region** to **ENAM**.
 
-  - Object Ownership:
-    - ACL enabled
-    - Object Ownership: Bucket Owner Preferred.
-    ![Bucket Ownership](../assets/acl_perms.png)
-- **Configure IAM Policy**:
-   - Create a new IAM policy:
-```json
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Sid": "PublicBucketReadAccess",
-            "Effect": "Allow",
-            "Action": [
-                "s3:ListBucket",
-                "s3:GetObject",
-                "s3:GetObjectAttributes"
-            ],
-            "Resource": [
-                "arn:aws:s3:::*/*",
-                "arn:aws:s3:::*"
-            ]
-        },
-        {
-            "Sid": "PrivateBucketFullAccess",
-            "Effect": "Allow",
-            "Action": [
-                "s3:*"
-            ],
-            "Resource": [
-                "arn:aws:s3:::<your-bucket-name>",
-                "arn:aws:s3:::<your-bucket-name>*/*"
-            ]
-        }
-    ]
-}
-```
-   - Replace `<your-bucket-name>` with your actual bucket name
-   - This policy provides minimum required permissions:
-     - Read objects and their ACLs
-     - Write objects and set their ACLs
-     - Get object attributes
-- **Create IAM User**:
-   - Create new IAM user
-   - Attach the policy created above
-   - Generate access key and secret key
-   - Save credentials securely
+  2. **Generate Tokens**:
+     - Create a **read token** and a **write token**.
+     - Note down the access key IDs and secret access keys for each token.
+
+  3. **Update `.env.yaml`**:
+     - Create the file `.env.yaml` by copying [`.env-template.yaml`](../.env-template.yaml)
+       and populate it with values from the previous steps:
+       ```
+         cp .env-template.yaml .env.yaml
+       ```
+     
+  The access key id and secret access key for your *read* token will be shared
+  with other neurons through commits to the network. The secrets for your write
+  token will stay secret.
+
 - **Git**
 
 ## Installation
@@ -159,15 +130,7 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu118
 uv sync --extra all
 ```
 
-5. **Configure AWS Credentials**:
-Add to your `~/.bash_profile`:
-```bash
-export AWS_ACCESS_KEY_ID="your-access-key"
-export AWS_SECRET_ACCESS_KEY="your-secret-key"
-export BUCKET="your-bucket-name"
-```
-
-6. **Create and Register Validator Wallet**:
+5. **Create and Register Validator Wallet**:
 ```bash
 # Create coldkey
 btcli wallet new_coldkey --wallet.name default --n-words 12
@@ -188,7 +151,6 @@ pm2 start neurons/validator.py --interpreter python3 --name validator -- \
   --actual_batch_size 6 \
   --wallet.name default \
   --wallet.hotkey validator \
-  --bucket $BUCKET \
   --use_wandb \
   --netuid <netuid> \
   --subtensor.network <network> \
@@ -242,13 +204,6 @@ pm2 list
   - Netuid: 1
   - Endpoint: `wss://localhost:9944`
 
-### AWS Setup
-
-1. Create an S3 bucket for storing validator data
-2. Configure bucket permissions for public read access
-3. Set up IAM user with S3 access
-4. Export credentials in environment
-
 ## Monitoring
 
 ### Logs
@@ -292,12 +247,12 @@ Monitor key metrics:
 - Impact on network consensus
 - Optimization strategies
 
-## Troubleshooting
+<!-- ## Troubleshooting
 
 Common issues and solutions:
 - State synchronization failures
 - Out of memory errors
 - Network connectivity issues
 - Weight setting delays
-- AWS access problems
+- AWS access problems -->
 

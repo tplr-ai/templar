@@ -1,20 +1,20 @@
+# Global imports
+import asyncio
+import git
 import os
+import subprocess
 import sys
 import threading
 import time
-import git
-import subprocess
 from packaging import version
-import asyncio
 
-# Import local modules
-from .logging import logger
-from . import __version__
+# Local imports
 from .comms import delete_old_version_files
-
+from .logging import logger
 
 
 TARGET_BRANCH = "main"
+
 
 class AutoUpdate(threading.Thread):
     """
@@ -53,7 +53,9 @@ class AutoUpdate(threading.Thread):
                     version_info = line.split("=")[1].strip().strip(' "')
                     return version_info
         except Exception as e:
-            logger.exception("Failed to get remote version for version check", exc_info=e)
+            logger.exception(
+                "Failed to get remote version for version check", exc_info=e
+            )
             return None
 
     def check_version_updated(self):
@@ -69,6 +71,7 @@ class AutoUpdate(threading.Thread):
         try:
             import templar
             from importlib import reload
+
             # from . import __init__
             reload(templar)
             local_version = templar.__version__
@@ -137,9 +140,7 @@ class AutoUpdate(threading.Thread):
                 logger.info(f"Resolving conflict in file: {file_path}")
                 self.repo.git.checkout("--theirs", file_path)
             self.repo.index.commit("Resolved merge conflicts automatically")
-            logger.info(
-                "Merge conflicts resolved, repository updated to remote state."
-            )
+            logger.info("Merge conflicts resolved, repository updated to remote state.")
             logger.info("✅ Successfully updated")
             return True
         except git.GitCommandError as e:
@@ -172,6 +173,7 @@ class AutoUpdate(threading.Thread):
         Cleans up old version slices from the S3 bucket.
         """
         from templar import __version__
+
         bucket_name = self.bucket_name
         logger.info(f"Cleaning up old versions from bucket {bucket_name}")
         await delete_old_version_files(bucket_name, __version__)
@@ -211,7 +213,9 @@ class AutoUpdate(threading.Thread):
                 logger.error("PM2 environment detected but process_name not provided")
                 sys.exit(1)
             # PM2 will restart the process if we exit
-            logger.info(f"Detected PM2 environment. Restarting process: {self.process_name}")
+            logger.info(
+                f"Detected PM2 environment. Restarting process: {self.process_name}"
+            )
             subprocess.check_call(["pm2", "restart", self.process_name])
             time.sleep(5)  # Give PM2 time to restart the process
             sys.exit(1)

@@ -15,13 +15,32 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+# Global imports
 import os
+import sys
+import yaml
+from pathlib import Path
+
+# Local imports
 import botocore.config
 from dotenv import dotenv_values
+from loguru import logger
+
 # Load environment variables
 env_config = {**dotenv_values(".env"), **os.environ}
-AWS_ACCESS_KEY_ID = env_config.get('AWS_ACCESS_KEY_ID')
-AWS_SECRET_ACCESS_KEY = env_config.get('AWS_SECRET_ACCESS_KEY')
+AWS_ACCESS_KEY_ID = env_config.get("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = env_config.get("AWS_SECRET_ACCESS_KEY")
+
+envfile_path = Path(__file__).parents[2] / ".env.yaml"
+try:
+    with open(envfile_path, "r") as file:
+        BUCKET_SECRETS = yaml.safe_load(file)
+except FileNotFoundError:
+    logger.error(
+        f"{envfile_path} not found. Please create it with the help of `.env-template.yaml`."
+    )
+    sys.exit()
+BUCKET_SECRETS["bucket_name"] = BUCKET_SECRETS["account_id"]
 
 # Configure the S3 client
 client_config = botocore.config.Config(

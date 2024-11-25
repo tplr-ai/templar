@@ -34,13 +34,15 @@ from templar.logging import logger
 from templar.constants import CF_REGION_NAME
 from templar.schemas import Bucket
 from .config import BUCKET_SECRETS
-from . import __version__ 
+from . import __version__
 
 
 from .config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, client_config
 
+
 def get_base_url(account_id: str) -> str:
     return f"https://{account_id}.r2.cloudflarestorage.com"
+
 
 def get_bucket(bucket_secrets: dict[str, str | dict[str, str]]) -> Bucket:
     return Bucket(
@@ -50,11 +52,13 @@ def get_bucket(bucket_secrets: dict[str, str | dict[str, str]]) -> Bucket:
         secret_access_key=bucket_secrets["read"]["secret_access_key"],
     )
 
+
 # Set uvloop as the event loop policy
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 # Define a semaphore to limit concurrent downloads (adjust as needed)
 semaphore = asyncio.Semaphore(1000)
+
 
 async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
     lock: FileLock = FileLock(f"{filename}.lock")
@@ -66,12 +70,9 @@ async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
             weights_only=True,
         )
 
+
 async def apply_slices_to_model(
-    model: torch.nn.Module,
-    window: int,
-    seed: str,
-    compression: int,
-    key: str = 'slice'
+    model: torch.nn.Module, window: int, seed: str, compression: int, key: str = "slice"
 ) -> int:
     """
     Applies downloaded model parameter slices to a model for a specific window.
@@ -111,29 +112,38 @@ async def apply_slices_to_model(
         Timeout: If unable to acquire lock on slice file
         Exception: For errors loading or applying slices
     """
-    max_global_step = 0 
+    max_global_step = 0
     indices_dict = await get_indices_for_window(model, seed, compression)
     slice_files = await load_files_for_window(window=window, key=key)
 
     slices_per_param = {name: 0 for name, _ in model.named_parameters()}
-    param_sums = {name: torch.zeros_like(param.data) for name, param in model.named_parameters()}
+    param_sums = {
+        name: torch.zeros_like(param.data) for name, param in model.named_parameters()
+    }
     max_global_step = 0  # Initialize max_global_step
 
     for file_i in slice_files:
         try:
             # Check if the filename contains the correct version
-            
-            match = re.match(rf"^{key}-{window}-.+-v{re.escape(__version__)}\.pt$", os.path.basename(file_i))
+
+            match = re.match(
+                rf"^{key}-{window}-.+-v{re.escape(__version__)}\.pt$",
+                os.path.basename(file_i),
+            )
             if not match:
-                logger.warning(f"Skipping file {file_i} due to version mismatch in filename.")
+                logger.warning(
+                    f"Skipping file {file_i} due to version mismatch in filename."
+                )
                 continue
 
             slice_i = await get_slices(file_i, model.device)
-            slice_global_step = slice_i.get('global_step')
+            slice_global_step = slice_i.get("global_step")
 
             # Skip the slice if 'global_step' is not present
             if slice_global_step is None:
-                logger.warning(f"Skipping slice {file_i} because it has no global_step.")
+                logger.warning(
+                    f"Skipping slice {file_i} because it has no global_step."
+                )
                 continue
 
             max_global_step = max(max_global_step, slice_global_step)
@@ -165,15 +175,16 @@ async def apply_slices_to_model(
 
     return max_global_step
 
+
 async def upload_slice_for_window(
     bucket: str,
     model: torch.nn.Module,
     window: int,
     seed: str,
-    wallet: 'bt.wallet',
+    wallet: "bt.wallet",
     compression: int,
-    key: str = 'slice',
-    global_step: int = 0
+    key: str = "slice",
+    global_step: int = 0,
 ):
     """
     Uploads a slice of model parameters to S3 for a specific window.
@@ -201,17 +212,16 @@ async def upload_slice_for_window(
     Raises:
         Exception: If upload to S3 fails
     """
-    
 
     # Include version in the filename
-    filename = f'{key}-{window}-{wallet.hotkey.ss58_address}-v{__version__}.pt'
+    filename = f"{key}-{window}-{wallet.hotkey.ss58_address}-v{__version__}.pt"
     logger.debug(f"Uploading slice to S3: {filename}")
 
     # Prepare the slice data
     indices = await get_indices_for_window(model, seed, compression)
 
     # Create the slice dictionary with global_step
-    slice_data = {'global_step': global_step}
+    slice_data = {"global_step": global_step}
     for name, param in model.named_parameters():
         slice_data[name] = param.data.view(-1)[indices[name].to(model.device)].cpu()
 
@@ -223,7 +233,7 @@ async def upload_slice_for_window(
     # Upload the file to S3
     session = get_session()
     async with session.create_client(
-        's3',
+        "s3",
         endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
@@ -231,7 +241,7 @@ async def upload_slice_for_window(
         aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
     ) as s3_client:
         try:
-            with open(temp_file_name, 'rb') as f:
+            with open(temp_file_name, "rb") as f:
                 await s3_client.put_object(Bucket=bucket, Key=filename, Body=f)
             logger.debug(f"Successfully uploaded slice to S3: {filename}")
         except Exception:
@@ -241,7 +251,8 @@ async def upload_slice_for_window(
             os.remove(temp_file_name)
             logger.debug(f"Temporary file {temp_file_name} removed")
 
-async def upload_master(bucket: str, model: torch.nn.Module, wallet: 'bt.wallet'):
+
+async def upload_master(bucket: str, model: torch.nn.Module, wallet: "bt.wallet"):
     """
     Uploads the master PyTorch model to an S3 bucket.
 
@@ -250,12 +261,12 @@ async def upload_master(bucket: str, model: torch.nn.Module, wallet: 'bt.wallet'
         model (torch.nn.Module): The PyTorch model to be uploaded.
         wallet (bt.wallet): The wallet object containing the hotkey.
     """
-    upload_filename = f'master-{wallet.hotkey.ss58_address}.pt'
+    upload_filename = f"master-{wallet.hotkey.ss58_address}.pt"
     logger.debug(f"Uploading master model to S3: {upload_filename}")
 
     session = get_session()
     async with session.create_client(
-        's3',
+        "s3",
         endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
@@ -269,7 +280,7 @@ async def upload_master(bucket: str, model: torch.nn.Module, wallet: 'bt.wallet'
                 temp_file_name = temp_file.name
 
             # Upload the file to S3
-            with open(temp_file_name, 'rb') as f:
+            with open(temp_file_name, "rb") as f:
                 await s3_client.put_object(Bucket=bucket, Key=upload_filename, Body=f)
             logger.debug(f"Successfully uploaded master model to S3: {upload_filename}")
         except Exception:
@@ -279,7 +290,10 @@ async def upload_master(bucket: str, model: torch.nn.Module, wallet: 'bt.wallet'
             os.remove(temp_file_name)
             logger.debug(f"Temporary file {temp_file_name} removed")
 
-async def get_indices_for_window(model: torch.nn.Module, seed: str, compression: int) -> Dict[str, torch.LongTensor]:
+
+async def get_indices_for_window(
+    model: torch.nn.Module, seed: str, compression: int
+) -> Dict[str, torch.LongTensor]:
     """
     Computes the indices for the given window and compression factor.
 
@@ -291,10 +305,12 @@ async def get_indices_for_window(model: torch.nn.Module, seed: str, compression:
     Returns:
         Dict[str, torch.LongTensor]: A dictionary mapping parameter names to index tensors.
     """
-    logger.debug(f"Computing indices for window seed {seed} with compression {compression}")
+    logger.debug(
+        f"Computing indices for window seed {seed} with compression {compression}"
+    )
     result = {}
     # Seed the random number generator with the seed
-    seed = int(hashlib.md5(str(seed).encode('utf-8')).hexdigest(), 16) % (2**32)
+    seed = int(hashlib.md5(str(seed).encode("utf-8")).hexdigest(), 16) % (2**32)
     rng = np.random.default_rng(seed)
     for name, param in model.named_parameters():
         # Randomly select indices based on the compression factor
@@ -302,6 +318,7 @@ async def get_indices_for_window(model: torch.nn.Module, seed: str, compression:
         indices = rng.choice(param.numel(), size=num_indices, replace=False)
         result[name] = torch.from_numpy(indices).long().cpu()
     return result
+
 
 async def download_file(s3_client, bucket: str, filename: str) -> str:
     """
@@ -331,9 +348,9 @@ async def download_file(s3_client, bucket: str, filename: str) -> str:
                 CHUNK_SIZE = 1 * 1024 * 1024  # 1 MB
 
                 response = await s3_client.get_object(Bucket=bucket, Key=filename)
-                async with aiofiles.open(temp_file, 'wb') as outfile:
+                async with aiofiles.open(temp_file, "wb") as outfile:
                     while True:
-                        chunk = await response['Body'].read(CHUNK_SIZE)
+                        chunk = await response["Body"].read(CHUNK_SIZE)
                         if not chunk:
                             break
                         await outfile.write(chunk)
@@ -342,16 +359,23 @@ async def download_file(s3_client, bucket: str, filename: str) -> str:
                 return temp_file
 
         except Timeout:
-            logger.error(f"Timeout occurred while trying to acquire lock on {lock_file}")
+            logger.error(
+                f"Timeout occurred while trying to acquire lock on {lock_file}"
+            )
             return None
         except Exception as e:
-            logger.exception(f"Failed to download file {filename} from bucket {bucket}: {e}")
+            logger.exception(
+                f"Failed to download file {filename} from bucket {bucket}: {e}"
+            )
             return None
         finally:
             # The lock is automatically released when exiting the 'with' block
             pass
 
-async def handle_file(s3_client, bucket: str, filename: str, hotkey: str, window: int, version: str):
+
+async def handle_file(
+    s3_client, bucket: str, filename: str, hotkey: str, window: int, version: str
+):
     """
     Handles downloading a single file from S3.
 
@@ -367,7 +391,9 @@ async def handle_file(s3_client, bucket: str, filename: str, hotkey: str, window
         SimpleNamespace: An object containing file metadata and the path to the downloaded file,
                          including the version.
     """
-    logger.debug(f"Handling file '{filename}' for window {window} and hotkey '{hotkey}'")
+    logger.debug(
+        f"Handling file '{filename}' for window {window} and hotkey '{hotkey}'"
+    )
     temp_file = await download_file(s3_client, bucket, filename)
     if temp_file:
         return SimpleNamespace(
@@ -376,11 +402,14 @@ async def handle_file(s3_client, bucket: str, filename: str, hotkey: str, window
             filename=filename,
             window=window,
             temp_file=temp_file,
-            version=version
+            version=version,
         )
     return None
 
-async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 'slice'):
+
+async def process_bucket(
+    s3_client, bucket: str, windows: List[int], key: str = "slice"
+):
     """
     Processes a single S3 bucket to download files for specified windows.
 
@@ -414,26 +443,34 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
 
     logger.debug(f"Processing bucket '{bucket}' for windows {windows}")
     files = []
-    paginator = s3_client.get_paginator('list_objects_v2')
+    paginator = s3_client.get_paginator("list_objects_v2")
 
     for window in windows:
-        prefix = f'{key}-{window}'
+        prefix = f"{key}-{window}"
         logger.debug(f"Listing objects with prefix '{prefix}' in bucket '{bucket}'")
         try:
             async for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-                logger.trace(f"Processing page for prefix '{prefix}' in bucket '{bucket}'")
-                if 'Contents' not in page:
-                    logger.trace(f"No contents found for prefix '{prefix}' in bucket '{bucket}'")
+                logger.trace(
+                    f"Processing page for prefix '{prefix}' in bucket '{bucket}'"
+                )
+                if "Contents" not in page:
+                    logger.trace(
+                        f"No contents found for prefix '{prefix}' in bucket '{bucket}'"
+                    )
                     continue
                 download_tasks = []
-                for obj in page.get('Contents', []):
-                    filename = obj['Key']
-                    logger.trace(f"Processing object with key '{filename}' in bucket '{bucket}'")
+                for obj in page.get("Contents", []):
+                    filename = obj["Key"]
+                    logger.trace(
+                        f"Processing object with key '{filename}' in bucket '{bucket}'"
+                    )
                     try:
                         # Extract hotkey and version from the filename using non-greedy matching
                         match = re.match(rf"^{key}-{window}-(.+?)-v(.+)\.pt$", filename)
                         if not match:
-                            logger.error(f"Filename '{filename}' does not conform to the expected format.")
+                            logger.error(
+                                f"Filename '{filename}' does not conform to the expected format."
+                            )
                             continue
                         slice_hotkey = match.group(1)
                         slice_version = match.group(2)
@@ -451,58 +488,78 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
                         )
                         # Add the download task, passing the version
                         download_tasks.append(
-                            handle_file(s3_client, bucket, filename, slice_hotkey, window, slice_version)
+                            handle_file(
+                                s3_client,
+                                bucket,
+                                filename,
+                                slice_hotkey,
+                                window,
+                                slice_version,
+                            )
                         )
                     except ValueError:
                         logger.exception(f"Error parsing filename '{filename}'")
                         continue
                     except Exception as e:
-                        logger.exception(f"Unexpected error processing filename '{filename}': {e}")
+                        logger.exception(
+                            f"Unexpected error processing filename '{filename}': {e}"
+                        )
                         continue
                 # Download the files concurrently
                 try:
-                    results = await asyncio.gather(*download_tasks, return_exceptions=True)
+                    results = await asyncio.gather(
+                        *download_tasks, return_exceptions=True
+                    )
                     for res in results:
                         if isinstance(res, Exception):
                             logger.error(f"Download task failed: {res}")
                         elif res:
                             files.append(res)
-                    logger.trace(f"Completed processing page for prefix '{prefix}' in bucket '{bucket}'")
+                    logger.trace(
+                        f"Completed processing page for prefix '{prefix}' in bucket '{bucket}'"
+                    )
                 except Exception as e:
-                    logger.exception(f"Error during asyncio.gather for prefix '{prefix}': {e}")
+                    logger.exception(
+                        f"Error during asyncio.gather for prefix '{prefix}': {e}"
+                    )
         except Exception as e:
-            logger.error(f"Error listing objects in bucket '{bucket}' with prefix '{prefix}': {e}")
+            logger.error(
+                f"Error listing objects in bucket '{bucket}' with prefix '{prefix}': {e}"
+            )
     logger.trace(f"Completed processing bucket '{bucket}' for windows {windows}")
     return files
 
+
 async def download_slices_for_buckets_and_windows(
-    buckets: List[Bucket],
-    windows: List[int],
-    key: str = 'slice'
+    buckets: List[Bucket], windows: List[int], key: str = "slice"
 ) -> Dict[int, List[SimpleNamespace]]:
     # Filter out None buckets
     valid_buckets = [b for b in buckets if b is not None]
-    
+
     if not valid_buckets:
-        logger.warning("No valid buckets provided to download_slices_for_buckets_and_windows.")
+        logger.warning(
+            "No valid buckets provided to download_slices_for_buckets_and_windows."
+        )
         return {}
-    
-    logger.debug(f"Downloading files for buckets {[b.name for b in valid_buckets]} and windows {windows}")
-    
+
+    logger.debug(
+        f"Downloading files for buckets {[b.name for b in valid_buckets]} and windows {windows}"
+    )
+
     session = get_session()
     tasks = []
     for bucket in set(valid_buckets):
         async with session.create_client(
-            's3',
+            "s3",
             endpoint_url=get_base_url(bucket.account_id),
             region_name=CF_REGION_NAME,
             config=client_config,
             aws_access_key_id=bucket.access_key_id,
-            aws_secret_access_key=bucket.secret_access_key
+            aws_secret_access_key=bucket.secret_access_key,
         ) as s3_client:
-            logger.debug(f'Processing bucket: {bucket.name}')
+            logger.debug(f"Processing bucket: {bucket.name}")
             tasks.append(process_bucket(s3_client, bucket.name, windows, key))
-    
+
     results = await asyncio.gather(*tasks)
     # Combine results into a dictionary mapping window IDs to lists of slices
     slices = defaultdict(list)
@@ -511,7 +568,8 @@ async def download_slices_for_buckets_and_windows(
             slices[item.window].append(item)
     return slices
 
-async def load_files_for_window(window: int, key: str = 'slice') -> List[str]:
+
+async def load_files_for_window(window: int, key: str = "slice") -> List[str]:
     """
     Loads files for a specific window from the temporary directory.
 
@@ -532,7 +590,7 @@ async def load_files_for_window(window: int, key: str = 'slice') -> List[str]:
         - Files must be in the system temp directory
         - Version number is pulled from templar.__version__
     """
-    
+
     logger.debug(f"Retrieving files for window {window} from temporary directory")
     temp_dir = tempfile.gettempdir()
     window_files = []
@@ -544,7 +602,7 @@ async def load_files_for_window(window: int, key: str = 'slice') -> List[str]:
     return window_files
 
 
-async def delete_files_before_window(window_max: int, key: str = 'slice'):
+async def delete_files_before_window(window_max: int, key: str = "slice"):
     """
     Deletes temporary files with window IDs less than the specified maximum.
 
@@ -553,7 +611,7 @@ async def delete_files_before_window(window_max: int, key: str = 'slice'):
         key (str, optional): The prefix to filter files by. Defaults to 'slice'
 
     Example:
-        >>> await delete_files_before_window(100, 'state') 
+        >>> await delete_files_before_window(100, 'state')
         # Deletes all state-*.pt files with window < 100
 
     Note:
@@ -562,7 +620,7 @@ async def delete_files_before_window(window_max: int, key: str = 'slice'):
         - Files must be in system temp directory
         - Version number is pulled from templar.__version__
     """
-    
+
     logger.debug(f"Deleting files with window id before {window_max}")
     temp_dir = tempfile.gettempdir()
     pattern = re.compile(rf"^{re.escape(key)}-(\d+)-.+-v{__version__}\.(pt|pt\.lock)$")
@@ -580,7 +638,9 @@ async def delete_files_before_window(window_max: int, key: str = 'slice'):
                 logger.error(f"Error deleting file {filename}: {e}")
 
 
-async def delete_files_from_bucket_before_window(bucket: str, window_max: int, key: str = 'slice'):
+async def delete_files_from_bucket_before_window(
+    bucket: str, window_max: int, key: str = "slice"
+):
     """
     Deletes files from an S3 bucket with window IDs less than the specified maximum.
 
@@ -599,11 +659,13 @@ async def delete_files_from_bucket_before_window(bucket: str, window_max: int, k
         - Version number is pulled from templar.__version__
         - Requires valid AWS credentials and bucket permissions
     """
-    
-    logger.debug(f"Deleting files in bucket {bucket} with window id before {window_max}")
+
+    logger.debug(
+        f"Deleting files in bucket {bucket} with window id before {window_max}"
+    )
     session = get_session()
     async with session.create_client(
-        's3',
+        "s3",
         endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
@@ -612,28 +674,38 @@ async def delete_files_from_bucket_before_window(bucket: str, window_max: int, k
     ) as s3_client:
         try:
             response = await s3_client.list_objects_v2(Bucket=bucket)
-            if 'Contents' in response:
-                for obj in response['Contents']:
-                    filename = obj['Key']
-                    match = re.match(rf"^{re.escape(key)}-(\d+)-.+-v{__version__}\.(pt|pt\.lock)$", filename)
+            if "Contents" in response:
+                for obj in response["Contents"]:
+                    filename = obj["Key"]
+                    match = re.match(
+                        rf"^{re.escape(key)}-(\d+)-.+-v{__version__}\.(pt|pt\.lock)$",
+                        filename,
+                    )
                     if match:
                         try:
                             window_id = int(match.group(1))
                             if window_id < window_max:
-                                await s3_client.delete_object(Bucket=bucket, Key=filename)
-                                logger.debug(f"Deleted file {filename} from bucket {bucket}")
+                                await s3_client.delete_object(
+                                    Bucket=bucket, Key=filename
+                                )
+                                logger.debug(
+                                    f"Deleted file {filename} from bucket {bucket}"
+                                )
                         except Exception as e:
-                            logger.error(f"Error deleting file {filename} from bucket {bucket}: {e}")
+                            logger.error(
+                                f"Error deleting file {filename} from bucket {bucket}: {e}"
+                            )
         except Exception as e:
             logger.error(f"Error listing objects in bucket {bucket}: {e}")
 
+
 BUCKET_REGEX = re.compile(
-    r'^(?=.{3,63}$)(?!.*\.\.)(?!\-)(?!\.)(?!.*\.$)[a-z0-9]+(?:[\.-][a-z0-9]+)*$'
+    r"^(?=.{3,63}$)(?!.*\.\.)(?!\-)(?!\.)(?!.*\.$)[a-z0-9]+(?:[\.-][a-z0-9]+)*$"
 )
 
 ARN_REGEX = re.compile(
-    r'^arn:(aws|aws-cn|aws-us-gov):s3-object-lambda:[a-z0-9\-]+:\d{12}:accesspoint[/:][a-zA-Z0-9.\-_]{1,63}$'
-    r'|^arn:(aws|aws-cn|aws-us-gov):s3-outposts:[a-z0-9\-]+:\d{12}:outpost[/:][a-zA-Z0-9.\-_]{1,63}[/:]accesspoint[/:][a-zA-Z0-9\-]{1,63}$'
+    r"^arn:(aws|aws-cn|aws-us-gov):s3-object-lambda:[a-z0-9\-]+:\d{12}:accesspoint[/:][a-zA-Z0-9.\-_]{1,63}$"
+    r"|^arn:(aws|aws-cn|aws-us-gov):s3-outposts:[a-z0-9\-]+:\d{12}:outpost[/:][a-zA-Z0-9.\-_]{1,63}[/:]accesspoint[/:][a-zA-Z0-9\-]{1,63}$"
 )
 
 
@@ -647,32 +719,34 @@ async def delete_old_version_files(bucket_name: str, current_version: str):
     """
     session = get_session()
     async with session.create_client(
-        's3',
-        region_name='us-east-1',
+        "s3",
+        region_name="us-east-1",
         config=client_config,
         aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
     ) as s3_client:
-        paginator = s3_client.get_paginator('list_objects_v2')
+        paginator = s3_client.get_paginator("list_objects_v2")
         async for page in paginator.paginate(Bucket=bucket_name):
             to_delete = []
-            for obj in page.get('Contents', []):
-                filename = obj['Key']
+            for obj in page.get("Contents", []):
+                filename = obj["Key"]
                 # Check if the file version matches the current version
                 match = re.match(r".+-v(.+)\.pt$", filename)
                 if match:
                     file_version = match.group(1)
                     if file_version != current_version:
-                        to_delete.append({'Key': filename})
+                        to_delete.append({"Key": filename})
                         logger.debug(f"Scheduled for deletion: {filename}")
             # Delete old versions in batches of 1000 (S3 limit for delete_objects)
             if to_delete:
                 response = await s3_client.delete_objects(
-                    Bucket=bucket_name,
-                    Delete={'Objects': to_delete}
+                    Bucket=bucket_name, Delete={"Objects": to_delete}
                 )
-                deleted = response.get('Deleted', [])
-                logger.info(f"Deleted {len(deleted)} old version files from bucket {bucket_name}")
+                deleted = response.get("Deleted", [])
+                logger.info(
+                    f"Deleted {len(deleted)} old version files from bucket {bucket_name}"
+                )
+
 
 # def is_valid_bucket(bucket_name: str) -> bool:
 #     """
@@ -736,7 +810,10 @@ async def delete_old_version_files(bucket_name: str, current_version: str):
 #         logger.error(f"Bucket name {bucket_name} is invalid. Please refer to the AWS documentation on naming conventions ")
 #         sys.exit(1)
 
-async def save_checkpoint(filename, model, optimizer=None, scheduler=None, global_step=0, **kwargs):
+
+async def save_checkpoint(
+    filename, model, optimizer=None, scheduler=None, global_step=0, **kwargs
+):
     """
     Saves the checkpoint to the specified filename asynchronously.
 
@@ -750,13 +827,13 @@ async def save_checkpoint(filename, model, optimizer=None, scheduler=None, globa
     """
     # Gather the checkpoint data
     checkpoint = {
-        'global_step': global_step,
-        'model_state_dict': model.state_dict(),
+        "global_step": global_step,
+        "model_state_dict": model.state_dict(),
     }
     if optimizer:
-        checkpoint['optimizer_state_dict'] = optimizer.state_dict()
+        checkpoint["optimizer_state_dict"] = optimizer.state_dict()
     if scheduler:
-        checkpoint['scheduler_state_dict'] = scheduler.state_dict()
+        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
     # Include additional state variables
     for key, value in kwargs.items():
         checkpoint[key] = value
@@ -766,7 +843,10 @@ async def save_checkpoint(filename, model, optimizer=None, scheduler=None, globa
     await loop.run_in_executor(None, torch.save, checkpoint, filename)
     torch.save(checkpoint, filename)
 
-async def load_checkpoint(filename, model, optimizer=None, scheduler=None, device='cpu'):
+
+async def load_checkpoint(
+    filename, model, optimizer=None, scheduler=None, device="cpu"
+):
     """
     Loads the checkpoint from the specified filename.
 
@@ -783,15 +863,22 @@ async def load_checkpoint(filename, model, optimizer=None, scheduler=None, devic
     """
     try:
         checkpoint = torch.load(filename, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        if optimizer and 'optimizer_state_dict' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if scheduler and 'scheduler_state_dict' in checkpoint:
-            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        global_step = checkpoint.get('global_step', 0)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        if optimizer and "optimizer_state_dict" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if scheduler and "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        global_step = checkpoint.get("global_step", 0)
         additional_state = {
-            k: checkpoint[k] for k in checkpoint
-            if k not in ['global_step', 'model_state_dict', 'optimizer_state_dict', 'scheduler_state_dict']
+            k: checkpoint[k]
+            for k in checkpoint
+            if k
+            not in [
+                "global_step",
+                "model_state_dict",
+                "optimizer_state_dict",
+                "scheduler_state_dict",
+            ]
         }
         return global_step, additional_state
     except (torch.serialization.pickle.UnpicklingError, RuntimeError, EOFError) as e:

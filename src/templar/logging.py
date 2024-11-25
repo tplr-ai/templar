@@ -20,6 +20,7 @@ import logging
 from rich.logging import RichHandler
 from rich.highlighter import NullHighlighter
 
+
 def T() -> float:
     """
     Returns the current time in seconds since the epoch.
@@ -28,6 +29,7 @@ def T() -> float:
         float: Current time in seconds.
     """
     return time.time()
+
 
 def P(window: int, duration: float) -> str:
     """
@@ -42,6 +44,7 @@ def P(window: int, duration: float) -> str:
     """
     return f"[steel_blue]{window}[/steel_blue] ([grey63]{duration:.2f}s[/grey63])"
 
+
 # Configure the root logger
 FORMAT = "%(message)s"
 logging.basicConfig(
@@ -55,20 +58,22 @@ logging.basicConfig(
             highlighter=NullHighlighter(),
             show_level=False,
             show_time=False,
-            show_path=False
+            show_path=False,
         )
-    ]
+    ],
 )
 
 # Create a logger instance
 logger = logging.getLogger("templar")
 logger.setLevel(logging.INFO)
 
+
 def debug() -> None:
     """
     Sets the logger level to DEBUG.
     """
     logger.setLevel(logging.DEBUG)
+
 
 def trace() -> None:
     """
@@ -80,10 +85,13 @@ def trace() -> None:
     """
     TRACE_LEVEL_NUM = 5
     logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
+
     def trace_method(self, message, *args, **kws) -> None:
         if self.isEnabledFor(TRACE_LEVEL_NUM):
             self._log(TRACE_LEVEL_NUM, message, args, **kws)
+
     logging.Logger.trace = trace_method
     logger.setLevel(TRACE_LEVEL_NUM)
 
-__all__ = ['logger', 'debug', 'trace', 'P', 'T']
+
+__all__ = ["logger", "debug", "trace", "P", "T"]

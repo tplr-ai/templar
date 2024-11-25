@@ -6,12 +6,13 @@ from .logging import logger
 from templar.schemas import Bucket
 import templar as tplr
 
+
 def commit(subtensor: bt.Subtensor, wallet, netuid: int) -> None:
     """Commits bucket configuration data to the subtensor network.
 
     This method prepares and commits bucket configuration data to the subtensor network.
     The data includes:
-    - Account ID: A string of fixed length 32 characters 
+    - Account ID: A string of fixed length 32 characters
     - Access key ID: A string of fixed length 32 characters
     - Secret access key: A string of variable length (up to 64 characters)
 
@@ -34,6 +35,7 @@ def commit(subtensor: bt.Subtensor, wallet, netuid: int) -> None:
     )
     subtensor.commit(wallet, netuid, concatenated)
     logger.info(f"Committed data to the network: {concatenated}")
+
 
 def get_all_commitments(
     substrate: SubstrateInterface,
@@ -66,8 +68,8 @@ def get_all_commitments(
             f"Querying commitments for netuid {netuid} at block {'latest' if block_hash is None else block_hash}"
         )
         return substrate.query_map(
-            module='Commitments',
-            storage_function='CommitmentOf',
+            module="Commitments",
+            storage_function="CommitmentOf",
             params=[netuid],
             block_hash=block_hash,
         )
@@ -82,18 +84,18 @@ def get_all_commitments(
             continue
 
         uid = hotkey_to_uid[hotkey]
-        commitment_info = value.value.get('info', {})
-        fields = commitment_info.get('fields', [])
+        commitment_info = value.value.get("info", {})
+        fields = commitment_info.get("fields", [])
 
         if not fields or not isinstance(fields[0], dict):
             continue
 
         field_value = next(iter(fields[0].values()))
-        if field_value.startswith('0x'):
+        if field_value.startswith("0x"):
             field_value = field_value[2:]
 
         try:
-            concatenated = bytes.fromhex(field_value).decode('utf-8').strip()
+            concatenated = bytes.fromhex(field_value).decode("utf-8").strip()
 
             if len(concatenated) != 128:
                 logger.error(

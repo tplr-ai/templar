@@ -37,7 +37,7 @@ This document provides a guide on how to set up and run a validator using `valid
 - **Cloudflare R2 Bucket Configuration**:
   
   To use buckets for sharing model slices, do the following:
-  1. **Create a Bucket**:
+  1. **Navigate to R2 Object Storage and Create a Bucket**:
      - Name the bucket the same as your **account ID**.
      - Set the **region** to **ENAM**.
 
@@ -130,15 +130,7 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu118
 uv sync --extra all
 ```
 
-5. **Configure AWS Credentials**:
-Add to your `~/.bash_profile`:
-```bash
-export AWS_ACCESS_KEY_ID="your-access-key"
-export AWS_SECRET_ACCESS_KEY="your-secret-key"
-export BUCKET="your-bucket-name"
-```
-
-6. **Create and Register Validator Wallet**:
+5. **Create and Register Validator Wallet**:
 ```bash
 # Create coldkey
 btcli wallet new_coldkey --wallet.name default --n-words 12
@@ -159,7 +151,6 @@ pm2 start neurons/validator.py --interpreter python3 --name validator -- \
   --actual_batch_size 6 \
   --wallet.name default \
   --wallet.hotkey validator \
-  --bucket $BUCKET \
   --use_wandb \
   --netuid <netuid> \
   --subtensor.network <network> \
@@ -213,13 +204,6 @@ pm2 list
   - Netuid: 1
   - Endpoint: `wss://localhost:9944`
 
-### AWS Setup
-
-1. Create an S3 bucket for storing validator data
-2. Configure bucket permissions for public read access
-3. Set up IAM user with S3 access
-4. Export credentials in environment
-
 ## Monitoring
 
 ### Logs
@@ -263,12 +247,12 @@ Monitor key metrics:
 - Impact on network consensus
 - Optimization strategies
 
-## Troubleshooting
+<!-- ## Troubleshooting
 
 Common issues and solutions:
 - State synchronization failures
 - Out of memory errors
 - Network connectivity issues
 - Weight setting delays
-- AWS access problems
+- AWS access problems -->
 

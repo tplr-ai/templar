@@ -231,9 +231,9 @@ Monitor key metrics:
 - Training progress
 - Rewards and weights
 
-## Troubleshooting
+<!-- ## Troubleshooting
 
 Common issues and solutions:
 - CUDA out of memory
 - Network synchronization issues
-- Registration failures
+- Registration failures -->

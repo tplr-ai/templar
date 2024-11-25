@@ -22,6 +22,7 @@ from transformers import AutoTokenizer, LlamaConfig
 # Cache file path
 HPARAMS_FILE = "hparams.json"
 
+
 def create_namespace(hparams: dict) -> SimpleNamespace:
     """
     Create a SimpleNamespace from the hyperparameters and add model configuration.
@@ -51,6 +52,7 @@ def create_namespace(hparams: dict) -> SimpleNamespace:
     )
 
     return hparams_ns
+
 
 def load_hparams() -> SimpleNamespace:
     """

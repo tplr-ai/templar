@@ -15,13 +15,14 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-import typing
-import random
+# Global imports
 import asyncio
 import aiohttp
 import numpy as np
-from transformers import AutoTokenizer
+import random
+import typing
 from torch.utils.data import IterableDataset
+from transformers import AutoTokenizer
 
 
 class SubsetLoader(IterableDataset):

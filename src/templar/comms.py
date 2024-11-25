@@ -15,36 +15,73 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+# Global imports
+import aiofiles
+import asyncio
+import hashlib
+import numpy as np
 import os
+import re
+import tempfile
 import torch
 import uvloop
-import hashlib
-import asyncio
-import tempfile
-import aiofiles
-from collections import defaultdict
-import numpy as np
-import bittensor as bt
-from typing import List, Dict
-from types import SimpleNamespace
-from filelock import FileLock, Timeout
 from aiobotocore.session import get_session
-import re
-from templar.logging import logger
-from templar.constants import CF_REGION_NAME
-from templar.schemas import Bucket
-from .config import BUCKET_SECRETS
+import bittensor as bt
+from collections import defaultdict
+from filelock import FileLock, Timeout
+from types import SimpleNamespace
+from typing import List, Dict
+
+# Local imports
 from . import __version__
-
-
-from .config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, client_config
+from .config import (
+    AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY,
+    BUCKET_SECRETS,
+    client_config,
+)
+from templar.constants import CF_REGION_NAME
+from templar.logging import logger
+from templar.schemas import Bucket
 
 
 def get_base_url(account_id: str) -> str:
+    """Gets the base URL for Cloudflare R2 storage.
+
+    Args:
+        account_id (str): The Cloudflare account ID
+
+    Returns:
+        str: The base URL for R2 storage in the format https://{account_id}.r2.cloudflarestorage.com
+    """
     return f"https://{account_id}.r2.cloudflarestorage.com"
 
 
 def get_bucket(bucket_secrets: dict[str, str | dict[str, str]]) -> Bucket:
+    """Creates a Bucket object from bucket secrets configuration.
+
+    Args:
+        bucket_secrets (dict[str, str | dict[str, str]]): Dictionary containing bucket configuration with:
+            - bucket_name: Name of the bucket
+            - account_id: Cloudflare account ID
+            - read: Dict containing read access credentials:
+                - access_key_id: Access key ID for read operations
+                - secret_access_key: Secret access key for read operations
+
+    Returns:
+        Bucket: A Bucket object initialized with the provided configuration
+
+    Example:
+        >>> secrets = {
+        ...     "bucket_name": "my-bucket",
+        ...     "account_id": "abc123",
+        ...     "read": {
+        ...         "access_key_id": "KEY123",
+        ...         "secret_access_key": "SECRET123"
+        ...     }
+        ... }
+        >>> bucket = get_bucket(secrets)
+    """
     return Bucket(
         name=bucket_secrets["bucket_name"],
         account_id=bucket_secrets["account_id"],
@@ -61,6 +98,24 @@ semaphore = asyncio.Semaphore(1000)
 
 
 async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
+    """Loads model parameter slices from a file with thread-safe locking.
+
+    Args:
+        filename (str): Path to the file containing model parameter slices
+        device (str): Device to load the tensors to (e.g. 'cpu', 'cuda')
+
+    Returns:
+        Dict[str, torch.Tensor]: Dictionary mapping parameter names to their tensor values
+
+    Example:
+        >>> slices = await get_slices('model_123.pt', 'cuda')
+        >>> print(slices.keys())
+        dict_keys(['layer1.weight', 'layer1.bias'])
+
+    Raises:
+        Timeout: If unable to acquire lock within 5 seconds
+        Exception: For errors loading the file
+    """
     lock: FileLock = FileLock(f"{filename}.lock")
     with lock.acquire(timeout=5):
         # Lock is held during the entire read operation
@@ -533,6 +588,35 @@ async def process_bucket(
 async def download_slices_for_buckets_and_windows(
     buckets: List[Bucket], windows: List[int], key: str = "slice"
 ) -> Dict[int, List[SimpleNamespace]]:
+    """Downloads model slices from multiple S3 buckets for specified windows.
+
+    This function downloads model slice files from a list of S3 buckets for the given window IDs.
+    It processes the buckets concurrently and combines the results into a dictionary mapping
+    window IDs to lists of downloaded slices.
+
+    Args:
+        buckets (List[Bucket]): List of Bucket objects containing S3 credentials and configuration
+        windows (List[int]): List of window IDs to download slices for
+        key (str, optional): Prefix to filter files by. Defaults to "slice"
+
+    Returns:
+        Dict[int, List[SimpleNamespace]]: Dictionary mapping window IDs to lists of downloaded slices.
+            Each slice is represented as a SimpleNamespace object containing metadata and file path.
+
+    Example:
+        >>> buckets = [Bucket(...), Bucket(...)]  # List of bucket configs
+        >>> windows = [1, 2, 3]  # Window IDs to download
+        >>> slices = await download_slices_for_buckets_and_windows(buckets, windows)
+        >>> print(slices[1])  # Get all slices for window 1
+        [Slice(path='/tmp/slice-1-abc.pt'), Slice(path='/tmp/slice-1-def.pt')]
+
+    Note:
+        - Filters out None buckets from input list
+        - Downloads files concurrently across buckets
+        - Uses CloudFront for downloads if configured
+        - Handles S3 authentication using bucket credentials
+        - Returns empty dict if no valid buckets provided
+    """
     # Filter out None buckets
     valid_buckets = [b for b in buckets if b is not None]
 

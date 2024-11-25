@@ -15,13 +15,16 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+# Global imports
 import os
-import botocore.config
-from dotenv import dotenv_values
+import sys
 import yaml
 from pathlib import Path
+
+# Local imports
+import botocore.config
+from dotenv import dotenv_values
 from loguru import logger
-import sys
 
 # Load environment variables
 env_config = {**dotenv_values(".env"), **os.environ}

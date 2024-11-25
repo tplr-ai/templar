@@ -9,7 +9,6 @@ import asyncio
 
 # Import local modules
 from .logging import logger
-from . import __version__
 from .comms import delete_old_version_files
 
 

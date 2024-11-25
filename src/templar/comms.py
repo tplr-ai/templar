@@ -16,14 +16,13 @@
 # DEALINGS IN THE SOFTWARE.
 
 import os
-import boto3
-from botocore.exceptions import ClientError
 import torch
 import uvloop
 import hashlib
 import asyncio
 import tempfile
 import aiofiles
+from collections import defaultdict
 import numpy as np
 import bittensor as bt
 from typing import List, Dict
@@ -31,13 +30,13 @@ from types import SimpleNamespace
 from filelock import FileLock, Timeout
 from aiobotocore.session import get_session
 import re
-import sys
 from templar.logging import logger
 from templar.constants import CF_REGION_NAME
 from templar.schemas import Bucket
 from .config import BUCKET_SECRETS
+from . import __version__ 
 
-from . import __version__
+
 from .config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, client_config
 
 def get_base_url(account_id: str) -> str:
@@ -123,7 +122,7 @@ async def apply_slices_to_model(
     for file_i in slice_files:
         try:
             # Check if the filename contains the correct version
-            from templar import __version__  # Import the version number
+            
             match = re.match(rf"^{key}-{window}-.+-v{re.escape(__version__)}\.pt$", os.path.basename(file_i))
             if not match:
                 logger.warning(f"Skipping file {file_i} due to version mismatch in filename.")
@@ -202,7 +201,7 @@ async def upload_slice_for_window(
     Raises:
         Exception: If upload to S3 fails
     """
-    from templar import __version__  # Import the version number
+    
 
     # Include version in the filename
     filename = f'{key}-{window}-{wallet.hotkey.ss58_address}-v{__version__}.pt'
@@ -329,8 +328,6 @@ async def download_file(s3_client, bucket: str, filename: str) -> str:
             with lock.acquire(timeout=1):
                 # Proceed to download the file
                 logger.debug(f"Downloading file {filename} to {temp_file}")
-                head_response = await s3_client.head_object(Bucket=bucket, Key=filename)
-                object_size = head_response['ContentLength']
                 CHUNK_SIZE = 1 * 1024 * 1024  # 1 MB
 
                 response = await s3_client.get_object(Bucket=bucket, Key=filename)
@@ -478,8 +475,6 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
     logger.trace(f"Completed processing bucket '{bucket}' for windows {windows}")
     return files
 
-from collections import defaultdict
-
 async def download_slices_for_buckets_and_windows(
     buckets: List[Bucket],
     windows: List[int],
@@ -537,7 +532,7 @@ async def load_files_for_window(window: int, key: str = 'slice') -> List[str]:
         - Files must be in the system temp directory
         - Version number is pulled from templar.__version__
     """
-    from templar import __version__  # Import the version number
+    
     logger.debug(f"Retrieving files for window {window} from temporary directory")
     temp_dir = tempfile.gettempdir()
     window_files = []
@@ -567,7 +562,7 @@ async def delete_files_before_window(window_max: int, key: str = 'slice'):
         - Files must be in system temp directory
         - Version number is pulled from templar.__version__
     """
-    from templar import __version__  # Import the version number
+    
     logger.debug(f"Deleting files with window id before {window_max}")
     temp_dir = tempfile.gettempdir()
     pattern = re.compile(rf"^{re.escape(key)}-(\d+)-.+-v{__version__}\.(pt|pt\.lock)$")
@@ -604,7 +599,7 @@ async def delete_files_from_bucket_before_window(bucket: str, window_max: int, k
         - Version number is pulled from templar.__version__
         - Requires valid AWS credentials and bucket permissions
     """
-    from templar import __version__  # Import the version number
+    
     logger.debug(f"Deleting files in bucket {bucket} with window id before {window_max}")
     session = get_session()
     async with session.create_client(

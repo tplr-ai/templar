@@ -1,3 +1,7 @@
+# ruff: noqa
+# pylint: disable=all
+# mypy: ignore-errors
+# type: ignore
 """
 Benchmark module for uploading, listing, downloading, and cleaning files on S3
 compatible platforms, with detailed logging of execution times.

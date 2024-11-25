@@ -68,8 +68,10 @@ class Validator:
         elif config.local:
             config.subtensor.network = 'local'
             config.subtensor.chain_endpoint = 'ws://127.0.0.1:9944'
-        if config.debug: tplr.debug()
-        if config.trace: tplr.trace()
+        if config.debug:
+            tplr.debug()
+        if config.trace:
+            tplr.trace()
         # tplr.validate_bucket_or_exit(tplr.config.BUCKET_SECRETS["bucket_name"])
         if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
@@ -102,7 +104,7 @@ class Validator:
             commitment = self.chain_manager.get_commitment(self.uid)
             if tplr.config.BUCKET_SECRETS["bucket_name"] != commitment.name:
                 raise ValueError('')
-        except:
+        except Exception:
             tplr.commit(self.subtensor, self.wallet, self.config.netuid)
         tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
 
@@ -135,7 +137,9 @@ class Validator:
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
         self.hparams = tplr.load_hparams()
-        torch.manual_seed(42); np.random.seed(42); random.seed(42)
+        torch.manual_seed(42)
+        np.random.seed(42)
+        random.seed(42)
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
         self.model.eval()
@@ -167,7 +171,7 @@ class Validator:
             self.global_step = 0
             self.scores = torch.zeros(256, dtype=torch.float32)
             self.weights = torch.zeros(256, dtype=torch.float32)
-        
+
         # Init buckets.
         self.buckets = []
         buckets = tplr.get_all_commitments(
@@ -179,7 +183,7 @@ class Validator:
         for uid in self.metagraph.uids:
             bucket = buckets.get(uid)
             tplr.logger.info(f"UID {uid} bucket: {bucket}")
-            
+
             if bucket is not None:
                 tplr.logger.info(f"Retrieved valid bucket for UID {uid}: {bucket.name}")
                 self.buckets.append(bucket)
@@ -202,7 +206,7 @@ class Validator:
         self.weights = torch.zeros( 256, dtype = torch.float32 ) 
         self.sample_rate = 1.0
         print ( self.hparams )
-        
+
     async def update(self):
         """Continuously updates the global state by polling every 10 minutes."""
         await asyncio.sleep(600)  # Initial sleep before starting updates
@@ -241,7 +245,7 @@ class Validator:
         self.loop = asyncio.get_running_loop()
         self.update_task = asyncio.create_task(self.update())
         self.listener = threading.Thread(target=self.block_listener, args=(self.loop,), daemon=True).start()
-        
+
         # Optionally sync the model state by pulling model states from the history.
         if self.config.sync_state:
             st = tplr.T()
@@ -288,7 +292,7 @@ class Validator:
                         scores=self.scores,
                         weights=self.weights
                     ))
-                
+
                 # Download the state for the eval window.
                 st = tplr.T()
                 valid_buckets = [b for b in self.buckets if b is not None]
@@ -306,7 +310,7 @@ class Validator:
                 )
                 n_state_slices = len(state_slices[window]) if window in state_slices else 0
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_state_slices} window states.")
-                
+
                 # Download the delta for the eval window.
                 st = tplr.T()
                 eval_slices = await tplr.download_slices_for_buckets_and_windows(
@@ -328,9 +332,10 @@ class Validator:
                                 tplr.logger.warning(f"Hotkey {slice_info.hotkey} not found in metagraph")                
                 if n_eval_slices == 0:
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: No slices to eval, continue ...")
-                    while self.current_window - offset == window: await asyncio.sleep(0.1) # Wait for next window.
+                    while self.current_window - offset == window:
+                        await asyncio.sleep(0.1)  # Wait for next window.
                     continue
-                
+
                 # Applied the model  state for the eval window.
                 st = tplr.T()
                 max_global_step = await tplr.apply_slices_to_model( 
@@ -343,7 +348,7 @@ class Validator:
                 if max_global_step is not None:
                     self.global_step = max(self.global_step, max_global_step)
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state and updated global step to {self.global_step}.")
-                
+
                 # Obtain the indicies for the eval window.
                 st = tplr.T()
                 indices = await tplr.get_indices_for_window(
@@ -352,7 +357,7 @@ class Validator:
                     compression = self.hparams.compression
                 ) 
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Obtained window indices.")
-                               
+
 
                 # Attain the UID of this slice.
                 st = tplr.T()
@@ -362,12 +367,13 @@ class Validator:
                     while self.current_window - offset == window:
                         await asyncio.sleep(0.1)  # Wait for next window.
                     continue
-                eval_slice_info = random.choice( valid_eval_slices)                
-                try: eval_uid = self.metagraph.hotkeys.index(eval_slice_info.hotkey)
+                eval_slice_info = random.choice(valid_eval_slices)
+                try:
+                    eval_uid = self.metagraph.hotkeys.index(eval_slice_info.hotkey)
                 except ValueError:
                     tplr.logger.warning(f"{tplr.P(window, tplr.T() - st)}: {eval_slice_info.hotkey} not found in metagraph")
-                    continue                                
-                eval_slice_data = await tplr.get_slices( eval_slice_info.temp_file, self.model.device )                
+                    continue
+                eval_slice_data = await tplr.get_slices(eval_slice_info.temp_file, self.model.device)
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Loaded window slices for uid: [dark_sea_green]{eval_uid}[/dark_sea_green].")
 
                 # Download the eval page for this uid.
@@ -377,7 +383,7 @@ class Validator:
                     n_pages = self.hparams.validator_window_eval_size,
                     seed = eval_uid
                 )            
-                random.shuffle( eval_pages )    
+                random.shuffle(eval_pages)    
                 eval_dataset = await tplr.dataset.DatasetLoader.create(
                     batch_size = self.config.actual_batch_size,
                     sequence_length = self.hparams.sequence_length,
@@ -385,12 +391,13 @@ class Validator:
                     tokenizer = self.hparams.tokenizer
                 )                
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded eval pages: [light_steel_blue]{[p[1] for p in eval_pages]}[/light_steel_blue].")
-  
+
                 # Accumulate gradients from this page.
                 eval_start = tplr.T()
                 self.model.zero_grad()
                 total_loss = 0.0
-                full_steps = 0; total_steps = 0; 
+                full_steps = 0
+                total_steps = 0
                 exhuasted_window = False
                 with torch.enable_grad():
                     for idx, batch in enumerate(eval_dataset):
@@ -404,7 +411,9 @@ class Validator:
                                 outputs = self.model(input_ids=input_ids, labels=labels)
                             total_loss += outputs.loss.item()
                             outputs.loss.backward()
-                            if self.current_window - offset != window: exhuasted_window = True; continue
+                            if self.current_window - offset != window:
+                                exhuasted_window = True
+                                continue
                 step_loss = total_loss/(full_steps+1)
                 eval_duration = tplr.T() - eval_start
                 tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
@@ -414,14 +423,17 @@ class Validator:
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tTotal steps: [tan]{full_steps}/{total_steps}[/tan], Rate: [tan]{(full_steps/total_steps):.2f}[/tan], Target: [tan]{self.sample_rate:.2f}[/tan]")
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tTotal tokens: [tan]{tokens_per_step}[/tan], Tokens per second: [tan]{tokens_per_second:.2f}[/tan]")
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tLoss: [tan]{step_loss}[tan]")
-                if exhuasted_window: self.sample_rate = max(0.0001, self.sample_rate * 0.95)
-                else: self.sample_rate = min(1, self.sample_rate * 1.05)
-                
+                if exhuasted_window:
+                    self.sample_rate = max(0.0001, self.sample_rate * 0.95)
+                else:
+                    self.sample_rate = min(1, self.sample_rate * 1.05)
+
                 # Compute the score for this slice.
                 st = tplr.T()
                 score = 0.0 
                 for i, (name_i, param_i) in enumerate( self.model.named_parameters() ):
-                    if param_i.grad is None: continue  # Skip parameters without gradients
+                    if param_i.grad is None:
+                        continue  # Skip parameters without gradients
                     idxs_i = indices[name_i].to(self.model.device)
                     grad_i = param_i.grad.view(-1).clone()[idxs_i].to(self.model.device) 
                     slice_i = eval_slice_data[name_i].view(-1).to(self.model.device) 
@@ -433,7 +445,6 @@ class Validator:
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Computed score: [bold dark_sea_green]{score:.4f}[/bold dark_sea_green]")           
 
                 # Assign and log scores.
-                start_time = tplr.T()
                 # Apply decay to miners who did not submit slices
                 all_uids = set(self.metagraph.uids.tolist())
                 non_submitted_uids = all_uids - submitted_uids
@@ -485,7 +496,7 @@ class Validator:
                         f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green], "
                         f"original_weight: [dark_sea_green]{orig_weight:.3f}[/dark_sea_green]"
                     )
-                
+
                 # Apply all deltas to the model state.
                 st = tplr.T()
                 max_global_step = await tplr.apply_slices_to_model( 
@@ -498,7 +509,7 @@ class Validator:
                 if max_global_step is not None:
                     self.global_step = max(self.global_step, max_global_step)
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window delta and updated global step to {self.global_step}.")
-                
+
                 # Clean local and remote space from old slices.
                 st = tplr.T()
                 await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'state')
@@ -564,9 +575,6 @@ class Validator:
                     # Pivot the DataFrame to have UIDs as columns
                     pivot_df = self.metrics_history.pivot(index='global_step', columns='uid', values=metric_name).reset_index()
 
-                    # Create wandb.Table
-                    table = wandb.Table(dataframe=pivot_df)
-
                     # Get the list of UIDs (column names excluding 'global_step')
                     uids = pivot_df.columns.drop('global_step').tolist()
 
@@ -583,7 +591,7 @@ class Validator:
                         xname="Global Step"
                     )
                     # Log the plot
-                    
+
                     wandb.log({f"validator/{metric_name}": line_plot}, step=self.global_step)
                 # Set temperatured weights on the chain.
                 if self.global_step % 100 == 0:
@@ -601,14 +609,14 @@ class Validator:
                         tplr.logger.info(f"Successfully set weights on chain: {result}")
                     except Exception as e:
                         tplr.logger.error(f"Failed to set weights on chain: {e}")
-                                                                
+
             # Catch keyboard interrrupt.
             except KeyboardInterrupt:
                 tplr.logger.info("Training interrupted by user. Stopping the run.")
                 self.stop_event.setplr.T()
                 await self.update_task
                 sys.exit(0)
-            
+
             # Catch unknown.
             except Exception as e:
                 tplr.logger.exception(f"Exception during training loop: {e}")
@@ -617,7 +625,7 @@ class Validator:
     # Returns the slice window based on a blotplr.
     def block_to_window(self, block: int) -> int:
         return int(block / self.hparams.window_length)
-    
+
     # Returns the slice window based on a blotplr.
     def window_to_seed(self, window: int) -> int:
         return str( self.subtensor.get_block_hash( window * self.hparams.window_length ) )
@@ -635,15 +643,15 @@ class Validator:
                 self.window_time = tplr.T()
                 loop.call_soon_threadsafe(self.new_window_event.set)
                 tplr.logger.info(f"{tplr.P(self.current_window, self.window_duration)} New Window.")
-                
+
         # Run listener with retry.
         while not self.stop_event.is_set():
             try:
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler); break
+                bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler)
+                break
             except Exception as e:
-                 # Wait for 5 seconds before retrying
                 tplr.logger.error(f"Failed to subscribe to block headers: {e}.\nRetrying in 1 seconds...")
-                time.sleep(1) 
+                time.sleep(1)
 
 if __name__ == "__main__":
     validator = Validator()

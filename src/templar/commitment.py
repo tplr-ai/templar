@@ -1,95 +1,123 @@
-from substrateinterface import SubstrateInterface
-from retry import retry
-from typing import Optional, Dict
+# Global imports
 import bittensor as bt
-from .logging import logger
+from retry import retry
+from substrateinterface import SubstrateInterface
+from typing import Optional, Dict
 
-def get_all_commitments(substrate: SubstrateInterface, netuid: int, metagraph, block: Optional[int] = None) -> Dict[int, str]:
-    """
-    Retrieves all commitments from the blockchain for a given network UID and maps them to bucket names.
-    
-    This function queries the blockchain for all commitments associated with a specific network UID,
-    decodes the commitment data which contains S3 bucket information, and maps each validator's UID
-    to their associated bucket name.
+# Local imports
+from .logging import logger
+import templar as tplr
+from templar.schemas import Bucket
+
+
+def commit(subtensor: bt.Subtensor, wallet, netuid: int) -> None:
+    """Commits bucket configuration data to the subtensor network.
+
+    This method prepares and commits bucket configuration data to the subtensor network.
+    The data includes:
+    - Account ID: A string of fixed length 32 characters
+    - Access key ID: A string of fixed length 32 characters
+    - Secret access key: A string of variable length (up to 64 characters)
+
+    The commitment process involves:
+    - Concatenating the account ID, access key ID, and secret access key into a single string
+    - Committing the concatenated data to the subtensor network using the provided netuid and wallet
 
     Args:
-        substrate (SubstrateInterface): Connection to the substrate blockchain
-        netuid (int): Network UID to query commitments for
-        metagraph: Bittensor metagraph object containing network state
-        block (Optional[int]): Specific block number to query. If None, queries latest block
+        subtensor: The subtensor network interface
+        wallet: The wallet used to sign the commitment transaction
+        netuid: The network UID to commit the data to
+
+    Raises:
+        Any exceptions from the subtensor network communication are propagated
+    """
+    concatenated = (
+        tplr.config.BUCKET_SECRETS["account_id"]
+        + tplr.config.BUCKET_SECRETS["read"]["access_key_id"]
+        + tplr.config.BUCKET_SECRETS["read"]["secret_access_key"]
+    )
+    subtensor.commit(wallet, netuid, concatenated)
+    logger.info(f"Committed data to the network: {concatenated}")
+
+
+def get_all_commitments(
+    substrate: SubstrateInterface,
+    netuid: int,
+    metagraph,
+    block: Optional[int] = None,
+) -> Dict[int, Bucket]:
+    """Retrieves and parses all commitment data from the network for a given netuid.
+
+    The commitment data for each neuron contains:
+    - Access Key ID: 32 characters (positions 0-31)
+    - Secret Access Key: 64 characters (positions 32-95)
+    - Account ID: 32 characters (positions 96-127)
+    Total length: 128 characters
+
+    Args:
+        substrate: The substrate interface for blockchain queries.
+        netuid: Network UID to query commitments for.
+        metagraph: Metagraph object containing hotkey->uid mappings.
+        block: Optional block number to query at. If None, queries the latest block.
 
     Returns:
-        Dict[int, str]: Mapping of validator UIDs to their S3 bucket names
-
-    Example:
-        >>> substrate = SubstrateInterface(url="wss://archivelnode.opentensor.ai:443")
-        >>> metagraph = bt.metagraph(netuid=1)
-        >>> buckets = get_all_commitments(substrate, 1, metagraph)
-        >>> print(buckets[0])  # Prints bucket name for validator UID 0
+        Dict[int, Bucket]: Mapping of UIDs to their corresponding Bucket objects.
     """
+
     @retry(delay=2, tries=3, backoff=2, max_delay=4)
     def query_commitments():
-        # Get block hash if specific block requested, otherwise use latest
         block_hash = None if block is None else substrate.get_block_hash(block)
-        logger.info(f"Querying commitments for netuid {netuid} at block {'latest' if block_hash is None else block_hash}")
-        
-        # Query the Commitments module's CommitmentOf storage
+        logger.info(
+            f"Querying commitments for netuid {netuid} at block {'latest' if block_hash is None else block_hash}"
+        )
         return substrate.query_map(
-            module='Commitments',
-            storage_function='CommitmentOf',
+            module="Commitments",
+            storage_function="CommitmentOf",
             params=[netuid],
-            block_hash=block_hash
+            block_hash=block_hash,
         )
 
-    # Execute query with retry logic and convert iterator to list
     result = list(query_commitments())
-
-    # Create mapping of hotkey (SS58 address) to validator UID
     hotkey_to_uid = dict(zip(metagraph.hotkeys, metagraph.uids))
-    buckets = {}
+    commitments = {}
 
-    # Process each commitment result
     for key, value in result:
-        # Extract hotkey (SS58 address) from key
         hotkey = key.value
-
-        # Skip if hotkey not in our network
         if hotkey not in hotkey_to_uid:
             continue
 
-        # Get validator UID for this hotkey
         uid = hotkey_to_uid[hotkey]
+        commitment_info = value.value.get("info", {})
+        fields = commitment_info.get("fields", [])
 
-        # Extract commitment hex data from nested structure
-        # Commitment data is stored in fields[0] of the commitment info
-        commitment_info = value.value.get('info', {})
-        fields = commitment_info.get('fields', [])
-
-        # Skip if commitment data is malformed
         if not fields or not isinstance(fields[0], dict):
             continue
 
-        # Extract hex value from first field
         field_value = next(iter(fields[0].values()))
-        # Remove '0x' prefix if present
-        if field_value.startswith('0x'):
+        if field_value.startswith("0x"):
             field_value = field_value[2:]
 
-        # Decode hex data to UTF-8 string
         try:
-            commitment = bytes.fromhex(field_value).decode('utf-8')
+            concatenated = bytes.fromhex(field_value).decode("utf-8").strip()
+
+            if len(concatenated) != 128:
+                logger.error(
+                    f"Commitment '{concatenated}' has length {len(concatenated)}, expected 128."
+                )
+                continue
+
+            # Use the suggested parsing logic
+            bucket = Bucket(
+                name=concatenated[:32],
+                account_id=concatenated[:32],
+                access_key_id=concatenated[32:64],
+                secret_access_key=concatenated[64:],
+            )
+            commitments[uid] = bucket
+            logger.success(f"Bucket fetched and parsed for UID {uid}: {bucket.name}")
+
         except Exception as e:
-            logger.error(f"Failed to decode commitment for UID {uid}: {e}")
+            logger.error(f"Failed to decode and parse commitment for UID {uid}: {e}")
             continue
 
-        # Extract bucket name from commitment string
-        # Format is "bucket_name:additional_data"
-        parts = commitment.split(':')
-        if parts:
-            bucket_name = parts[0]
-            buckets[uid] = bucket_name
-        else:
-            logger.error(f"Failed to extract bucket name for UID {uid}: Commitment is empty")
-            continue
-
-    return buckets
+    return commitments

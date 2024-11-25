@@ -173,6 +173,7 @@ class Validator:
             self.weights = torch.zeros(256, dtype=torch.float32)
 
         # Init buckets.
+        buckets = tplr.get_all_commitments(self.subtensor.substrate, self.config.netuid, self.metagraph)
         self.buckets = []
         buckets = tplr.get_all_commitments(
             substrate=self.subtensor.substrate,
@@ -613,7 +614,7 @@ class Validator:
             # Catch keyboard interrrupt.
             except KeyboardInterrupt:
                 tplr.logger.info("Training interrupted by user. Stopping the run.")
-                self.stop_event.setplr.T()
+                self.stop_event.set()
                 await self.update_task
                 sys.exit(0)
 

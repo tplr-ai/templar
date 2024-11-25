@@ -28,6 +28,7 @@ from .chain import *
 from .commitment import *
 from .comms import *
 from .config import *
+from .commitment import *
 from .dataset import *
 from .hparams import *
 from .learning_rates import *

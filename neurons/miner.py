@@ -190,6 +190,7 @@ class Miner:
         )
 
         # Init buckets.
+        buckets = tplr.get_all_commitments(self.subtensor.substrate, self.config.netuid, self.metagraph)
         self.buckets = []
         buckets = tplr.get_all_commitments(
             substrate=self.subtensor.substrate,
@@ -235,6 +236,13 @@ class Miner:
         """Updates subtensor connection, metagraph, hyperparameters, and buckets."""
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
+
+        # Fetch all commitments at once
+        buckets = tplr.get_all_commitments(
+            substrate=self.subtensor.substrate,
+            netuid=self.config.netuid,
+            metagraph=self.metagraph
+        )
 
         # Fetch all commitments at once
         buckets = tplr.get_all_commitments(

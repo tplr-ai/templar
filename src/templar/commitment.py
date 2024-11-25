@@ -1,10 +1,13 @@
-from substrateinterface import SubstrateInterface
-from retry import retry
-from typing import Optional, Dict
+# Global imports
 import bittensor as bt
+from retry import retry
+from substrateinterface import SubstrateInterface
+from typing import Optional, Dict
+
+# Local imports
 from .logging import logger
-from templar.schemas import Bucket
 import templar as tplr
+from templar.schemas import Bucket
 
 
 def commit(subtensor: bt.Subtensor, wallet, netuid: int) -> None:

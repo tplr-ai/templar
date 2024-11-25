@@ -1,15 +1,16 @@
+# Global imports
+import asyncio
+import git
 import os
+import subprocess
 import sys
 import threading
 import time
-import git
-import subprocess
 from packaging import version
-import asyncio
 
-# Import local modules
-from .logging import logger
+# Local imports 
 from .comms import delete_old_version_files
+from .logging import logger
 
 
 TARGET_BRANCH = "main"

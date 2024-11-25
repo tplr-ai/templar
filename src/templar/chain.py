@@ -1,7 +1,10 @@
-from pydantic import ValidationError
-from templar.schemas import Bucket
-import templar as tplr
+# Global imports
 import bittensor as bt
+from pydantic import ValidationError
+
+# Local imports
+import templar as tplr
+from templar.schemas import Bucket
 
 
 class ChainManager:

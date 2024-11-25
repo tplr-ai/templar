@@ -15,10 +15,11 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-import time
+# Global imports
 import logging
-from rich.logging import RichHandler
+import time
 from rich.highlighter import NullHighlighter
+from rich.logging import RichHandler
 
 
 def T() -> float:

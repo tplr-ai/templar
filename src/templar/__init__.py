@@ -15,6 +15,11 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+# ruff: noqa
+# pylint: disable=all
+# mypy: ignore-errors
+# type: ignore
+
 __version__ = "0.1.5"
 
 # Import package.

@@ -3,7 +3,6 @@ from retry import retry
 from typing import Optional, Dict
 import bittensor as bt
 from .logging import logger
-from pydantic import ValidationError
 from templar.schemas import Bucket
 import templar as tplr
 
@@ -59,7 +58,6 @@ def get_all_commitments(
     Returns:
         Dict[int, Bucket]: Mapping of UIDs to their corresponding Bucket objects.
     """
-    from retry import retry
 
     @retry(delay=2, tries=3, backoff=2, max_delay=4)
     def query_commitments():

@@ -252,7 +252,6 @@ class DatasetLoader(SubsetLoader):
 
     async def _fetch(self, page_info: typing.Tuple[str, int, str]):
         self.pages = list(page_info)
-        num_pages = len(self.pages)
         async with aiohttp.ClientSession() as session:
             tasks = [self._fetch_data_for_page((config_name, page, split), session)
                      for (config_name, page, split) in self.pages]

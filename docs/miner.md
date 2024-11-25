@@ -33,7 +33,7 @@ This document provides a guide on how to set up and run a miner using `miner.py`
 - **Cloudflare R2 Bucket Configuration**:
   
   To use buckets for sharing model slices, do the following:
-  1. **Create a Bucket**:
+  1. **Navigate to R2 Object Storage and Create a Bucket**:
      - Name the bucket the same as your **account ID**.
      - Set the **region** to **ENAM**.
 
@@ -129,15 +129,8 @@ uv sync --extra all
 uv pip install flash-attn --no-build-isolation
 ```
 
-5. **Configure AWS Credentials**:
-Add to your `~/.bash_profile`:
-```bash
-export AWS_ACCESS_KEY_ID="your-access-key"
-export AWS_SECRET_ACCESS_KEY="your-secret-key"
-export BUCKET="your-bucket-name"
-```
 
-6. **Create and Register Wallets**:
+5. **Create and Register Wallets**:
 ```bash
 # Create coldkey
 btcli wallet new_coldkey --wallet.name default --n-words 12
@@ -160,7 +153,6 @@ PM2 automatically manages your miner processes and restarts them if they crash:
     --actual_batch_size <batch_size> \
     --wallet.name default \
     --wallet.hotkey "name" \
-    --bucket $BUCKET \
     --device "cuda" \
     --use_wandb \
     --netuid <netuid> \
@@ -215,12 +207,12 @@ pm2 list
   - Netuid: 3
   - Endpoint: `wss://localhost:9944`
 
-### AWS Setup
+<!-- ### AWS Setup
 
 1. Create an S3 bucket with public read access
 2. Configure CORS for validator access
 3. Set up IAM user with S3 access
-4. Export credentials in environment
+4. Export credentials in environment -->
 
 ## Monitoring
 
@@ -244,5 +236,4 @@ Monitor key metrics:
 Common issues and solutions:
 - CUDA out of memory
 - Network synchronization issues
-- AWS permissions
 - Registration failures

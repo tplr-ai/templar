@@ -35,6 +35,7 @@ import sys
 from templar.logging import logger
 from templar.constants import CF_REGION_NAME
 from templar.schemas import Bucket
+from .config import BUCKET_SECRETS
 
 from . import __version__
 from .config import AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, client_config
@@ -224,11 +225,11 @@ async def upload_slice_for_window(
     session = get_session()
     async with session.create_client(
         's3',
-        endpoint_url=get_base_url(tplr.config.BUCKET_SECRETS["account_id"]),
+        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
-        aws_access_key_id=tplr.config.BUCKET_SECRETS["write"]["access_key_id"],
-        aws_secret_access_key=tplr.config.BUCKET_SECRETS["write"]["secret_access_key"],
+        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
     ) as s3_client:
         try:
             with open(temp_file_name, 'rb') as f:
@@ -256,11 +257,11 @@ async def upload_master(bucket: str, model: torch.nn.Module, wallet: 'bt.wallet'
     session = get_session()
     async with session.create_client(
         's3',
-        endpoint_url=get_base_url(tplr.config.BUCKET_SECRETS["account_id"]),
+        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
-        aws_access_key_id=tplr.config.BUCKET_SECRETS["write"]["access_key_id"],
-        aws_secret_access_key=tplr.config.BUCKET_SECRETS["write"]["secret_access_key"],
+        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
     ) as s3_client:
         try:
             # Create a temporary file and write the model state dictionary to it
@@ -477,22 +478,25 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
     logger.trace(f"Completed processing bucket '{bucket}' for windows {windows}")
     return files
 
-async def download_slices_for_buckets_and_windows(buckets: List[Bucket], windows: List[int], key:str = 'slice') -> Dict[int, List[SimpleNamespace]]:
-    """
-    Downloads files from multiple S3 buckets for the given windows.
+from collections import defaultdict
 
-    Args:
-        buckets (List[Bucket]): A list of Bucket objects, holding name and
-            creds for a cloudflare bucket.
-        windows (List[int]): A list of window identifiers.
-
-    Returns:
-        Dict[int, List[SimpleNamespace]]: A dictionary mapping windows to lists of file metadata and paths.
-    """
-    logger.debug(f"Downloading files for buckets {set([b.name for b in buckets])} and windows {windows}")
+async def download_slices_for_buckets_and_windows(
+    buckets: List[Bucket],
+    windows: List[int],
+    key: str = 'slice'
+) -> Dict[int, List[SimpleNamespace]]:
+    # Filter out None buckets
+    valid_buckets = [b for b in buckets if b is not None]
+    
+    if not valid_buckets:
+        logger.warning("No valid buckets provided to download_slices_for_buckets_and_windows.")
+        return {}
+    
+    logger.debug(f"Downloading files for buckets {[b.name for b in valid_buckets]} and windows {windows}")
+    
     session = get_session()
     tasks = []
-    for bucket in set(buckets):
+    for bucket in set(valid_buckets):
         async with session.create_client(
             's3',
             endpoint_url=get_base_url(bucket.account_id),
@@ -501,24 +505,16 @@ async def download_slices_for_buckets_and_windows(buckets: List[Bucket], windows
             aws_access_key_id=bucket.access_key_id,
             aws_secret_access_key=bucket.secret_access_key
         ) as s3_client:
-            logger.debug(f'bucket: {bucket.name}')
-            if not bucket:
-                continue
+            logger.debug(f'Processing bucket: {bucket.name}')
             tasks.append(process_bucket(s3_client, bucket.name, windows, key))
+    
     results = await asyncio.gather(*tasks)
-    # Flatten the list of lists
-    files = [item for sublist in results for item in sublist]
-
-    # Create a dictionary with windows as keys and list of files as values
-    windows_dict = {}
-    for file in files:
-        window = file.window
-        if window not in windows_dict:
-            windows_dict[window] = []
-        windows_dict[window].append(file)
-
-    logger.debug(f"Downloaded all files grouped by windows: {windows}")
-    return windows_dict
+    # Combine results into a dictionary mapping window IDs to lists of slices
+    slices = defaultdict(list)
+    for result in results:
+        for item in result:
+            slices[item.window].append(item)
+    return slices
 
 async def load_files_for_window(window: int, key: str = 'slice') -> List[str]:
     """
@@ -613,11 +609,11 @@ async def delete_files_from_bucket_before_window(bucket: str, window_max: int, k
     session = get_session()
     async with session.create_client(
         's3',
-        endpoint_url=get_base_url(tplr.config.BUCKET_SECRETS["account_id"]),
+        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
         region_name=CF_REGION_NAME,
         config=client_config,
-        aws_access_key_id=tplr.config.BUCKET_SECRETS["write"]["access_key_id"],
-        aws_secret_access_key=tplr.config.BUCKET_SECRETS["write"]["secret_access_key"],
+        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
     ) as s3_client:
         try:
             response = await s3_client.list_objects_v2(Bucket=bucket)
@@ -683,54 +679,55 @@ async def delete_old_version_files(bucket_name: str, current_version: str):
                 deleted = response.get('Deleted', [])
                 logger.info(f"Deleted {len(deleted)} old version files from bucket {bucket_name}")
 
-def is_valid_bucket(bucket_name: str) -> bool:
-    """
-    Validates if the bucket name matches AWS S3 bucket naming rules
-    and checks if the bucket exists and is accessible.
+# def is_valid_bucket(bucket_name: str) -> bool:
+#     """
+#     Validates if the bucket name matches AWS S3 bucket naming rules
+#     and checks if the bucket exists and is accessible.
 
-    Args:
-        bucket_name (str): The bucket name to validate.
+#     Args:
+#         bucket_name (str): The bucket name to validate.
 
-    Returns:
-        bool: True if valid and accessible, False otherwise.
-    """
-    # Ensure bucket_name is a string
-    if isinstance(bucket_name, bytes):
-        bucket_name = bucket_name.decode('utf-8')
+#     Returns:
+#         bool: True if valid and accessible, False otherwise.
+#     """
+#     # Ensure bucket_name is a string
+#     if isinstance(bucket_name, bytes):
+#         bucket_name = bucket_name.decode('utf-8')
 
-    # # Check if the bucket name matches the regex
-    # if not (BUCKET_REGEX.match(bucket_name) or ARN_REGEX.match(bucket_name)):
-    #     logger.debug(f"Invalid bucket name format: {bucket_name}")
-    #     return False
+#     # # Check if the bucket name matches the regex
+#     # if not (BUCKET_REGEX.match(bucket_name) or ARN_REGEX.match(bucket_name)):
+#     #     logger.debug(f"Invalid bucket name format: {bucket_name}")
+#     #     return False
 
-    # Create S3 client
-    s3_client = boto3.client(
-        's3',
-        region_name='us-east-1',
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
-    )
+#     # Create S3 client
+#     s3_client = boto3.client(
+#         's3',
+#         region_name=CF_REGION_NAME,
+#         aws_access_key_id=AWS_ACCESS_KEY_ID,
+#         aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+#         config=client_config
+#     )
 
-    # Check if the bucket exists and is accessible
-    try:
-        # Try to list objects in the bucket
-        s3_client.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
-        logger.debug(f"Bucket '{bucket_name}' exists and is accessible.")
-        return True  # Bucket exists and is accessible
-    except ClientError as e:
-        error_code = e.response['Error']['Code']
-        if error_code in ['NoSuchBucket', '404']:
-            logger.debug(f"Bucket '{bucket_name}' does not exist.")
-        elif error_code in ['AccessDenied', '403']:
-            logger.debug(f"Access denied for bucket '{bucket_name}'.")
-        elif error_code == 'AllAccessDisabled':
-            logger.debug(f"All access disabled for bucket '{bucket_name}'.")
-        else:
-            logger.debug(f"Error accessing bucket '{bucket_name}': {e}")
-        return False
-    except Exception as e:
-        logger.debug(f"Unexpected error when accessing bucket '{bucket_name}': {e}")
-        return False
+#     # Check if the bucket exists and is accessible
+#     try:
+#         # Try to list objects in the bucket
+#         s3_client.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
+#         logger.debug(f"Bucket '{bucket_name}' exists and is accessible.")
+#         return True  # Bucket exists and is accessible
+#     except ClientError as e:
+#         error_code = e.response['Error']['Code']
+#         if error_code in ['NoSuchBucket', '404']:
+#             logger.debug(f"Bucket '{bucket_name}' does not exist.")
+#         elif error_code in ['AccessDenied', '403']:
+#             logger.debug(f"Access denied for bucket '{bucket_name}'.")
+#         elif error_code == 'AllAccessDisabled':
+#             logger.debug(f"All access disabled for bucket '{bucket_name}'.")
+#         else:
+#             logger.debug(f"Error accessing bucket '{bucket_name}': {e}")
+#         return False
+#     except Exception as e:
+#         logger.debug(f"Unexpected error when accessing bucket '{bucket_name}': {e}")
+#         return False
 
 # def validate_bucket_or_exit(bucket_name: str):
 #     """

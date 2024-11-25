@@ -70,7 +70,7 @@ class Validator:
             config.subtensor.chain_endpoint = 'ws://127.0.0.1:9944'
         if config.debug: tplr.debug()
         if config.trace: tplr.trace()
-        tplr.validate_bucket_or_exit(tplr.config.BUCKET_SECRETS["bucket_name"])
+        # tplr.validate_bucket_or_exit(tplr.config.BUCKET_SECRETS["bucket_name"])
         if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
             autoupdater.start()
@@ -98,10 +98,12 @@ class Validator:
 
         # Init bucket.
         try:
-            if tplr.config.BUCKET_SECRETS["bucket_name"] != self.chain_manager.get_commitment(self.uid):
+            tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
+            commitment = self.chain_manager.get_commitment(self.uid)
+            if tplr.config.BUCKET_SECRETS["bucket_name"] != commitment.name:
                 raise ValueError('')
         except:
-            self.chain_manager.commit()
+            tplr.commit(self.subtensor, self.wallet, self.config.netuid)
         tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
 
         # Init Wandb.
@@ -168,15 +170,24 @@ class Validator:
         
         # Init buckets.
         self.buckets = []
-        for uid in self.metagraph.uids:
-            try:
-                bucket =  self.chain_manager.get_commitment(uid)
-                tplr.logger.debug(f"Retrieved bucket for UID {uid}: {bucket.name}")
-                self.buckets.append(bucket)
-            except Exception as e:
-                tplr.logger.warning(f"Skipping appending bucket for uid {uid} due to {e}")
-        tplr.logger.info(f"Created {len(self.buckets)} bucket objects: {(b.name for b in self.buckets)}")
+        buckets = tplr.get_all_commitments(
+            substrate=self.subtensor.substrate,
+            netuid=self.config.netuid,
+            metagraph=self.metagraph
+        )
 
+        for uid in self.metagraph.uids:
+            bucket = buckets.get(uid)
+            tplr.logger.info(f"UID {uid} bucket: {bucket}")
+            
+            if bucket is not None:
+                tplr.logger.info(f"Retrieved valid bucket for UID {uid}: {bucket.name}")
+                self.buckets.append(bucket)
+            else:
+                tplr.logger.info(f"No valid bucket found for UID {uid}")
+                self.buckets.append(None)
+
+        tplr.logger.info(f"Final list of buckets: {self.buckets}")
 
         self.last_window = 0
         self.optimal_pages_per_step = 4
@@ -194,36 +205,36 @@ class Validator:
         
     async def update(self):
         """Continuously updates the global state by polling every 10 minutes."""
+        await asyncio.sleep(600)  # Initial sleep before starting updates
         while not self.stop_event.is_set():
             st = tplr.T()
-            await asyncio.to_thread(self.perform_update)
+            await self.perform_update()
             tplr.logger.info(f"{tplr.P(self.current_window, tplr.T() - st)} Updated global state.")
             await asyncio.sleep(600)
 
-    def perform_update(self):
-        """Updates subtensor connection, metagraph, hyperparameters and buckets."""
+    async def perform_update(self):
+        """Updates subtensor connection, metagraph, hyperparameters, and buckets."""
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
-        self.hparams = tplr.load_hparams()
 
-        next_buckets = []
-        for uid in self.metagraph.uids:
-            try:
-                bucket = self.chain_manager.get_commitment(uid)
-                if tplr.is_valid_bucket(bucket.name):
-                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket.name}")
-                    next_buckets.append(bucket)
-                else:
-                    tplr.logger.warning(f"Skipping addition of bucket for UID {uid}: Invalid or missing bucket name: {bucket.name}")
-                    next_buckets.append(None)
-            except Exception as e:
-                tplr.logger.warning(f"Skipping addition of bucket for UID {uid}: Error retrieving bucket for UID {uid}: {e}")
-        old_num_buckets = len(self.buckets)
-        self.buckets = next_buckets
-        tplr.logger.info(
-            f"Bucket list updated. Number of buckets changed from {old_num_buckets} to {len(self.buckets)}."
-            f"Current buckets: {(b.name for b in self.buckets)}"
+        # Fetch all commitments at once
+        buckets = tplr.get_all_commitments(
+            substrate=self.subtensor.substrate,
+            netuid=self.config.netuid,
+            metagraph=self.metagraph
         )
+
+        self.buckets = []
+        for uid in self.metagraph.uids:
+            bucket = buckets.get(uid)
+            if isinstance(bucket, bytes):
+                bucket = bucket.decode('utf-8')
+            if bucket is not None :
+                tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
+                self.buckets.append(bucket)
+            else:
+                tplr.logger.debug(f"UID {uid}: Invalid or missing bucket: {bucket}")
+                self.buckets.append(None)
 
     async def run(self):
         # Main loop.
@@ -236,7 +247,7 @@ class Validator:
             st = tplr.T()
             history_windows = [ self.current_window - i for i in range (self.hparams.max_history) ]
             state_slices = await tplr.download_slices_for_buckets_and_windows(
-                buckets = self.buckets,
+                buckets=[b for b in self.buckets if b is not None],
                 windows = history_windows,
                 key = 'state'
             )
@@ -280,12 +291,20 @@ class Validator:
                 
                 # Download the state for the eval window.
                 st = tplr.T()
+                valid_buckets = [b for b in self.buckets if b is not None]
+
+                if not valid_buckets:
+                    tplr.logger.info(f"No valid buckets to download state slices for window {window}")
+                    # Wait for the next window
+                    while self.current_window - offset == window:
+                        await asyncio.sleep(0.1)  # Keep waiting until the window changes
+
                 state_slices = await tplr.download_slices_for_buckets_and_windows(
-                    buckets = self.buckets,
-                    windows = [ window ],
-                    key = 'state'
+                    buckets=valid_buckets,
+                    windows=[window],
+                    key='state'
                 )
-                n_state_slices = len(state_slices[ window ]) if window in state_slices else 0
+                n_state_slices = len(state_slices[window]) if window in state_slices else 0
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_state_slices} window states.")
                 
                 # Download the delta for the eval window.

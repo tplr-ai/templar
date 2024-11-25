@@ -16,6 +16,8 @@
 # DEALINGS IN THE SOFTWARE.
 
 import os
+import boto3
+from botocore.exceptions import ClientError
 import torch
 import uvloop
 import hashlib
@@ -109,6 +111,7 @@ async def apply_slices_to_model(
         Timeout: If unable to acquire lock on slice file
         Exception: For errors loading or applying slices
     """
+    max_global_step = 0 
     indices_dict = await get_indices_for_window(model, seed, compression)
     slice_files = await load_files_for_window(window=window, key=key)
 
@@ -411,10 +414,6 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str = 
     import re
     from templar import __version__  # Ensure __version__ is imported
 
-    # Validate the bucket name before processing
-    if not is_valid_bucket(bucket):
-        logger.debug(f"Skipping invalid bucket: '{bucket}'")
-        return []
     logger.debug(f"Processing bucket '{bucket}' for windows {windows}")
     files = []
     paginator = s3_client.get_paginator('list_objects_v2')
@@ -686,30 +685,64 @@ async def delete_old_version_files(bucket_name: str, current_version: str):
 
 def is_valid_bucket(bucket_name: str) -> bool:
     """
-    Validates the bucket name against AWS S3 naming conventions and ARN patterns.
+    Validates if the bucket name matches AWS S3 bucket naming rules
+    and checks if the bucket exists and is accessible.
 
     Args:
-        bucket_name (str): The name of the S3 bucket.
+        bucket_name (str): The bucket name to validate.
 
     Returns:
-        bool: True if valid, False otherwise.
+        bool: True if valid and accessible, False otherwise.
     """
-    if BUCKET_REGEX.match(bucket_name) or ARN_REGEX.match(bucket_name):
-        return True
-    logger.debug(f"Invalid bucket name: {bucket_name}")
-    return False
+    # Ensure bucket_name is a string
+    if isinstance(bucket_name, bytes):
+        bucket_name = bucket_name.decode('utf-8')
 
-def validate_bucket_or_exit(bucket_name: str):
-    """
-    Validates the bucket name and exits the program if invalid.
+    # # Check if the bucket name matches the regex
+    # if not (BUCKET_REGEX.match(bucket_name) or ARN_REGEX.match(bucket_name)):
+    #     logger.debug(f"Invalid bucket name format: {bucket_name}")
+    #     return False
 
-    Args:
-        bucket_name (str): The name of the S3 bucket.
-    """
-    logger.debug("Validating Bucket name")
-    if not is_valid_bucket(bucket_name):
-        logger.error(f"Bucket name {bucket_name} is invalid. Please refer to the AWS documentation on naming conventions ")
-        sys.exit(1)
+    # Create S3 client
+    s3_client = boto3.client(
+        's3',
+        region_name='us-east-1',
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+    )
+
+    # Check if the bucket exists and is accessible
+    try:
+        # Try to list objects in the bucket
+        s3_client.list_objects_v2(Bucket=bucket_name, MaxKeys=1)
+        logger.debug(f"Bucket '{bucket_name}' exists and is accessible.")
+        return True  # Bucket exists and is accessible
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        if error_code in ['NoSuchBucket', '404']:
+            logger.debug(f"Bucket '{bucket_name}' does not exist.")
+        elif error_code in ['AccessDenied', '403']:
+            logger.debug(f"Access denied for bucket '{bucket_name}'.")
+        elif error_code == 'AllAccessDisabled':
+            logger.debug(f"All access disabled for bucket '{bucket_name}'.")
+        else:
+            logger.debug(f"Error accessing bucket '{bucket_name}': {e}")
+        return False
+    except Exception as e:
+        logger.debug(f"Unexpected error when accessing bucket '{bucket_name}': {e}")
+        return False
+
+# def validate_bucket_or_exit(bucket_name: str):
+#     """
+#     Validates the bucket name and exits the program if invalid.
+
+#     Args:
+#         bucket_name (str): The name of the S3 bucket.
+#     """
+#     logger.debug("Validating Bucket name")
+#     if not is_valid_bucket(bucket_name):
+#         logger.error(f"Bucket name {bucket_name} is invalid. Please refer to the AWS documentation on naming conventions ")
+#         sys.exit(1)
 
 async def save_checkpoint(filename, model, optimizer=None, scheduler=None, global_step=0, **kwargs):
     """
@@ -751,6 +784,7 @@ async def load_checkpoint(filename, model, optimizer=None, scheduler=None, devic
         optimizer (torch.optim.Optimizer, optional): Optimizer to load the state into.
         scheduler (torch.optim.lr_scheduler._LRScheduler, optional): Scheduler to load the state into.
         device (str): Device to map the checkpoint.
+
     Returns:
         global_step (int): The global step at which the checkpoint was saved.
         additional_state (dict): Dictionary of additional state variables.
@@ -770,4 +804,8 @@ async def load_checkpoint(filename, model, optimizer=None, scheduler=None, devic
         return global_step, additional_state
     except (torch.serialization.pickle.UnpicklingError, RuntimeError, EOFError) as e:
         logger.error(f"Checkpoint at {filename} is corrupt: {e}")
-        return None, {}  # Indicate corruption
+        # Return global_step as 0 and an empty additional_state
+        return 0, {}
+    except Exception as e:
+        logger.error(f"Failed to load checkpoint from {filename}: {e}")
+        return 0, {}

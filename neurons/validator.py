@@ -72,10 +72,12 @@ class Validator:
             tplr.debug()
         if config.trace:
             tplr.trace()
-        # tplr.validate_bucket_or_exit(tplr.config.BUCKET_SECRETS["bucket_name"])
         if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
-            autoupdater.start()
+            # Start autoupdater in a new thread
+            autoupdate_thread = threading.Thread(target=autoupdater.start)
+            autoupdate_thread.daemon = True  # Ensures thread exits when main program exits
+            autoupdate_thread.start()
         return config
 
     def __init__(self):

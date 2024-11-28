@@ -166,7 +166,7 @@ class Miner:
         )   
 
         # Load checkpoint if it exists
-        self.checkpoint_path = f"checkpoint-M{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
+        self.checkpoint_path = f"checkpoint*.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
         if os.path.exists(self.checkpoint_path):
             tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
             global_step, _ = asyncio.run(tplr.load_checkpoint(

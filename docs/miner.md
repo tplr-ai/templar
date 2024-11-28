@@ -1,3 +1,4 @@
+
 # Miner Setup
 
 This document provides a guide on how to set up and run a miner using `miner.py`. It explains the workflow, configuration options, and step-by-step instructions to get a miner up and running.
@@ -30,16 +31,21 @@ This document provides a guide on how to set up and run a miner using `miner.py`
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Python 3.12**
 - **CUDA-compatible drivers**
-- **Cloudflare R2 Bucket Configuration**:
-  
+
+
+## Cloudflare R2 Bucket Configuration
   To use buckets for sharing model slices, do the following:
   1. **Navigate to R2 Object Storage and Create a Bucket**:
-     - Name the bucket the same as your **account ID**.
-     - Set the **region** to **ENAM**.
+     - Name the bucket the same as your CloudFlare **account ID**. This can be found on the your [Cloudflare Dashboard](https://dash.cloudflare.com) in the lower right corner or the right side of the R2 Object Storage Overview page. Account IDs are not sensitive and are safe to share. 
+     - Set the **region** to **ENAM** (Eastern North America).
 
   2. **Generate Tokens**:
-     - Create a **read token** and a **write token**.
-     - Note down the access key IDs and secret access keys for each token.
+     - Navigate to the R2 Object Storage Overview page, on the left side, click "Manage R2 API Tokens".
+     - Create seperate **read** and  **read/write**  tokens.
+     - Note down the access key IDs and secret access keys for each token. These can also be retrieved at any time from your R2 API Token Management page
+     - ***Heads up***: The access key id and secret access key for your *read* token will be shared
+  with other neurons through commits to the network. The secrets for your write
+  token will stay secret.
 
   3. **Update `.env.yaml`**:
      - Create the file `.env.yaml` by copying [`.env-template.yaml`](../.env-template.yaml)
@@ -48,11 +54,8 @@ This document provides a guide on how to set up and run a miner using `miner.py`
          cp .env-template.yaml .env.yaml
        ```
      
-  The access key id and secret access key for your *read* token will be shared
-  with other neurons through commits to the network. The secrets for your write
-  token will stay secret.
 
-- **Git**
+
 
 ## Installation
 

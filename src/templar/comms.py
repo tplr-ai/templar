@@ -127,7 +127,12 @@ async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
 
 
 async def apply_slices_to_model(
-    model: torch.nn.Module, window: int, seed: str, compression: int, save_location: str, key: str = "slice"
+    model: torch.nn.Module,
+    window: int,
+    seed: str,
+    compression: int,
+    save_location: str,
+    key: str = "slice",
 ) -> int:
     """
     Applies downloaded model parameter slices to a model for a specific window.
@@ -169,7 +174,9 @@ async def apply_slices_to_model(
     """
     max_global_step = 0
     indices_dict = await get_indices_for_window(model, seed, compression)
-    slice_files = await load_files_for_window(window=window, save_location=save_location, key=key)
+    slice_files = await load_files_for_window(
+        window=window, save_location=save_location, key=key
+    )
 
     slices_per_param = {name: 0 for name, _ in model.named_parameters()}
     param_sums = {
@@ -375,7 +382,9 @@ async def get_indices_for_window(
     return result
 
 
-async def download_file(s3_client, bucket: str, filename: str, save_location: str) -> str:
+async def download_file(
+    s3_client, bucket: str, filename: str, save_location: str
+) -> str:
     """
     Downloads a file from S3, using parallel downloads for large files.
 
@@ -429,7 +438,13 @@ async def download_file(s3_client, bucket: str, filename: str, save_location: st
 
 
 async def handle_file(
-    s3_client, bucket: str, filename: str, hotkey: str, window: int, version: str, save_location: str
+    s3_client,
+    bucket: str,
+    filename: str,
+    hotkey: str,
+    window: int,
+    version: str,
+    save_location: str,
 ):
     """
     Handles downloading a single file from S3.
@@ -550,7 +565,7 @@ async def process_bucket(
                                 slice_hotkey,
                                 window,
                                 slice_version,
-                                save_location
+                                save_location,
                             )
                         )
                     except ValueError:
@@ -643,7 +658,9 @@ async def download_slices_for_buckets_and_windows(
             aws_secret_access_key=bucket.secret_access_key,
         ) as s3_client:
             logger.debug(f"Processing bucket: {bucket.name}")
-            tasks.append(process_bucket(s3_client, bucket.name, windows, key, save_location))
+            tasks.append(
+                process_bucket(s3_client, bucket.name, windows, key, save_location)
+            )
 
     results = await asyncio.gather(*tasks)
     # Combine results into a dictionary mapping window IDs to lists of slices
@@ -654,7 +671,9 @@ async def download_slices_for_buckets_and_windows(
     return slices
 
 
-async def load_files_for_window(window: int, save_location: str, key: str = "slice") -> List[str]:
+async def load_files_for_window(
+    window: int, save_location: str, key: str = "slice"
+) -> List[str]:
     """
     Loads files for a specific window from the temporary directory.
 
@@ -687,7 +706,9 @@ async def load_files_for_window(window: int, save_location: str, key: str = "sli
     return window_files
 
 
-async def delete_files_before_window(window_max: int, save_location: str, key: str = "slice"):
+async def delete_files_before_window(
+    window_max: int, save_location: str, key: str = "slice"
+):
     """
     Deletes temporary files with window IDs less than the specified maximum.
 

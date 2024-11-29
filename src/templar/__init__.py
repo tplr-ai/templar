@@ -25,6 +25,7 @@ __version__ = "0.1.6"
 # Import package.
 from .autoupdate import *
 from .chain import *
+from .checkpoint import * 
 from .commitment import *
 from .comms import *
 from .config import *

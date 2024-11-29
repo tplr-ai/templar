@@ -100,16 +100,6 @@ class Miner:
         tplr.logger.info('\n' + '-' * 40 + ' Objects ' + '-' * 40)
         tplr.logger.info(f'\nWallet: {self.wallet}\nSubtensor: {self.subtensor}\nMetagraph: {self.metagraph}\nUID: {self.uid}')
 
-        # Init bucket.
-        try:
-            tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
-            commitment = self.chain_manager.get_commitment(self.uid)
-            if tplr.config.BUCKET_SECRETS["bucket_name"] != commitment.name:
-                raise ValueError('')
-        except Exception:
-            tplr.commit(self.subtensor, self.wallet, self.config.netuid)
-        tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
-
         # Init Wandb.
         # Ensure the wandb directory exists
         wandb_dir = os.path.join(os.getcwd(), 'wandb')
@@ -136,6 +126,85 @@ class Miner:
             job_type='training'
         )
 
+        # Init bucket.
+        try:
+            tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
+            commitment = self.chain_manager.get_commitment(self.uid)
+            if tplr.config.BUCKET_SECRETS["bucket_name"] != commitment.name:
+                raise ValueError('')
+        except Exception:
+            tplr.commit(self.subtensor, self.wallet, self.config.netuid)
+        tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
+
+        # Init buckets.
+        # self.buckets = []
+        # buckets = tplr.get_all_commitments(
+        #     substrate=self.subtensor.substrate,
+        #     netuid=self.config.netuid,
+        #     metagraph=self.metagraph
+        # )
+
+        # for uid in self.metagraph.uids:
+        #     bucket = buckets.get(uid)
+        #     tplr.logger.info(f"UID {uid} bucket: {bucket}")
+
+        #     if bucket is not None:
+        #         tplr.logger.info(f"Retrieved valid bucket for UID {uid}: {bucket.name}")
+        #         self.buckets.append(bucket)
+        #     else:
+        #         tplr.logger.info(f"No valid bucket found for UID {uid}")
+        #         self.buckets.append(None)
+
+        # tplr.logger.info(f"Final list of buckets: {self.buckets}")
+
+        # Retrieve bucket info for all neurons
+        self.buckets = tplr.get_all_buckets(
+            subtensor=self.subtensor,
+            netuid=self.config.netuid,
+            metagraph=self.metagraph
+        )
+
+        # Get the neuron with the highest stake
+        highest_stake_hotkey = tplr.get_neuron_with_highest_stake(
+            metagraph=self.metagraph
+        )
+
+        if highest_stake_hotkey:
+            bucket_info = self.buckets.get(highest_stake_hotkey)
+            if bucket_info:
+                checkpoint_dir = os.path.dirname(self.checkpoint_path)
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                # Download checkpoint using the neuron's bucket credentials
+                checkpoint_file = asyncio.run(
+                    tplr.download_checkpoint_from_neuron(
+                        bucket_info=bucket_info,
+                        neuron_hotkey=highest_stake_hotkey,
+                        checkpoint_dir=checkpoint_dir
+                    )
+                )
+                if checkpoint_file:
+                    # Load the checkpoint
+                    global_step, _ = asyncio.run(
+                        tplr.load_checkpoint(
+                            filename=checkpoint_file,
+                            model=self.model,
+                            optimizer=self.optimizer,
+                            scheduler=self.scheduler,
+                            device=self.config.device
+                        )
+                    )
+                    self.global_step = global_step if global_step is not None else 0
+                    tplr.logger.info(f"Resumed from global step {self.global_step}")
+                else:
+                    tplr.logger.warning("Failed to download neuron checkpoint. Starting from scratch.")
+                    self.global_step = 0
+            else:
+                tplr.logger.warning(f"No bucket info for neuron {highest_stake_hotkey}. Starting from scratch.")
+                self.global_step = 0
+        else:
+            tplr.logger.warning("No neurons found. Starting from scratch.")
+            self.global_step = 0
+
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
         self.hparams = tplr.load_hparams()
@@ -154,32 +223,32 @@ class Miner:
             foreach=True,  # more memory usage, but faster
         )   
 
-        # Load checkpoint if it exists
-        self.checkpoint_path = f"checkpoint-M{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
-        if os.path.exists(self.checkpoint_path):
-            tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
-            global_step, _ = asyncio.run(tplr.load_checkpoint(
-                filename=self.checkpoint_path,
-                model=self.model,
-                optimizer=self.optimizer,
-                scheduler=None,
-                device=self.config.device
-            ))
+        # # Load checkpoint if it exists
+        # self.checkpoint_path = f"checkpoint-M{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
+        # if os.path.exists(self.checkpoint_path):
+        #     tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
+        #     global_step, _ = asyncio.run(tplr.load_checkpoint(
+        #         filename=self.checkpoint_path,
+        #         model=self.model,
+        #         optimizer=self.optimizer,
+        #         scheduler=None,
+        #         device=self.config.device
+        #     ))
 
-            self.global_step = global_step
-            if global_step is None:
-                tplr.logger.warning(f"Corrupt checkpoint detected at {self.checkpoint_path}. Removing file and starting fresh.")
-                try:
-                    os.remove(self.checkpoint_path)
-                    tplr.logger.info(f"Removed corrupt checkpoint: {self.checkpoint_path}")
-                except OSError as e:
-                    tplr.logger.error(f"Failed to remove corrupt checkpoint: {e}")
-                global_step = 0
-            else:
-                tplr.logger.info(f"Resumed from global step {self.global_step}")
-        else:
-            tplr.logger.info("No checkpoint file found. Starting from scratch.")
-            self.global_step = 0
+        #     self.global_step = global_step
+        #     if global_step is None:
+        #         tplr.logger.warning(f"Corrupt checkpoint detected at {self.checkpoint_path}. Removing file and starting fresh.")
+        #         try:
+        #             os.remove(self.checkpoint_path)
+        #             tplr.logger.info(f"Removed corrupt checkpoint: {self.checkpoint_path}")
+        #         except OSError as e:
+        #             tplr.logger.error(f"Failed to remove corrupt checkpoint: {e}")
+        #         global_step = 0
+        #     else:
+        #         tplr.logger.info(f"Resumed from global step {self.global_step}")
+        # else:
+        #     tplr.logger.info("No checkpoint file found. Starting from scratch.")
+        #     self.global_step = 0
 
         # Initialize learning rate scheduler
         self.scheduler = tplr.get_wsd_scheduler(
@@ -189,27 +258,6 @@ class Miner:
             num_decay_steps=self.hparams.num_decay_steps,
         )
 
-        # Init buckets.
-        buckets = tplr.get_all_commitments(self.subtensor.substrate, self.config.netuid, self.metagraph)
-        self.buckets = []
-        buckets = tplr.get_all_commitments(
-            substrate=self.subtensor.substrate,
-            netuid=self.config.netuid,
-            metagraph=self.metagraph
-        )
-
-        for uid in self.metagraph.uids:
-            bucket = buckets.get(uid)
-            tplr.logger.info(f"UID {uid} bucket: {bucket}")
-
-            if bucket is not None:
-                tplr.logger.info(f"Retrieved valid bucket for UID {uid}: {bucket.name}")
-                self.buckets.append(bucket)
-            else:
-                tplr.logger.info(f"No valid bucket found for UID {uid}")
-                self.buckets.append(None)
-
-        tplr.logger.info(f"Final list of buckets: {self.buckets}")
 
         # Init run state.
         self.sample_rate = 1.0

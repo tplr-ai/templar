@@ -72,10 +72,12 @@ class Validator:
             tplr.debug()
         if config.trace:
             tplr.trace()
-        # tplr.validate_bucket_or_exit(tplr.config.BUCKET_SECRETS["bucket_name"])
         if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
-            autoupdater.start()
+            # Start autoupdater in a new thread
+            autoupdate_thread = threading.Thread(target=autoupdater.start)
+            autoupdate_thread.daemon = True  # Ensures thread exits when main program exits
+            autoupdate_thread.start()
         return config
 
     def __init__(self):
@@ -97,16 +99,6 @@ class Validator:
         )
         tplr.logger.info('\n' + '-' * 40 + ' Objects ' + '-' * 40)
         tplr.logger.info(f'\nWallet: {self.wallet}\nSubtensor: {self.subtensor}\nMetagraph: {self.metagraph}\nUID: {self.uid}')
-
-        # Init bucket.
-        try:
-            tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
-            commitment = self.chain_manager.get_commitment(self.uid)
-            if tplr.config.BUCKET_SECRETS["bucket_name"] != commitment.name:
-                raise ValueError('')
-        except Exception:
-            tplr.commit(self.subtensor, self.wallet, self.config.netuid)
-        tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
 
         # Init Wandb.
         # Ensure the wandb directory exists
@@ -134,6 +126,47 @@ class Validator:
             job_type='validation'
         )
         self.metrics_history = pd.DataFrame()
+
+        # Init bucket.
+        try:
+            tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
+            commitment = self.chain_manager.get_commitment(self.uid)
+            if tplr.config.BUCKET_SECRETS["bucket_name"] != commitment.name:
+                raise ValueError('')
+        except Exception:
+            tplr.commit(self.subtensor, self.wallet, self.config.netuid)
+        tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
+
+        # Init buckets.
+        # self.buckets = []
+        # buckets = tplr.get_all_commitments(
+        #     substrate=self.subtensor.substrate,
+        #     netuid=self.config.netuid,
+        #     metagraph=self.metagraph
+        # )
+
+        # for uid in self.metagraph.uids:
+        #     bucket = buckets.get(uid)
+        #     tplr.logger.info(f"UID {uid} bucket: {bucket}")
+
+        #     if bucket is not None:
+        #         tplr.logger.info(f"Retrieved valid bucket for UID {uid}: {bucket.name}")
+        #         self.buckets.append(bucket)
+        #     else:
+        #         tplr.logger.info(f"No valid bucket found for UID {uid}")
+        #         self.buckets.append(None)
+
+        # tplr.logger.info(f"Final list of buckets: {self.buckets}")
+
+
+
+        # Retrieve bucket info for all neurons
+        self.buckets = tplr.get_all_buckets(
+            subtensor=self.subtensor,
+            netuid=self.config.netuid,
+            metagraph=self.metagraph
+        )
+
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
         self.hparams = tplr.load_hparams()
@@ -143,56 +176,57 @@ class Validator:
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
         self.model.eval()
-
-        # Set checkpoint path
-        self.checkpoint_path = f"checkpoint-V{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
-
-        # Load checkpoint if it exists
-        if os.path.exists(self.checkpoint_path):
-            tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
-
-            # The load_checkpoint function updates the model's state in place
-            global_step, additional_state = asyncio.run(tplr.load_checkpoint(
-                filename=self.checkpoint_path,
-                model=self.model,            # Model state is updated inside load_checkpoint
-                device=self.config.device
-            ))
-
-            # Update global_step
-            self.global_step = global_step
-
-            # Load additional state variables
-            self.scores = additional_state.get('scores', torch.zeros(256, dtype=torch.float32))
-            self.weights = additional_state.get('weights', torch.zeros(256, dtype=torch.float32))
-
-            tplr.logger.info(f"Resumed from global step {self.global_step}")
-        else:
-            tplr.logger.info("No checkpoint found. Starting from scratch.")
-            self.global_step = 0
-            self.scores = torch.zeros(256, dtype=torch.float32)
-            self.weights = torch.zeros(256, dtype=torch.float32)
-
-        # Init buckets.
-        buckets = tplr.get_all_commitments(self.subtensor.substrate, self.config.netuid, self.metagraph)
-        self.buckets = []
-        buckets = tplr.get_all_commitments(
-            substrate=self.subtensor.substrate,
-            netuid=self.config.netuid,
+        
+        # Get the neuron with the highest stake
+        highest_stake_hotkey = tplr.get_neuron_with_highest_stake(
             metagraph=self.metagraph
         )
 
-        for uid in self.metagraph.uids:
-            bucket = buckets.get(uid)
-            tplr.logger.info(f"UID {uid} bucket: {bucket}")
-
-            if bucket is not None:
-                tplr.logger.info(f"Retrieved valid bucket for UID {uid}: {bucket.name}")
-                self.buckets.append(bucket)
+        if highest_stake_hotkey:
+            bucket_info = self.buckets.get(highest_stake_hotkey)
+            if bucket_info:
+                checkpoint_dir = os.path.dirname(self.checkpoint_path)
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                # Download checkpoint using the neuron's bucket credentials
+                checkpoint_file = asyncio.run(
+                    tplr.download_checkpoint_from_neuron(
+                        bucket_info=bucket_info,
+                        neuron_hotkey=highest_stake_hotkey,
+                        checkpoint_dir=checkpoint_dir
+                    )
+                )
+                if checkpoint_file:
+                    # Load the checkpoint
+                    global_step, _ = asyncio.run(
+                        tplr.load_checkpoint(
+                            filename=checkpoint_file,
+                            model=self.model,
+                            optimizer=self.optimizer,
+                            scheduler=self.scheduler,
+                            device=self.config.device
+                        )
+                    )
+                    self.global_step = global_step if global_step is not None else 0
+                    tplr.logger.info(f"Resumed from global step {self.global_step}")
+                else:
+                    tplr.logger.warning("Failed to download neuron checkpoint. Starting from scratch.")
+                    self.global_step = 0
             else:
-                tplr.logger.info(f"No valid bucket found for UID {uid}")
-                self.buckets.append(None)
+                tplr.logger.warning(f"No bucket info for neuron {highest_stake_hotkey}. Starting from scratch.")
+                self.global_step = 0
+        else:
+            tplr.logger.warning("No neurons found. Starting from scratch.")
+            self.global_step = 0
 
-        tplr.logger.info(f"Final list of buckets: {self.buckets}")
+        # # Init model.
+        # tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
+        # self.hparams = tplr.load_hparams()
+        # torch.manual_seed(42)
+        # np.random.seed(42)
+        # random.seed(42)
+        # self.model = LlamaForCausalLM(config=self.hparams.model_config)
+        # self.model.to(self.config.device)
+        # self.model.eval()
 
         self.last_window = 0
         self.optimal_pages_per_step = 4
@@ -206,6 +240,8 @@ class Validator:
         self.scores = torch.zeros( 256, dtype = torch.float32 ) 
         self.weights = torch.zeros( 256, dtype = torch.float32 ) 
         self.sample_rate = 1.0
+        self.metagraph_lock = asyncio.Lock()
+        self.buckets_lock = asyncio.Lock()
         print ( self.hparams )
 
     async def update(self):
@@ -219,27 +255,28 @@ class Validator:
 
     async def perform_update(self):
         """Updates subtensor connection, metagraph, hyperparameters, and buckets."""
-        self.subtensor = bt.subtensor(config=self.config)
-        self.metagraph = self.subtensor.metagraph(self.config.netuid)
+        async with self.metagraph_lock:
+            self.subtensor = bt.subtensor(config=self.config)
+            self.metagraph = self.subtensor.metagraph(self.config.netuid)
 
-        # Fetch all commitments at once
         buckets = tplr.get_all_commitments(
             substrate=self.subtensor.substrate,
             netuid=self.config.netuid,
             metagraph=self.metagraph
         )
 
-        self.buckets = []
-        for uid in self.metagraph.uids:
-            bucket = buckets.get(uid)
-            if isinstance(bucket, bytes):
-                bucket = bucket.decode('utf-8')
-            if bucket is not None :
-                tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
-                self.buckets.append(bucket)
-            else:
-                tplr.logger.debug(f"UID {uid}: Invalid or missing bucket: {bucket}")
-                self.buckets.append(None)
+        async with self.buckets_lock:
+            self.buckets = []
+            for uid in self.metagraph.uids:
+                bucket = buckets.get(uid)
+                if isinstance(bucket, bytes):
+                    bucket = bucket.decode('utf-8')
+                if bucket is not None:
+                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
+                    self.buckets.append(bucket)
+                else:
+                    tplr.logger.debug(f"UID {uid}: Invalid or missing bucket: {bucket}")
+                    self.buckets.append(None)
 
     async def run(self):
         # Main loop.
@@ -296,13 +333,15 @@ class Validator:
 
                 # Download the state for the eval window.
                 st = tplr.T()
-                valid_buckets = [b for b in self.buckets if b is not None]
+                async with self.buckets_lock:
+                    valid_buckets = [b for b in self.buckets if b is not None]
 
                 if not valid_buckets:
                     tplr.logger.info(f"No valid buckets to download state slices for window {window}")
                     # Wait for the next window
                     while self.current_window - offset == window:
                         await asyncio.sleep(0.1)  # Keep waiting until the window changes
+             
 
                 state_slices = await tplr.download_slices_for_buckets_and_windows(
                     buckets=valid_buckets,
@@ -314,11 +353,12 @@ class Validator:
 
                 # Download the delta for the eval window.
                 st = tplr.T()
-                eval_slices = await tplr.download_slices_for_buckets_and_windows(
-                    buckets = self.buckets,
-                    windows = [ window ],
-                    key = 'delta'
-                ) 
+                async with self.buckets_lock:
+                    eval_slices = await tplr.download_slices_for_buckets_and_windows(
+                        buckets = self.buckets,
+                        windows = [ window ],
+                        key = 'delta'
+                    ) 
                 n_eval_slices = len(eval_slices[ window ]) if window in eval_slices else 0
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_eval_slices} window deltas.")
                 # Collect UIDs of miners who submitted slices
@@ -326,11 +366,12 @@ class Validator:
                 if window in eval_slices:
                     for slice_info in eval_slices[window]:
                         if getattr(slice_info, 'version', None) == tplr.__version__:
-                            try:
-                                uid = self.metagraph.hotkeys.index(slice_info.hotkey)
-                                submitted_uids.add(uid)
-                            except ValueError:
-                                tplr.logger.warning(f"Hotkey {slice_info.hotkey} not found in metagraph")                
+                            async with self.metagraph_lock:
+                                try:
+                                    uid = self.metagraph.hotkeys.index(slice_info.hotkey)
+                                    submitted_uids.add(uid)
+                                except ValueError:
+                                    tplr.logger.warning(f"Hotkey {slice_info.hotkey} not found in metagraph")                
                 if n_eval_slices == 0:
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: No slices to eval, continue ...")
                     while self.current_window - offset == window:
@@ -369,11 +410,12 @@ class Validator:
                         await asyncio.sleep(0.1)  # Wait for next window.
                     continue
                 eval_slice_info = random.choice(valid_eval_slices)
-                try:
-                    eval_uid = self.metagraph.hotkeys.index(eval_slice_info.hotkey)
-                except ValueError:
-                    tplr.logger.warning(f"{tplr.P(window, tplr.T() - st)}: {eval_slice_info.hotkey} not found in metagraph")
-                    continue
+                async with self.metagraph_lock:
+                    try:
+                        eval_uid = self.metagraph.hotkeys.index(eval_slice_info.hotkey)
+                    except ValueError:
+                        tplr.logger.warning(f"{tplr.P(window, tplr.T() - st)}: {eval_slice_info.hotkey} not found in metagraph")
+                        continue
                 eval_slice_data = await tplr.get_slices(eval_slice_info.temp_file, self.model.device)
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Loaded window slices for uid: [dark_sea_green]{eval_uid}[/dark_sea_green].")
 
@@ -626,7 +668,6 @@ class Validator:
     # Returns the slice window based on a blotplr.
     def block_to_window(self, block: int) -> int:
         return int(block / self.hparams.window_length)
-
     # Returns the slice window based on a blotplr.
     def window_to_seed(self, window: int) -> int:
         return str( self.subtensor.get_block_hash( window * self.hparams.window_length ) )

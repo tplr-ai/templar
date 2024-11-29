@@ -458,31 +458,24 @@ class Validator:
 
                 # Update the score for the evaluated miner
                 self.step_scores[eval_uid] = score
-                self.scores[eval_uid] = (1 - self.hparams.validator_moving_alpha) * score + self.hparams.validator_moving_alpha * self.scores[eval_uid]
+                self.scores[eval_uid] = (
+                    (1 - self.hparams.validator_moving_alpha) * score + 
+                    self.hparams.validator_moving_alpha * self.scores[eval_uid]
+                )
 
-                # Store the original weights before adjustment.
-                total_score = torch.sum(self.scores).item()
-                if total_score == 0.0:
-                    tplr.logger.warning("Total score is zero; setting all weights to zero.")
+                # Only consider positive scores for weights
+                positive_scores_indices = self.scores > 0
+                positive_scores = self.scores[positive_scores_indices]
+
+                total_positive_score = positive_scores.sum().item()
+
+                if total_positive_score == 0.0:
+                    tplr.logger.warning("Total positive score is zero; setting all weights to zero.")
                     self.weights = torch.zeros_like(self.scores)
-                    original_weights = self.weights.clone()  # All zeros in this case
                 else:
-                    # Normalize scores to get initial weights
-                    self.weights = self.scores / total_score
-                    # Store the original weights before adjustment
-                    original_weights = self.weights.clone()
-                    # Set negative weights to zero
-                    negative_weights = self.weights < 0
-                    if negative_weights.any():
-                        tplr.logger.info("Negative weights detected; setting them to zero.")
-                        self.weights[negative_weights] = 0.0
-                        # Re-normalize the positive weights to ensure the sum is 1
-                        positive_total = torch.sum(self.weights).item()
-                        if positive_total == 0.0:
-                            tplr.logger.warning("All weights are zero after removing negative weights; cannot normalize.")
-                            # Weights remain zero
-                        else:
-                            self.weights = self.weights / positive_total
+                    # Normalize positive scores to get weights
+                    self.weights = torch.zeros_like(self.scores)
+                    self.weights[positive_scores_indices] = positive_scores / total_positive_score
 
                 # Log updated scores and weights
                 valid_score_indices = torch.nonzero(self.scores != 0).squeeze().view(-1)
@@ -490,14 +483,12 @@ class Validator:
                     uid = uid_i.item()
                     moving_score = self.scores[uid].item()
                     weight = self.weights[uid].item()
-                    orig_weight = original_weights[uid].item()
                     step_score = self.step_scores[uid].item()
                     tplr.logger.info(
                         f"\tuid: [dark_sea_green]{uid}[/dark_sea_green], "
                         f"step_score: [dark_sea_green]{step_score:.3f}[/dark_sea_green], "
                         f"moving_score: [dark_sea_green]{moving_score:.3f}[/dark_sea_green], "
-                        f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green], "
-                        f"original_weight: [dark_sea_green]{orig_weight:.3f}[/dark_sea_green]"
+                        f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green]"
                     )
 
                 # Apply all deltas to the model state.
@@ -549,7 +540,6 @@ class Validator:
                     step_score = self.step_scores[uid].item()
                     moving_score = self.scores[uid].item()
                     weight = self.weights[uid].item()
-                    orig_weight = original_weights[uid].item()
 
                     # Append to metrics list for aggregation
                     metrics_list.append({
@@ -558,7 +548,6 @@ class Validator:
                         'step_score': step_score,
                         'moving_score': moving_score,
                         'weight': weight,
-                        'original_weight': orig_weight,
                     })
 
                 # Convert metrics list to DataFrame
@@ -571,7 +560,7 @@ class Validator:
                 self.metrics_history.drop_duplicates(subset=['global_step', 'uid'], keep='last', inplace=True)
 
                 # List of metrics to plot
-                metrics_to_plot = ['step_score', 'moving_score', 'weight', 'original_weight']
+                metrics_to_plot = ['step_score', 'moving_score', 'weight']
 
                 # Create aggregated plots for each metric
                 for metric_name in metrics_to_plot:

@@ -435,8 +435,9 @@ class Miner:
                         seed = window,
                         wallet = self.wallet, 
                         compression = self.hparams.compression,
+                        save_location = self.save_location,
                         key = 'delta',
-                        global_step=self.global_step 
+                        global_step = self.global_step 
                     )                
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Uploaded the delta.")
 
@@ -464,8 +465,9 @@ class Miner:
                         seed = window + 1, 
                         wallet = self.wallet, 
                         compression = self.hparams.compression,
+                        save_location = self.save_location,
                         key = 'state',
-                        global_step=self.global_step 
+                        global_step = self.global_step 
                     )
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Uploaded the state.")
 

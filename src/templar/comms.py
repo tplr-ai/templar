@@ -127,7 +127,7 @@ async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
 
 
 async def apply_slices_to_model(
-    model: torch.nn.Module, window: int, seed: str, compression: int, key: str = "slice"
+    model: torch.nn.Module, window: int, seed: str, compression: int, save_location: str, key: str = "slice"
 ) -> int:
     """
     Applies downloaded model parameter slices to a model for a specific window.
@@ -169,7 +169,7 @@ async def apply_slices_to_model(
     """
     max_global_step = 0
     indices_dict = await get_indices_for_window(model, seed, compression)
-    slice_files = await load_files_for_window(window=window, key=key)
+    slice_files = await load_files_for_window(window=window, save_location=save_location, key=key)
 
     slices_per_param = {name: 0 for name, _ in model.named_parameters()}
     param_sums = {
@@ -238,6 +238,7 @@ async def upload_slice_for_window(
     seed: str,
     wallet: "bt.wallet",
     compression: int,
+    save_location: str,
     key: str = "slice",
     global_step: int = 0,
 ):
@@ -280,10 +281,9 @@ async def upload_slice_for_window(
     for name, param in model.named_parameters():
         slice_data[name] = param.data.view(-1)[indices[name].to(model.device)].cpu()
 
-    # Create a temporary file and write the sliced model state dictionary to it
-    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        torch.save(slice_data, temp_file)
-        temp_file_name = temp_file.name  # Store the temporary file name
+    # Use save_location for temporary file
+    temp_file_name = os.path.join(save_location, filename)
+    torch.save(slice_data, temp_file_name)
 
     # Upload the file to S3
     session = get_session()
@@ -375,7 +375,7 @@ async def get_indices_for_window(
     return result
 
 
-async def download_file(s3_client, bucket: str, filename: str) -> str:
+async def download_file(s3_client, bucket: str, filename: str, save_location: str) -> str:
     """
     Downloads a file from S3, using parallel downloads for large files.
 
@@ -388,7 +388,7 @@ async def download_file(s3_client, bucket: str, filename: str) -> str:
         str: The path to the downloaded file in the temporary directory.
     """
     async with semaphore:
-        temp_file = os.path.join(tempfile.gettempdir(), filename)
+        temp_file = os.path.join(save_location, filename)
         # Check if the file exists.
         if os.path.exists(temp_file):
             logger.debug(f"File {temp_file} already exists, skipping download.")
@@ -429,7 +429,7 @@ async def download_file(s3_client, bucket: str, filename: str) -> str:
 
 
 async def handle_file(
-    s3_client, bucket: str, filename: str, hotkey: str, window: int, version: str
+    s3_client, bucket: str, filename: str, hotkey: str, window: int, version: str, save_location: str
 ):
     """
     Handles downloading a single file from S3.
@@ -449,7 +449,7 @@ async def handle_file(
     logger.debug(
         f"Handling file '{filename}' for window {window} and hotkey '{hotkey}'"
     )
-    temp_file = await download_file(s3_client, bucket, filename)
+    temp_file = await download_file(s3_client, bucket, filename, save_location)
     if temp_file:
         return SimpleNamespace(
             bucket=bucket,
@@ -463,7 +463,7 @@ async def handle_file(
 
 
 async def process_bucket(
-    s3_client, bucket: str, windows: List[int], key: str = "slice"
+    s3_client, bucket: str, windows: List[int], key: str, save_location: str
 ):
     """
     Processes a single S3 bucket to download files for specified windows.
@@ -550,6 +550,7 @@ async def process_bucket(
                                 slice_hotkey,
                                 window,
                                 slice_version,
+                                save_location
                             )
                         )
                     except ValueError:
@@ -586,7 +587,7 @@ async def process_bucket(
 
 
 async def download_slices_for_buckets_and_windows(
-    buckets: List[Bucket], windows: List[int], key: str = "slice"
+    buckets: List[Bucket], windows: List[int], key: str, save_location: str
 ) -> Dict[int, List[SimpleNamespace]]:
     """Downloads model slices from multiple S3 buckets for specified windows.
 
@@ -642,7 +643,7 @@ async def download_slices_for_buckets_and_windows(
             aws_secret_access_key=bucket.secret_access_key,
         ) as s3_client:
             logger.debug(f"Processing bucket: {bucket.name}")
-            tasks.append(process_bucket(s3_client, bucket.name, windows, key))
+            tasks.append(process_bucket(s3_client, bucket.name, windows, key, save_location))
 
     results = await asyncio.gather(*tasks)
     # Combine results into a dictionary mapping window IDs to lists of slices
@@ -653,7 +654,7 @@ async def download_slices_for_buckets_and_windows(
     return slices
 
 
-async def load_files_for_window(window: int, key: str = "slice") -> List[str]:
+async def load_files_for_window(window: int, save_location: str, key: str = "slice") -> List[str]:
     """
     Loads files for a specific window from the temporary directory.
 
@@ -676,7 +677,7 @@ async def load_files_for_window(window: int, key: str = "slice") -> List[str]:
     """
 
     logger.debug(f"Retrieving files for window {window} from temporary directory")
-    temp_dir = tempfile.gettempdir()
+    temp_dir = save_location
     window_files = []
     pattern = re.compile(rf"^{key}-{window}-.+-v{__version__}\.pt$")
     for filename in os.listdir(temp_dir):
@@ -686,7 +687,7 @@ async def load_files_for_window(window: int, key: str = "slice") -> List[str]:
     return window_files
 
 
-async def delete_files_before_window(window_max: int, key: str = "slice"):
+async def delete_files_before_window(window_max: int, save_location: str, key: str = "slice"):
     """
     Deletes temporary files with window IDs less than the specified maximum.
 
@@ -706,7 +707,7 @@ async def delete_files_before_window(window_max: int, key: str = "slice"):
     """
 
     logger.debug(f"Deleting files with window id before {window_max}")
-    temp_dir = tempfile.gettempdir()
+    temp_dir = save_location
     pattern = re.compile(rf"^{re.escape(key)}-(\d+)-.+-v{__version__}\.(pt|pt\.lock)$")
     for filename in os.listdir(temp_dir):
         match = pattern.match(filename)

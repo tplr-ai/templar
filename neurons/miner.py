@@ -60,6 +60,7 @@ class Miner:
         parser.add_argument('--no_autoupdate', action='store_true', help='Disable automatic updates')
         parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
         parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to save/load the checkpoint. If None, the path is set to checkpoint-M<UID>.pth.')
+        parser.add_argument('--save-location', type=str, default=None, help='Directory to save/load slice files')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -222,7 +223,13 @@ class Miner:
         self.new_window_event = asyncio.Event()
         self.stop_event = asyncio.Event()    
         self.last_full_steps = self.hparams.desired_batch_size // self.config.actual_batch_size
-        bt.logging.off    
+        bt.logging.off
+        self.save_location = self.config.save_location
+        if self.save_location is None:
+            import tempfile
+            self.save_location = tempfile.gettempdir()
+        else:
+            os.makedirs(self.save_location, exist_ok=True)    
         print ( self.hparams )
 
     async def update(self):
@@ -282,6 +289,7 @@ class Miner:
                     window = window,
                     seed = window,
                     compression = self.hparams.compression,
+                    save_location=self.save_location,
                     key = 'state'
                 )
                 if max_global_step is not None:
@@ -326,7 +334,8 @@ class Miner:
                     state_slices = await tplr.download_slices_for_buckets_and_windows(
                         buckets=valid_buckets,
                         windows=[window],
-                        key='state'
+                        key='state',
+                        save_location=self.save_location
                     )
 
                     n_state_slices = len(state_slices[window]) if window in state_slices else 0
@@ -337,7 +346,8 @@ class Miner:
                     delta_slices = await tplr.download_slices_for_buckets_and_windows(
                         buckets = self.buckets,
                         windows = [ window - 1 ],
-                        key = 'delta'
+                        key = 'delta',
+                        save_location=self.save_location
                     )       
                     n_slices = len(delta_slices[ window - 1  ]) if window - 1 in delta_slices else 0
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Download {n_slices} window deltas.")
@@ -349,6 +359,7 @@ class Miner:
                         window=window,
                         seed=window,
                         compression=self.hparams.compression,
+                        save_location=self.save_location,
                         key='state'
                     )
                     if max_global_step is not None:
@@ -436,6 +447,7 @@ class Miner:
                         window=window - 1,
                         seed=window - 1,
                         compression=self.hparams.compression,
+                        save_location=self.save_location,
                         key='delta'
                     )
                     if max_global_step is not None:
@@ -459,8 +471,8 @@ class Miner:
 
                     # Clean file history.
                     st = tplr.T()
-                    await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'state')
-                    await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'delta')
+                    await tplr.delete_files_before_window(window_max=window - self.hparams.max_history, save_location=self.save_location, key='state')
+                    await tplr.delete_files_before_window(window_max=window - self.hparams.max_history, save_location=self.save_location, key='delta')
                     await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'state' )
                     await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Cleaned file history.")

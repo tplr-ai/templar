@@ -208,6 +208,12 @@ class Validator:
         self.scores = torch.zeros( 256, dtype = torch.float32 ) 
         self.weights = torch.zeros( 256, dtype = torch.float32 ) 
         self.sample_rate = 1.0
+        self.save_location = self.config.save_location
+        if self.save_location is None:
+            import tempfile
+            self.save_location = tempfile.gettempdir()
+        else:
+            os.makedirs(self.save_location, exist_ok=True)  
         print ( self.hparams )
 
     async def update(self):
@@ -256,7 +262,8 @@ class Validator:
             state_slices = await tplr.download_slices_for_buckets_and_windows(
                 buckets=[b for b in self.buckets if b is not None],
                 windows = history_windows,
-                key = 'state'
+                key = 'state',
+                save_location=self.save_location
             )
             for window in tqdm(history_windows, desc="Syncing state"):
                 max_global_step = await tplr.apply_slices_to_model( 
@@ -264,6 +271,7 @@ class Validator:
                     window=window,
                     seed=window,
                     compression=self.hparams.compression,
+                    save_location=self.save_location,
                     key='state',
                 )
                 if max_global_step is not None:
@@ -309,7 +317,8 @@ class Validator:
                 state_slices = await tplr.download_slices_for_buckets_and_windows(
                     buckets=valid_buckets,
                     windows=[window],
-                    key='state'
+                    key='state',
+                    save_location=self.save_location
                 )
                 n_state_slices = len(state_slices[window]) if window in state_slices else 0
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_state_slices} window states.")
@@ -319,7 +328,8 @@ class Validator:
                 eval_slices = await tplr.download_slices_for_buckets_and_windows(
                     buckets = self.buckets,
                     windows = [ window ],
-                    key = 'delta'
+                    key = 'delta',
+                    save_location=self.save_location
                 ) 
                 n_eval_slices = len(eval_slices[ window ]) if window in eval_slices else 0
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_eval_slices} window deltas.")
@@ -346,6 +356,7 @@ class Validator:
                     window=window,
                     seed=window,
                     compression=self.hparams.compression,
+                    save_location=self.save_location,
                     key='state',
                 )
                 if max_global_step is not None:
@@ -498,6 +509,7 @@ class Validator:
                     window=window,
                     seed=window,
                     compression=self.hparams.compression,
+                    save_location=self.save_location,
                     key='delta',
                 )
                 if max_global_step is not None:
@@ -506,8 +518,8 @@ class Validator:
 
                 # Clean local and remote space from old slices.
                 st = tplr.T()
-                await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'state')
-                await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'delta')
+                await tplr.delete_files_before_window(window_max=window - self.hparams.max_history, save_location=self.save_location, key='state')
+                await tplr.delete_files_before_window(window_max=window - self.hparams.max_history, save_location=self.save_location, key='delta')
                 await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'state' )
                 await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Cleaned file history.")

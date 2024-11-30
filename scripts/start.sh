@@ -32,6 +32,4 @@ pm2 start neurons/miner.py --interpreter python3 --name M4 -- --actual_batch_siz
 pm2 start neurons/miner.py --interpreter python3 --name M5 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M555 --bucket $BUCKET --device cuda:5 --use_wandb --project $PROJECT --test --netuid 223 --autoupdate --process_name M5
 pm2 start neurons/miner.py --interpreter python3 --name M6 -- --actual_batch_size 1 --wallet.name Bistro --wallet.hotkey M666 --bucket $BUCKET --device cuda:6 --use_wandb --project $PROJECT --test --netuid 223 --autoupdate --process_name M6
 
-pm2 start neurons/validator.py --interpreter python3 --name V2 -- --actual_batch_size 6 --wallet.name templar --wallet.hotkey templar_validator --device cuda:7 --use_wandb  --netuid 3 --autoupdate --process_name V2
-
-
+pm2 start neurons/miner.py --interpreter python3 --name M1 -- --actual_batch_size 6 --wallet.name temple_run --wallet.hotkey temple_runner --device cuda:6 --use_wandb --netuid 3 --autoupdate --process_name M1 --sync

@@ -121,31 +121,31 @@ class Miner:
             tplr.commit(self.subtensor, self.wallet, self.config.netuid)
         tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
 
-        # Init Wandb.
-        # Ensure the wandb directory exists
-        wandb_dir = os.path.join(os.getcwd(), 'wandb')
-        os.makedirs(wandb_dir, exist_ok=True)
+        # # Init Wandb.
+        # # Ensure the wandb directory exists
+        # wandb_dir = os.path.join(os.getcwd(), 'wandb')
+        # os.makedirs(wandb_dir, exist_ok=True)
 
-        # Define the run ID file path inside the wandb directory
-        run_id_file = os.path.join(wandb_dir, f"wandb_run_id_M{self.uid}_{tplr.__version__}.txt")
+        # # Define the run ID file path inside the wandb directory
+        # run_id_file = os.path.join(wandb_dir, f"wandb_run_id_M{self.uid}_{tplr.__version__}.txt")
 
-        # Attempt to read the existing run ID
-        if os.path.exists(run_id_file):
-            with open(run_id_file, 'r') as f:
-                run_id = f.read().strip()
-            tplr.logger.info(f"Resuming WandB run with id {run_id}")
-        else:
-            run_id = None
-            tplr.logger.info("Starting a new WandB run.")
+        # # Attempt to read the existing run ID
+        # if os.path.exists(run_id_file):
+        #     with open(run_id_file, 'r') as f:
+        #         run_id = f.read().strip()
+        #     tplr.logger.info(f"Resuming WandB run with id {run_id}")
+        # else:
+        #     run_id = None
+        #     tplr.logger.info("Starting a new WandB run.")
 
-        # Initialize WandB
-        self.wandb = tplr.initialize_wandb(
-            run_prefix='M',
-            uid=self.uid,
-            config=self.config,
-            group='miner',
-            job_type='training'
-        )
+        # # Initialize WandB
+        # self.wandb = tplr.initialize_wandb(
+        #     run_prefix='M',
+        #     uid=self.uid,
+        #     config=self.config,
+        #     group='miner',
+        #     job_type='training'
+        # )
 
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
@@ -165,32 +165,32 @@ class Miner:
             foreach=True,  # more memory usage, but faster
         )   
 
-        # Load checkpoint if it exists
-        self.checkpoint_path = f"checkpoint-V1.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
-        if os.path.exists(self.checkpoint_path):
-            tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
-            global_step, _ = asyncio.run(tplr.load_checkpoint(
-                filename=self.checkpoint_path,
-                model=self.model,
-                optimizer=self.optimizer,
-                scheduler=None,
-                device=self.config.device
-            ))
+        # # Load checkpoint if it exists
+        # self.checkpoint_path = f"checkpoint-V1.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
+        # if os.path.exists(self.checkpoint_path):
+        #     tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
+        #     global_step, _ = asyncio.run(tplr.load_checkpoint(
+        #         filename=self.checkpoint_path,
+        #         model=self.model,
+        #         optimizer=self.optimizer,
+        #         scheduler=None,
+        #         device=self.config.device
+        #     ))
 
-            self.global_step = global_step
-            if global_step is None:
-                tplr.logger.warning(f"Corrupt checkpoint detected at {self.checkpoint_path}. Removing file and starting fresh.")
-                try:
-                    os.remove(self.checkpoint_path)
-                    tplr.logger.info(f"Removed corrupt checkpoint: {self.checkpoint_path}")
-                except OSError as e:
-                    tplr.logger.error(f"Failed to remove corrupt checkpoint: {e}")
-                global_step = 0
-            else:
-                tplr.logger.info(f"Resumed from global step {self.global_step}")
-        else:
-            tplr.logger.info("No checkpoint file found. Starting from scratch.")
-            self.global_step = 0
+        #     self.global_step = global_step
+        #     if global_step is None:
+        #         tplr.logger.warning(f"Corrupt checkpoint detected at {self.checkpoint_path}. Removing file and starting fresh.")
+        #         try:
+        #             os.remove(self.checkpoint_path)
+        #             tplr.logger.info(f"Removed corrupt checkpoint: {self.checkpoint_path}")
+        #         except OSError as e:
+        #             tplr.logger.error(f"Failed to remove corrupt checkpoint: {e}")
+        #         global_step = 0
+        #     else:
+        #         tplr.logger.info(f"Resumed from global step {self.global_step}")
+        # else:
+        #     tplr.logger.info("No checkpoint file found. Starting from scratch.")
+        #     self.global_step = 0
 
         # Initialize learning rate scheduler
         self.scheduler = tplr.get_wsd_scheduler(
@@ -237,7 +237,8 @@ class Miner:
             import tempfile
             self.save_location = tempfile.gettempdir()
         else:
-            os.makedirs(self.save_location, exist_ok=True)    
+            os.makedirs(self.save_location, exist_ok=True) 
+        self.global_step = 0   
         print ( self.hparams )
 
     async def update(self):
@@ -494,14 +495,14 @@ class Miner:
                     window_time_delta = self.window_time - end_step
                     window_delta_str = f"[red]{window_time_delta:.2f}[/red]" if window_time_delta < 0 else f"[green]+{window_time_delta:.2f}[/green]"
                     tplr.logger.info(f"{tplr.P(window, end_step - start_step)}[{window_delta_str}]: Finished step.")
-                    wandb.log({
-                        "miner/loss": step_loss,
-                        "miner/tokens_per_step": tokens_per_step,
-                        "miner/tokens_per_second": tokens_per_second,
-                        "miner/sample_rate": self.sample_rate,
-                        "miner/utilization": train_duration / (end_step - start_step),
-                        "miner/learning_rate": self.scheduler.get_last_lr()[0]
-                    }, step=self.global_step)
+                    # wandb.log({
+                    #     "miner/loss": step_loss,
+                    #     "miner/tokens_per_step": tokens_per_step,
+                    #     "miner/tokens_per_second": tokens_per_second,
+                    #     "miner/sample_rate": self.sample_rate,
+                    #     "miner/utilization": train_duration / (end_step - start_step),
+                    #     "miner/learning_rate": self.scheduler.get_last_lr()[0]
+                    # }, step=self.global_step)
 
             # Catch keyboard interrrupt.
             except KeyboardInterrupt:

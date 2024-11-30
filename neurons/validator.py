@@ -535,70 +535,18 @@ class Validator:
                 tplr.logger.info(f"{tplr.P(window, gs_end - gs_start)}[{window_delta_str}]: Finished step.")
                 # Log main metrics
                 wandb.log({
-                    "validator/loss": step_loss,
-                    "validator/tokens_per_step": tokens_per_step,
-                    "validator/tokens_per_second": tokens_per_second,
-                    "validator/sample_rate": self.sample_rate,
-                    "validator/utilization": eval_duration / (gs_end - gs_start)
-                }, step=self.global_step)                   
-
-                # Prepare a list to hold metrics for all UIDs
-                metrics_list = []
-
-                # Collect metrics for all UIDs
+                    f"loss": step_loss,
+                    f"tokens_per_step": tokens_per_step,
+                    f"tokens_per_second": tokens_per_second,
+                    f"sample_rate": self.sample_rate,
+                    f"utilization": eval_duration / (gs_end - gs_start)
+                }, step=self.global_step)
                 for uid_i in valid_score_indices:
-                    uid = uid_i.item()
-                    uid_str = str(uid)
-
-                    # Extract metrics
-                    step_score = self.step_scores[uid].item()
-                    moving_score = self.scores[uid].item()
-                    weight = self.weights[uid].item()
-
-                    # Append to metrics list for aggregation
-                    metrics_list.append({
-                        'global_step': self.global_step,
-                        'uid': uid_str,
-                        'step_score': step_score,
-                        'moving_score': moving_score,
-                        'weight': weight,
-                    })
-
-                # Convert metrics list to DataFrame
-                metrics_df = pd.DataFrame(metrics_list)
-
-                # Append to metrics history
-                self.metrics_history = pd.concat([self.metrics_history, metrics_df], ignore_index=True)
-
-                # Drop duplicates to avoid multiple entries for the same step and UID
-                self.metrics_history.drop_duplicates(subset=['global_step', 'uid'], keep='last', inplace=True)
-
-                # List of metrics to plot
-                metrics_to_plot = ['step_score', 'moving_score', 'weight']
-
-                # Create aggregated plots for each metric
-                for metric_name in metrics_to_plot:
-                    # Pivot the DataFrame to have UIDs as columns
-                    pivot_df = self.metrics_history.pivot(index='global_step', columns='uid', values=metric_name).reset_index()
-
-                    # Get the list of UIDs (column names excluding 'global_step')
-                    uids = pivot_df.columns.drop('global_step').tolist()
-
-                    # Prepare xs (global steps) and ys (metric values per UID)
-                    xs = pivot_df['global_step'].values.tolist()
-                    ys = [pivot_df[uid].values.tolist() for uid in uids]
-
-                    # Create the line plot
-                    line_plot = wandb.plot.line_series(
-                        xs=xs,
-                        ys=ys,
-                        keys=uids,
-                        title=f"Validator {metric_name.replace('_', ' ').title()}",
-                        xname="Global Step"
-                    )
-                    # Log the plot
-
-                    wandb.log({f"validator/{metric_name}": line_plot}, step=self.global_step)
+                    wandb.log({
+                        f"step_scores/{uid_i.item()}": self.step_scores[uid_i].item(),
+                        f"moving_scores/{uid_i.item()}": self.scores[uid_i].item(),
+                        f"weights/{uid_i.item()}": self.weights[uid_i].item(),
+                    }, step=self.global_step)
                 # Set temperatured weights on the chain.
                 if self.global_step % 100 == 0:
                     tplr.logger.info(f"Setting weights on chain: {self.weights[ self.metagraph.uids ]}")

@@ -102,16 +102,17 @@ class Miner:
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         tplr.logger.info('\n' + '-' * 40 + ' Objects ' + '-' * 40)
         tplr.logger.info(f'\nWallet: {self.wallet}\nSubtensor: {self.subtensor}\nMetagraph: {self.metagraph}\nUID: {self.uid}')
-
+        
         # Init bucket.
-        try:
-            tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
-            commitment = self.chain_manager.get_commitment(self.uid)
-            if tplr.config.BUCKET_SECRETS["bucket_name"] != commitment.name:
-                raise ValueError('')
-        except Exception:
-            tplr.commit(self.subtensor, self.wallet, self.config.netuid)
-        tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
+        # try:
+        #     tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
+        #     commitment = self.chain_manager.get_commitment(self.uid)
+        #     if tplr.config.BUCKET_SECRETS["bucket_name"] != commitment.name:
+        #         raise ValueError('')
+        # except Exception:
+        #     tplr.commit(self.subtensor, self.wallet, self.config.netuid)
+        # tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
+        tplr.commit(self.subtensor, self.wallet, self.config.netuid)
 
         # Init Wandb.
         # Ensure the wandb directory exists

@@ -144,6 +144,12 @@ btcli wallet new_hotkey --wallet.name default --wallet.hotkey <name> --n-words 1
 btcli subnet pow_register --wallet.name default --wallet.hotkey <name> --netuid <netuid> --subtensor.network <network>
 ```
 
+6. **Log into Weights & Biases (WandB)**
+```bash
+# Log into WandB
+wandb login <your_api_key>
+```
+
 ## Running the Miner
 
 ### Using PM2 (Recommended)

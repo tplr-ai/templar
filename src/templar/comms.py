@@ -127,16 +127,24 @@ async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
 
 
 async def apply_slices_to_model(
-    model: torch.nn.Module, window: int, seed: str, compression: int, key: str = "slice"
+    model: torch.nn.Module,
+    window: int,
+    seed: str,
+    compression: int,
+    save_location: str,
+    key: str = "slice",
 ) -> int:
     """
-    Applies downloaded model parameter slices to a model for a specific window.
+    Applies downloaded model parameter slices to a model for a specific window,
+    weighting each contribution equally based on the norm of each miner's update
+    and preserving the overall parameter scale.
 
     Args:
         model (torch.nn.Module): The PyTorch model to apply slices to
         window (int): The window number to load slices for
         seed (str): Seed used to determine which parameters to select
         compression (int): Compression factor for parameter selection
+        save_location (str): Directory where slices are saved
         key (str, optional): Prefix for the slice files. Defaults to 'slice'
 
     Returns:
@@ -147,43 +155,34 @@ async def apply_slices_to_model(
     2. Loads all slice files for the given window
     3. For each slice file:
         - Verifies version matches
-        - Loads slice data and applies to model parameters
-        - Tracks max global step seen
-    4. Averages parameter values across all slices
-    5. Updates model parameters with averaged values
-
-    Example:
-        >>> max_step = await apply_slices_to_model(
-        ...     model=model,
-        ...     window=123,
-        ...     seed="abc",
-        ...     compression=10,
-        ...     key="state"
-        ... )
-        >>> print(max_step)
-        1000
-
-    Raises:
-        Timeout: If unable to acquire lock on slice file
-        Exception: For errors loading or applying slices
+        - Loads slice data and computes the norm
+        - Normalizes the slice to have unit norm
+        - Accumulates the normalized slices
+        - Tracks max global step and collects norms
+    4. Averages parameter values across all normalized slices
+    5. Multiplies the averaged parameters by the average norm
+    6. Updates model parameters with the scaled averaged values
     """
+
     max_global_step = 0
     indices_dict = await get_indices_for_window(model, seed, compression)
-    slice_files = await load_files_for_window(window=window, key=key)
+    slice_files = await load_files_for_window(
+        window=window, save_location=save_location, key=key
+    )
 
-    slices_per_param = {name: 0 for name, _ in model.named_parameters()}
+    slices_per_param = {name: 0 for name, _ in model.named_parameters() if name in indices_dict}
     param_sums = {
-        name: torch.zeros_like(param.data) for name, param in model.named_parameters()
+        name: torch.zeros(len(indices_dict[name]), dtype=param.data.dtype, device=model.device)
+        for name, param in model.named_parameters() if name in indices_dict
     }
-    max_global_step = 0  # Initialize max_global_step
+    slice_norms = []  # To collect norms for computing average norm
 
     for file_i in slice_files:
         try:
-            # Check if the filename contains the correct version
-
+            filename = os.path.basename(file_i)
             match = re.match(
                 rf"^{key}-{window}-.+-v{re.escape(__version__)}\.pt$",
-                os.path.basename(file_i),
+                filename,
             )
             if not match:
                 logger.warning(
@@ -194,7 +193,6 @@ async def apply_slices_to_model(
             slice_i = await get_slices(file_i, model.device)
             slice_global_step = slice_i.get("global_step")
 
-            # Skip the slice if 'global_step' is not present
             if slice_global_step is None:
                 logger.warning(
                     f"Skipping slice {file_i} because it has no global_step."
@@ -203,29 +201,50 @@ async def apply_slices_to_model(
 
             max_global_step = max(max_global_step, slice_global_step)
 
+            # Compute norm of the slice
+            slice_norm = 0.0
+            slice_values = {}
+
             for name, param in model.named_parameters():
                 if name not in indices_dict or name not in slice_i:
                     continue
-                values = slice_i[name].to(param.data.device)
-                param_indices = indices_dict[name].to(param.data.device)
-                param_sums[name].view(-1)[param_indices] += values
+                values = slice_i[name].to(model.device)
+                slice_norm += torch.norm(values, p=2).item() ** 2  # Square of L2 norm
+                slice_values[name] = values
+
+            slice_norm = np.sqrt(slice_norm) + 1e-8  # Add epsilon to avoid division by zero
+            slice_norms.append(slice_norm)  # Collect norms for averaging
+
+            # Normalize and accumulate
+            for name, values in slice_values.items():
+                normalized_values = values / slice_norm
+                param_sums[name] += normalized_values
                 slices_per_param[name] += 1
-                del values
-            del slice_i
+
+            del slice_i, slice_values
+
         except Timeout:
             logger.error(f"Timeout occurred while trying to acquire lock on {file_i}")
             continue
         except Exception as e:
             logger.exception(f"Error applying slice from {file_i}: {e}")
+            continue
 
-    # Apply the average to the parameters.
+    if not slices_per_param or not slice_norms:
+        logger.warning(f"No valid slices found for window {window}")
+        return max_global_step
+
+    # Compute average norm
+    avg_norm = np.mean(slice_norms)
+
+    # Apply the average of normalized slices to the parameters and scale by avg_norm
     for name, param in model.named_parameters():
         if slices_per_param.get(name, 0) == 0 or name not in indices_dict:
             continue
-        param_indices = indices_dict[name].to(param.data.device)
-        avg_param = param_sums[name].view(-1)[param_indices] / slices_per_param[name]
+        param_indices = indices_dict[name].to(model.device)
+        avg_param = param_sums[name] / slices_per_param[name]
+        avg_param = avg_param * avg_norm  # Scale by average norm
         avg_param = avg_param.to(param.data.dtype)
-        avg_param = avg_param.to(param.data.device)
         param.data.view(-1)[param_indices] = avg_param.clone()
 
     return max_global_step

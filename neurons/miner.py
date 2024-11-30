@@ -102,7 +102,7 @@ class Miner:
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         tplr.logger.info('\n' + '-' * 40 + ' Objects ' + '-' * 40)
         tplr.logger.info(f'\nWallet: {self.wallet}\nSubtensor: {self.subtensor}\nMetagraph: {self.metagraph}\nUID: {self.uid}')
-        
+
         # Init bucket.
         # try:
         #     tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
@@ -391,10 +391,10 @@ class Miner:
                 total_loss = 0.0
                 full_steps = 0
                 total_steps = 0
-                exhuasted_window = False
+                exhausted_window = False
                 for batch in dataset:
                     total_steps += 1
-                    if random.random() < self.sample_rate and not exhuasted_window:
+                    if random.random() < self.sample_rate and not exhausted_window:
                         full_steps += 1
                         input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                         labels = input_ids.clone()
@@ -404,7 +404,7 @@ class Miner:
                         total_loss += outputs.loss.item()
                         outputs.loss.backward()
                         if window != self.current_window and not self.config.baseline:
-                            exhuasted_window = True
+                            exhausted_window = True
                             continue
                 if self.hparams.grad_clip:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.hparams.grad_clip)
@@ -420,7 +420,7 @@ class Miner:
                 tplr.logger.info(f"{tplr.P(window, train_duration)} \tTotal steps: [tan]{full_steps}/{total_steps}[/tan], Rate: [tan]{(full_steps/total_steps):.2f}[/tan], Target: [tan]{self.sample_rate:.2f}[/tan]")
                 tplr.logger.info(f"{tplr.P(window, train_duration)} \tTotal tokens: [tan]{tokens_per_step}[/tan], Tokens per second: [tan]{tokens_per_second:.2f}[/tan]")
                 tplr.logger.info(f"{tplr.P(window, train_duration)} \tLoss: [tan]{step_loss}[tan]")
-                if exhuasted_window:
+                if exhausted_window:
                     self.sample_rate = max(0.0001, self.sample_rate * 0.95)
                 else:
                     self.sample_rate = min(1, self.sample_rate * 1.05)

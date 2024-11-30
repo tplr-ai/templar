@@ -414,11 +414,11 @@ class Validator:
                 total_loss = 0.0
                 full_steps = 0
                 total_steps = 0
-                exhuasted_window = False
+                exhausted_window = False
                 with torch.enable_grad():
                     for idx, batch in enumerate(eval_dataset):
                         total_steps += 1
-                        if random.random() < self.sample_rate and not exhuasted_window:
+                        if random.random() < self.sample_rate and not exhausted_window:
                             full_steps += 1
                             input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                             labels = input_ids.clone()
@@ -428,7 +428,7 @@ class Validator:
                             total_loss += outputs.loss.item()
                             outputs.loss.backward()
                             if self.current_window - offset != window:
-                                exhuasted_window = True
+                                exhausted_window = True
                                 continue
                 step_loss = total_loss/(full_steps+1)
                 eval_duration = tplr.T() - eval_start
@@ -439,7 +439,7 @@ class Validator:
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tTotal steps: [tan]{full_steps}/{total_steps}[/tan], Rate: [tan]{(full_steps/total_steps):.2f}[/tan], Target: [tan]{self.sample_rate:.2f}[/tan]")
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tTotal tokens: [tan]{tokens_per_step}[/tan], Tokens per second: [tan]{tokens_per_second:.2f}[/tan]")
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tLoss: [tan]{step_loss}[tan]")
-                if exhuasted_window:
+                if exhausted_window:
                     self.sample_rate = max(0.0001, self.sample_rate * 0.95)
                 else:
                     self.sample_rate = min(1, self.sample_rate * 1.05)

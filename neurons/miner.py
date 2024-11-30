@@ -104,15 +104,22 @@ class Miner:
         tplr.logger.info(f'\nWallet: {self.wallet}\nSubtensor: {self.subtensor}\nMetagraph: {self.metagraph}\nUID: {self.uid}')
 
         # Init bucket.
-        # try:
-        #     tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
-        #     commitment = self.chain_manager.get_commitment(self.uid)
-        #     if tplr.config.BUCKET_SECRETS["bucket_name"] != commitment.name:
-        #         raise ValueError('')
-        # except Exception:
-        #     tplr.commit(self.subtensor, self.wallet, self.config.netuid)
-        # tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
-        tplr.commit(self.subtensor, self.wallet, self.config.netuid)
+        try:
+            tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
+            commitment = self.chain_manager.get_commitment(self.uid)
+            current_bucket = tplr.Bucket(
+                name=tplr.config.BUCKET_SECRETS["bucket_name"],
+                account_id=tplr.config.BUCKET_SECRETS["account_id"],
+                access_key_id=tplr.config.BUCKET_SECRETS["access_key_id"],
+                secret_access_key=tplr.config.BUCKET_SECRETS["secret_access_key"]
+            )
+            if current_bucket != commitment:
+                # TODO: Handle mismatched commitments
+                raise ValueError("Bucket commitment data does not match.")
+            raise ValueError('')
+        except Exception:
+            tplr.commit(self.subtensor, self.wallet, self.config.netuid)
+        tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
 
         # Init Wandb.
         # Ensure the wandb directory exists

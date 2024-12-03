@@ -105,21 +105,25 @@ class Miner:
 
         # Init bucket.
         try:
-            tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
+            tplr.logger.debug(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
             commitment = self.chain_manager.get_commitment(self.uid)
-            current_bucket = tplr.Bucket(
-                name=tplr.config.BUCKET_SECRETS["bucket_name"],
-                account_id=tplr.config.BUCKET_SECRETS["account_id"],
-                access_key_id=tplr.config.BUCKET_SECRETS["access_key_id"],
-                secret_access_key=tplr.config.BUCKET_SECRETS["secret_access_key"]
+            
+            # Convert Bucket object back to concatenated string format for comparison
+            commitment_str = commitment.name + commitment.access_key_id + commitment.secret_access_key
+            
+            current_bucket = (
+                tplr.config.BUCKET_SECRETS["bucket_name"] +
+                tplr.config.BUCKET_SECRETS["read"]["access_key_id"] +
+                tplr.config.BUCKET_SECRETS["read"]["secret_access_key"]
             )
-            if current_bucket != commitment:
-                # TODO: Handle mismatched commitments
+            tplr.logger.debug(f'Comparing:\nCommitment: {commitment_str}\nCurrent: {current_bucket}')
+            
+            if current_bucket != commitment_str:
                 raise ValueError("Bucket commitment data does not match.")
-            raise ValueError('')
-        except Exception:
+                
+        except Exception as e:
+            tplr.logger.error(f"Commitment error: {str(e)}")
             tplr.commit(self.subtensor, self.wallet, self.config.netuid)
-        tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
 
         # # Init Wandb.
         # # Ensure the wandb directory exists

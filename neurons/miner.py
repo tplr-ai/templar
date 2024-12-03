@@ -125,31 +125,31 @@ class Miner:
             tplr.logger.error(f"Commitment error: {str(e)}")
             tplr.commit(self.subtensor, self.wallet, self.config.netuid)
 
-        # # Init Wandb.
-        # # Ensure the wandb directory exists
-        # wandb_dir = os.path.join(os.getcwd(), 'wandb')
-        # os.makedirs(wandb_dir, exist_ok=True)
+        # Init Wandb.
+        # Ensure the wandb directory exists
+        wandb_dir = os.path.join(os.getcwd(), 'wandb')
+        os.makedirs(wandb_dir, exist_ok=True)
 
-        # # Define the run ID file path inside the wandb directory
-        # run_id_file = os.path.join(wandb_dir, f"wandb_run_id_M{self.uid}_{tplr.__version__}.txt")
+        # Define the run ID file path inside the wandb directory
+        run_id_file = os.path.join(wandb_dir, f"wandb_run_id_M{self.uid}_{tplr.__version__}.txt")
 
-        # # Attempt to read the existing run ID
-        # if os.path.exists(run_id_file):
-        #     with open(run_id_file, 'r') as f:
-        #         run_id = f.read().strip()
-        #     tplr.logger.info(f"Resuming WandB run with id {run_id}")
-        # else:
-        #     run_id = None
-        #     tplr.logger.info("Starting a new WandB run.")
+        # Attempt to read the existing run ID
+        if os.path.exists(run_id_file):
+            with open(run_id_file, 'r') as f:
+                run_id = f.read().strip()
+            tplr.logger.info(f"Resuming WandB run with id {run_id}")
+        else:
+            run_id = None
+            tplr.logger.info("Starting a new WandB run.")
 
-        # # Initialize WandB
-        # self.wandb = tplr.initialize_wandb(
-        #     run_prefix='M',
-        #     uid=self.uid,
-        #     config=self.config,
-        #     group='miner',
-        #     job_type='training'
-        # )
+        # Initialize WandB
+        self.wandb = tplr.initialize_wandb(
+            run_prefix='M',
+            uid=self.uid,
+            config=self.config,
+            group='miner',
+            job_type='training'
+        )
 
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
@@ -167,34 +167,44 @@ class Miner:
             betas=(self.hparams.optimizer_beta1, self.hparams.optimizer_beta2),  # B1 and B2
             weight_decay=self.hparams.optimizer_weight_decay,  # Weight decay
             foreach=True,  # more memory usage, but faster
-        )   
+        ) 
 
-        # # Load checkpoint if it exists
-        # self.checkpoint_path = f"checkpoint-V1.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
-        # if os.path.exists(self.checkpoint_path):
-        #     tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
-        #     global_step, _ = asyncio.run(tplr.load_checkpoint(
-        #         filename=self.checkpoint_path,
-        #         model=self.model,
-        #         optimizer=self.optimizer,
-        #         scheduler=None,
-        #         device=self.config.device
-        #     ))
+        #  Delete old check point
+        for filename in os.listdir(os.getcwd()):
+            if filename.startswith("checkpoint") and filename.endswith(".pth"):
+                file_path = os.path.join(os.getcwd(), filename)
+                try:
+                    os.remove(file_path)
+                    tplr.logger.info(f"Deleted checkpoint file {file_path}")
+                except OSError as e:
+                    tplr.logger.error(f"Failed to delete {file_path}: {e}")  
 
-        #     self.global_step = global_step
-        #     if global_step is None:
-        #         tplr.logger.warning(f"Corrupt checkpoint detected at {self.checkpoint_path}. Removing file and starting fresh.")
-        #         try:
-        #             os.remove(self.checkpoint_path)
-        #             tplr.logger.info(f"Removed corrupt checkpoint: {self.checkpoint_path}")
-        #         except OSError as e:
-        #             tplr.logger.error(f"Failed to remove corrupt checkpoint: {e}")
-        #         global_step = 0
-        #     else:
-        #         tplr.logger.info(f"Resumed from global step {self.global_step}")
-        # else:
-        #     tplr.logger.info("No checkpoint file found. Starting from scratch.")
-        #     self.global_step = 0
+        # Load checkpoint if it exists
+        self.checkpoint_path = f"checkpoint-V1.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
+        if os.path.exists(self.checkpoint_path):
+            tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
+            global_step, _ = asyncio.run(tplr.load_checkpoint(
+                filename=self.checkpoint_path,
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=None,
+                device=self.config.device
+            ))
+
+            self.global_step = global_step
+            if global_step is None:
+                tplr.logger.warning(f"Corrupt checkpoint detected at {self.checkpoint_path}. Removing file and starting fresh.")
+                try:
+                    os.remove(self.checkpoint_path)
+                    tplr.logger.info(f"Removed corrupt checkpoint: {self.checkpoint_path}")
+                except OSError as e:
+                    tplr.logger.error(f"Failed to remove corrupt checkpoint: {e}")
+                global_step = 0
+            else:
+                tplr.logger.info(f"Resumed from global step {self.global_step}")
+        else:
+            tplr.logger.info("No checkpoint file found. Starting from scratch.")
+            self.global_step = 0
 
         # Initialize learning rate scheduler
         self.scheduler = tplr.get_wsd_scheduler(

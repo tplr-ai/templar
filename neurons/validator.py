@@ -103,20 +103,25 @@ class Validator:
 
         # Init bucket.
         try:
-            tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
+            tplr.logger.debug(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
             commitment = self.chain_manager.get_commitment(self.uid)
+            
+            # Convert Bucket object back to concatenated string format for comparison
+            commitment_str = commitment.name + commitment.access_key_id + commitment.secret_access_key
+            
             current_bucket = (
-                tplr.config.BUCKET_SECRETS["account_id"] +
-                tplr.config.BUCKET_SECRETS["access_key_id"] +
-                tplr.config.BUCKET_SECRETS["secret_access_key"]
+                tplr.config.BUCKET_SECRETS["bucket_name"] +
+                tplr.config.BUCKET_SECRETS["read"]["access_key_id"] +
+                tplr.config.BUCKET_SECRETS["read"]["secret_access_key"]
             )
-            if current_bucket != commitment:
-                # TODO: Handle mismatched commitments
+            tplr.logger.debug(f'Comparing:\nCommitment: {commitment_str}\nCurrent: {current_bucket}')
+            
+            if current_bucket != commitment_str:
                 raise ValueError("Bucket commitment data does not match.")
-            raise ValueError('')
-        except Exception:
+                
+        except Exception as e:
+            tplr.logger.error(f"Commitment error: {str(e)}")
             tplr.commit(self.subtensor, self.wallet, self.config.netuid)
-        tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
 
         # Init Wandb.
         # Ensure the wandb directory exists
@@ -153,6 +158,16 @@ class Validator:
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
         self.model.eval()
+
+        #  Delete old check point
+        for filename in os.listdir(os.getcwd()):
+            if filename.startswith("checkpoint") and filename.endswith(".pth"):
+                file_path = os.path.join(os.getcwd(), filename)
+                try:
+                    os.remove(file_path)
+                    tplr.logger.info(f"Deleted checkpoint file {file_path}")
+                except OSError as e:
+                    tplr.logger.error(f"Failed to delete {file_path}: {e}")
 
         # Set checkpoint path
         self.checkpoint_path = f"checkpoint-V{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 

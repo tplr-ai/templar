@@ -136,41 +136,8 @@ async def apply_slices_to_model(
 ) -> int:
     """
     Applies downloaded model parameter slices to a model for a specific window.
-
-    Args:
-        model (torch.nn.Module): The PyTorch model to apply slices to
-        window (int): The window number to load slices for
-        seed (str): Seed used to determine which parameters to select
-        compression (int): Compression factor for parameter selection
-        key (str, optional): Prefix for the slice files. Defaults to 'slice'
-
-    Returns:
-        int: The maximum global step seen across all applied slices
-
-    The function:
-    1. Gets indices for parameter selection based on seed and compression
-    2. Loads all slice files for the given window
-    3. For each slice file:
-        - Verifies version matches
-        - Loads slice data and applies to model parameters
-        - Tracks max global step seen
-    4. Averages parameter values across all slices
-    5. Updates model parameters with averaged values
-
-    Example:
-        >>> max_step = await apply_slices_to_model(
-        ...     model=model,
-        ...     window=123,
-        ...     seed="abc",
-        ...     compression=10,
-        ...     key="state"
-        ... )
-        >>> print(max_step)
-        1000
-
-    Raises:
-        Timeout: If unable to acquire lock on slice file
-        Exception: For errors loading or applying slices
+    If the slices are incompatible with the model (e.g., different architectures),
+    the function skips applying any slices.
     """
     max_global_step = 0
     indices_dict = await get_indices_for_window(model, seed, compression)
@@ -178,34 +145,66 @@ async def apply_slices_to_model(
         window=window, save_location=save_location, key=key
     )
 
-    slices_per_param = {name: 0 for name, _ in model.named_parameters()}
-    param_sums = {
-        name: torch.zeros_like(param.data) for name, param in model.named_parameters()
-    }
-    max_global_step = 0  # Initialize max_global_step
+    # Initial compatibility check
+    compatible = True
+    expected_param_shapes = {name: param.size() for name, param in model.named_parameters()}
 
     for file_i in slice_files:
         try:
-            # Check if the filename contains the correct version
-
+            # Check for version match
             match = re.match(
                 rf"^{key}-{window}-.+-v{re.escape(__version__)}\.pt$",
                 os.path.basename(file_i),
             )
             if not match:
-                logger.warning(
-                    f"Skipping file {file_i} due to version mismatch in filename."
-                )
+                logger.debug(f"Skipping file {file_i} due to version mismatch.")
                 continue
 
+            # Load the slice
+            slice_i = await get_slices(file_i, model.device)
+
+            # Validate parameter names and sizes
+            for name, values in slice_i.items():
+                if name == "global_step":
+                    continue
+                if name not in expected_param_shapes:
+                    logger.error(f"Parameter '{name}' in {file_i} not found in model.")
+                    compatible = False
+                    break
+                expected_length = indices_dict[name].numel()
+                if values.numel() != expected_length:
+                    logger.error(
+                        f"Size mismatch for parameter '{name}' in {file_i}: "
+                        f"expected {expected_length}, got {values.numel()}."
+                    )
+                    compatible = False
+                    break
+            if not compatible:
+                logger.error(f"Incompatible slice detected in {file_i}.")
+                break
+
+        except Exception as e:
+            logger.error(f"Error validating slice {file_i}: {e}")
+            compatible = False
+            break
+
+    if not compatible:
+        logger.error("Slices are incompatible with the current model. Skipping all slices.")
+        return max_global_step  # No updates applied
+
+    # Proceed to apply slices as usual
+    slices_per_param = {name: 0 for name, _ in model.named_parameters()}
+    param_sums = {
+        name: torch.zeros_like(param.data) for name, param in model.named_parameters()
+    }
+
+    for file_i in slice_files:
+        try:
             slice_i = await get_slices(file_i, model.device)
             slice_global_step = slice_i.get("global_step")
 
-            # Skip the slice if 'global_step' is not present
             if slice_global_step is None:
-                logger.warning(
-                    f"Skipping slice {file_i} because it has no global_step."
-                )
+                logger.debug(f"Skipping {file_i} because it has no global_step.")
                 continue
 
             max_global_step = max(max_global_step, slice_global_step)
@@ -213,28 +212,71 @@ async def apply_slices_to_model(
             for name, param in model.named_parameters():
                 if name not in indices_dict or name not in slice_i:
                     continue
-                values = slice_i[name].to(param.data.device)
-                param_indices = indices_dict[name].to(param.data.device)
-                param_sums[name].view(-1)[param_indices] += values
-                slices_per_param[name] += 1
-                del values
-            del slice_i
-        except Timeout:
-            logger.error(f"Timeout occurred while trying to acquire lock on {file_i}")
-            continue
-        except Exception as e:
-            logger.exception(f"Error applying slice from {file_i}: {e}")
+                try:
+                    values = slice_i[name].to(param.device)
+                    param_indices = indices_dict[name].to(param.device)
 
-    # Apply the average to the parameters.
+                    # Size validation
+                    if values.size(0) != param_indices.size(0):
+                        logger.debug(
+                            f"Size mismatch for '{name}' in {file_i}: "
+                            f"values size {values.size(0)} != indices size {param_indices.size(0)}. "
+                            "Skipping this parameter."
+                        )
+                        continue
+
+                    # Index bounds check
+                    param_view = param_sums[name].view(-1)
+                    if param_indices.max() >= param_view.size(0):
+                        logger.debug(
+                            f"Index out of bounds for '{name}' in {file_i}: "
+                            f"max index {param_indices.max()} >= param size {param_view.size(0)}. "
+                            "Skipping this parameter."
+                        )
+                        continue
+
+                    # Apply slice
+                    param_view[param_indices] += values
+                    slices_per_param[name] += 1
+                    del values
+                except Exception as e:
+                    logger.debug(f"Error applying '{name}' from {file_i}: {e}")
+                    continue
+            del slice_i
+        except Exception as e:
+            logger.error(f"Error processing {file_i}: {e}")
+            continue
+
+    # Update model parameters
+    updated_params = 0
+    skipped_params = 0
     for name, param in model.named_parameters():
         if slices_per_param.get(name, 0) == 0 or name not in indices_dict:
+            skipped_params += 1
             continue
-        param_indices = indices_dict[name].to(param.data.device)
-        avg_param = param_sums[name].view(-1)[param_indices] / slices_per_param[name]
-        avg_param = avg_param.to(param.data.dtype)
-        avg_param = avg_param.to(param.data.device)
-        param.data.view(-1)[param_indices] = avg_param.clone()
+        try:
+            param_indices = indices_dict[name].to(param.device)
+            param_view = param.data.view(-1)
 
+            if param_indices.max() >= param_view.size(0):
+                logger.debug(
+                    f"Index out of bounds during update for '{name}': "
+                    f"max index {param_indices.max()} >= param size {param_view.size(0)}. "
+                    "Skipping this parameter."
+                )
+                skipped_params += 1
+                continue
+
+            avg_param = param_sums[name].view(-1)[param_indices] / slices_per_param[name]
+            avg_param = avg_param.to(param.data.dtype)
+            param_view[param_indices] = avg_param.clone()
+            updated_params += 1
+        except Exception as e:
+            logger.debug(f"Error updating '{name}': {e}")
+            skipped_params += 1
+            continue
+
+    logger.info(f"Updated {updated_params} parameters, skipped {skipped_params} parameters")
     return max_global_step
 
 

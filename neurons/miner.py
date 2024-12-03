@@ -140,10 +140,24 @@ class Miner:
         # Ensure the wandb directory exists
         wandb_dir = os.path.join(os.getcwd(), 'wandb')
         os.makedirs(wandb_dir, exist_ok=True)
+        # Init Wandb.
+        # Ensure the wandb directory exists
+        wandb_dir = os.path.join(os.getcwd(), 'wandb')
+        os.makedirs(wandb_dir, exist_ok=True)
 
         # Define the run ID file path inside the wandb directory
         run_id_file = os.path.join(wandb_dir, f"wandb_run_id_M{self.uid}_{tplr.__version__}.txt")
+        # Define the run ID file path inside the wandb directory
+        run_id_file = os.path.join(wandb_dir, f"wandb_run_id_M{self.uid}_{tplr.__version__}.txt")
 
+        # Attempt to read the existing run ID
+        if os.path.exists(run_id_file):
+            with open(run_id_file, 'r') as f:
+                run_id = f.read().strip()
+            tplr.logger.info(f"Resuming WandB run with id {run_id}")
+        else:
+            run_id = None
+            tplr.logger.info("Starting a new WandB run.")
         # Attempt to read the existing run ID
         if os.path.exists(run_id_file):
             with open(run_id_file, 'r') as f:

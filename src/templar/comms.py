@@ -136,8 +136,7 @@ async def apply_slices_to_model(
 ) -> int:
     """
     Applies downloaded model parameter slices to a model for a specific window.
-    If the slices are incompatible with the model (e.g., different architectures),
-    the function skips applying any slices.
+    Skips only incompatible slices instead of all slices if a mismatch occurs.
     """
     max_global_step = 0
     indices_dict = await get_indices_for_window(model, seed, compression)
@@ -145,12 +144,14 @@ async def apply_slices_to_model(
         window=window, save_location=save_location, key=key
     )
 
-    # Initial compatibility check
-    compatible = True
+    # Initialize tracking for valid slices
+    valid_slice_files = []
+
     expected_param_shapes = {
         name: param.size() for name, param in model.named_parameters()
     }
 
+    # Validate each slice individually
     for file_i in slice_files:
         try:
             # Check for version match
@@ -166,12 +167,13 @@ async def apply_slices_to_model(
             slice_i = await get_slices(file_i, model.device)
 
             # Validate parameter names and sizes
+            incompatible = False
             for name, values in slice_i.items():
                 if name == "global_step":
                     continue
                 if name not in expected_param_shapes:
                     logger.error(f"Parameter '{name}' in {file_i} not found in model.")
-                    compatible = False
+                    incompatible = True
                     break
                 expected_length = indices_dict[name].numel()
                 if values.numel() != expected_length:
@@ -179,30 +181,32 @@ async def apply_slices_to_model(
                         f"Size mismatch for parameter '{name}' in {file_i}: "
                         f"expected {expected_length}, got {values.numel()}."
                     )
-                    compatible = False
+                    incompatible = True
                     break
-            if not compatible:
-                logger.error(f"Incompatible slice detected in {file_i}.")
-                break
+            if incompatible:
+                logger.error(
+                    f"Incompatible slice detected in {file_i}. Skipping this slice."
+                )
+                continue
+
+            # If compatible, add to valid slices
+            valid_slice_files.append(file_i)
 
         except Exception as e:
             logger.error(f"Error validating slice {file_i}: {e}")
-            compatible = False
-            break
+            continue
 
-    if not compatible:
-        logger.error(
-            "Slices are incompatible with the current model. Skipping all slices."
-        )
+    if not valid_slice_files:
+        logger.error("No compatible slices found. Skipping slice application.")
         return max_global_step  # No updates applied
 
-    # Proceed to apply slices as usual
+    # Proceed to apply valid slices
     slices_per_param = {name: 0 for name, _ in model.named_parameters()}
     param_sums = {
         name: torch.zeros_like(param.data) for name, param in model.named_parameters()
     }
 
-    for file_i in slice_files:
+    for file_i in valid_slice_files:
         try:
             slice_i = await get_slices(file_i, model.device)
             slice_global_step = slice_i.get("global_step")

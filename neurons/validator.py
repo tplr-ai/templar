@@ -32,6 +32,8 @@ from transformers import LlamaForCausalLM
 import pandas as pd
 import wandb
 import wandb.plot
+from asyncio import TimeoutError
+from functools import partial
 
 # Local imports.
 import templar as tplr
@@ -159,16 +161,6 @@ class Validator:
         self.model.to(self.config.device)
         self.model.eval()
 
-        #  Delete old check point
-        for filename in os.listdir(os.getcwd()):
-            if filename.startswith("checkpoint") and filename.endswith(".pth"):
-                file_path = os.path.join(os.getcwd(), filename)
-                try:
-                    os.remove(file_path)
-                    tplr.logger.info(f"Deleted checkpoint file {file_path}")
-                except OSError as e:
-                    tplr.logger.error(f"Failed to delete {file_path}: {e}")
-
         # Set checkpoint path
         self.checkpoint_path = f"checkpoint-V{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
 
@@ -238,6 +230,14 @@ class Validator:
         else:
             os.makedirs(self.save_location, exist_ok=True)  
         print ( self.hparams )
+
+        # Configuration for weight setting
+        self.weight_setting_config = {
+            'timeout': 60,  # seconds
+            'max_retries': 3,
+            'retry_delay': 5,
+            'health_check_interval': 300  # 5 minutes
+        }
 
     async def update(self):
         """Continuously updates the global state by polling every 10 minutes."""
@@ -556,11 +556,11 @@ class Validator:
                 tplr.logger.info(f"{tplr.P(window, gs_end - gs_start)}[{window_delta_str}]: Finished step.")
                 # Log main metrics
                 wandb.log({
-                    f"loss": step_loss,
-                    f"tokens_per_step": tokens_per_step,
-                    f"tokens_per_second": tokens_per_second,
-                    f"sample_rate": self.sample_rate,
-                    f"utilization": eval_duration / (gs_end - gs_start)
+                    "loss": step_loss,
+                    "tokens_per_step": tokens_per_step,
+                    "tokens_per_second": tokens_per_second,
+                    "sample_rate": self.sample_rate,
+                    "utilization": eval_duration / (gs_end - gs_start)
                 }, step=self.global_step)
                 for uid_i in valid_score_indices:
                     wandb.log({
@@ -570,20 +570,35 @@ class Validator:
                     }, step=self.global_step)
                 # Set temperatured weights on the chain.
                 if self.global_step % 100 == 0:
-                    tplr.logger.info(f"Setting weights on chain: {self.weights[ self.metagraph.uids ]}")
-                    try:
-                        result = await asyncio.to_thread(
-                            self.subtensor.set_weights,
-                            wallet=self.wallet,
-                            netuid=self.config.netuid,
-                            uids=self.metagraph.uids,
-                            weights=self.weights[self.metagraph.uids],
-                            wait_for_inclusion=True,
-                            wait_for_finalization=False,
-                        )
-                        tplr.logger.info(f"Successfully set weights on chain: {result}")
-                    except Exception as e:
-                        tplr.logger.error(f"Failed to set weights on chain: {e}")
+                    tplr.logger.info(f"Setting weights on chain: {self.weights[self.metagraph.uids]}")
+                    
+                    max_retries = 3
+                    retry_delay = 5
+                    
+                    for attempt in range(max_retries):
+                        result, error = await self.set_weights_with_timeout()
+                        
+                        if result is not None:
+                            tplr.logger.info(f"Successfully set weights on chain: {result}")
+                            break
+                            
+                        if attempt < max_retries - 1:
+                            tplr.logger.warning(f"Failed to set weights (attempt {attempt + 1}/{max_retries}): {error}")
+                            tplr.logger.info(f"Retrying in {retry_delay} seconds...")
+                            await asyncio.sleep(retry_delay)
+                        else:
+                            tplr.logger.error(f"Failed to set weights after {max_retries} attempts: {error}")
+                            # Continue with the next iteration rather than freezing
+                            break
+
+                # Add periodic health check
+                self.last_active_timestamp = time.time()
+                
+                # Add this at the end of each main loop iteration
+                if time.time() - self.last_active_timestamp > 300:  # 5 minutes timeout
+                    tplr.logger.error("Validator appears to be frozen. Initiating recovery...")
+                    # Force proceed to next iteration
+                    continue
 
             # Catch keyboard interrrupt.
             except KeyboardInterrupt:
@@ -627,6 +642,31 @@ class Validator:
             except Exception as e:
                 tplr.logger.error(f"Failed to subscribe to block headers: {e}.\nRetrying in 1 seconds...")
                 time.sleep(1)
+
+    async def set_weights_with_timeout(self, timeout=30):
+        """Set weights with timeout and retry logic"""
+        try:
+            # Wrap synchronous subtensor call in partial to pass arguments
+            set_weights_fn = partial(
+                self.subtensor.set_weights,
+                wallet=self.wallet,
+                netuid=self.config.netuid,
+                uids=self.metagraph.uids,
+                weights=self.weights[self.metagraph.uids],
+                wait_for_inclusion=True,
+                wait_for_finalization=False,
+            )
+
+            # Execute with timeout
+            result = await asyncio.wait_for(
+                asyncio.to_thread(set_weights_fn),
+                timeout=timeout
+            )
+            return result, None
+        except TimeoutError:
+            return None, "Timeout while setting weights"
+        except Exception as e:
+            return None, str(e)
 
 if __name__ == "__main__":
     validator = Validator()

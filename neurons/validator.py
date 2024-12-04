@@ -556,11 +556,11 @@ class Validator:
                 tplr.logger.info(f"{tplr.P(window, gs_end - gs_start)}[{window_delta_str}]: Finished step.")
                 # Log main metrics
                 wandb.log({
-                    f"loss": step_loss,
-                    f"tokens_per_step": tokens_per_step,
-                    f"tokens_per_second": tokens_per_second,
-                    f"sample_rate": self.sample_rate,
-                    f"utilization": eval_duration / (gs_end - gs_start)
+                    "loss": step_loss,
+                    "tokens_per_step": tokens_per_step,
+                    "tokens_per_second": tokens_per_second,
+                    "sample_rate": self.sample_rate,
+                    "utilization": eval_duration / (gs_end - gs_start)
                 }, step=self.global_step)
                 for uid_i in valid_score_indices:
                     wandb.log({

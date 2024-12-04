@@ -147,7 +147,9 @@ async def apply_slices_to_model(
 
     # Initial compatibility check
     compatible = True
-    expected_param_shapes = {name: param.size() for name, param in model.named_parameters()}
+    expected_param_shapes = {
+        name: param.size() for name, param in model.named_parameters()
+    }
 
     for file_i in slice_files:
         try:
@@ -189,7 +191,9 @@ async def apply_slices_to_model(
             break
 
     if not compatible:
-        logger.error("Slices are incompatible with the current model. Skipping all slices.")
+        logger.error(
+            "Slices are incompatible with the current model. Skipping all slices."
+        )
         return max_global_step  # No updates applied
 
     # Proceed to apply slices as usual
@@ -267,7 +271,9 @@ async def apply_slices_to_model(
                 skipped_params += 1
                 continue
 
-            avg_param = param_sums[name].view(-1)[param_indices] / slices_per_param[name]
+            avg_param = (
+                param_sums[name].view(-1)[param_indices] / slices_per_param[name]
+            )
             avg_param = avg_param.to(param.data.dtype)
             param_view[param_indices] = avg_param.clone()
             updated_params += 1
@@ -276,7 +282,9 @@ async def apply_slices_to_model(
             skipped_params += 1
             continue
 
-    logger.info(f"Updated {updated_params} parameters, skipped {skipped_params} parameters")
+    logger.info(
+        f"Updated {updated_params} parameters, skipped {skipped_params} parameters"
+    )
     return max_global_step
 
 

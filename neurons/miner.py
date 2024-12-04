@@ -509,14 +509,14 @@ class Miner:
                     window_time_delta = self.window_time - end_step
                     window_delta_str = f"[red]{window_time_delta:.2f}[/red]" if window_time_delta < 0 else f"[green]+{window_time_delta:.2f}[/green]"
                     tplr.logger.info(f"{tplr.P(window, end_step - start_step)}[{window_delta_str}]: Finished step.")
-                    # wandb.log({
-                    #     "miner/loss": step_loss,
-                    #     "miner/tokens_per_step": tokens_per_step,
-                    #     "miner/tokens_per_second": tokens_per_second,
-                    #     "miner/sample_rate": self.sample_rate,
-                    #     "miner/utilization": train_duration / (end_step - start_step),
-                    #     "miner/learning_rate": self.scheduler.get_last_lr()[0]
-                    # }, step=self.global_step)
+                    wandb.log({
+                        "miner/loss": step_loss,
+                        "miner/tokens_per_step": tokens_per_step,
+                        "miner/tokens_per_second": tokens_per_second,
+                        "miner/sample_rate": self.sample_rate,
+                        "miner/utilization": train_duration / (end_step - start_step),
+                        "miner/learning_rate": self.scheduler.get_last_lr()[0]
+                    }, step=self.global_step)
 
             # Catch keyboard interrrupt.
             except KeyboardInterrupt:

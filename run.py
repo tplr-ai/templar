@@ -20,6 +20,7 @@ import sys
 import time
 import wandb
 import torch
+import random
 import asyncio
 import argparse
 import threading
@@ -43,7 +44,6 @@ class Miner:
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
         parser.add_argument('--use_wandb', action='store_true', help='Use Weights and Biases for logging')
-        parser.add_argument('--baseline', action='store_true', help='Run without gossip.')
         parser.add_argument('--is_validator', action='store_true', help='Is validator')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
@@ -92,7 +92,7 @@ class Miner:
         self.current_window = int( self.subtensor.block / 2 )
         
         # Init scores
-        self.scores = torch.zeros( [0] * self.metagraph.n, dtype = torch.float32 )
+        self.scores = torch.zeros( [0] * int(self.metagraph.n), dtype = torch.float32 )
         
         # Init wandb.
         if self.config.use_wandb:
@@ -110,36 +110,35 @@ class Miner:
         self.loop = asyncio.get_running_loop()
         self.listener = threading.Thread(target=self.block_listener, args=(self.loop,), daemon=True).start()
         
-        if not self.config.baseline:
-            gather_result = await tplr.comms.gather(
-                state_dict = self.model.state_dict(),
-                my_uid = self.uid,
-                uids = [2,3],
-                window = int(self.current_window/self.config.windows_per_sync),
-                key = 'model',
-                timeout = 30,
-                device = self.config.device
-            )
-            state_dict = {}
-            for name in gather_result:
-                tensor_list = gather_result[name]
-                averaged_tensor = torch.mean(torch.stack(tensor_list), dim=0)
-                state_dict[name] = averaged_tensor
-            self.model.load_state_dict(state_dict)
+        gather_result = await tplr.comms.gather(
+            state_dict = self.model.state_dict(),
+            my_uid = self.uid,
+            uids = [2,3],
+            window = int(self.current_window/self.config.windows_per_sync),
+            key = 'model',
+            timeout = 30,
+            device = self.config.device
+        )
+        state_dict = {}
+        for name in gather_result:
+            tensor_list = gather_result[name]
+            averaged_tensor = torch.mean(torch.stack(tensor_list), dim=0)
+            state_dict[name] = averaged_tensor
+        self.model.load_state_dict(state_dict)
 
         # Run until stopped.
         while True:
             
             # Record the window we are on.
             step_window = self.current_window
+            step_uid = self.uid if not self.config.is_validator else random.choice([2,3])
             tplr.logger.info('\n' + '-' * 40 + f' Window: {step_window} ' + '-' * 40)
 
             # Get the pages for this window.
-            seed = self.uid if self.config.is_validator else 2
             pages = await tplr.dataset.DatasetLoader.next_pages(
                 offset = step_window,
                 n_pages = 1,
-                seed = seed
+                seed = self.metagraph.hotkeys[self.uid]
             )            
             loader = await tplr.dataset.DatasetLoader.create(
                 batch_size = self.config.batch_size,
@@ -176,65 +175,62 @@ class Miner:
                 # Add the grad to the momentum.
                 self.momentum[n].add_(p.grad, alpha=0.0001)
                 
-                if not self.config.baseline:
-                    # Compress gradient.
-                    sparse_idx, sparse_val, xshape, totalk = self.compressor.compress(
-                        self.transformer.encode(self.momentum[n]), 32
-                    )
-                    # Estimate transmitted gradient.
-                    transmit_grad = self.transformer.decode(
-                        self.compressor.decompress(p, sparse_idx, sparse_val, xshape, totalk)
-                    )
-                    # Remove the transmitted from delta (double couting)
-                    self.momentum[n].sub_(transmit_grad)
-                    # Add to share_state
-                    transmitted[ n ] = transmit_grad
-                    share_state[ n + 'sparse_idx'] = sparse_idx 
-                    share_state[ n + 'sparse_val'] = sparse_val
-                    xshapes[ n ] = xshape; totalks[ n ] = totalk
-
-            if not self.config.baseline:
-                # All-gather share state from all peers with timeout.
-                gather_result = await tplr.comms.gather(
-                    state_dict = share_state,
-                    my_uid = self.uid,
-                    uids = [2,3],
-                    window = step_window,
-                    key = 'gradient',
-                    timeout = 3,
-                    device = self.config.device
+                # Compress gradient.
+                sparse_idx, sparse_val, xshape, totalk = self.compressor.compress(
+                    self.transformer.encode(self.momentum[n]), 32
                 )
+                # Estimate transmitted gradient.
+                transmit_grad = self.transformer.decode(
+                    self.compressor.decompress(p, sparse_idx, sparse_val, xshape, totalk)
+                )
+                # Remove the transmitted from delta (double couting)
+                self.momentum[n].sub_(transmit_grad)
+                # Add to share_state
+                transmitted[ n ] = transmit_grad
+                share_state[ n + 'sparse_idx'] = sparse_idx 
+                share_state[ n + 'sparse_val'] = sparse_val
+                xshapes[ n ] = xshape; totalks[ n ] = totalk
+
+            # All-gather share state from all peers with timeout.
+            gather_result = await tplr.comms.gather(
+                state_dict = share_state,
+                my_uid = self.uid,
+                uids = [2,3],
+                window = step_window,
+                key = 'gradient',
+                timeout = 3,
+                device = self.config.device
+            )
             
             # Decompress state and apply to grad.
-            if not self.config.baseline:
-                for n, p in self.model.named_parameters():
-                    # Decode grad from all nodes
-                    if self.config.is_validator:
-                        eval_idx = gather_result[n + 'sparse_idx'][ seed ]
-                        eval_val = gather_result[n + 'sparse_val'][ seed ]
-                        # Estimate transmitted gradient.
-                        their_grad = self.transformer.decode(
-                            self.compressor.decompress(p, eval_idx, eval_val, xshapes[ n ], totalks[ n ])
-                        )
-                        # Get transmitted
-                        my_grad = transmitted[ n ]
-                        # Compute cosine sim
-                        cosine_sim = torch.nn.functional.cosine_similarity(their_grad, my_grad, dim=0)
-                        self.scores[ seed ] = 0.1 * cosine_sim + 0.9 * self.scores[ seed ]
-                        self.weights = torch.softmax( self.scores, dim = 0 )
-                        
-                    new_grad = self.transformer.decode(
-                        self.compressor.batch_decompress(
-                            p, gather_result[n + 'sparse_idx'], gather_result[n + 'sparse_val'], xshapes[ n ], totalks[ n ]
-                        )
+            for n, p in self.model.named_parameters():
+                # Decode grad from all nodes
+                if self.config.is_validator:
+                    eval_idx = gather_result[n + 'sparse_idx'][ step_uid ]
+                    eval_val = gather_result[n + 'sparse_val'][ step_uid ]
+                    # Estimate transmitted gradient.
+                    their_grad = self.transformer.decode(
+                        self.compressor.decompress(p, eval_idx, eval_val, xshapes[ n ], totalks[ n ])
                     )
-                    # Set grad to values
-                    if p.grad is None:
-                        p.grad = new_grad
-                    else:
-                        p.grad.copy_(new_grad)
-                    # Sign-SGD
-                    p.grad.sign_()
+                    # Get transmitted
+                    my_grad = transmitted[ n ]
+                    # Compute cosine sim
+                    cosine_sim = torch.nn.functional.cosine_similarity(their_grad, my_grad, dim=0)
+                    self.scores[ step_uid ] = 0.1 * cosine_sim + 0.9 * self.scores[ step_uid ]
+                    self.weights = torch.softmax( self.scores, dim = 0 )
+                    
+                new_grad = self.transformer.decode(
+                    self.compressor.batch_decompress(
+                        p, gather_result[n + 'sparse_idx'], gather_result[n + 'sparse_val'], xshapes[ n ], totalks[ n ]
+                    )
+                )
+                # Set grad to values
+                if p.grad is None:
+                    p.grad = new_grad
+                else:
+                    p.grad.copy_(new_grad)
+                # Sign-SGD
+                p.grad.sign_()
                     
             # Apply the optimizer step
             self.optimizer.step()

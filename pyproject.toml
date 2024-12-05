@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tplr"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bittensor==8.4.3",
+    "bt-decode==0.2.0a0",
+    "torch",
+    "boto3",
+    "einops",
+    "aiofiles",
+    "aioboto3",
+    "aiobotocore",
+    "transformers",
+    "pip",
+]

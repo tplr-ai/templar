@@ -1,0 +1,5 @@
+[default]
+entity = const69
+project = aesop
+base_url = https://api.wandb.ai
+

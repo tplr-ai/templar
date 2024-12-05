@@ -94,10 +94,10 @@ async def get( uid: int, window: int, key: str, timeout: int = 30 ):
         tplr.logger.info(f"GET {full_key} <--")
         return state_dict
     except asyncio.TimeoutError:
-        tplr.logger.info(f"Timeout occurred while downloading {full_key} from S3.")
+        tplr.logger.debug(f"Timeout occurred while downloading {full_key} from S3.")
         return None
     except Exception as e:
-        tplr.logger.info(f"An error occurred during GET: {full_key}: {e}")
+        tplr.logger.debug(f"An error occurred during GET: {full_key}: {e}")
         return None
     
 async def get_with_retry(uid, window, key, timeout):
@@ -116,14 +116,24 @@ async def get_with_retry(uid, window, key, timeout):
                 return None
             await asyncio.sleep(0.1)  # Wait before retrying
     
-async def gather( state_dict: Dict[str, torch.Tensor], my_uid: int, uids: List[int], window: int, key:str, timeout: int ) -> List[ Dict[str, torch.Tensor] ]:
-    # Put the object
-    await put( 
-        state_dict = state_dict, 
-        uid = my_uid, 
-        window = window, 
-        key = key
-    )
+async def gather( 
+    state_dict: Dict[str, torch.Tensor], 
+    my_uid: int, 
+    uids: List[int], 
+    window: int, 
+    key:str, 
+    timeout: int,
+    device: str,
+) -> List[ Dict[str, torch.Tensor] ]:
+    # Put the object if exists.
+    if state_dict != None:
+        await put( 
+            state_dict = state_dict, 
+            uid = my_uid, 
+            window = window, 
+            key = key
+        )
+    # Create gather tasks for all other objects.
     gather_tasks = []
     for uid in uids:
         gather_tasks.append(
@@ -134,17 +144,18 @@ async def gather( state_dict: Dict[str, torch.Tensor], my_uid: int, uids: List[i
                 timeout = timeout
             )
         )        
-    # Gather all result
+    # Create buffer for responses.
     gather_result = {
-        key: [ torch.zeros_like(value) for _ in uids ] for key, value in state_dict.items()
+        key: [ torch.zeros_like(value).to(device) for _ in uids ] for key, value in state_dict.items()
     }
-    # Get results
+    # Gather results async.
     responses = await asyncio.gather(*gather_tasks)
-    # Fill results
+    # Fill results.
     for uid, resp in enumerate( responses ):
         if resp == None: continue
         for key in state_dict.keys():
-            gather_result[ key ][ uid ] = resp[ key ]       
+            gather_result[ key ][ uid ] = resp[ key ].to(device)   
+    # Return gather result.   
     return gather_result
                 
     

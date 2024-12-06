@@ -54,8 +54,13 @@ def get_pm2_process_name():
 def get_remote_spec_version():
     try:
         # Append a timestamp to bypass caching
+        headers = {
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0"
+        }
         url = f"{GITHUB_RAW_URL}?_={int(time.time())}"
-        response = requests.get(url)
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
         content = response.text
     except Exception as e:

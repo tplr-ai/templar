@@ -38,7 +38,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 # Globals: determined by master.
-SPEC_VERSION = 0 # Run version.
+SPEC_VERSION = 1 # Run version.
 PROJECT = 'templar' # wandb project.
 SEQUENCE_LENGTH = 1024 # global sequence length.
 PAGES_PER_WINDOW = 2 # Pages to train on (and be evaluated on each window.)
@@ -59,8 +59,6 @@ class Miner:
     def config():
         parser = argparse.ArgumentParser(description='Miner script')
         parser.add_argument('--netuid', type=int, default=229, help='Bittensor network UID.')
-        parser.add_argument('--batch_size', type=int, default=8, help='Training batch size per accumulatio step.')
-        parser.add_argument('--sequence_length', type=int, default=1024, help='Batch size sequence length.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training (e.g., cpu or cuda)')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
@@ -116,7 +114,8 @@ class Miner:
         
         # Init state params.
         self.stop_event = asyncio.Event()
-        self.current_window = int( self.subtensor.block / BLOCKS_PER_WINDOW )
+        self.current_block = self.subtensor.block
+        self.current_window = int( self.current_block / BLOCKS_PER_WINDOW )
         
         # Init scores.
         self.scores = torch.zeros(self.metagraph.n, dtype=torch.float32)
@@ -284,6 +283,10 @@ class Miner:
                     wait_for_inclusion = False, # Dont wait, fire and forget.
                     wait_for_finalization = False,
                 )
+                
+            # Check for autoupdate every 360 blocks.
+            if self.current_block % 360 == 0:
+                tplr.optionally_auto_update( SPEC_VERSION )
             
             # Wait for end of window (if not already done.)
             while self.current_window == step_window: time.sleep(0.1)

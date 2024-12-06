@@ -27,3 +27,4 @@ from .comms import *
 from .compress import *
 from .dataset import *
 from .logging import *
+from .update import *

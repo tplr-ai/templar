@@ -135,118 +135,160 @@ async def apply_slices_to_model(
     key: str = "slice",
 ) -> int:
     """
-    Applies downloaded model parameter slices to a model for a specific window,
-    weighting each contribution equally based on the norm of each miner's update
-    and preserving the overall parameter scale.
-
-    Args:
-        model (torch.nn.Module): The PyTorch model to apply slices to
-        window (int): The window number to load slices for
-        seed (str): Seed used to determine which parameters to select
-        compression (int): Compression factor for parameter selection
-        save_location (str): Directory where slices are saved
-        key (str, optional): Prefix for the slice files. Defaults to 'slice'
-
-    Returns:
-        int: The maximum global step seen across all applied slices
-
-    The function:
-    1. Gets indices for parameter selection based on seed and compression
-    2. Loads all slice files for the given window
-    3. For each slice file:
-        - Verifies version matches
-        - Loads slice data and computes the norm
-        - Normalizes the slice to have unit norm
-        - Accumulates the normalized slices
-        - Tracks max global step and collects norms
-    4. Averages parameter values across all normalized slices
-    5. Multiplies the averaged parameters by the average norm
-    6. Updates model parameters with the scaled averaged values
+    Applies downloaded model parameter slices to a model for a specific window.
+    Skips only incompatible slices instead of all slices if a mismatch occurs.
     """
-
     max_global_step = 0
     indices_dict = await get_indices_for_window(model, seed, compression)
     slice_files = await load_files_for_window(
         window=window, save_location=save_location, key=key
     )
 
-    slices_per_param = {name: 0 for name, _ in model.named_parameters() if name in indices_dict}
-    param_sums = {
-        name: torch.zeros(len(indices_dict[name]), dtype=param.data.dtype, device=model.device)
-        for name, param in model.named_parameters() if name in indices_dict
-    }
-    slice_norms = []  # To collect norms for computing average norm
+    # Initialize tracking for valid slices
+    valid_slice_files = []
 
+    expected_param_shapes = {
+        name: param.size() for name, param in model.named_parameters()
+    }
+
+    # Validate each slice individually
     for file_i in slice_files:
         try:
-            filename = os.path.basename(file_i)
+            # Check for version match
             match = re.match(
                 rf"^{key}-{window}-.+-v{re.escape(__version__)}\.pt$",
-                filename,
+                os.path.basename(file_i),
             )
             if not match:
-                logger.warning(
-                    f"Skipping file {file_i} due to version mismatch in filename."
+                logger.debug(f"Skipping file {file_i} due to version mismatch.")
+                continue
+
+            # Load the slice
+            slice_i = await get_slices(file_i, model.device)
+
+            # Validate parameter names and sizes
+            incompatible = False
+            for name, values in slice_i.items():
+                if name == "global_step":
+                    continue
+                if name not in expected_param_shapes:
+                    logger.error(f"Parameter '{name}' in {file_i} not found in model.")
+                    incompatible = True
+                    break
+                expected_length = indices_dict[name].numel()
+                if values.numel() != expected_length:
+                    logger.error(
+                        f"Size mismatch for parameter '{name}' in {file_i}: "
+                        f"expected {expected_length}, got {values.numel()}."
+                    )
+                    incompatible = True
+                    break
+            if incompatible:
+                logger.error(
+                    f"Incompatible slice detected in {file_i}. Skipping this slice."
                 )
                 continue
 
+            # If compatible, add to valid slices
+            valid_slice_files.append(file_i)
+
+        except Exception as e:
+            logger.error(f"Error validating slice {file_i}: {e}")
+            continue
+
+    if not valid_slice_files:
+        logger.error("No compatible slices found. Skipping slice application.")
+        return max_global_step  # No updates applied
+
+    # Proceed to apply valid slices
+    slices_per_param = {name: 0 for name, _ in model.named_parameters()}
+    param_sums = {
+        name: torch.zeros_like(param.data) for name, param in model.named_parameters()
+    }
+
+    for file_i in valid_slice_files:
+        try:
             slice_i = await get_slices(file_i, model.device)
             slice_global_step = slice_i.get("global_step")
 
             if slice_global_step is None:
-                logger.warning(
-                    f"Skipping slice {file_i} because it has no global_step."
-                )
+                logger.debug(f"Skipping {file_i} because it has no global_step.")
                 continue
 
             max_global_step = max(max_global_step, slice_global_step)
 
-            # Compute norm of the slice
-            slice_norm = 0.0
-            slice_values = {}
-
             for name, param in model.named_parameters():
                 if name not in indices_dict or name not in slice_i:
                     continue
-                values = slice_i[name].to(model.device)
-                slice_norm += torch.norm(values, p=2).item() ** 2  # Square of L2 norm
-                slice_values[name] = values
+                try:
+                    values = slice_i[name].to(param.device)
+                    param_indices = indices_dict[name].to(param.device)
 
-            slice_norm = np.sqrt(slice_norm) + 1e-8  # Add epsilon to avoid division by zero
-            slice_norms.append(slice_norm)  # Collect norms for averaging
+                    # Size validation
+                    if values.size(0) != param_indices.size(0):
+                        logger.debug(
+                            f"Size mismatch for '{name}' in {file_i}: "
+                            f"values size {values.size(0)} != indices size {param_indices.size(0)}. "
+                            "Skipping this parameter."
+                        )
+                        continue
 
-            # Normalize and accumulate
-            for name, values in slice_values.items():
-                normalized_values = values / slice_norm
-                param_sums[name] += normalized_values
-                slices_per_param[name] += 1
+                    # Index bounds check
+                    param_view = param_sums[name].view(-1)
+                    if param_indices.max() >= param_view.size(0):
+                        logger.debug(
+                            f"Index out of bounds for '{name}' in {file_i}: "
+                            f"max index {param_indices.max()} >= param size {param_view.size(0)}. "
+                            "Skipping this parameter."
+                        )
+                        continue
 
-            del slice_i, slice_values
-
-        except Timeout:
-            logger.error(f"Timeout occurred while trying to acquire lock on {file_i}")
-            continue
+                    # Apply slice
+                    param_view[param_indices] += values
+                    slices_per_param[name] += 1
+                    del values
+                except Exception as e:
+                    logger.debug(f"Error applying '{name}' from {file_i}: {e}")
+                    continue
+            del slice_i
         except Exception as e:
-            logger.exception(f"Error applying slice from {file_i}: {e}")
+            logger.error(f"Error processing {file_i}: {e}")
             continue
 
-    if not slices_per_param or not slice_norms:
-        logger.warning(f"No valid slices found for window {window}")
-        return max_global_step
-
-    # Compute average norm
-    avg_norm = np.mean(slice_norms)
-
-    # Apply the average of normalized slices to the parameters and scale by avg_norm
+    # Update model parameters
+    updated_params = 0
+    skipped_params = 0
     for name, param in model.named_parameters():
         if slices_per_param.get(name, 0) == 0 or name not in indices_dict:
+            skipped_params += 1
             continue
-        param_indices = indices_dict[name].to(model.device)
-        avg_param = param_sums[name] / slices_per_param[name]
-        avg_param = avg_param * avg_norm  # Scale by average norm
-        avg_param = avg_param.to(param.data.dtype)
-        param.data.view(-1)[param_indices] = avg_param.clone()
+        try:
+            param_indices = indices_dict[name].to(param.device)
+            param_view = param.data.view(-1)
 
+            if param_indices.max() >= param_view.size(0):
+                logger.debug(
+                    f"Index out of bounds during update for '{name}': "
+                    f"max index {param_indices.max()} >= param size {param_view.size(0)}. "
+                    "Skipping this parameter."
+                )
+                skipped_params += 1
+                continue
+
+            avg_param = (
+                param_sums[name].view(-1)[param_indices] / slices_per_param[name]
+            )
+            avg_param = avg_param.to(param.data.dtype)
+            param_view[param_indices] = avg_param.clone()
+            updated_params += 1
+        except Exception as e:
+            logger.debug(f"Error updating '{name}': {e}")
+            skipped_params += 1
+            continue
+
+    logger.info(
+        f"Updated {updated_params} parameters, skipped {skipped_params} parameters"
+    )
     return max_global_step
 
 
@@ -257,6 +299,7 @@ async def upload_slice_for_window(
     seed: str,
     wallet: "bt.wallet",
     compression: int,
+    save_location: str,
     key: str = "slice",
     global_step: int = 0,
 ):
@@ -299,10 +342,9 @@ async def upload_slice_for_window(
     for name, param in model.named_parameters():
         slice_data[name] = param.data.view(-1)[indices[name].to(model.device)].cpu()
 
-    # Create a temporary file and write the sliced model state dictionary to it
-    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        torch.save(slice_data, temp_file)
-        temp_file_name = temp_file.name  # Store the temporary file name
+    # Use save_location for temporary file
+    temp_file_name = os.path.join(save_location, filename)
+    torch.save(slice_data, temp_file_name)
 
     # Upload the file to S3
     session = get_session()
@@ -394,7 +436,9 @@ async def get_indices_for_window(
     return result
 
 
-async def download_file(s3_client, bucket: str, filename: str) -> str:
+async def download_file(
+    s3_client, bucket: str, filename: str, save_location: str
+) -> str:
     """
     Downloads a file from S3, using parallel downloads for large files.
 
@@ -407,7 +451,7 @@ async def download_file(s3_client, bucket: str, filename: str) -> str:
         str: The path to the downloaded file in the temporary directory.
     """
     async with semaphore:
-        temp_file = os.path.join(tempfile.gettempdir(), filename)
+        temp_file = os.path.join(save_location, filename)
         # Check if the file exists.
         if os.path.exists(temp_file):
             logger.debug(f"File {temp_file} already exists, skipping download.")
@@ -448,7 +492,13 @@ async def download_file(s3_client, bucket: str, filename: str) -> str:
 
 
 async def handle_file(
-    s3_client, bucket: str, filename: str, hotkey: str, window: int, version: str
+    s3_client,
+    bucket: str,
+    filename: str,
+    hotkey: str,
+    window: int,
+    version: str,
+    save_location: str,
 ):
     """
     Handles downloading a single file from S3.
@@ -468,7 +518,7 @@ async def handle_file(
     logger.debug(
         f"Handling file '{filename}' for window {window} and hotkey '{hotkey}'"
     )
-    temp_file = await download_file(s3_client, bucket, filename)
+    temp_file = await download_file(s3_client, bucket, filename, save_location)
     if temp_file:
         return SimpleNamespace(
             bucket=bucket,
@@ -482,7 +532,7 @@ async def handle_file(
 
 
 async def process_bucket(
-    s3_client, bucket: str, windows: List[int], key: str = "slice"
+    s3_client, bucket: str, windows: List[int], key: str, save_location: str
 ):
     """
     Processes a single S3 bucket to download files for specified windows.
@@ -569,6 +619,7 @@ async def process_bucket(
                                 slice_hotkey,
                                 window,
                                 slice_version,
+                                save_location,
                             )
                         )
                     except ValueError:
@@ -605,7 +656,7 @@ async def process_bucket(
 
 
 async def download_slices_for_buckets_and_windows(
-    buckets: List[Bucket], windows: List[int], key: str = "slice"
+    buckets: List[Bucket], windows: List[int], key: str, save_location: str
 ) -> Dict[int, List[SimpleNamespace]]:
     """Downloads model slices from multiple S3 buckets for specified windows.
 
@@ -661,7 +712,9 @@ async def download_slices_for_buckets_and_windows(
             aws_secret_access_key=bucket.secret_access_key,
         ) as s3_client:
             logger.debug(f"Processing bucket: {bucket.name}")
-            tasks.append(process_bucket(s3_client, bucket.name, windows, key))
+            tasks.append(
+                process_bucket(s3_client, bucket.name, windows, key, save_location)
+            )
 
     results = await asyncio.gather(*tasks)
     # Combine results into a dictionary mapping window IDs to lists of slices
@@ -672,7 +725,9 @@ async def download_slices_for_buckets_and_windows(
     return slices
 
 
-async def load_files_for_window(window: int, key: str = "slice") -> List[str]:
+async def load_files_for_window(
+    window: int, save_location: str, key: str = "slice"
+) -> List[str]:
     """
     Loads files for a specific window from the temporary directory.
 
@@ -695,7 +750,7 @@ async def load_files_for_window(window: int, key: str = "slice") -> List[str]:
     """
 
     logger.debug(f"Retrieving files for window {window} from temporary directory")
-    temp_dir = tempfile.gettempdir()
+    temp_dir = save_location
     window_files = []
     pattern = re.compile(rf"^{key}-{window}-.+-v{__version__}\.pt$")
     for filename in os.listdir(temp_dir):
@@ -705,7 +760,9 @@ async def load_files_for_window(window: int, key: str = "slice") -> List[str]:
     return window_files
 
 
-async def delete_files_before_window(window_max: int, key: str = "slice"):
+async def delete_files_before_window(
+    window_max: int, save_location: str, key: str = "slice"
+):
     """
     Deletes temporary files with window IDs less than the specified maximum.
 
@@ -725,7 +782,7 @@ async def delete_files_before_window(window_max: int, key: str = "slice"):
     """
 
     logger.debug(f"Deleting files with window id before {window_max}")
-    temp_dir = tempfile.gettempdir()
+    temp_dir = save_location
     pattern = re.compile(rf"^{re.escape(key)}-(\d+)-.+-v{__version__}\.(pt|pt\.lock)$")
     for filename in os.listdir(temp_dir):
         match = pattern.match(filename)

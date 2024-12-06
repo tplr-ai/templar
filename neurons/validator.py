@@ -32,6 +32,8 @@ from transformers import LlamaForCausalLM
 import pandas as pd
 import wandb
 import wandb.plot
+from asyncio import TimeoutError
+from functools import partial
 
 # Local imports.
 import templar as tplr
@@ -59,6 +61,7 @@ class Validator:
         parser.add_argument('--no_autoupdate', action='store_true', help='Disable automatic updates')
         parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
         parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to save/load the checkpoint. If None, the path is set to checkpoint-V<UID>.pth.')
+        parser.add_argument('--save-location', type=str, default=None, help='Directory to save/load slice files')
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
         config = bt.config(parser)
@@ -99,6 +102,28 @@ class Validator:
         )
         tplr.logger.info('\n' + '-' * 40 + ' Objects ' + '-' * 40)
         tplr.logger.info(f'\nWallet: {self.wallet}\nSubtensor: {self.subtensor}\nMetagraph: {self.metagraph}\nUID: {self.uid}')
+
+        # Init bucket.
+        try:
+            tplr.logger.debug(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
+            commitment = self.chain_manager.get_commitment(self.uid)
+            
+            # Convert Bucket object back to concatenated string format for comparison
+            commitment_str = commitment.name + commitment.access_key_id + commitment.secret_access_key
+            
+            current_bucket = (
+                tplr.config.BUCKET_SECRETS["bucket_name"] +
+                tplr.config.BUCKET_SECRETS["read"]["access_key_id"] +
+                tplr.config.BUCKET_SECRETS["read"]["secret_access_key"]
+            )
+            tplr.logger.debug(f'Comparing:\nCommitment: {commitment_str}\nCurrent: {current_bucket}')
+            
+            if current_bucket != commitment_str:
+                raise ValueError("Bucket commitment data does not match.")
+                
+        except Exception as e:
+            tplr.logger.error(f"Commitment error: {str(e)}")
+            tplr.commit(self.subtensor, self.wallet, self.config.netuid)
 
         # Init Wandb.
         # Ensure the wandb directory exists
@@ -240,9 +265,21 @@ class Validator:
         self.scores = torch.zeros( 256, dtype = torch.float32 ) 
         self.weights = torch.zeros( 256, dtype = torch.float32 ) 
         self.sample_rate = 1.0
-        self.metagraph_lock = asyncio.Lock()
-        self.buckets_lock = asyncio.Lock()
+        self.save_location = self.config.save_location
+        if self.save_location is None:
+            import tempfile
+            self.save_location = tempfile.gettempdir()
+        else:
+            os.makedirs(self.save_location, exist_ok=True)  
         print ( self.hparams )
+
+        # Configuration for weight setting
+        self.weight_setting_config = {
+            'timeout': 60,  # seconds
+            'max_retries': 3,
+            'retry_delay': 5,
+            'health_check_interval': 300  # 5 minutes
+        }
 
     async def update(self):
         """Continuously updates the global state by polling every 10 minutes."""
@@ -291,7 +328,8 @@ class Validator:
             state_slices = await tplr.download_slices_for_buckets_and_windows(
                 buckets=[b for b in self.buckets if b is not None],
                 windows = history_windows,
-                key = 'state'
+                key = 'state',
+                save_location=self.save_location
             )
             for window in tqdm(history_windows, desc="Syncing state"):
                 max_global_step = await tplr.apply_slices_to_model( 
@@ -299,6 +337,7 @@ class Validator:
                     window=window,
                     seed=window,
                     compression=self.hparams.compression,
+                    save_location=self.save_location,
                     key='state',
                 )
                 if max_global_step is not None:
@@ -346,19 +385,20 @@ class Validator:
                 state_slices = await tplr.download_slices_for_buckets_and_windows(
                     buckets=valid_buckets,
                     windows=[window],
-                    key='state'
+                    key='state',
+                    save_location=self.save_location
                 )
                 n_state_slices = len(state_slices[window]) if window in state_slices else 0
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_state_slices} window states.")
 
                 # Download the delta for the eval window.
                 st = tplr.T()
-                async with self.buckets_lock:
-                    eval_slices = await tplr.download_slices_for_buckets_and_windows(
-                        buckets = self.buckets,
-                        windows = [ window ],
-                        key = 'delta'
-                    ) 
+                eval_slices = await tplr.download_slices_for_buckets_and_windows(
+                    buckets = self.buckets,
+                    windows = [ window ],
+                    key = 'delta',
+                    save_location=self.save_location
+                ) 
                 n_eval_slices = len(eval_slices[ window ]) if window in eval_slices else 0
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_eval_slices} window deltas.")
                 # Collect UIDs of miners who submitted slices
@@ -385,6 +425,7 @@ class Validator:
                     window=window,
                     seed=window,
                     compression=self.hparams.compression,
+                    save_location=self.save_location,
                     key='state',
                 )
                 if max_global_step is not None:
@@ -441,11 +482,11 @@ class Validator:
                 total_loss = 0.0
                 full_steps = 0
                 total_steps = 0
-                exhuasted_window = False
+                exhausted_window = False
                 with torch.enable_grad():
                     for idx, batch in enumerate(eval_dataset):
                         total_steps += 1
-                        if random.random() < self.sample_rate and not exhuasted_window:
+                        if random.random() < self.sample_rate and not exhausted_window:
                             full_steps += 1
                             input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                             labels = input_ids.clone()
@@ -455,7 +496,7 @@ class Validator:
                             total_loss += outputs.loss.item()
                             outputs.loss.backward()
                             if self.current_window - offset != window:
-                                exhuasted_window = True
+                                exhausted_window = True
                                 continue
                 step_loss = total_loss/(full_steps+1)
                 eval_duration = tplr.T() - eval_start
@@ -466,7 +507,7 @@ class Validator:
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tTotal steps: [tan]{full_steps}/{total_steps}[/tan], Rate: [tan]{(full_steps/total_steps):.2f}[/tan], Target: [tan]{self.sample_rate:.2f}[/tan]")
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tTotal tokens: [tan]{tokens_per_step}[/tan], Tokens per second: [tan]{tokens_per_second:.2f}[/tan]")
                 tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tLoss: [tan]{step_loss}[tan]")
-                if exhuasted_window:
+                if exhausted_window:
                     self.sample_rate = max(0.0001, self.sample_rate * 0.95)
                 else:
                     self.sample_rate = min(1, self.sample_rate * 1.05)
@@ -498,31 +539,24 @@ class Validator:
 
                 # Update the score for the evaluated miner
                 self.step_scores[eval_uid] = score
-                self.scores[eval_uid] = (1 - self.hparams.validator_moving_alpha) * score + self.hparams.validator_moving_alpha * self.scores[eval_uid]
+                self.scores[eval_uid] = (
+                    (1 - self.hparams.validator_moving_alpha) * score + 
+                    self.hparams.validator_moving_alpha * self.scores[eval_uid]
+                )
 
-                # Store the original weights before adjustment.
-                total_score = torch.sum(self.scores).item()
-                if total_score == 0.0:
-                    tplr.logger.warning("Total score is zero; setting all weights to zero.")
+                # Only consider positive scores for weights
+                positive_scores_indices = self.scores > 0
+                positive_scores = self.scores[positive_scores_indices]
+
+                total_positive_score = positive_scores.sum().item()
+
+                if total_positive_score == 0.0:
+                    tplr.logger.warning("Total positive score is zero; setting all weights to zero.")
                     self.weights = torch.zeros_like(self.scores)
-                    original_weights = self.weights.clone()  # All zeros in this case
                 else:
-                    # Normalize scores to get initial weights
-                    self.weights = self.scores / total_score
-                    # Store the original weights before adjustment
-                    original_weights = self.weights.clone()
-                    # Set negative weights to zero
-                    negative_weights = self.weights < 0
-                    if negative_weights.any():
-                        tplr.logger.info("Negative weights detected; setting them to zero.")
-                        self.weights[negative_weights] = 0.0
-                        # Re-normalize the positive weights to ensure the sum is 1
-                        positive_total = torch.sum(self.weights).item()
-                        if positive_total == 0.0:
-                            tplr.logger.warning("All weights are zero after removing negative weights; cannot normalize.")
-                            # Weights remain zero
-                        else:
-                            self.weights = self.weights / positive_total
+                    # Normalize positive scores to get weights
+                    self.weights = torch.zeros_like(self.scores)
+                    self.weights[positive_scores_indices] = positive_scores / total_positive_score
 
                 # Log updated scores and weights
                 valid_score_indices = torch.nonzero(self.scores != 0).squeeze().view(-1)
@@ -530,14 +564,12 @@ class Validator:
                     uid = uid_i.item()
                     moving_score = self.scores[uid].item()
                     weight = self.weights[uid].item()
-                    orig_weight = original_weights[uid].item()
                     step_score = self.step_scores[uid].item()
                     tplr.logger.info(
                         f"\tuid: [dark_sea_green]{uid}[/dark_sea_green], "
                         f"step_score: [dark_sea_green]{step_score:.3f}[/dark_sea_green], "
                         f"moving_score: [dark_sea_green]{moving_score:.3f}[/dark_sea_green], "
-                        f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green], "
-                        f"original_weight: [dark_sea_green]{orig_weight:.3f}[/dark_sea_green]"
+                        f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green]"
                     )
 
                 # Apply all deltas to the model state.
@@ -547,6 +579,7 @@ class Validator:
                     window=window,
                     seed=window,
                     compression=self.hparams.compression,
+                    save_location=self.save_location,
                     key='delta',
                 )
                 if max_global_step is not None:
@@ -555,8 +588,8 @@ class Validator:
 
                 # Clean local and remote space from old slices.
                 st = tplr.T()
-                await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'state')
-                await tplr.delete_files_before_window( window_max = window - self.hparams.max_history, key = 'delta')
+                await tplr.delete_files_before_window(window_max=window - self.hparams.max_history, save_location=self.save_location, key='state')
+                await tplr.delete_files_before_window(window_max=window - self.hparams.max_history, save_location=self.save_location, key='delta')
                 await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'state' )
                 await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Cleaned file history.")
@@ -570,88 +603,49 @@ class Validator:
                 tplr.logger.info(f"{tplr.P(window, gs_end - gs_start)}[{window_delta_str}]: Finished step.")
                 # Log main metrics
                 wandb.log({
-                    "validator/loss": step_loss,
-                    "validator/tokens_per_step": tokens_per_step,
-                    "validator/tokens_per_second": tokens_per_second,
-                    "validator/sample_rate": self.sample_rate,
-                    "validator/utilization": eval_duration / (gs_end - gs_start)
-                }, step=self.global_step)                   
-
-                # Prepare a list to hold metrics for all UIDs
-                metrics_list = []
-
-                # Collect metrics for all UIDs
+                    "loss": step_loss,
+                    "tokens_per_step": tokens_per_step,
+                    "tokens_per_second": tokens_per_second,
+                    "sample_rate": self.sample_rate,
+                    "utilization": eval_duration / (gs_end - gs_start)
+                }, step=self.global_step)
                 for uid_i in valid_score_indices:
-                    uid = uid_i.item()
-                    uid_str = str(uid)
-
-                    # Extract metrics
-                    step_score = self.step_scores[uid].item()
-                    moving_score = self.scores[uid].item()
-                    weight = self.weights[uid].item()
-                    orig_weight = original_weights[uid].item()
-
-                    # Append to metrics list for aggregation
-                    metrics_list.append({
-                        'global_step': self.global_step,
-                        'uid': uid_str,
-                        'step_score': step_score,
-                        'moving_score': moving_score,
-                        'weight': weight,
-                        'original_weight': orig_weight,
-                    })
-
-                # Convert metrics list to DataFrame
-                metrics_df = pd.DataFrame(metrics_list)
-
-                # Append to metrics history
-                self.metrics_history = pd.concat([self.metrics_history, metrics_df], ignore_index=True)
-
-                # Drop duplicates to avoid multiple entries for the same step and UID
-                self.metrics_history.drop_duplicates(subset=['global_step', 'uid'], keep='last', inplace=True)
-
-                # List of metrics to plot
-                metrics_to_plot = ['step_score', 'moving_score', 'weight', 'original_weight']
-
-                # Create aggregated plots for each metric
-                for metric_name in metrics_to_plot:
-                    # Pivot the DataFrame to have UIDs as columns
-                    pivot_df = self.metrics_history.pivot(index='global_step', columns='uid', values=metric_name).reset_index()
-
-                    # Get the list of UIDs (column names excluding 'global_step')
-                    uids = pivot_df.columns.drop('global_step').tolist()
-
-                    # Prepare xs (global steps) and ys (metric values per UID)
-                    xs = pivot_df['global_step'].values.tolist()
-                    ys = [pivot_df[uid].values.tolist() for uid in uids]
-
-                    # Create the line plot
-                    line_plot = wandb.plot.line_series(
-                        xs=xs,
-                        ys=ys,
-                        keys=uids,
-                        title=f"Validator {metric_name.replace('_', ' ').title()}",
-                        xname="Global Step"
-                    )
-                    # Log the plot
-
-                    wandb.log({f"validator/{metric_name}": line_plot}, step=self.global_step)
+                    wandb.log({
+                        f"step_scores/{uid_i.item()}": self.step_scores[uid_i].item(),
+                        f"moving_scores/{uid_i.item()}": self.scores[uid_i].item(),
+                        f"weights/{uid_i.item()}": self.weights[uid_i].item(),
+                    }, step=self.global_step)
                 # Set temperatured weights on the chain.
                 if self.global_step % 100 == 0:
-                    tplr.logger.info(f"Setting weights on chain: {self.weights[ self.metagraph.uids ]}")
-                    try:
-                        result = await asyncio.to_thread(
-                            self.subtensor.set_weights,
-                            wallet=self.wallet,
-                            netuid=self.config.netuid,
-                            uids=self.metagraph.uids,
-                            weights=self.weights[self.metagraph.uids],
-                            wait_for_inclusion=True,
-                            wait_for_finalization=False,
-                        )
-                        tplr.logger.info(f"Successfully set weights on chain: {result}")
-                    except Exception as e:
-                        tplr.logger.error(f"Failed to set weights on chain: {e}")
+                    tplr.logger.info(f"Setting weights on chain: {self.weights[self.metagraph.uids]}")
+                    
+                    max_retries = 3
+                    retry_delay = 5
+                    
+                    for attempt in range(max_retries):
+                        result, error = await self.set_weights_with_timeout()
+                        
+                        if result is not None:
+                            tplr.logger.info(f"Successfully set weights on chain: {result}")
+                            break
+                            
+                        if attempt < max_retries - 1:
+                            tplr.logger.warning(f"Failed to set weights (attempt {attempt + 1}/{max_retries}): {error}")
+                            tplr.logger.info(f"Retrying in {retry_delay} seconds...")
+                            await asyncio.sleep(retry_delay)
+                        else:
+                            tplr.logger.error(f"Failed to set weights after {max_retries} attempts: {error}")
+                            # Continue with the next iteration rather than freezing
+                            break
+
+                # Add periodic health check
+                self.last_active_timestamp = time.time()
+                
+                # Add this at the end of each main loop iteration
+                if time.time() - self.last_active_timestamp > 300:  # 5 minutes timeout
+                    tplr.logger.error("Validator appears to be frozen. Initiating recovery...")
+                    # Force proceed to next iteration
+                    continue
 
             # Catch keyboard interrrupt.
             except KeyboardInterrupt:
@@ -694,6 +688,31 @@ class Validator:
             except Exception as e:
                 tplr.logger.error(f"Failed to subscribe to block headers: {e}.\nRetrying in 1 seconds...")
                 time.sleep(1)
+
+    async def set_weights_with_timeout(self, timeout=30):
+        """Set weights with timeout and retry logic"""
+        try:
+            # Wrap synchronous subtensor call in partial to pass arguments
+            set_weights_fn = partial(
+                self.subtensor.set_weights,
+                wallet=self.wallet,
+                netuid=self.config.netuid,
+                uids=self.metagraph.uids,
+                weights=self.weights[self.metagraph.uids],
+                wait_for_inclusion=True,
+                wait_for_finalization=False,
+            )
+
+            # Execute with timeout
+            result = await asyncio.wait_for(
+                asyncio.to_thread(set_weights_fn),
+                timeout=timeout
+            )
+            return result, None
+        except TimeoutError:
+            return None, "Timeout while setting weights"
+        except Exception as e:
+            return None, str(e)
 
 if __name__ == "__main__":
     validator = Validator()

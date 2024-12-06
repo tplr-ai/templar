@@ -41,9 +41,10 @@ This document provides a guide on how to set up and run a validator using `valid
      - Name the bucket the same as your **account ID**.
      - Set the **region** to **ENAM**.
 
+
   2. **Generate Tokens**:
-     - Create a **read token** and a **write token**.
-     - Note down the access key IDs and secret access keys for each token.
+      - Create a **read token** with **Admin Read** permissions and a **write token** with **Admin Read & Write** permissions.
+      - Note down the access key IDs and secret access keys for each token.
 
   3. **Update `.env.yaml`**:
      - Create the file `.env.yaml` by copying [`.env-template.yaml`](../.env-template.yaml)
@@ -138,6 +139,12 @@ btcli wallet new_coldkey --wallet.name default --n-words 12
 # Create and register validator hotkey
 btcli wallet new_hotkey --wallet.name default --wallet.hotkey validator --n-words 12
 btcli subnet pow_register --wallet.name default --wallet.hotkey validator --netuid <netuid> --subtensor.network <network>
+```
+
+6. **Log into Weights & Biases (WandB)**
+```bash
+# Log into WandB
+wandb login <your_api_key>
 ```
 
 ## Running the Validator

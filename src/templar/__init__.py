@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "0.1.6"
+__version__ = "0.1.9"
 
 # Import package.
 from .autoupdate import *

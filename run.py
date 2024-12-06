@@ -38,7 +38,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 # Globals: determined by master.
-SPEC_VERSION = 2 # Run version.
+SPEC_VERSION = 3 # Run version.
 PROJECT = 'templar' # wandb project.
 SEQUENCE_LENGTH = 1024 # global sequence length.
 PAGES_PER_WINDOW = 2 # Pages to train on (and be evaluated on each window.)

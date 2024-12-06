@@ -19,6 +19,7 @@
 import os
 import re
 import sys
+import time
 import json
 import requests
 import subprocess
@@ -51,18 +52,16 @@ def get_pm2_process_name():
 
 
 def get_remote_spec_version():
-    """
-    Fetch the remote run.py from GitHub and extract the SPEC_VERSION value.
-    """
     try:
-        response = requests.get(GITHUB_RAW_URL)
+        # Append a timestamp to bypass caching
+        url = f"{GITHUB_RAW_URL}?_={int(time.time())}"
+        response = requests.get(url)
         response.raise_for_status()
         content = response.text
     except Exception as e:
         tplr.logger.error(f"Failed to fetch remote run.py: {e}")
         return None
     
-    # Regex to find `SPEC_VERSION = <number>`
     match = re.search(r"^\s*SPEC_VERSION\s*=\s*(\d+)", content, re.MULTILINE)
     if match:
         return int(match.group(1))

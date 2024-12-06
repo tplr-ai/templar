@@ -49,7 +49,7 @@ WINDOWS_PER_SYNC = 100 # Step Windows before sync state occurs.
 MOMENTUM_DECAY = 0.999 # momentum deacy rate.
 TOPK_COMPRESSION = 32 # DeMo Topk Compression.
 TARGET_CHUNK = 64 # DeMo chunk size.
-SCORES_ALPHA = 0.01 # Scores moving average.
+SCORES_ALPHA = 0.001 # Scores moving average.
 WINDOWS_PER_WEIGHTS = 10 # Windows before validator sets weights on chain.
 
 class Miner:

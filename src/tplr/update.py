@@ -25,7 +25,7 @@ import subprocess
 
 import tplr as tplr
 
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/unconst/tplr/main/run.py"
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/unconst/tplr/refs/heads/main/run.py"
 
 def get_pm2_process_name():
     """

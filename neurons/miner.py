@@ -162,25 +162,25 @@ class Miner:
         tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
 
         # Init buckets.
-        # self.buckets = []
-        # buckets = tplr.get_all_commitments(
-        #     substrate=self.subtensor.substrate,
-        #     netuid=self.config.netuid,
-        #     metagraph=self.metagraph
-        # )
+        self.buckets = []
+        buckets = tplr.get_all_commitments(
+            substrate=self.subtensor.substrate,
+            netuid=self.config.netuid,
+            metagraph=self.metagraph
+        )
 
-        # for uid in self.metagraph.uids:
-        #     bucket = buckets.get(uid)
-        #     tplr.logger.info(f"UID {uid} bucket: {bucket}")
+        for uid in self.metagraph.uids:
+            bucket = buckets.get(uid)
+            tplr.logger.info(f"UID {uid} bucket: {bucket}")
 
-        #     if bucket is not None:
-        #         tplr.logger.info(f"Retrieved valid bucket for UID {uid}: {bucket.name}")
-        #         self.buckets.append(bucket)
-        #     else:
-        #         tplr.logger.info(f"No valid bucket found for UID {uid}")
-        #         self.buckets.append(None)
+            if bucket is not None:
+                tplr.logger.info(f"Retrieved valid bucket for UID {uid}: {bucket.name}")
+                self.buckets.append(bucket)
+            else:
+                tplr.logger.info(f"No valid bucket found for UID {uid}")
+                self.buckets.append(None)
 
-        # tplr.logger.info(f"Final list of buckets: {self.buckets}")
+        tplr.logger.info(f"Final list of buckets: {self.buckets}")
 
         # Retrieve bucket info for all neurons
         self.buckets = tplr.get_all_buckets(

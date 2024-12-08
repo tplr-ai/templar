@@ -101,7 +101,7 @@ def get_all_commitments(
             concatenated = bytes.fromhex(field_value).decode("utf-8").strip()
 
             if len(concatenated) != 128:
-                logger.error(
+                logger.debug(
                     f"Commitment '{concatenated}' has length {len(concatenated)}, expected 128."
                 )
                 continue
@@ -114,7 +114,7 @@ def get_all_commitments(
                 secret_access_key=concatenated[64:],
             )
             commitments[uid] = bucket
-            logger.success(f"Bucket fetched and parsed for UID {uid}: {bucket.name}")
+            logger.debug(f"Bucket fetched and parsed for UID {uid}: {bucket.name}")
 
         except Exception as e:
             logger.error(f"Failed to decode and parse commitment for UID {uid}: {e}")

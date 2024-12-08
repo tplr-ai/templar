@@ -150,40 +150,17 @@ class Validator:
             group='validator',
             job_type='validation'
         )
-        self.metrics_history = pd.DataFrame()
-
-        # Init bucket.
-        try:
-            tplr.logger.info(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
-            commitment = self.chain_manager.get_commitment(self.uid)
-            if tplr.config.BUCKET_SECRETS["bucket_name"] != commitment.name:
-                raise ValueError('')
-        except Exception:
-            tplr.commit(self.subtensor, self.wallet, self.config.netuid)
-        tplr.logger.info('Bucket:' + tplr.config.BUCKET_SECRETS["bucket_name"])
-
-        # Init buckets.
-        # self.buckets = []
-        # buckets = tplr.get_all_commitments(
-        #     substrate=self.subtensor.substrate,
-        #     netuid=self.config.netuid,
-        #     metagraph=self.metagraph
-        # )
-
-        # for uid in self.metagraph.uids:
-        #     bucket = buckets.get(uid)
-        #     tplr.logger.info(f"UID {uid} bucket: {bucket}")
-
-        #     if bucket is not None:
-        #         tplr.logger.info(f"Retrieved valid bucket for UID {uid}: {bucket.name}")
-        #         self.buckets.append(bucket)
-        #     else:
-        #         tplr.logger.info(f"No valid bucket found for UID {uid}")
-        #         self.buckets.append(None)
-
-        # tplr.logger.info(f"Final list of buckets: {self.buckets}")
 
 
+        # Set checkpoint path
+        if self.config.checkpoint_path is None:
+            # Default path if none provided
+            self.checkpoint_path = f"checkpoints/checkpoint-V{self.uid}.pth"
+        else:
+            self.checkpoint_path = self.config.checkpoint_path
+
+        # Create checkpoint directory if it doesn't exist
+        os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
 
         # Retrieve bucket info for all neurons
         self.buckets = tplr.get_all_buckets(
@@ -202,56 +179,21 @@ class Validator:
         self.model.to(self.config.device)
         self.model.eval()
         
-        # Get the neuron with the highest stake
-        highest_stake_hotkey = tplr.get_neuron_with_highest_stake(
-            metagraph=self.metagraph
+        # Initialize checkpoint manager
+        self.checkpoint_manager = tplr.CheckpointManager(
+            model=self.model,
+            checkpoint_path=self.checkpoint_path,
+            wallet=self.wallet,
+            device=self.config.device,
         )
-
-        if highest_stake_hotkey:
-            bucket_info = self.buckets.get(highest_stake_hotkey)
-            if bucket_info:
-                checkpoint_dir = os.path.dirname(self.checkpoint_path)
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                # Download checkpoint using the neuron's bucket credentials
-                checkpoint_file = asyncio.run(
-                    tplr.download_checkpoint_from_neuron(
-                        bucket_info=bucket_info,
-                        neuron_hotkey=highest_stake_hotkey,
-                        checkpoint_dir=checkpoint_dir
-                    )
-                )
-                if checkpoint_file:
-                    # Load the checkpoint
-                    global_step, _ = asyncio.run(
-                        tplr.load_checkpoint(
-                            filename=checkpoint_file,
-                            model=self.model,
-                            optimizer=self.optimizer,
-                            scheduler=self.scheduler,
-                            device=self.config.device
-                        )
-                    )
-                    self.global_step = global_step if global_step is not None else 0
-                    tplr.logger.info(f"Resumed from global step {self.global_step}")
-                else:
-                    tplr.logger.warning("Failed to download neuron checkpoint. Starting from scratch.")
-                    self.global_step = 0
-            else:
-                tplr.logger.warning(f"No bucket info for neuron {highest_stake_hotkey}. Starting from scratch.")
-                self.global_step = 0
-        else:
-            tplr.logger.warning("No neurons found. Starting from scratch.")
-            self.global_step = 0
-
-        # # Init model.
-        # tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
-        # self.hparams = tplr.load_hparams()
-        # torch.manual_seed(42)
-        # np.random.seed(42)
-        # random.seed(42)
-        # self.model = LlamaForCausalLM(config=self.hparams.model_config)
-        # self.model.to(self.config.device)
-        # self.model.eval()
+        
+        # Load initial checkpoint
+        self.global_step = asyncio.run(
+            self.checkpoint_manager.load_from_highest_stake(
+                metagraph=self.metagraph,
+                buckets=self.buckets
+            )
+        )
 
         self.last_window = 0
         self.optimal_pages_per_step = 4
@@ -356,24 +298,17 @@ class Validator:
                 window = self.current_window - offset
 
 
-                # Save checkpoint every 500 steps
-                if self.global_step % 500 == 0:
-                    tplr.logger.info(f"Scheduling checkpoint save at block {self.global_step}")
-                    # Update last checkpoint block to avoid repeated saves at the same block
-                    self.last_checkpoint_block = self.global_step
-                    # Schedule the save_checkpoint function to run asynchronously
-                    asyncio.create_task(tplr.save_checkpoint(
-                        filename=self.checkpoint_path,
-                        model=self.model,
+                # Upload checkpoint every 10 steps
+                if self.global_step % 10 == 0:
+                    self.checkpoint_manager.save_and_upload(
                         global_step=self.global_step,
                         scores=self.scores,
                         weights=self.weights
-                    ))
+                    )
 
                 # Download the state for the eval window.
                 st = tplr.T()
-                async with self.buckets_lock:
-                    valid_buckets = [b for b in self.buckets if b is not None]
+                valid_buckets = [b for b in self.buckets if b is not None]
 
                 if not valid_buckets:
                     tplr.logger.info(f"No valid buckets to download state slices for window {window}")
@@ -406,12 +341,11 @@ class Validator:
                 if window in eval_slices:
                     for slice_info in eval_slices[window]:
                         if getattr(slice_info, 'version', None) == tplr.__version__:
-                            async with self.metagraph_lock:
-                                try:
-                                    uid = self.metagraph.hotkeys.index(slice_info.hotkey)
-                                    submitted_uids.add(uid)
-                                except ValueError:
-                                    tplr.logger.warning(f"Hotkey {slice_info.hotkey} not found in metagraph")                
+                            try:
+                                uid = self.metagraph.hotkeys.index(slice_info.hotkey)
+                                submitted_uids.add(uid)
+                            except ValueError:
+                                tplr.logger.warning(f"Hotkey {slice_info.hotkey} not found in metagraph")                
                 if n_eval_slices == 0:
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: No slices to eval, continue ...")
                     while self.current_window - offset == window:
@@ -451,12 +385,11 @@ class Validator:
                         await asyncio.sleep(0.1)  # Wait for next window.
                     continue
                 eval_slice_info = random.choice(valid_eval_slices)
-                async with self.metagraph_lock:
-                    try:
-                        eval_uid = self.metagraph.hotkeys.index(eval_slice_info.hotkey)
-                    except ValueError:
-                        tplr.logger.warning(f"{tplr.P(window, tplr.T() - st)}: {eval_slice_info.hotkey} not found in metagraph")
-                        continue
+                try:
+                    eval_uid = self.metagraph.hotkeys.index(eval_slice_info.hotkey)
+                except ValueError:
+                    tplr.logger.warning(f"{tplr.P(window, tplr.T() - st)}: {eval_slice_info.hotkey} not found in metagraph")
+                    continue
                 eval_slice_data = await tplr.get_slices(eval_slice_info.temp_file, self.model.device)
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Loaded window slices for uid: [dark_sea_green]{eval_uid}[/dark_sea_green].")
 
@@ -658,6 +591,8 @@ class Validator:
             except Exception as e:
                 tplr.logger.exception(f"Exception during training loop: {e}")
                 continue
+            finally:
+                 self.checkpoint_manager.cleanup()
 
     # Returns the slice window based on a blotplr.
     def block_to_window(self, block: int) -> int:

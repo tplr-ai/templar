@@ -633,17 +633,29 @@ async def download_slices_for_buckets_and_windows(
         - Returns empty dict if no valid buckets provided
     """
     # Filter out None buckets
-    valid_buckets = [b for b in buckets if b is not None]
+    valid_buckets = []
+    for b in buckets:
+        if b is None:
+            continue
+        if isinstance(b, str):
+            logger.warning(f"Received string instead of Bucket object: {b}")
+            continue
+        if not isinstance(b, Bucket):
+            logger.warning(f"Invalid bucket type: {type(b)}")
+            continue
+        valid_buckets.append(b)
 
     if not valid_buckets:
-        logger.warning(
-            "No valid buckets provided to download_slices_for_buckets_and_windows."
-        )
+        logger.warning("No valid buckets provided")
         return {}
 
-    logger.debug(
-        f"Downloading files for buckets {[b.name for b in valid_buckets]} and windows {windows}"
-    )
+    try:
+        logger.debug(
+            f"Downloading files for buckets {[b.name for b in valid_buckets]} and windows {windows}"
+        )
+    except Exception as e:
+        logger.error(f"Error logging bucket names: {e}")
+        return {}
 
     session = get_session()
     tasks = []

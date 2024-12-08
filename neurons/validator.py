@@ -29,7 +29,6 @@ import time
 import torch
 from tqdm import tqdm
 from transformers import LlamaForCausalLM
-import pandas as pd
 import wandb
 import wandb.plot
 from asyncio import TimeoutError

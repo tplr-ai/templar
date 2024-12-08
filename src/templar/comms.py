@@ -157,8 +157,11 @@ async def apply_slices_to_model(
     )
 
     param_sums = {
-        name: torch.zeros(len(indices_dict[name]), dtype=param.data.dtype, device=model.device)
-        for name, param in model.named_parameters() if name in indices_dict
+        name: torch.zeros(
+            len(indices_dict[name]), dtype=param.data.dtype, device=model.device
+        )
+        for name, param in model.named_parameters()
+        if name in indices_dict
     }
     slice_norms = []  # Collect norms for computing median
     num_files = 0  # Track the number of valid files
@@ -198,7 +201,9 @@ async def apply_slices_to_model(
                 slice_norm += torch.norm(values, p=2).item() ** 2  # Square of L2 norm
                 slice_values[name] = values
 
-            slice_norm = np.sqrt(slice_norm) + 1e-8  # Add epsilon to avoid division by zero
+            slice_norm = (
+                np.sqrt(slice_norm) + 1e-8
+            )  # Add epsilon to avoid division by zero
             slice_norms.append(slice_norm)  # Collect norm for computing median
             num_files += 1  # Increment valid file count
 
@@ -234,7 +239,6 @@ async def apply_slices_to_model(
         param.data.view(-1)[param_indices] = avg_param.clone()
 
     return max_global_step
-
 
 
 async def upload_slice_for_window(

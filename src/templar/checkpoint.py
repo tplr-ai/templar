@@ -1,50 +1,68 @@
-import os
-import asyncio
 import aiofiles
-import torch
+import asyncio
+import bittensor as bt
+import botocore
+import concurrent
 import numpy as np
-from .schemas import Bucket
-from typing import Dict, Optional, List
+import os
+import queue
+import shutil
+import torch
 from aiobotocore.session import get_session
+import threading
+from typing import Dict, List, Optional, Tuple, Union
 
 from . import __version__
 from .config import BUCKET_SECRETS, client_config
 from .constants import CF_REGION_NAME
 from .commitment import get_all_commitments
 from .logging import logger
-import bittensor as bt
+from .schemas import Bucket
+
 
 def get_base_url(account_id: str) -> str:
-    return f"https://{account_id}.r2.cloudflarestorage.com"
+    """Get base URL for R2 storage"""
+    url = f"https://{account_id}.r2.cloudflarestorage.com"
+    logger.debug(f"Base URL constructed: {url}")
+    return url
 
 def get_all_buckets(
     subtensor: bt.Subtensor,
     netuid: int,
     metagraph,
-) -> Dict[str, Optional[Bucket]]:
+) -> List[Optional[Union[str, Bucket]]]:
     """
     Retrieves and parses all bucket commitments from the network.
 
+    Args:
+        subtensor: The subtensor instance
+        netuid: Network UID
+        metagraph: Network metagraph
+
     Returns:
-        Dict[str, Optional[Bucket]]: Mapping of neuron hotkeys to their Bucket objects.
+        List[Optional[Union[str, Bucket]]]: List of bucket strings or Bucket objects, 
+        with None for invalid buckets. Index corresponds to UID.
     """
-    # Fetch all commitments
+    buckets = []
     commitments = get_all_commitments(
         substrate=subtensor.substrate,
         netuid=netuid,
         metagraph=metagraph,
     )
 
-    # Map UIDs to hotkeys
-    uid_to_hotkey = dict(zip(metagraph.uids.tolist(), metagraph.hotkeys))
-    hotkey_to_bucket = {}
-    for uid, bucket in commitments.items():
-        hotkey = uid_to_hotkey.get(uid)
-        if hotkey:
-            hotkey_to_bucket[hotkey] = bucket
+    for uid in metagraph.uids:
+        bucket = commitments.get(uid)
+        logger.debug(f"UID {uid} bucket: {bucket}")
+
+        if bucket is not None:
+            logger.debug(f"Retrieved valid bucket for UID {uid}: {bucket}")
+            buckets.append(bucket)
         else:
-            hotkey_to_bucket[hotkey] = None
-    return hotkey_to_bucket
+            logger.debug(f"No valid bucket found for UID {uid}")
+            buckets.append(None)
+
+    logger.debug(f"Final list of buckets: {buckets}")
+    return buckets
 
 async def save_checkpoint(
     filename: str,
@@ -85,7 +103,7 @@ async def load_checkpoint(
     Loads the checkpoint from the specified filename.
     """
     try:
-        checkpoint = torch.load(filename, map_location=device)
+        checkpoint = torch.load(filename, map_location=device, weights_only=True)
         model.load_state_dict(checkpoint["model_state_dict"])
         if optimizer and "optimizer_state_dict" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -103,38 +121,54 @@ async def load_checkpoint(
         return 0, {}
 
 async def upload_checkpoint(
-    bucket: str,
     checkpoint_path: str,
     wallet: bt.wallet,
-    key_prefix: str = "neuron_checkpoints",
 ):
     """
-    Uploads the checkpoint file to S3 storage.
+    Uploads the checkpoint file to S3 storage using configured bucket.
     """
-    filename = f"{key_prefix}/{wallet.hotkey.ss58_address}-v{__version__}.pth"
+    filename = f"neuron_checkpoints_{wallet.hotkey.ss58_address}_v{__version__}.pth"
     logger.debug(f"Uploading checkpoint to S3: {filename}")
 
-    session = get_session()
-    async with session.create_client(
-        "s3",
-        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
-        region_name=CF_REGION_NAME,
-        config=client_config,
-        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
-    ) as s3_client:
-        try:
-            with open(checkpoint_path, "rb") as f:
-                await s3_client.put_object(Bucket=bucket, Key=filename, Body=f)
-            logger.debug(f"Successfully uploaded checkpoint to S3: {filename}")
-        except Exception as e:
-            logger.exception(f"Failed to upload checkpoint to S3: {filename}. Error: {e}")
+    # Extract just the bucket name without the full path
+    bucket_name = BUCKET_SECRETS["bucket_name"].split('/')[-1]
+    
+    temp_dir = os.path.dirname(checkpoint_path)
+    temp_file = os.path.join(temp_dir, f"temp_{filename}")
+    
+    try:
+        shutil.copy2(checkpoint_path, temp_file)
+        
+        session = get_session()
+        async with session.create_client(
+            "s3",
+            endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
+            region_name=CF_REGION_NAME,
+            config=client_config,
+            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+        ) as s3_client:
+            try:
+                with open(temp_file, "rb") as f:
+                    await s3_client.put_object(
+                        Bucket=bucket_name,  # Use just the bucket name
+                        Key=filename,
+                        Body=f
+                    )
+                logger.debug(f"Successfully uploaded checkpoint to S3: {filename}")
+            except Exception as e:
+                logger.exception(f"Failed to upload checkpoint to S3: {filename}. Error: {e}")
+                raise
+    finally:
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+            logger.debug(f"Temporary file {temp_file} removed")
+
 
 async def download_checkpoint_from_neuron(
     bucket_info: Bucket,
     neuron_hotkey: str,
     checkpoint_dir: str,
-    key_prefix: str = "neuron_checkpoints",
 ) -> Optional[str]:
     """
     Downloads the checkpoint file from the neuron's S3 storage.
@@ -148,9 +182,8 @@ async def download_checkpoint_from_neuron(
     Returns:
         Optional[str]: Path to the downloaded checkpoint file, or None if failed.
     """
-    filename = f"{key_prefix}/{neuron_hotkey}-v{__version__}.pth"
+    filename = f"neuron_checkpoints_{neuron_hotkey}_v{__version__}.pth"
     local_checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint-{neuron_hotkey}.pth")
-    logger.debug(f"Downloading checkpoint from S3: {filename}")
 
     session = get_session()
     async with session.create_client(
@@ -167,32 +200,351 @@ async def download_checkpoint_from_neuron(
                 await f.write(await response['Body'].read())
             logger.debug(f"Successfully downloaded checkpoint: {local_checkpoint_path}")
             return local_checkpoint_path
+        except botocore.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchKey':
+                logger.info(f"No checkpoint found for neuron {neuron_hotkey}")
+            else:
+                logger.error(f"Error downloading checkpoint: {str(e)}")
+            return None
         except Exception as e:
-            logger.exception(f"Failed to download checkpoint from S3: {filename}. Error: {e}")
+            logger.error(f"Unexpected error downloading checkpoint: {str(e)}")
             return None
 
 def get_neuron_with_highest_stake(
     metagraph,
-    exclude_hotkeys: Optional[List[str]] = None
+    buckets: List[Optional[Union[str, Bucket]]]
 ) -> Optional[str]:
     """
-    Retrieves the hotkey of the neuron with the highest stake.
+    Get the hotkey of the neuron with highest stake that has a valid bucket.
+
+    Args:
+        metagraph: Network metagraph
+        buckets: List of buckets corresponding to UIDs
+
+    Returns:
+        Optional[str]: Hotkey of highest stake neuron, or None if no valid neuron found
     """
     try:
-        stakes = metagraph.S  # Stake values for all neurons
-        if not stakes.any():
-            logger.warning("Stake values are empty.")
-            return None
-
-        exclude_indices = []
-        if exclude_hotkeys:
-            hotkey_to_index = {hotkey: idx for idx, hotkey in enumerate(metagraph.hotkeys)}
-            exclude_indices = [hotkey_to_index[hotkey] for hotkey in exclude_hotkeys if hotkey in hotkey_to_index]
-            stakes[exclude_indices] = -np.inf
-
-        highest_stake_uid = stakes.argmax()
-        highest_stake_hotkey = metagraph.hotkeys[highest_stake_uid]
-        return highest_stake_hotkey
-    except Exception as e:
-        logger.exception(f"Error fetching neuron with highest stake: {e}")
+        # Get highest stake UID using metagraph.S
+        highest_stake_uid = int(metagraph.S.argmax())
+        
+        # Check if this UID has a valid bucket
+        if highest_stake_uid < len(buckets) and buckets[highest_stake_uid] is not None:
+            return metagraph.hotkeys[highest_stake_uid]
+                
+        logger.warning("No valid bucket found for highest stake neuron")
         return None
+        
+    except Exception as e:
+        logger.error(f"Error finding highest stake neuron: {e}")
+        return None
+
+async def load_highest_stake_checkpoint(
+    metagraph,
+    buckets: List[Optional[Union[str, Bucket]]],
+    model: torch.nn.Module,
+    checkpoint_path: str,
+    device: str = "cpu",
+    optimizer: Optional[torch.optim.Optimizer] = None,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+) -> int:
+    """
+    Attempts to load checkpoint from the highest stake neuron.
+    
+    Args:
+        metagraph: Network metagraph
+        buckets: List of buckets corresponding to UIDs
+        model: Model to load checkpoint into
+        checkpoint_path: Base path for checkpoint storage
+        device: Device to load checkpoint to
+        optimizer: Optional optimizer to load state
+        scheduler: Optional scheduler to load state
+        
+    Returns:
+        int: Global step from loaded checkpoint, or 0 if starting fresh
+    """
+    try:
+        highest_stake_hotkey = get_neuron_with_highest_stake(
+            metagraph=metagraph,
+            buckets=buckets
+        )
+
+        if highest_stake_hotkey:
+            uid = metagraph.hotkeys.index(highest_stake_hotkey)
+            bucket_info = buckets[uid]
+            
+            if bucket_info:
+                checkpoint_dir = os.path.dirname(checkpoint_path)
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                
+                checkpoint_file = await download_checkpoint_from_neuron(
+                    bucket_info=bucket_info,
+                    neuron_hotkey=highest_stake_hotkey,
+                    checkpoint_dir=checkpoint_dir
+                )
+                
+                if checkpoint_file:
+                    # Load the checkpoint with optional optimizer/scheduler
+                    global_step, _ = await load_checkpoint(
+                        filename=checkpoint_file,
+                        model=model,
+                        device=device,
+                        optimizer=optimizer if optimizer is not None else None,
+                        scheduler=scheduler if scheduler is not None else None
+                    )
+                    logger.info(f"Resumed from global step {global_step}")
+                    return global_step if global_step is not None else 0
+                    
+                logger.warning("Failed to download neuron checkpoint. Starting from scratch.")
+                return 0
+                
+            logger.warning(f"No bucket info for neuron {highest_stake_hotkey}. Starting from scratch.")
+            return 0
+            
+        logger.warning("No neurons found. Starting from scratch.")
+        return 0
+        
+    except Exception as e:
+        logger.error(f"Error loading checkpoint: {e}")
+        return 0
+    
+
+class CheckpointManager:
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        checkpoint_path: str,
+        wallet: bt.wallet,
+        device: str = "cpu",
+        optimizer: Optional[torch.optim.Optimizer] = None,
+        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+    ):
+        self.model = model
+        self.checkpoint_path = checkpoint_path
+        self.wallet = wallet
+        self.device = device
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self._shutdown = False
+        self._active_futures = set()
+        self.upload_queue = queue.Queue()
+        self._initialize_thread_pool()
+        self._start_upload_worker()
+
+    def _initialize_thread_pool(self):
+        """Initialize a new thread pool if needed"""
+        if not hasattr(self, 'thread_pool') or self.thread_pool._shutdown:
+            self.thread_pool = concurrent.futures.ThreadPoolExecutor(
+                max_workers=2,
+                thread_name_prefix="checkpoint_worker"
+            )
+            self._shutdown = False
+
+    def _start_upload_worker(self):
+        """Start a dedicated thread for handling uploads"""
+        def upload_worker():
+            while not self._shutdown:
+                try:
+                    # Wait for upload tasks with timeout
+                    task = self.upload_queue.get(timeout=1.0)
+                    if task is None:  # Shutdown signal
+                        break
+                    
+                    # Run the upload
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(self._upload_checkpoint_async())
+                    except Exception as e:
+                        logger.error(f"Background upload failed: {e}")
+                    finally:
+                        loop.close()
+                        self.upload_queue.task_done()
+                except queue.Empty:
+                    continue  # Keep checking for new tasks
+                
+        self.upload_thread = threading.Thread(
+            target=upload_worker,
+            name="checkpoint_uploader",
+            daemon=True
+        )
+        self.upload_thread.start()
+
+    def _cleanup_future(self, future):
+        """Remove completed future from active set"""
+        self._active_futures.discard(future)
+
+    def _save_checkpoint_sync(self, global_step: int, **kwargs):
+        """Synchronous checkpoint save"""
+        try:
+            checkpoint = {
+                "global_step": global_step,
+                "model_state_dict": self.model.state_dict(),
+            }
+            
+            if self.optimizer:
+                checkpoint["optimizer_state_dict"] = self.optimizer.state_dict()
+            if self.scheduler:
+                checkpoint["scheduler_state_dict"] = self.scheduler.state_dict()
+                
+            # Include additional state variables
+            for key, value in kwargs.items():
+                checkpoint[key] = value
+
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
+            
+            # Save checkpoint
+            torch.save(checkpoint, self.checkpoint_path)
+            logger.info(f"Checkpoint saved locally: {self.checkpoint_path}")
+            
+        except Exception as e:
+            logger.error(f"Failed to save checkpoint: {e}")
+            raise
+
+    async def _upload_checkpoint_async(self):
+        """Async checkpoint upload"""
+        try:
+            # Simple filename without paths
+            filename = f"neuron_checkpoints_{self.wallet.hotkey.ss58_address}_v{__version__}.pth"
+            logger.debug(f"Uploading checkpoint to S3: {filename}")
+
+            # Get clean bucket name
+            bucket = BUCKET_SECRETS["bucket_name"]
+            if '/' in bucket:
+                bucket = bucket.split('/')[-1]
+            
+            # Create temp file
+            temp_dir = os.path.dirname(self.checkpoint_path)
+            temp_file = os.path.join(temp_dir, f"temp_{filename}")
+            
+            try:
+                # Copy to temp file
+                shutil.copy2(self.checkpoint_path, temp_file)
+                
+                # Upload using same client setup as slice upload
+                session = get_session()
+                async with session.create_client(
+                    "s3",
+                    endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
+                    region_name=CF_REGION_NAME,
+                    config=client_config,
+                    aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+                    aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+                ) as s3_client:
+                    with open(temp_file, "rb") as f:
+                        await s3_client.put_object(
+                            Bucket=bucket,
+                            Key=filename,
+                            Body=f
+                        )
+                    logger.info(f"Successfully uploaded checkpoint to S3: {filename}")
+            finally:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+                    logger.debug(f"Temporary file {temp_file} removed")
+                    
+        except Exception as e:
+            logger.error(f"Failed to upload checkpoint: {e}")
+            raise
+
+    def save_and_upload(self, global_step: int, **kwargs):
+        """Non-blocking save and upload"""
+        try:
+            # Save checkpoint synchronously (usually fast)
+            self._save_checkpoint_sync(global_step, **kwargs)
+            
+            # Queue the upload to happen in background
+            if not self._shutdown:
+                self.upload_queue.put_nowait(True)
+                logger.debug("Queued checkpoint for background upload")
+            
+        except Exception as e:
+            logger.error(f"Error in save_and_upload: {e}")
+
+    async def load_from_highest_stake(
+        self,
+        metagraph,
+        buckets: List[Optional[Union[str, Bucket]]]
+    ) -> int:
+        """
+        Loads checkpoint from highest stake neuron.
+        
+        Args:
+            metagraph: Network metagraph
+            buckets: List of buckets corresponding to UIDs
+            
+        Returns:
+            int: Global step from loaded checkpoint, or 0 if starting fresh
+        """
+        try:
+            highest_stake_hotkey = get_neuron_with_highest_stake(
+                metagraph=metagraph,
+                buckets=buckets
+            )
+
+            if highest_stake_hotkey:
+                uid = metagraph.hotkeys.index(highest_stake_hotkey)
+                bucket_info = buckets[uid]
+                
+                if bucket_info:
+                    checkpoint_dir = os.path.dirname(self.checkpoint_path)
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+                    
+                    checkpoint_file = await download_checkpoint_from_neuron(
+                        bucket_info=bucket_info,
+                        neuron_hotkey=highest_stake_hotkey,
+                        checkpoint_dir=checkpoint_dir
+                    )
+                    
+                    if checkpoint_file:
+                        # Load the checkpoint with optional optimizer/scheduler
+                        checkpoint = torch.load(checkpoint_file, map_location=self.device)
+                        self.model.load_state_dict(checkpoint["model_state_dict"])
+                        
+                        if self.optimizer and "optimizer_state_dict" in checkpoint:
+                            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                        if self.scheduler and "scheduler_state_dict" in checkpoint:
+                            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                            
+                        global_step = checkpoint.get("global_step", 0)
+                        logger.info(f"Resumed from global step {global_step}")
+                        return global_step
+                        
+                    logger.warning("Failed to download neuron checkpoint. Starting from scratch.")
+                    return 0
+                    
+                logger.warning(f"No bucket info for neuron {highest_stake_hotkey}. Starting from scratch.")
+                return 0
+                
+            logger.warning("No neurons found. Starting from scratch.")
+            return 0
+            
+        except Exception as e:
+            logger.error(f"Error loading checkpoint: {e}")
+            return 0
+
+    def cleanup(self):
+        """Cleanup background workers"""
+        if not self._shutdown:
+            self._shutdown = True
+            
+            # Signal upload worker to stop
+            try:
+                self.upload_queue.put_nowait(None)
+            except queue.Full:
+                pass
+
+            # Wait for upload thread to finish with timeout
+            if hasattr(self, 'upload_thread'):
+                self.upload_thread.join(timeout=5.0)
+            
+            # Cleanup thread pool
+            if hasattr(self, 'thread_pool'):
+                self.thread_pool.shutdown(wait=True)
+                
+            logger.info("CheckpointManager shutdown complete")
+
+    def __del__(self):
+        """Ensure thread pool is cleaned up"""
+        self.cleanup()

@@ -136,45 +136,31 @@ class Miner:
             tplr.logger.error(f"Commitment error: {str(e)}")
             tplr.commit(self.subtensor, self.wallet, self.config.netuid)
 
-        # Init Wandb.
-        # Ensure the wandb directory exists
-        wandb_dir = os.path.join(os.getcwd(), 'wandb')
-        os.makedirs(wandb_dir, exist_ok=True)
-        # Init Wandb.
-        # Ensure the wandb directory exists
-        wandb_dir = os.path.join(os.getcwd(), 'wandb')
-        os.makedirs(wandb_dir, exist_ok=True)
+        # # Init Wandb.
+        # # Ensure the wandb directory exists
+        # wandb_dir = os.path.join(os.getcwd(), 'wandb')
+        # os.makedirs(wandb_dir, exist_ok=True)
 
-        # Define the run ID file path inside the wandb directory
-        run_id_file = os.path.join(wandb_dir, f"wandb_run_id_M{self.uid}_{tplr.__version__}.txt")
-        # Define the run ID file path inside the wandb directory
-        run_id_file = os.path.join(wandb_dir, f"wandb_run_id_M{self.uid}_{tplr.__version__}.txt")
+        # # Define the run ID file path inside the wandb directory
+        # run_id_file = os.path.join(wandb_dir, f"wandb_run_id_M{self.uid}_{tplr.__version__}.txt")
 
-        # Attempt to read the existing run ID
-        if os.path.exists(run_id_file):
-            with open(run_id_file, 'r') as f:
-                run_id = f.read().strip()
-            tplr.logger.info(f"Resuming WandB run with id {run_id}")
-        else:
-            run_id = None
-            tplr.logger.info("Starting a new WandB run.")
-        # Attempt to read the existing run ID
-        if os.path.exists(run_id_file):
-            with open(run_id_file, 'r') as f:
-                run_id = f.read().strip()
-            tplr.logger.info(f"Resuming WandB run with id {run_id}")
-        else:
-            run_id = None
-            tplr.logger.info("Starting a new WandB run.")
+        # # Attempt to read the existing run ID
+        # if os.path.exists(run_id_file):
+        #     with open(run_id_file, 'r') as f:
+        #         run_id = f.read().strip()
+        #     tplr.logger.info(f"Resuming WandB run with id {run_id}")
+        # else:
+        #     run_id = None
+        #     tplr.logger.info("Starting a new WandB run.")
 
-        # Initialize WandB
-        self.wandb = tplr.initialize_wandb(
-            run_prefix='M',
-            uid=self.uid,
-            config=self.config,
-            group='miner',
-            job_type='training'
-        )
+        # # Initialize WandB
+        # self.wandb = tplr.initialize_wandb(
+        #     run_prefix='M',
+        #     uid=self.uid,
+        #     config=self.config,
+        #     group='miner',
+        #     job_type='training'
+        # )
 
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
@@ -544,21 +530,21 @@ class Miner:
                         await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
                         tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Cleaned file history.")
 
-                        # Wait until we are on a new window.
-                        end_step = tplr.T()
-                        while self.current_window == window:
-                            await asyncio.sleep(0.1)
-                        window_time_delta = self.window_time - end_step
-                        window_delta_str = f"[red]{window_time_delta:.2f}[/red]" if window_time_delta < 0 else f"[green]+{window_time_delta:.2f}[/green]"
-                        tplr.logger.info(f"{tplr.P(window, end_step - start_step)}[{window_delta_str}]: Finished step.")
-                        wandb.log({
-                            "miner/loss": step_loss,
-                            "miner/tokens_per_step": tokens_per_step,
-                            "miner/tokens_per_second": tokens_per_second,
-                            "miner/sample_rate": self.sample_rate,
-                            "miner/utilization": train_duration / (end_step - start_step),
-                            "miner/learning_rate": self.scheduler.get_last_lr()[0]
-                        }, step=self.global_step)
+                    # Wait until we are on a new window.
+                    end_step = tplr.T()
+                    while self.current_window == window:
+                        await asyncio.sleep(0.1)
+                    window_time_delta = self.window_time - end_step
+                    window_delta_str = f"[red]{window_time_delta:.2f}[/red]" if window_time_delta < 0 else f"[green]+{window_time_delta:.2f}[/green]"
+                    tplr.logger.info(f"{tplr.P(window, end_step - start_step)}[{window_delta_str}]: Finished step.")
+                    # wandb.log({
+                    #     "miner/loss": step_loss,
+                    #     "miner/tokens_per_step": tokens_per_step,
+                    #     "miner/tokens_per_second": tokens_per_second,
+                    #     "miner/sample_rate": self.sample_rate,
+                    #     "miner/utilization": train_duration / (end_step - start_step),
+                    #     "miner/learning_rate": self.scheduler.get_last_lr()[0]
+                    # }, step=self.global_step)
 
                 # Catch keyboard interrrupt.
                 except KeyboardInterrupt:

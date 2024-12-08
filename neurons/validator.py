@@ -29,7 +29,6 @@ import time
 import torch
 from tqdm import tqdm
 from transformers import LlamaForCausalLM
-import pandas as pd
 import wandb
 import wandb.plot
 from asyncio import TimeoutError
@@ -150,7 +149,25 @@ class Validator:
             group='validator',
             job_type='validation'
         )
-        self.metrics_history = pd.DataFrame()
+
+
+        # Set checkpoint path
+        if self.config.checkpoint_path is None:
+            # Default path if none provided
+            self.checkpoint_path = f"checkpoints/checkpoint-V{self.uid}.pth"
+        else:
+            self.checkpoint_path = self.config.checkpoint_path
+
+        # Create checkpoint directory if it doesn't exist
+        os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
+
+        # Retrieve bucket info for all neurons
+        self.buckets = tplr.get_all_buckets(
+            subtensor=self.subtensor,
+            netuid=self.config.netuid,
+            metagraph=self.metagraph
+        )
+
         # Init model.
         tplr.logger.info('\n' + '-' * 40 + ' Hparams ' + '-' * 40)
         self.hparams = tplr.load_hparams()
@@ -160,56 +177,22 @@ class Validator:
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
         self.model.eval()
-
-        # Set checkpoint path
-        self.checkpoint_path = f"checkpoint-V{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path 
-
-        # Load checkpoint if it exists
-        if os.path.exists(self.checkpoint_path):
-            tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
-
-            # The load_checkpoint function updates the model's state in place
-            global_step, additional_state = asyncio.run(tplr.load_checkpoint(
-                filename=self.checkpoint_path,
-                model=self.model,            # Model state is updated inside load_checkpoint
-                device=self.config.device
-            ))
-
-            # Update global_step
-            self.global_step = global_step
-
-            # Load additional state variables
-            self.scores = additional_state.get('scores', torch.zeros(256, dtype=torch.float32))
-            self.weights = additional_state.get('weights', torch.zeros(256, dtype=torch.float32))
-
-            tplr.logger.info(f"Resumed from global step {self.global_step}")
-        else:
-            tplr.logger.info("No checkpoint found. Starting from scratch.")
-            self.global_step = 0
-            self.scores = torch.zeros(256, dtype=torch.float32)
-            self.weights = torch.zeros(256, dtype=torch.float32)
-
-        # Init buckets.
-        buckets = tplr.get_all_commitments(self.subtensor.substrate, self.config.netuid, self.metagraph)
-        self.buckets = []
-        buckets = tplr.get_all_commitments(
-            substrate=self.subtensor.substrate,
-            netuid=self.config.netuid,
-            metagraph=self.metagraph
+        
+        # Initialize checkpoint manager
+        self.checkpoint_manager = tplr.CheckpointManager(
+            model=self.model,
+            checkpoint_path=self.checkpoint_path,
+            wallet=self.wallet,
+            device=self.config.device,
         )
-
-        for uid in self.metagraph.uids:
-            bucket = buckets.get(uid)
-            tplr.logger.info(f"UID {uid} bucket: {bucket}")
-
-            if bucket is not None:
-                tplr.logger.info(f"Retrieved valid bucket for UID {uid}: {bucket.name}")
-                self.buckets.append(bucket)
-            else:
-                tplr.logger.info(f"No valid bucket found for UID {uid}")
-                self.buckets.append(None)
-
-        tplr.logger.info(f"Final list of buckets: {self.buckets}")
+        
+        # Load initial checkpoint
+        self.global_step = asyncio.run(
+            self.checkpoint_manager.load_from_highest_stake(
+                metagraph=self.metagraph,
+                buckets=self.buckets
+            )
+        )
 
         self.last_window = 0
         self.optimal_pages_per_step = 4
@@ -250,27 +233,28 @@ class Validator:
 
     async def perform_update(self):
         """Updates subtensor connection, metagraph, hyperparameters, and buckets."""
-        self.subtensor = bt.subtensor(config=self.config)
-        self.metagraph = self.subtensor.metagraph(self.config.netuid)
+        async with self.metagraph_lock:
+            self.subtensor = bt.subtensor(config=self.config)
+            self.metagraph = self.subtensor.metagraph(self.config.netuid)
 
-        # Fetch all commitments at once
         buckets = tplr.get_all_commitments(
             substrate=self.subtensor.substrate,
             netuid=self.config.netuid,
             metagraph=self.metagraph
         )
 
-        self.buckets = []
-        for uid in self.metagraph.uids:
-            bucket = buckets.get(uid)
-            if isinstance(bucket, bytes):
-                bucket = bucket.decode('utf-8')
-            if bucket is not None :
-                tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
-                self.buckets.append(bucket)
-            else:
-                tplr.logger.debug(f"UID {uid}: Invalid or missing bucket: {bucket}")
-                self.buckets.append(None)
+        async with self.buckets_lock:
+            self.buckets = []
+            for uid in self.metagraph.uids:
+                bucket = buckets.get(uid)
+                if isinstance(bucket, bytes):
+                    bucket = bucket.decode('utf-8')
+                if bucket is not None:
+                    tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
+                    self.buckets.append(bucket)
+                else:
+                    tplr.logger.debug(f"UID {uid}: Invalid or missing bucket: {bucket}")
+                    self.buckets.append(None)
 
     async def run(self):
         # Main loop.
@@ -313,19 +297,13 @@ class Validator:
                 window = self.current_window - offset
 
 
-                # Save checkpoint every 500 steps
-                if self.global_step % 500 == 0:
-                    tplr.logger.info(f"Scheduling checkpoint save at block {self.global_step}")
-                    # Update last checkpoint block to avoid repeated saves at the same block
-                    self.last_checkpoint_block = self.global_step
-                    # Schedule the save_checkpoint function to run asynchronously
-                    asyncio.create_task(tplr.save_checkpoint(
-                        filename=self.checkpoint_path,
-                        model=self.model,
+                # Upload checkpoint every 10 steps
+                if self.global_step % 10 == 0:
+                    self.checkpoint_manager.save_and_upload(
                         global_step=self.global_step,
                         scores=self.scores,
                         weights=self.weights
-                    ))
+                    )
 
                 # Download the state for the eval window.
                 st = tplr.T()
@@ -336,6 +314,7 @@ class Validator:
                     # Wait for the next window
                     while self.current_window - offset == window:
                         await asyncio.sleep(0.1)  # Keep waiting until the window changes
+             
 
                 state_slices = await tplr.download_slices_for_buckets_and_windows(
                     buckets=valid_buckets,
@@ -611,11 +590,12 @@ class Validator:
             except Exception as e:
                 tplr.logger.exception(f"Exception during training loop: {e}")
                 continue
+            finally:
+                 self.checkpoint_manager.cleanup()
 
     # Returns the slice window based on a blotplr.
     def block_to_window(self, block: int) -> int:
         return int(block / self.hparams.window_length)
-
     # Returns the slice window based on a blotplr.
     def window_to_seed(self, window: int) -> int:
         return str( self.subtensor.get_block_hash( window * self.hparams.window_length ) )

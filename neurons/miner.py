@@ -103,6 +103,16 @@ class Miner:
         tplr.logger.info('\n' + '-' * 40 + ' Objects ' + '-' * 40)
         tplr.logger.info(f'\nWallet: {self.wallet}\nSubtensor: {self.subtensor}\nMetagraph: {self.metagraph}\nUID: {self.uid}')
 
+        # Set checkpoint path
+        if self.config.checkpoint_path is None:
+            # Default path if none provided
+            self.checkpoint_path = f"checkpoints/checkpoint-M{self.uid}.pth"
+        else:
+            self.checkpoint_path = self.config.checkpoint_path
+            
+        # Create checkpoint directory if it doesn't exist
+        os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
+
         # Init bucket.
         try:
             tplr.logger.debug(f'bucket_name: {tplr.config.BUCKET_SECRETS["bucket_name"]}')
@@ -167,34 +177,7 @@ class Miner:
             betas=(self.hparams.optimizer_beta1, self.hparams.optimizer_beta2),  # B1 and B2
             weight_decay=self.hparams.optimizer_weight_decay,  # Weight decay
             foreach=True,  # more memory usage, but faster
-        ) 
-
-        # Load checkpoint if it exists
-        self.checkpoint_path = f"checkpoint-M{self.uid}.pth" if self.config.checkpoint_path is None else self.config.checkpoint_path
-        if os.path.exists(self.checkpoint_path):
-            tplr.logger.info(f"Loading checkpoint from {self.checkpoint_path}")
-            global_step, _ = asyncio.run(tplr.load_checkpoint(
-                filename=self.checkpoint_path,
-                model=self.model,
-                optimizer=self.optimizer,
-                scheduler=None,
-                device=self.config.device
-            ))
-
-            self.global_step = global_step
-            if global_step is None:
-                tplr.logger.warning(f"Corrupt checkpoint detected at {self.checkpoint_path}. Removing file and starting fresh.")
-                try:
-                    os.remove(self.checkpoint_path)
-                    tplr.logger.info(f"Removed corrupt checkpoint: {self.checkpoint_path}")
-                except OSError as e:
-                    tplr.logger.error(f"Failed to remove corrupt checkpoint: {e}")
-                global_step = 0
-            else:
-                tplr.logger.info(f"Resumed from global step {self.global_step}")
-        else:
-            tplr.logger.info("No checkpoint file found. Starting from scratch.")
-            self.global_step = 0
+        )
 
         # Initialize learning rate scheduler
         self.scheduler = tplr.get_wsd_scheduler(
@@ -203,28 +186,44 @@ class Miner:
             num_stable_steps=self.hparams.num_stable_steps,
             num_decay_steps=self.hparams.num_decay_steps,
         )
-
-        # Init buckets.
-        buckets = tplr.get_all_commitments(self.subtensor.substrate, self.config.netuid, self.metagraph)
-        self.buckets = []
-        buckets = tplr.get_all_commitments(
-            substrate=self.subtensor.substrate,
+        
+        # Retrieve bucket info for all neurons
+        self.buckets = tplr.get_all_buckets(
+            subtensor=self.subtensor,
             netuid=self.config.netuid,
             metagraph=self.metagraph
         )
 
-        for uid in self.metagraph.uids:
-            bucket = buckets.get(uid)
-            tplr.logger.info(f"UID {uid} bucket: {bucket}")
+        # # Load checkpoint from highest stake neuron
+        # self.global_step = asyncio.run(
+        #     tplr.load_highest_stake_checkpoint(
+        #         metagraph=self.metagraph,
+        #         buckets=self.buckets,
+        #         model=self.model,
+        #         checkpoint_path=self.checkpoint_path,
+        #         optimizer=self.optimizer,
+        #         scheduler=self.scheduler,
+        #         device=self.config.device
+        #     )
+        # )
 
-            if bucket is not None:
-                tplr.logger.info(f"Retrieved valid bucket for UID {uid}: {bucket.name}")
-                self.buckets.append(bucket)
-            else:
-                tplr.logger.info(f"No valid bucket found for UID {uid}")
-                self.buckets.append(None)
-
-        tplr.logger.info(f"Final list of buckets: {self.buckets}")
+        # Initialize checkpoint manager
+        self.checkpoint_manager = tplr.CheckpointManager(
+            model=self.model,
+            checkpoint_path=self.checkpoint_path,
+            wallet=self.wallet,
+            device=self.config.device,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler
+        )
+        
+        # Load initial checkpoint
+        self.global_step = asyncio.run(
+            self.checkpoint_manager.load_from_highest_stake(
+                metagraph=self.metagraph,
+                buckets=self.buckets
+            )
+        )
 
         # Init run state.
         self.sample_rate = 1.0
@@ -235,7 +234,6 @@ class Miner:
         self.new_window_event = asyncio.Event()
         self.stop_event = asyncio.Event()    
         self.last_full_steps = self.hparams.desired_batch_size // self.config.actual_batch_size
-        bt.logging.off
         self.save_location = self.config.save_location
         if self.save_location is None:
             import tempfile
@@ -259,12 +257,6 @@ class Miner:
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
 
-        # Fetch all commitments at once
-        buckets = tplr.get_all_commitments(
-            substrate=self.subtensor.substrate,
-            netuid=self.config.netuid,
-            metagraph=self.metagraph
-        )
 
         # Fetch all commitments at once
         buckets = tplr.get_all_commitments(
@@ -317,18 +309,6 @@ class Miner:
                 # Start the window step.     
                 tplr.logger.info('[bold]' + '\n' + '-' * 40 + f' Step: {self.global_step} ' + '-' * 40)
                 self.global_step += 1
-
-                # Save checkpoint every 500 steps
-                if self.global_step % 500 == 0:
-                    tplr.logger.info(f"Scheduling checkpoint save at global step {self.global_step}")
-                    # Schedule the tplr.save_checkpoint function to run asynchronously
-                    asyncio.create_task(tplr.save_checkpoint(
-                        filename=self.checkpoint_path,
-                        model=self.model,
-                        optimizer=self.optimizer,
-                        scheduler=self.scheduler,
-                        global_step=self.global_step
-                    ))
                 start_step = tplr.T()
                 window = self.current_window
 
@@ -515,11 +495,15 @@ class Miner:
                 await self.update_task
                 sys.exit(0)
 
+
             # Catch unknown.
             except Exception as e:
                 message = f"Exception during training loop: {escape(str(e))}"
                 tplr.logger.exception(message)
                 continue
+            finally:
+                 self.checkpoint_manager.cleanup()
+
 
     # Returns the slice window based on a blotplr.
     def block_to_window(self, block: int) -> int:

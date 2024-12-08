@@ -135,8 +135,20 @@ async def apply_slices_to_model(
     key: str = "slice",
 ) -> int:
     """
-    Applies downloaded model parameter slices to a model for a specific window.
-    Skips only incompatible slices instead of all slices if a mismatch occurs.
+    Applies downloaded model parameter slices to a model for a specific window,
+    weighting each contribution equally based on the norm of each miner's update
+    and preserving the overall parameter scale.
+
+    Args:
+        model (torch.nn.Module): The PyTorch model to apply slices to
+        window (int): The window number to load slices for
+        seed (str): Seed used to determine which parameters to select
+        compression (int): Compression factor for parameter selection
+        save_location (str): Directory where slices are saved
+        key (str, optional): Prefix for the slice files. Defaults to 'slice'.
+
+    Returns:
+        int: The maximum global step seen across all applied slices.
     """
     max_global_step = 0
     indices_dict = await get_indices_for_window(model, seed, compression)
@@ -144,151 +156,88 @@ async def apply_slices_to_model(
         window=window, save_location=save_location, key=key
     )
 
-    # Initialize tracking for valid slices
-    valid_slice_files = []
-
-    expected_param_shapes = {
-        name: param.size() for name, param in model.named_parameters()
+    param_sums = {
+        name: torch.zeros(
+            len(indices_dict[name]), dtype=param.data.dtype, device=model.device
+        )
+        for name, param in model.named_parameters()
+        if name in indices_dict
     }
+    slice_norms = []  # Collect norms for computing median
+    num_files = 0  # Track the number of valid files
 
-    # Validate each slice individually
     for file_i in slice_files:
         try:
-            # Check for version match
+            filename = os.path.basename(file_i)
             match = re.match(
                 rf"^{key}-{window}-.+-v{re.escape(__version__)}\.pt$",
-                os.path.basename(file_i),
+                filename,
             )
             if not match:
-                logger.debug(f"Skipping file {file_i} due to version mismatch.")
-                continue
-
-            # Load the slice
-            slice_i = await get_slices(file_i, model.device)
-
-            # Validate parameter names and sizes
-            incompatible = False
-            for name, values in slice_i.items():
-                if name == "global_step":
-                    continue
-                if name not in expected_param_shapes:
-                    logger.error(f"Parameter '{name}' in {file_i} not found in model.")
-                    incompatible = True
-                    break
-                expected_length = indices_dict[name].numel()
-                if values.numel() != expected_length:
-                    logger.error(
-                        f"Size mismatch for parameter '{name}' in {file_i}: "
-                        f"expected {expected_length}, got {values.numel()}."
-                    )
-                    incompatible = True
-                    break
-            if incompatible:
-                logger.error(
-                    f"Incompatible slice detected in {file_i}. Skipping this slice."
+                logger.warning(
+                    f"Skipping file {file_i} due to version mismatch in filename."
                 )
                 continue
 
-            # If compatible, add to valid slices
-            valid_slice_files.append(file_i)
-
-        except Exception as e:
-            logger.error(f"Error validating slice {file_i}: {e}")
-            continue
-
-    if not valid_slice_files:
-        logger.error("No compatible slices found. Skipping slice application.")
-        return max_global_step  # No updates applied
-
-    # Proceed to apply valid slices
-    slices_per_param = {name: 0 for name, _ in model.named_parameters()}
-    param_sums = {
-        name: torch.zeros_like(param.data) for name, param in model.named_parameters()
-    }
-
-    for file_i in valid_slice_files:
-        try:
             slice_i = await get_slices(file_i, model.device)
             slice_global_step = slice_i.get("global_step")
 
             if slice_global_step is None:
-                logger.debug(f"Skipping {file_i} because it has no global_step.")
+                logger.warning(
+                    f"Skipping slice {file_i} because it has no global_step."
+                )
                 continue
 
             max_global_step = max(max_global_step, slice_global_step)
 
+            # Compute norm of the slice
+            slice_norm = 0.0
+            slice_values = {}
+
             for name, param in model.named_parameters():
                 if name not in indices_dict or name not in slice_i:
                     continue
-                try:
-                    values = slice_i[name].to(param.device)
-                    param_indices = indices_dict[name].to(param.device)
+                values = slice_i[name].to(model.device)
+                slice_norm += torch.norm(values, p=2).item() ** 2  # Square of L2 norm
+                slice_values[name] = values
 
-                    # Size validation
-                    if values.size(0) != param_indices.size(0):
-                        logger.debug(
-                            f"Size mismatch for '{name}' in {file_i}: "
-                            f"values size {values.size(0)} != indices size {param_indices.size(0)}. "
-                            "Skipping this parameter."
-                        )
-                        continue
+            slice_norm = (
+                np.sqrt(slice_norm) + 1e-8
+            )  # Add epsilon to avoid division by zero
+            slice_norms.append(slice_norm)  # Collect norm for computing median
+            num_files += 1  # Increment valid file count
 
-                    # Index bounds check
-                    param_view = param_sums[name].view(-1)
-                    if param_indices.max() >= param_view.size(0):
-                        logger.debug(
-                            f"Index out of bounds for '{name}' in {file_i}: "
-                            f"max index {param_indices.max()} >= param size {param_view.size(0)}. "
-                            "Skipping this parameter."
-                        )
-                        continue
+            # Normalize and accumulate
+            for name, values in slice_values.items():
+                normalized_values = values / slice_norm
+                param_sums[name] += normalized_values
 
-                    # Apply slice
-                    param_view[param_indices] += values
-                    slices_per_param[name] += 1
-                    del values
-                except Exception as e:
-                    logger.debug(f"Error applying '{name}' from {file_i}: {e}")
-                    continue
-            del slice_i
+            del slice_i, slice_values
+
+        except Timeout:
+            logger.error(f"Timeout occurred while trying to acquire lock on {file_i}")
+            continue
         except Exception as e:
-            logger.error(f"Error processing {file_i}: {e}")
+            logger.exception(f"Error applying slice from {file_i}: {e}")
             continue
 
-    # Update model parameters
-    updated_params = 0
-    skipped_params = 0
+    if not num_files or not slice_norms:
+        logger.warning(f"No valid slices found for window {window}")
+        return max_global_step
+
+    # Compute median norm
+    median_norm = torch.median(torch.tensor(slice_norms))
+
+    # Apply the average of normalized slices to the parameters and scale by median_norm
     for name, param in model.named_parameters():
-        if slices_per_param.get(name, 0) == 0 or name not in indices_dict:
-            skipped_params += 1
+        if name not in indices_dict:
             continue
-        try:
-            param_indices = indices_dict[name].to(param.device)
-            param_view = param.data.view(-1)
+        param_indices = indices_dict[name].to(model.device)
+        avg_param = param_sums[name] / num_files  # Average normalized slices
+        avg_param = avg_param * median_norm  # Scale by median norm
+        avg_param = avg_param.to(param.data.dtype)
+        param.data.view(-1)[param_indices] = avg_param.clone()
 
-            if param_indices.max() >= param_view.size(0):
-                logger.debug(
-                    f"Index out of bounds during update for '{name}': "
-                    f"max index {param_indices.max()} >= param size {param_view.size(0)}. "
-                    "Skipping this parameter."
-                )
-                skipped_params += 1
-                continue
-
-            avg_param = (
-                param_sums[name].view(-1)[param_indices] / slices_per_param[name]
-            )
-            avg_param = avg_param.to(param.data.dtype)
-            param_view[param_indices] = avg_param.clone()
-            updated_params += 1
-        except Exception as e:
-            logger.debug(f"Error updating '{name}': {e}")
-            skipped_params += 1
-            continue
-
-    logger.info(
-        f"Updated {updated_params} parameters, skipped {skipped_params} parameters"
-    )
     return max_global_step
 
 
@@ -688,17 +637,29 @@ async def download_slices_for_buckets_and_windows(
         - Returns empty dict if no valid buckets provided
     """
     # Filter out None buckets
-    valid_buckets = [b for b in buckets if b is not None]
+    valid_buckets = []
+    for b in buckets:
+        if b is None:
+            continue
+        if isinstance(b, str):
+            logger.warning(f"Received string instead of Bucket object: {b}")
+            continue
+        if not isinstance(b, Bucket):
+            logger.warning(f"Invalid bucket type: {type(b)}")
+            continue
+        valid_buckets.append(b)
 
     if not valid_buckets:
-        logger.warning(
-            "No valid buckets provided to download_slices_for_buckets_and_windows."
-        )
+        logger.warning("No valid buckets provided")
         return {}
 
-    logger.debug(
-        f"Downloading files for buckets {[b.name for b in valid_buckets]} and windows {windows}"
-    )
+    try:
+        logger.debug(
+            f"Downloading files for buckets {[b.name for b in valid_buckets]} and windows {windows}"
+        )
+    except Exception as e:
+        logger.error(f"Error logging bucket names: {e}")
+        return {}
 
     session = get_session()
     tasks = []

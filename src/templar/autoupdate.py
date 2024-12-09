@@ -236,4 +236,4 @@ class AutoUpdate(threading.Thread):
                 self.try_update()
             except Exception as e:
                 logger.exception("Exception during autoupdate check", exc_info=e)
-            time.sleep(900)  # Sleep for 15 mins
+            time.sleep(60)  # Sleep for 15 mins

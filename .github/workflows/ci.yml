@@ -1,0 +1,46 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    env:
+      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
+      READ_ACCESS_KEY_ID: ${{ secrets.READ_ACCESS_KEY_ID }}
+      READ_SECRET_ACCESS_KEY: ${{ secrets.READ_SECRET_ACCESS_KEY }}
+      WRITE_ACCESS_KEY_ID: ${{ secrets.WRITE_ACCESS_KEY_ID }}
+      WRITE_SECRET_ACCESS_KEY: ${{ secrets.WRITE_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up UV
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: uv sync --extra all
+
+      - name: Create .env.yaml
+        run: |
+          echo "account_id: \"$ACCOUNT_ID\"" > .env.yaml
+          echo "read:" >> .env.yaml
+          echo "  access_key_id: \"$READ_ACCESS_KEY_ID\"" >> .env.yaml
+          echo "  secret_access_key: \"$READ_SECRET_ACCESS_KEY\"" >> .env.yaml
+          echo "write:" >> .env.yaml
+          echo "  access_key_id: \"$WRITE_ACCESS_KEY_ID\"" >> .env.yaml
+          echo "  secret_access_key: \"$WRITE_SECRET_ACCESS_KEY\"" >> .env.yaml
+
+      - name: Run Ruff Lint
+        uses: astral-sh/ruff-action@v1
+        with:
+          args: check
+
+      - name: Run Ruff Format
+        uses: astral-sh/ruff-action@v1
+        with:
+          args: format --check
+
+      - name: Run Tests
+        run: uv run --frozen pytest

@@ -15,6 +15,8 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 # fmt: off
+# ruff: noqa
+
 
 # Global imports.
 import sys
@@ -194,18 +196,7 @@ class Miner:
             metagraph=self.metagraph
         )
 
-        # # Load checkpoint from highest stake neuron
-        # self.global_step = asyncio.run(
-        #     tplr.load_highest_stake_checkpoint(
-        #         metagraph=self.metagraph,
-        #         buckets=self.buckets,
-        #         model=self.model,
-        #         checkpoint_path=self.checkpoint_path,
-        #         optimizer=self.optimizer,
-        #         scheduler=self.scheduler,
-        #         device=self.config.device
-        #     )
-        # )
+
 
         # Initialize checkpoint manager
         self.checkpoint_manager = tplr.CheckpointManager(

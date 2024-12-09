@@ -296,7 +296,7 @@ class Validator:
 
 
                     # Upload checkpoint every 10 steps
-                    if self.global_step % 1 == 0:
+                    if self.global_step % 10 == 0:
                         self.checkpoint_manager.save_and_upload(
                             global_step=self.global_step,
                             block_number=self.current_block,

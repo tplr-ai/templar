@@ -5,12 +5,10 @@ import botocore
 import concurrent
 import glob
 import os
-import queue
 import re
 import shutil
 import torch
 from aiobotocore.session import get_session
-import threading
 from typing import List, Optional, Union
 
 from . import __version__
@@ -197,7 +195,6 @@ async def download_checkpoint_from_neuron(
     import re
 
     # Prepare the checkpoint filename pattern
-    filename_pattern = f"neuron_checkpoint_{neuron_hotkey}_b*_v*.pth"
     regex_pattern = rf"neuron_checkpoint_{neuron_hotkey}_b(\d+)_v[\d\.]+\.pth"
 
     local_checkpoint_path = None
@@ -213,17 +210,19 @@ async def download_checkpoint_from_neuron(
     ) as s3_client:
         try:
             # List all checkpoint files for this neuron in their bucket
-            paginator = s3_client.get_paginator('list_objects_v2')
+            paginator = s3_client.get_paginator("list_objects_v2")
             latest_block_number = -1
             latest_filename = None
 
-            async for page in paginator.paginate(Bucket=bucket_info.name, Prefix=f"neuron_checkpoint_{neuron_hotkey}_"):
-                contents = page.get('Contents', [])
+            async for page in paginator.paginate(
+                Bucket=bucket_info.name, Prefix=f"neuron_checkpoint_{neuron_hotkey}_"
+            ):
+                contents = page.get("Contents", [])
                 if not contents:
                     continue  # Move to the next page
 
                 for obj in contents:
-                    key = obj['Key']
+                    key = obj["Key"]
                     match = re.match(regex_pattern, key)
                     if match:
                         block_number = int(match.group(1))
@@ -233,20 +232,22 @@ async def download_checkpoint_from_neuron(
 
             if latest_filename:
                 # Download the latest checkpoint
-                local_checkpoint_path = os.path.join(
-                    checkpoint_dir, latest_filename
-                )
+                local_checkpoint_path = os.path.join(checkpoint_dir, latest_filename)
                 os.makedirs(os.path.dirname(local_checkpoint_path), exist_ok=True)
 
-                response = await s3_client.get_object(Bucket=bucket_info.name, Key=latest_filename)
+                response = await s3_client.get_object(
+                    Bucket=bucket_info.name, Key=latest_filename
+                )
                 async with aiofiles.open(local_checkpoint_path, "wb") as f:
                     while True:
-                        chunk = await response['Body'].read(1024 * 1024)
+                        chunk = await response["Body"].read(1024 * 1024)
                         if not chunk:
                             break
                         await f.write(chunk)
 
-                logger.debug(f"Successfully downloaded checkpoint: {local_checkpoint_path}")
+                logger.debug(
+                    f"Successfully downloaded checkpoint: {local_checkpoint_path}"
+                )
                 return local_checkpoint_path
             else:
                 logger.info(f"No valid checkpoints found for neuron {neuron_hotkey}")
@@ -421,7 +422,8 @@ async def get_latest_checkpoint_from_neuron(bucket_info, neuron_hotkey):
 
             # Download the checkpoint
             local_checkpoint_path = os.path.join(
-                "checkpoints", latest_key  # Adjust the path as needed
+                "checkpoints",
+                latest_key,  # Adjust the path as needed
             )
             os.makedirs(os.path.dirname(local_checkpoint_path), exist_ok=True)
 
@@ -469,7 +471,7 @@ class CheckpointManager:
         if not hasattr(self, "thread_pool") or self.thread_pool._shutdown:
             self.thread_pool = concurrent.futures.ThreadPoolExecutor(
                 max_workers=5,  # Adjust max_workers as needed
-                thread_name_prefix="checkpoint_worker"
+                thread_name_prefix="checkpoint_worker",
             )
             self._shutdown = False
 
@@ -551,7 +553,7 @@ class CheckpointManager:
         # Pattern to match checkpoint filenames
         pattern = os.path.join(
             self.checkpoint_dir,
-            f"neuron_checkpoint_{self.wallet.hotkey.ss58_address}_b*_v{__version__}.pth"
+            f"neuron_checkpoint_{self.wallet.hotkey.ss58_address}_b*_v{__version__}.pth",
         )
 
         # Get a list of checkpoint files
@@ -565,7 +567,7 @@ class CheckpointManager:
             filename = os.path.basename(filepath)
             match = re.match(
                 rf"neuron_checkpoint_{self.wallet.hotkey.ss58_address}_b(\d+)_v{__version__}\.pth",
-                filename
+                filename,
             )
             if match:
                 block_number = int(match.group(1))
@@ -610,18 +612,19 @@ class CheckpointManager:
             ) as s3_client:
                 # Build list of keys to delete
                 delete_objects = {
-                    'Objects': [
-                        {'Key': os.path.basename(filepath)}
+                    "Objects": [
+                        {"Key": os.path.basename(filepath)}
                         for _, filepath in old_checkpoints
                     ],
-                    'Quiet': True
+                    "Quiet": True,
                 }
-                if delete_objects['Objects']:
+                if delete_objects["Objects"]:
                     response = await s3_client.delete_objects(
-                        Bucket=bucket,
-                        Delete=delete_objects
+                        Bucket=bucket, Delete=delete_objects
                     )
-                    logger.debug(f"Deleted old checkpoints from S3: {delete_objects['Objects']}")
+                    logger.debug(
+                        f"Deleted old checkpoints from S3: {delete_objects['Objects']}"
+                    )
                     logger.debug(f"S3 deletion response: {response}")
                 else:
                     logger.debug("No old checkpoints to delete from S3.")
@@ -668,8 +671,12 @@ class CheckpointManager:
                             filename=checkpoint_file,
                             model=self.model,
                             device=self.device,
-                            optimizer=self.optimizer if self.optimizer is not None else None,
-                            scheduler=self.scheduler if self.scheduler is not None else None,
+                            optimizer=self.optimizer
+                            if self.optimizer is not None
+                            else None,
+                            scheduler=self.scheduler
+                            if self.scheduler is not None
+                            else None,
                         )
                         logger.info(f"Resumed from global step {global_step}")
                         return global_step if global_step is not None else 0

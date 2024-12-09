@@ -420,60 +420,24 @@ class CheckpointManager:
         self.optimizer = optimizer
         self.scheduler = scheduler
 
-        # Define checkpoint_dir based on checkpoint_path
         self.checkpoint_dir = os.path.dirname(self.checkpoint_path)
         if not self.checkpoint_dir:
             self.checkpoint_dir = os.getcwd()  # Default to current working directory
 
-        # Ensure the checkpoint directory exists
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
         self._shutdown = False
         self._active_futures = set()
-        self.upload_queue = queue.Queue()
         self._initialize_thread_pool()
-        self._start_upload_worker()
 
     def _initialize_thread_pool(self):
         """Initialize a new thread pool if needed"""
         if not hasattr(self, "thread_pool") or self.thread_pool._shutdown:
             self.thread_pool = concurrent.futures.ThreadPoolExecutor(
-                max_workers=2, thread_name_prefix="checkpoint_worker"
+                max_workers=5,  # Adjust max_workers as needed
+                thread_name_prefix="checkpoint_worker"
             )
             self._shutdown = False
-
-    def _start_upload_worker(self):
-        """Start a dedicated thread for handling uploads"""
-
-        def upload_worker():
-            while not self._shutdown:
-                try:
-                    # Wait for upload tasks with timeout
-                    task = self.upload_queue.get(timeout=1.0)
-                    if task is None:  # Shutdown signal
-                        break
-
-                    # Run the upload
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(self._upload_checkpoint_async())
-                    except Exception as e:
-                        logger.error(f"Background upload failed: {e}")
-                    finally:
-                        loop.close()
-                        self.upload_queue.task_done()
-                except queue.Empty:
-                    continue  # Keep checking for new tasks
-
-        self.upload_thread = threading.Thread(
-            target=upload_worker, name="checkpoint_uploader", daemon=True
-        )
-        self.upload_thread.start()
-
-    def _cleanup_future(self, future):
-        """Remove completed future from active set"""
-        self._active_futures.discard(future)
 
     def _save_checkpoint_sync(self, global_step: int, block_number: int, **kwargs):
         """Synchronous checkpoint save."""
@@ -499,6 +463,18 @@ class CheckpointManager:
         torch.save(checkpoint, self.checkpoint_path)
         logger.info(f"Checkpoint saved at {self.checkpoint_path}")
 
+    async def _upload_and_cleanup(self):
+        """Async method to upload the checkpoint and clean up old checkpoints."""
+        try:
+            # Upload the checkpoint
+            await self._upload_checkpoint_async()
+
+            # Cleanup old checkpoints
+            await self._cleanup_old_checkpoints_async()
+
+        except Exception as e:
+            logger.exception(f"Exception in _upload_and_cleanup: {e}")
+
     async def _upload_checkpoint_async(self):
         """Async checkpoint upload."""
         try:
@@ -508,7 +484,7 @@ class CheckpointManager:
             # Get clean bucket name
             bucket = BUCKET_SECRETS["bucket_name"].split("/")[-1]
 
-            # Upload using same client setup as slice upload
+            # Upload using S3 client
             session = get_session()
             async with session.create_client(
                 "s3",
@@ -533,27 +509,10 @@ class CheckpointManager:
             logger.exception(f"Failed to upload checkpoint: {e}")
             raise
 
-    def save_and_upload(self, global_step: int, block_number: int, **kwargs):
-        """Non-blocking save and upload."""
-        try:
-            # Save checkpoint synchronously (usually fast)
-            self._save_checkpoint_sync(global_step, block_number, **kwargs)
-
-            # Clean up old checkpoints
-            self.cleanup_old_checkpoints(max_checkpoints=3)
-
-            # Queue the upload to happen in background
-            if not self._shutdown:
-                self.upload_queue.put_nowait(True)
-                logger.debug("Queued checkpoint for background upload")
-
-        except Exception as e:
-            logger.error(f"Error in save_and_upload: {e}")
-
-    def cleanup_old_checkpoints(self, max_checkpoints=3):
+    async def _cleanup_old_checkpoints_async(self, max_checkpoints=3):
         """
-        Deletes old checkpoints, keeping only the latest 'max_checkpoints' checkpoints
-        both locally and in S3.
+        Asynchronously deletes old checkpoints, keeping only the latest 'max_checkpoints'
+        checkpoints both locally and in S3.
         """
         # Pattern to match checkpoint filenames
         pattern = os.path.join(
@@ -583,6 +542,7 @@ class CheckpointManager:
 
         # Keep the latest 'max_checkpoints' and delete the rest
         old_checkpoints = checkpoints[max_checkpoints:]
+        # Delete local files synchronously (file operations are I/O bound but quick)
         for _, filepath in old_checkpoints:
             try:
                 os.remove(filepath)
@@ -591,7 +551,7 @@ class CheckpointManager:
                 logger.warning(f"Failed to delete local old checkpoint {filepath}: {e}")
 
         # Delete old checkpoints from S3
-        asyncio.run(self._delete_old_checkpoints_from_s3(old_checkpoints))
+        await self._delete_old_checkpoints_from_s3(old_checkpoints)
 
     async def _delete_old_checkpoints_from_s3(self, old_checkpoints):
         """
@@ -635,10 +595,12 @@ class CheckpointManager:
             logger.warning(f"Failed to delete old checkpoints from S3: {e}")
 
     async def load_from_highest_stake(
-        self, metagraph, buckets: List[Optional[Union[str, Bucket]]]
+        self,
+        metagraph,
+        buckets,
     ) -> int:
         """
-        Loads the latest checkpoint from the neuron with the highest stake.
+        Attempts to load checkpoint from the highest stake neuron.
 
         Args:
             metagraph: Network metagraph
@@ -657,30 +619,26 @@ class CheckpointManager:
                 bucket_info = buckets[uid]
 
                 if bucket_info:
-                    checkpoint_file = await get_latest_checkpoint_from_neuron(
+                    checkpoint_dir = os.path.dirname(self.checkpoint_path)
+                    os.makedirs(checkpoint_dir, exist_ok=True)
+
+                    checkpoint_file = await download_checkpoint_from_neuron(
                         bucket_info=bucket_info,
                         neuron_hotkey=highest_stake_hotkey,
+                        checkpoint_dir=checkpoint_dir,
                     )
 
                     if checkpoint_file:
                         # Load the checkpoint with optional optimizer/scheduler
-                        checkpoint = torch.load(
-                            checkpoint_file, map_location=self.device
+                        global_step, _ = await load_checkpoint(
+                            filename=checkpoint_file,
+                            model=self.model,
+                            device=self.device,
+                            optimizer=self.optimizer if self.optimizer is not None else None,
+                            scheduler=self.scheduler if self.scheduler is not None else None,
                         )
-                        self.model.load_state_dict(checkpoint["model_state_dict"])
-
-                        if self.optimizer and "optimizer_state_dict" in checkpoint:
-                            self.optimizer.load_state_dict(
-                                checkpoint["optimizer_state_dict"]
-                            )
-                        if self.scheduler and "scheduler_state_dict" in checkpoint:
-                            self.scheduler.load_state_dict(
-                                checkpoint["scheduler_state_dict"]
-                            )
-
-                        global_step = checkpoint.get("global_step", 0)
                         logger.info(f"Resumed from global step {global_step}")
-                        return global_step
+                        return global_step if global_step is not None else 0
 
                     logger.warning(
                         "Failed to download neuron checkpoint. Starting from scratch."
@@ -699,25 +657,48 @@ class CheckpointManager:
             logger.error(f"Error loading checkpoint: {e}")
             return 0
 
+    def save_and_upload(self, global_step: int, block_number: int, **kwargs):
+        """Non-blocking save and upload."""
+        try:
+            # Save checkpoint synchronously
+            self._save_checkpoint_sync(global_step, block_number, **kwargs)
+
+            # Submit the upload and cleanup task to the thread pool
+            if not self._shutdown:
+                future = self.thread_pool.submit(self._upload_and_cleanup_sync)
+                future.add_done_callback(self._cleanup_future)
+                self._active_futures.add(future)
+                logger.debug("Submitted checkpoint upload to thread pool")
+
+        except Exception as e:
+            logger.error(f"Error in save_and_upload: {e}")
+
+    def _upload_and_cleanup_sync(self):
+        """Sync wrapper to run the async upload and cleanup."""
+        try:
+            logger.info("Starting upload and cleanup task")
+            asyncio.set_event_loop(asyncio.new_event_loop())
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(self._upload_and_cleanup())
+            loop.close()
+            logger.info("Upload and cleanup task completed")
+        except Exception as e:
+            logger.exception(f"Exception in _upload_and_cleanup_sync: {e}")
+
+    def _cleanup_future(self, future):
+        """Callback to clean up completed futures."""
+        self._active_futures.discard(future)
+
     def cleanup(self):
         """Cleanup background workers"""
         if not self._shutdown:
             self._shutdown = True
-
-            # Signal upload worker to stop
-            try:
-                self.upload_queue.put_nowait(None)
-            except queue.Full:
-                pass
-
-            # Wait for upload thread to finish with timeout
-            if hasattr(self, "upload_thread"):
-                self.upload_thread.join(timeout=5.0)
-
-            # Cleanup thread pool
+            # Cancel any remaining futures
+            for future in self._active_futures:
+                future.cancel()
+            # Shutdown thread pool
             if hasattr(self, "thread_pool"):
                 self.thread_pool.shutdown(wait=True)
-
             logger.info("CheckpointManager shutdown complete")
 
     def __del__(self):

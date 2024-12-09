@@ -3,6 +3,7 @@ import asyncio
 import bittensor as bt
 import botocore
 import concurrent
+import glob
 import os
 import queue
 import re
@@ -538,6 +539,9 @@ class CheckpointManager:
             # Save checkpoint synchronously (usually fast)
             self._save_checkpoint_sync(global_step, block_number, **kwargs)
 
+            # Clean up old checkpoints
+            self.cleanup_old_checkpoints(max_checkpoints=3)
+
             # Queue the upload to happen in background
             if not self._shutdown:
                 self.upload_queue.put_nowait(True)
@@ -545,6 +549,90 @@ class CheckpointManager:
 
         except Exception as e:
             logger.error(f"Error in save_and_upload: {e}")
+
+    def cleanup_old_checkpoints(self, max_checkpoints=3):
+        """
+        Deletes old checkpoints, keeping only the latest 'max_checkpoints' checkpoints
+        both locally and in S3.
+        """
+        # Pattern to match checkpoint filenames
+        pattern = os.path.join(
+            self.checkpoint_dir,
+            f"neuron_checkpoint_{self.wallet.hotkey.ss58_address}_b*_v{__version__}.pth"
+        )
+
+        # Get a list of checkpoint files
+        checkpoint_files = glob.glob(pattern)
+        if len(checkpoint_files) <= max_checkpoints:
+            return  # No need to delete any checkpoints
+
+        # Extract block numbers and sort the checkpoints
+        checkpoints = []
+        for filepath in checkpoint_files:
+            filename = os.path.basename(filepath)
+            match = re.match(
+                rf"neuron_checkpoint_{self.wallet.hotkey.ss58_address}_b(\d+)_v{__version__}\.pth",
+                filename
+            )
+            if match:
+                block_number = int(match.group(1))
+                checkpoints.append((block_number, filepath))
+
+        # Sort the checkpoints by block number in descending order
+        checkpoints.sort(reverse=True)
+
+        # Keep the latest 'max_checkpoints' and delete the rest
+        old_checkpoints = checkpoints[max_checkpoints:]
+        for _, filepath in old_checkpoints:
+            try:
+                os.remove(filepath)
+                logger.debug(f"Deleted local old checkpoint: {filepath}")
+            except Exception as e:
+                logger.warning(f"Failed to delete local old checkpoint {filepath}: {e}")
+
+        # Delete old checkpoints from S3
+        asyncio.run(self._delete_old_checkpoints_from_s3(old_checkpoints))
+
+    async def _delete_old_checkpoints_from_s3(self, old_checkpoints):
+        """
+        Deletes the specified old checkpoints from S3.
+
+        Args:
+            old_checkpoints (list): A list of tuples containing block numbers and file paths.
+        """
+        try:
+            # Extract just the bucket name
+            bucket = BUCKET_SECRETS["bucket_name"].split("/")[-1]
+
+            # Set up S3 client
+            session = get_session()
+            async with session.create_client(
+                "s3",
+                endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
+                region_name=CF_REGION_NAME,
+                config=client_config,
+                aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+                aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+            ) as s3_client:
+                # Build list of keys to delete
+                delete_objects = {
+                    'Objects': [
+                        {'Key': os.path.basename(filepath)}
+                        for _, filepath in old_checkpoints
+                    ],
+                    'Quiet': True
+                }
+                if delete_objects['Objects']:
+                    response = await s3_client.delete_objects(
+                        Bucket=bucket,
+                        Delete=delete_objects
+                    )
+                    logger.debug(f"Deleted old checkpoints from S3: {delete_objects['Objects']}")
+                    logger.debug(f"S3 deletion response: {response}")
+                else:
+                    logger.debug("No old checkpoints to delete from S3.")
+        except Exception as e:
+            logger.warning(f"Failed to delete old checkpoints from S3: {e}")
 
     async def load_from_highest_stake(
         self, metagraph, buckets: List[Optional[Union[str, Bucket]]]

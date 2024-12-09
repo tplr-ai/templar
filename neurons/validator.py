@@ -296,9 +296,10 @@ class Validator:
 
 
                     # Upload checkpoint every 10 steps
-                    if self.global_step % 10 == 0:
+                    if self.global_step % 1 == 0:
                         self.checkpoint_manager.save_and_upload(
                             global_step=self.global_step,
+                            block_number=self.current_block,
                             scores=self.scores,
                             weights=self.weights
                         )
@@ -599,7 +600,7 @@ class Validator:
         return str( self.subtensor.get_block_hash( window * self.hparams.window_length ) )
 
     # A listener thread which posts the block event
-    # when the chain announces a new blotplr.
+    # when the chain announces a new block.
     def block_listener(self, loop):
         def handler(event, _u, _s):
             self.current_block = int(event['header']['number'])

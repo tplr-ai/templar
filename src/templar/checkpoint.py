@@ -5,6 +5,7 @@ import botocore
 import concurrent
 import os
 import queue
+import re
 import shutil
 import torch
 from aiobotocore.session import get_session
@@ -326,6 +327,81 @@ async def load_highest_stake_checkpoint(
         return 0
 
 
+async def get_latest_checkpoint_from_neuron(bucket_info, neuron_hotkey):
+    """
+    Lists available checkpoints in the neuron's bucket and downloads the latest one.
+
+    Args:
+        bucket_info: Bucket information for the neuron
+        neuron_hotkey: Hotkey of the neuron
+
+    Returns:
+        str: Path to the downloaded checkpoint file
+    """
+    import re  # Ensure 're' is imported at the top of your module
+
+    try:
+        bucket = bucket_info["bucket_name"].split("/")[-1]
+
+        # Set up client
+        session = get_session()
+        async with session.create_client(
+            "s3",
+            endpoint_url=get_base_url(bucket_info["account_id"]),
+            region_name=CF_REGION_NAME,
+            config=client_config,
+            aws_access_key_id=bucket_info["read"]["access_key_id"],
+            aws_secret_access_key=bucket_info["read"]["secret_access_key"],
+        ) as s3_client:
+            # List objects in the bucket with prefix matching the neuron's checkpoints
+            prefix = f"neuron_checkpoint_{neuron_hotkey}"
+            paginator = s3_client.get_paginator("list_objects_v2")
+            async for result in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                objects = result.get("Contents", [])
+                break  # For simplicity, only considering the first page
+
+            if not objects:
+                logger.warning("No checkpoints found in neuron's bucket")
+                return None
+
+            # Sort checkpoints by block number
+            checkpoints = []
+            for obj in objects:
+                key = obj["Key"]
+                match = re.match(
+                    rf"neuron_checkpoint_{neuron_hotkey}_b(\d+)_v.+\.pth", key
+                )
+                if match:
+                    block_number = int(match.group(1))
+                    checkpoints.append((block_number, key))
+
+            if not checkpoints:
+                logger.warning("No valid checkpoints found")
+                return None
+
+            # Get the checkpoint with the highest block number
+            checkpoints.sort(reverse=True)
+            latest_block, latest_key = checkpoints[0]
+            logger.info(f"Latest checkpoint found: {latest_key} (block {latest_block})")
+
+            # Download the checkpoint
+            local_checkpoint_path = os.path.join(
+                "checkpoints", latest_key  # Adjust the path as needed
+            )
+            os.makedirs(os.path.dirname(local_checkpoint_path), exist_ok=True)
+
+            async with aiofiles.open(local_checkpoint_path, "wb") as f:
+                response = await s3_client.get_object(Bucket=bucket, Key=latest_key)
+                async for chunk in response["Body"].iter_chunked(1024 * 1024):
+                    await f.write(chunk)
+
+            return local_checkpoint_path
+
+    except Exception as e:
+        logger.error(f"Failed to get latest checkpoint from neuron: {e}")
+        return None
+
+
 class CheckpointManager:
     def __init__(
         self,
@@ -342,6 +418,15 @@ class CheckpointManager:
         self.device = device
         self.optimizer = optimizer
         self.scheduler = scheduler
+
+        # Define checkpoint_dir based on checkpoint_path
+        self.checkpoint_dir = os.path.dirname(self.checkpoint_path)
+        if not self.checkpoint_dir:
+            self.checkpoint_dir = os.getcwd()  # Default to current working directory
+
+        # Ensure the checkpoint directory exists
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
         self._shutdown = False
         self._active_futures = set()
         self.upload_queue = queue.Queue()
@@ -389,81 +474,69 @@ class CheckpointManager:
         """Remove completed future from active set"""
         self._active_futures.discard(future)
 
-    def _save_checkpoint_sync(self, global_step: int, **kwargs):
-        """Synchronous checkpoint save"""
-        try:
-            checkpoint = {
-                "global_step": global_step,
-                "model_state_dict": self.model.state_dict(),
-            }
+    def _save_checkpoint_sync(self, global_step: int, block_number: int, **kwargs):
+        """Synchronous checkpoint save."""
+        checkpoint = {
+            "global_step": global_step,
+            "block_number": block_number,
+            "model_state_dict": self.model.state_dict(),
+        }
+        if self.optimizer:
+            checkpoint["optimizer_state_dict"] = self.optimizer.state_dict()
+        if self.scheduler:
+            checkpoint["scheduler_state_dict"] = self.scheduler.state_dict()
+        # Include any additional info
+        checkpoint.update(kwargs)
 
-            if self.optimizer:
-                checkpoint["optimizer_state_dict"] = self.optimizer.state_dict()
-            if self.scheduler:
-                checkpoint["scheduler_state_dict"] = self.scheduler.state_dict()
+        # Construct the filename with block number
+        filename = f"neuron_checkpoint_{self.wallet.hotkey.ss58_address}_b{block_number}_v{__version__}.pth"
 
-            # Include additional state variables
-            for key, value in kwargs.items():
-                checkpoint[key] = value
+        # Full path
+        self.checkpoint_path = os.path.join(self.checkpoint_dir, filename)
 
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
-
-            # Save checkpoint
-            torch.save(checkpoint, self.checkpoint_path)
-            logger.info(f"Checkpoint saved locally: {self.checkpoint_path}")
-
-        except Exception as e:
-            logger.error(f"Failed to save checkpoint: {e}")
-            raise
+        # Save the checkpoint
+        torch.save(checkpoint, self.checkpoint_path)
+        logger.info(f"Checkpoint saved at {self.checkpoint_path}")
 
     async def _upload_checkpoint_async(self):
-        """Async checkpoint upload"""
+        """Async checkpoint upload."""
         try:
-            # Simple filename without paths
-            filename = f"neuron_checkpoints_{self.wallet.hotkey.ss58_address}_v{__version__}.pth"
-            logger.debug(f"Uploading checkpoint to S3: {filename}")
+            filename = os.path.basename(self.checkpoint_path)
+            logger.info(f"Uploading checkpoint to S3: {filename}")
 
             # Get clean bucket name
-            bucket = BUCKET_SECRETS["bucket_name"]
-            if "/" in bucket:
-                bucket = bucket.split("/")[-1]
+            bucket = BUCKET_SECRETS["bucket_name"].split("/")[-1]
 
-            # Create temp file
-            temp_dir = os.path.dirname(self.checkpoint_path)
-            temp_file = os.path.join(temp_dir, f"temp_{filename}")
-
-            try:
-                # Copy to temp file
-                shutil.copy2(self.checkpoint_path, temp_file)
-
-                # Upload using same client setup as slice upload
-                session = get_session()
-                async with session.create_client(
-                    "s3",
-                    endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
-                    region_name=CF_REGION_NAME,
-                    config=client_config,
-                    aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-                    aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
-                ) as s3_client:
-                    with open(temp_file, "rb") as f:
-                        await s3_client.put_object(Bucket=bucket, Key=filename, Body=f)
-                    logger.info(f"Successfully uploaded checkpoint to S3: {filename}")
-            finally:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-                    logger.debug(f"Temporary file {temp_file} removed")
+            # Upload using same client setup as slice upload
+            session = get_session()
+            async with session.create_client(
+                "s3",
+                endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
+                region_name=CF_REGION_NAME,
+                config=client_config,
+                aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+                aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+            ) as s3_client:
+                async with aiofiles.open(self.checkpoint_path, "rb") as f:
+                    file_content = await f.read()
+                    response = await s3_client.put_object(
+                        Bucket=bucket,
+                        Key=filename,
+                        Body=file_content,
+                        CacheControl="no-cache, no-store, must-revalidate",
+                    )
+                logger.info(f"Successfully uploaded checkpoint to S3: {filename}")
+                logger.debug(f"Upload response: {response}")
 
         except Exception as e:
-            logger.error(f"Failed to upload checkpoint: {e}")
+            logger.exception(f"Failed to upload checkpoint: {e}")
             raise
 
-    def save_and_upload(self, global_step: int, **kwargs):
-        """Non-blocking save and upload"""
+    def save_and_upload(self, global_step: int, block_number: int, **kwargs):
+        """Non-blocking save and upload."""
         try:
             # Save checkpoint synchronously (usually fast)
-            self._save_checkpoint_sync(global_step, **kwargs)
+            self._save_checkpoint_sync(global_step, block_number, **kwargs)
 
             # Queue the upload to happen in background
             if not self._shutdown:
@@ -477,7 +550,7 @@ class CheckpointManager:
         self, metagraph, buckets: List[Optional[Union[str, Bucket]]]
     ) -> int:
         """
-        Loads checkpoint from highest stake neuron.
+        Loads the latest checkpoint from the neuron with the highest stake.
 
         Args:
             metagraph: Network metagraph
@@ -496,13 +569,9 @@ class CheckpointManager:
                 bucket_info = buckets[uid]
 
                 if bucket_info:
-                    checkpoint_dir = os.path.dirname(self.checkpoint_path)
-                    os.makedirs(checkpoint_dir, exist_ok=True)
-
-                    checkpoint_file = await download_checkpoint_from_neuron(
+                    checkpoint_file = await get_latest_checkpoint_from_neuron(
                         bucket_info=bucket_info,
                         neuron_hotkey=highest_stake_hotkey,
-                        checkpoint_dir=checkpoint_dir,
                     )
 
                     if checkpoint_file:

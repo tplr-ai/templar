@@ -184,21 +184,23 @@ async def download_checkpoint_from_neuron(
     checkpoint_dir: str,
 ) -> Optional[str]:
     """
-    Downloads the checkpoint file from the neuron's S3 storage.
+    Downloads the latest checkpoint file (by block number) from the neuron's S3 storage.
 
     Args:
         bucket_info (Bucket): The neuron's bucket credentials.
-        neuron_hotkey (str): Hotkey of the neuron.
+        neuron_hotkey (str): Hotkey of the neuron with the highest stake.
         checkpoint_dir (str): Directory to save the checkpoint.
-        key_prefix (str, optional): S3 key prefix. Defaults to 'neuron_checkpoints'.
 
     Returns:
         Optional[str]: Path to the downloaded checkpoint file, or None if failed.
     """
-    filename = f"neuron_checkpoints_{neuron_hotkey}_v{__version__}.pth"
-    local_checkpoint_path = os.path.join(
-        checkpoint_dir, f"checkpoint-{neuron_hotkey}.pth"
-    )
+    import re
+
+    # Prepare the checkpoint filename pattern
+    filename_pattern = f"neuron_checkpoint_{neuron_hotkey}_b*_v*.pth"
+    regex_pattern = rf"neuron_checkpoint_{neuron_hotkey}_b(\d+)_v[\d\.]+\.pth"
+
+    local_checkpoint_path = None
 
     session = get_session()
     async with session.create_client(
@@ -210,16 +212,48 @@ async def download_checkpoint_from_neuron(
         aws_secret_access_key=bucket_info.secret_access_key,
     ) as s3_client:
         try:
-            response = await s3_client.get_object(Bucket=bucket_info.name, Key=filename)
-            async with aiofiles.open(local_checkpoint_path, "wb") as f:
-                await f.write(await response["Body"].read())
-            logger.debug(f"Successfully downloaded checkpoint: {local_checkpoint_path}")
-            return local_checkpoint_path
-        except botocore.exceptions.ClientError as e:
-            if e.response["Error"]["Code"] == "NoSuchKey":
-                logger.info(f"No checkpoint found for neuron {neuron_hotkey}")
+            # List all checkpoint files for this neuron in their bucket
+            paginator = s3_client.get_paginator('list_objects_v2')
+            latest_block_number = -1
+            latest_filename = None
+
+            async for page in paginator.paginate(Bucket=bucket_info.name, Prefix=f"neuron_checkpoint_{neuron_hotkey}_"):
+                contents = page.get('Contents', [])
+                if not contents:
+                    continue  # Move to the next page
+
+                for obj in contents:
+                    key = obj['Key']
+                    match = re.match(regex_pattern, key)
+                    if match:
+                        block_number = int(match.group(1))
+                        if block_number > latest_block_number:
+                            latest_block_number = block_number
+                            latest_filename = key
+
+            if latest_filename:
+                # Download the latest checkpoint
+                local_checkpoint_path = os.path.join(
+                    checkpoint_dir, latest_filename
+                )
+                os.makedirs(os.path.dirname(local_checkpoint_path), exist_ok=True)
+
+                response = await s3_client.get_object(Bucket=bucket_info.name, Key=latest_filename)
+                async with aiofiles.open(local_checkpoint_path, "wb") as f:
+                    while True:
+                        chunk = await response['Body'].read(1024 * 1024)
+                        if not chunk:
+                            break
+                        await f.write(chunk)
+
+                logger.debug(f"Successfully downloaded checkpoint: {local_checkpoint_path}")
+                return local_checkpoint_path
             else:
-                logger.error(f"Error downloading checkpoint: {str(e)}")
+                logger.info(f"No valid checkpoints found for neuron {neuron_hotkey}")
+                return None
+
+        except botocore.exceptions.ClientError as e:
+            logger.error(f"Error downloading checkpoint: {str(e)}")
             return None
         except Exception as e:
             logger.error(f"Unexpected error downloading checkpoint: {str(e)}")

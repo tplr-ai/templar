@@ -222,6 +222,10 @@ class Validator:
             'health_check_interval': 300  # 5 minutes
         }
 
+        # At the beginning of the Validator class, add a new attribute to track checkpoint tasks
+        self.checkpoint_tasks = set()  # Track checkpoint tasks
+        self.checkpoint_lock = asyncio.Lock()  # Add lock for thread safety
+
     async def update(self):
         """Continuously updates the global state by polling every 10 minutes."""
         await asyncio.sleep(600)  # Initial sleep before starting updates
@@ -297,12 +301,17 @@ class Validator:
 
                     # Upload checkpoint every 10 steps
                     if self.global_step % 10 == 0:
-                        self.checkpoint_manager.save_and_upload(
-                            global_step=self.global_step,
-                            block_number=self.current_block,
-                            scores=self.scores,
-                            weights=self.weights
+                        # Create background task for checkpoint operations
+                        checkpoint_task = asyncio.create_task(
+                            self.save_checkpoint_background(
+                                global_step=self.global_step,
+                                block_number=self.current_block,
+                                scores=self.scores.clone(),  # Clone to avoid race conditions
+                                weights=self.weights.clone()  # Clone to avoid race conditions
+                            )
                         )
+                        self.checkpoint_tasks.add(checkpoint_task)
+                        checkpoint_task.add_done_callback(self.checkpoint_tasks.discard)
 
                     # Download the state for the eval window.
                     st = tplr.T()
@@ -646,6 +655,29 @@ class Validator:
             return None, "Timeout while setting weights"
         except Exception as e:
             return None, str(e)
+
+    async def save_checkpoint_background(self, global_step: int, block_number: int, scores: torch.Tensor, weights: torch.Tensor):
+        """Handles checkpoint saving and uploading in the background"""
+        try:
+            async with self.checkpoint_lock:  # Ensure thread safety
+                await self.checkpoint_manager.save_and_upload(
+                    global_step=global_step,
+                    block_number=block_number,
+                    scores=scores,
+                    weights=weights
+                )
+        except Exception as e:
+            tplr.logger.error(f"Error in background checkpoint save: {e}")
+
+    def cleanup(self):
+        """Cleanup resources if needed."""
+        self._shutdown = True
+        # Wait for any pending checkpoint tasks to complete
+        if self.checkpoint_tasks:
+            tplr.logger.info(f"Waiting for {len(self.checkpoint_tasks)} checkpoint tasks to complete...")
+            asyncio.gather(*self.checkpoint_tasks)
+        self.checkpoint_manager.cleanup()
+        logger.info("CheckpointManager shutdown complete")
 
 if __name__ == "__main__":
     validator = Validator()

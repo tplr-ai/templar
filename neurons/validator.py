@@ -300,7 +300,7 @@ class Validator:
 
 
                     # Upload checkpoint every 10 steps
-                    if self.global_step % 10 == 0:
+                    if self.global_step % 2 == 0:
                         # Create background task for checkpoint operations
                         checkpoint_task = asyncio.create_task(
                             self.save_checkpoint_background(
@@ -677,7 +677,7 @@ class Validator:
             tplr.logger.info(f"Waiting for {len(self.checkpoint_tasks)} checkpoint tasks to complete...")
             asyncio.gather(*self.checkpoint_tasks)
         self.checkpoint_manager.cleanup()
-        logger.info("CheckpointManager shutdown complete")
+        tplr.logger.info("CheckpointManager shutdown complete")
 
 if __name__ == "__main__":
     validator = Validator()

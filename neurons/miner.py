@@ -230,7 +230,8 @@ class Miner:
             import tempfile
             self.save_location = tempfile.gettempdir()
         else:
-            os.makedirs(self.save_location, exist_ok=True) 
+            os.makedirs(self.save_location, exist_ok=True)
+        self.checkpoint_tasks = set()  
         print ( self.hparams )
 
     async def update(self):
@@ -268,11 +269,60 @@ class Miner:
                 tplr.logger.debug(f"UID {uid}: Invalid or missing bucket: {bucket}")
                 self.buckets.append(None)
 
+    async def load_checkpoint_background(self):
+        """Handles checkpoint loading in the background."""
+        try:
+            tplr.logger.info(f"Loading checkpoint at step {self.global_step}")
+
+            # Load the checkpoint into a temporary model
+            temp_model = LlamaForCausalLM(config=self.hparams.model_config).to(self.config.device)
+            temp_optimizer = optim.AdamW(
+                temp_model.parameters(),
+                lr=self.hparams.learning_rate,
+                betas=(self.hparams.optimizer_beta1, self.hparams.optimizer_beta2),
+                weight_decay=self.hparams.optimizer_weight_decay,
+                foreach=True,
+            )
+            temp_scheduler = tplr.get_wsd_scheduler(
+                optimizer=temp_optimizer,
+                num_warmup_steps=self.hparams.num_warmup_steps,
+                num_stable_steps=self.hparams.num_stable_steps,
+                num_decay_steps=self.hparams.num_decay_steps,
+            )
+            temp_checkpoint_manager = tplr.CheckpointManager(
+                model=temp_model,
+                checkpoint_path=self.checkpoint_path,
+                wallet=self.wallet,
+                device=self.config.device,
+                optimizer=temp_optimizer,
+                scheduler=temp_scheduler
+            )
+
+            # Load the checkpoint from the highest stake
+            await temp_checkpoint_manager.load_from_highest_stake(
+                metagraph=self.metagraph,
+                buckets=self.buckets
+            )
+
+            # Safely update the main model's parameters
+            for param, temp_param in zip(self.model.parameters(), temp_model.parameters()):
+                param.data.copy_(temp_param.data)
+
+            tplr.logger.info(f"Checkpoint loaded at step {self.global_step}")
+
+            # Clean up the temporary model to free memory
+            del temp_model, temp_optimizer, temp_scheduler, temp_checkpoint_manager
+            torch.cuda.empty_cache()
+
+        except Exception as e:
+            tplr.logger.error(f"Error loading checkpoint in background: {str(e)}")
+
     async def run(self):
         # Main loop.
         self.loop = asyncio.get_running_loop()
         self.update_task = asyncio.create_task(self.update())
         self.listener = threading.Thread(target=self.block_listener, args=(self.loop,), daemon=True).start()
+        self.checkpoint_tasks = set()  # Track checkpoint tasks
 
         # Optionally sync the model state by pulling model states from the history.
         if self.config.sync_state:
@@ -292,207 +342,221 @@ class Miner:
                     self.scheduler.last_epoch = self.global_step - 1  # Update scheduler
                 tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied history and updated global step to {self.global_step}.")
             torch.cuda.empty_cache()
+        try: 
+            # Main training loop.
+            while True:
+                try:      
+                    # Start the window step.     
+                    tplr.logger.info('[bold]' + '\n' + '-' * 40 + f' Step: {self.global_step} ' + '-' * 40)
+                    self.global_step += 1
+                    start_step = tplr.T()
+                    window = self.current_window
 
-        # Main training loop.
-        while True:
-            try:      
-                # Start the window step.     
-                tplr.logger.info('[bold]' + '\n' + '-' * 40 + f' Step: {self.global_step} ' + '-' * 40)
-                self.global_step += 1
-                start_step = tplr.T()
-                window = self.current_window
+                    # Run for non-baseline miners.
+                    if not self.config.baseline:
+                        st = tplr.T()
+                        valid_buckets = [b for b in self.buckets if b is not None]
 
-                # Run for non-baseline miners.
-                if not self.config.baseline:
+                        if not valid_buckets:
+                            tplr.logger.info(f"No valid buckets to download state slices for window {window}")
+                            # Wait for the next window
+                            while self.current_window == window:
+                                await asyncio.sleep(0.1)
+                            continue
+
+                        state_slices = await tplr.download_slices_for_buckets_and_windows(
+                            buckets=valid_buckets,
+                            windows=[window],
+                            key='state',
+                            save_location=self.save_location
+                        )
+
+                        n_state_slices = len(state_slices[window]) if window in state_slices else 0
+                        tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_state_slices} window states.")
+
+                        # Download the delta from the previous window.
+                        st = tplr.T()
+                        delta_slices = await tplr.download_slices_for_buckets_and_windows(
+                            buckets = self.buckets,
+                            windows = [ window - 1 ],
+                            key = 'delta',
+                            save_location=self.save_location
+                        )       
+                        n_slices = len(delta_slices[ window - 1  ]) if window - 1 in delta_slices else 0
+                        tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Download {n_slices} window deltas.")
+
+                        # Apply the state for the current window.
+                        st = tplr.T()
+                        max_global_step = await tplr.apply_slices_to_model( 
+                            model=self.model, 
+                            window=window,
+                            seed=window,
+                            compression=self.hparams.compression,
+                            save_location=self.save_location,
+                            key='state'
+                        )
+                        if max_global_step is not None:
+                            self.global_step = max(self.global_step, max_global_step)
+                            self.scheduler.last_epoch = self.global_step - 1  # Update scheduler
+                        tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state and updated global step to {self.global_step}.")
+
+                    # Download the page for the current window.
                     st = tplr.T()
-                    valid_buckets = [b for b in self.buckets if b is not None]
+                    pages = await tplr.dataset.DatasetLoader.next_pages(
+                        offset = window,
+                        n_pages = self.hparams.validator_window_eval_size,
+                        seed = self.uid if not self.config.random else random.randint(0, 1000)
+                    )
+                    random.shuffle( pages )
+                    dataset = await tplr.dataset.DatasetLoader.create(
+                        batch_size = self.config.actual_batch_size,
+                        sequence_length = self.hparams.sequence_length,
+                        pages_info = pages,
+                        tokenizer = self.hparams.tokenizer
+                    )
+                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded training page: [light_steel_blue]{[p[1] for p in pages]}[/light_steel_blue] random = {self.config.random}")
 
-                    if not valid_buckets:
-                        tplr.logger.info(f"No valid buckets to download state slices for window {window}")
-                        # Wait for the next window
+                    # Accumualte gradients on the model applied to the base state.
+                    train_start = tplr.T()
+                    self.model.zero_grad()
+                    self.model.eval()
+                    total_loss = 0.0
+                    full_steps = 0
+                    total_steps = 0
+                    exhausted_window = False
+                    for batch in dataset:
+                        total_steps += 1
+                        if random.random() < self.sample_rate and not exhausted_window:
+                            full_steps += 1
+                            input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
+                            labels = input_ids.clone()
+                            labels = torch.where(labels == self.hparams.tokenizer.pad_token_id, -100, labels)
+                            with torch.amp.autocast(device_type=self.model.device.type, dtype=torch.bfloat16):  # Enable autocasting
+                                outputs = self.model(input_ids=input_ids, labels=labels)
+                            total_loss += outputs.loss.item()
+                            outputs.loss.backward()
+                            if window != self.current_window and not self.config.baseline:
+                                exhausted_window = True
+                                continue
+                    if self.hparams.grad_clip:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.hparams.grad_clip)
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    self.optimizer.zero_grad()
+                    torch.cuda.empty_cache()
+                    step_loss = total_loss/(full_steps+1)
+                    train_duration = tplr.T() - train_start
+                    tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
+                    tokens_per_second =  tokens_per_step / train_duration
+                    tplr.logger.info(f"{tplr.P(window, train_duration)} Accumulated gradients:")
+                    tplr.logger.info(f"{tplr.P(window, train_duration)} \tTotal steps: [tan]{full_steps}/{total_steps}[/tan], Rate: [tan]{(full_steps/total_steps):.2f}[/tan], Target: [tan]{self.sample_rate:.2f}[/tan]")
+                    tplr.logger.info(f"{tplr.P(window, train_duration)} \tTotal tokens: [tan]{tokens_per_step}[/tan], Tokens per second: [tan]{tokens_per_second:.2f}[/tan]")
+                    tplr.logger.info(f"{tplr.P(window, train_duration)} \tLoss: [tan]{step_loss}[tan]")
+                    if exhausted_window:
+                        self.sample_rate = max(0.0001, self.sample_rate * 0.95)
+                    else:
+                        self.sample_rate = min(1, self.sample_rate * 1.05)
+
+                    # At the end of each step, check if it's time to load the checkpoint
+                    if self.global_step % 10 == 0 and self.global_step != 0:
+                        # Create a background task for loading the checkpoint
+                        checkpoint_task = asyncio.create_task(
+                            self.load_checkpoint_background()
+                        )
+                        self.checkpoint_tasks.add(checkpoint_task)
+                        checkpoint_task.add_done_callback(self.checkpoint_tasks.discard)
+
+                    # Run for non-baseline nodes.
+                    if not self.config.baseline:
+                        # Upload the delta for the previous window.
+                        st = tplr.T()
+                        await tplr.upload_slice_for_window(
+                            bucket = tplr.config.BUCKET_SECRETS["bucket_name"],
+                            model = self.model, 
+                            window = window,
+                            seed = window,
+                            wallet = self.wallet, 
+                            compression = self.hparams.compression,
+                            save_location = self.save_location,
+                            key = 'delta',
+                            global_step = self.global_step 
+                        )                
+                        tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Uploaded the delta.")
+
+                        # Apply the delta from the previous window.
+                        st = tplr.T()
+                        max_global_step = await tplr.apply_slices_to_model(
+                            model=self.model, 
+                            window=window - 1,
+                            seed=window - 1,
+                            compression=self.hparams.compression,
+                            save_location=self.save_location,
+                            key='delta'
+                        )
+                        if max_global_step is not None:
+                            self.global_step = max(self.global_step, max_global_step)
+                            self.scheduler.last_epoch = self.global_step - 1  # Update scheduler
+                        tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window delta and updated global step to {self.global_step}.")
+
+                        # Upload the state for the current window.
+                        st = tplr.T()
+                        await tplr.upload_slice_for_window(
+                            bucket = tplr.config.BUCKET_SECRETS["bucket_name"],
+                            model = self.model, 
+                            window = window + 1,
+                            seed = window + 1, 
+                            wallet = self.wallet, 
+                            compression = self.hparams.compression,
+                            save_location = self.save_location,
+                            key = 'state',
+                            global_step = self.global_step 
+                        )
+                        tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Uploaded the state.")
+
+                        # Clean file history.
+                        st = tplr.T()
+                        await tplr.delete_files_before_window(window_max=window - self.hparams.max_history, save_location=self.save_location, key='state')
+                        await tplr.delete_files_before_window(window_max=window - self.hparams.max_history, save_location=self.save_location, key='delta')
+                        await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'state' )
+                        await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
+                        tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Cleaned file history.")
+
+                        # Wait until we are on a new window.
+                        end_step = tplr.T()
                         while self.current_window == window:
                             await asyncio.sleep(0.1)
-                        continue
+                        window_time_delta = self.window_time - end_step
+                        window_delta_str = f"[red]{window_time_delta:.2f}[/red]" if window_time_delta < 0 else f"[green]+{window_time_delta:.2f}[/green]"
+                        tplr.logger.info(f"{tplr.P(window, end_step - start_step)}[{window_delta_str}]: Finished step.")
+                        wandb.log({
+                            "miner/loss": step_loss,
+                            "miner/tokens_per_step": tokens_per_step,
+                            "miner/tokens_per_second": tokens_per_second,
+                            "miner/sample_rate": self.sample_rate,
+                            "miner/utilization": train_duration / (end_step - start_step),
+                            "miner/learning_rate": self.scheduler.get_last_lr()[0]
+                        }, step=self.global_step)
 
-                    state_slices = await tplr.download_slices_for_buckets_and_windows(
-                        buckets=valid_buckets,
-                        windows=[window],
-                        key='state',
-                        save_location=self.save_location
-                    )
-
-                    n_state_slices = len(state_slices[window]) if window in state_slices else 0
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded {n_state_slices} window states.")
-
-                    # Download the delta from the previous window.
-                    st = tplr.T()
-                    delta_slices = await tplr.download_slices_for_buckets_and_windows(
-                        buckets = self.buckets,
-                        windows = [ window - 1 ],
-                        key = 'delta',
-                        save_location=self.save_location
-                    )       
-                    n_slices = len(delta_slices[ window - 1  ]) if window - 1 in delta_slices else 0
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Download {n_slices} window deltas.")
-
-                    # Apply the state for the current window.
-                    st = tplr.T()
-                    max_global_step = await tplr.apply_slices_to_model( 
-                        model=self.model, 
-                        window=window,
-                        seed=window,
-                        compression=self.hparams.compression,
-                        save_location=self.save_location,
-                        key='state'
-                    )
-                    if max_global_step is not None:
-                        self.global_step = max(self.global_step, max_global_step)
-                        self.scheduler.last_epoch = self.global_step - 1  # Update scheduler
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window state and updated global step to {self.global_step}.")
-
-                # Download the page for the current window.
-                st = tplr.T()
-                pages = await tplr.dataset.DatasetLoader.next_pages(
-                    offset = window,
-                    n_pages = self.hparams.validator_window_eval_size,
-                    seed = self.uid if not self.config.random else random.randint(0, 1000)
-                )
-                random.shuffle( pages )
-                dataset = await tplr.dataset.DatasetLoader.create(
-                    batch_size = self.config.actual_batch_size,
-                    sequence_length = self.hparams.sequence_length,
-                    pages_info = pages,
-                    tokenizer = self.hparams.tokenizer
-                )
-                tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded training page: [light_steel_blue]{[p[1] for p in pages]}[/light_steel_blue] random = {self.config.random}")
-
-                # Accumualte gradients on the model applied to the base state.
-                train_start = tplr.T()
-                self.model.zero_grad()
-                self.model.eval()
-                total_loss = 0.0
-                full_steps = 0
-                total_steps = 0
-                exhausted_window = False
-                for batch in dataset:
-                    total_steps += 1
-                    if random.random() < self.sample_rate and not exhausted_window:
-                        full_steps += 1
-                        input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
-                        labels = input_ids.clone()
-                        labels = torch.where(labels == self.hparams.tokenizer.pad_token_id, -100, labels)
-                        with torch.amp.autocast(device_type=self.model.device.type, dtype=torch.bfloat16):  # Enable autocasting
-                            outputs = self.model(input_ids=input_ids, labels=labels)
-                        total_loss += outputs.loss.item()
-                        outputs.loss.backward()
-                        if window != self.current_window and not self.config.baseline:
-                            exhausted_window = True
-                            continue
-                if self.hparams.grad_clip:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.hparams.grad_clip)
-                self.optimizer.step()
-                self.scheduler.step()
-                self.optimizer.zero_grad()
-                torch.cuda.empty_cache()
-                step_loss = total_loss/(full_steps+1)
-                train_duration = tplr.T() - train_start
-                tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
-                tokens_per_second =  tokens_per_step / train_duration
-                tplr.logger.info(f"{tplr.P(window, train_duration)} Accumulated gradients:")
-                tplr.logger.info(f"{tplr.P(window, train_duration)} \tTotal steps: [tan]{full_steps}/{total_steps}[/tan], Rate: [tan]{(full_steps/total_steps):.2f}[/tan], Target: [tan]{self.sample_rate:.2f}[/tan]")
-                tplr.logger.info(f"{tplr.P(window, train_duration)} \tTotal tokens: [tan]{tokens_per_step}[/tan], Tokens per second: [tan]{tokens_per_second:.2f}[/tan]")
-                tplr.logger.info(f"{tplr.P(window, train_duration)} \tLoss: [tan]{step_loss}[tan]")
-                if exhausted_window:
-                    self.sample_rate = max(0.0001, self.sample_rate * 0.95)
-                else:
-                    self.sample_rate = min(1, self.sample_rate * 1.05)
-
-                # Run for non-baseline nodes.
-                if not self.config.baseline:
-                    # Upload the delta for the previous window.
-                    st = tplr.T()
-                    await tplr.upload_slice_for_window(
-                        bucket = tplr.config.BUCKET_SECRETS["bucket_name"],
-                        model = self.model, 
-                        window = window,
-                        seed = window,
-                        wallet = self.wallet, 
-                        compression = self.hparams.compression,
-                        save_location = self.save_location,
-                        key = 'delta',
-                        global_step = self.global_step 
-                    )                
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Uploaded the delta.")
-
-                    # Apply the delta from the previous window.
-                    st = tplr.T()
-                    max_global_step = await tplr.apply_slices_to_model(
-                        model=self.model, 
-                        window=window - 1,
-                        seed=window - 1,
-                        compression=self.hparams.compression,
-                        save_location=self.save_location,
-                        key='delta'
-                    )
-                    if max_global_step is not None:
-                        self.global_step = max(self.global_step, max_global_step)
-                        self.scheduler.last_epoch = self.global_step - 1  # Update scheduler
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Applied window delta and updated global step to {self.global_step}.")
-
-                    # Upload the state for the current window.
-                    st = tplr.T()
-                    await tplr.upload_slice_for_window(
-                        bucket = tplr.config.BUCKET_SECRETS["bucket_name"],
-                        model = self.model, 
-                        window = window + 1,
-                        seed = window + 1, 
-                        wallet = self.wallet, 
-                        compression = self.hparams.compression,
-                        save_location = self.save_location,
-                        key = 'state',
-                        global_step = self.global_step 
-                    )
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Uploaded the state.")
-
-                    # Clean file history.
-                    st = tplr.T()
-                    await tplr.delete_files_before_window(window_max=window - self.hparams.max_history, save_location=self.save_location, key='state')
-                    await tplr.delete_files_before_window(window_max=window - self.hparams.max_history, save_location=self.save_location, key='delta')
-                    await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'state' )
-                    await tplr.delete_files_from_bucket_before_window( bucket = tplr.config.BUCKET_SECRETS["bucket_name"], window_max = window - self.hparams.max_history, key = 'delta' )
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Cleaned file history.")
-
-                    # Wait until we are on a new window.
-                    end_step = tplr.T()
-                    while self.current_window == window:
-                        await asyncio.sleep(0.1)
-                    window_time_delta = self.window_time - end_step
-                    window_delta_str = f"[red]{window_time_delta:.2f}[/red]" if window_time_delta < 0 else f"[green]+{window_time_delta:.2f}[/green]"
-                    tplr.logger.info(f"{tplr.P(window, end_step - start_step)}[{window_delta_str}]: Finished step.")
-                    wandb.log({
-                        "miner/loss": step_loss,
-                        "miner/tokens_per_step": tokens_per_step,
-                        "miner/tokens_per_second": tokens_per_second,
-                        "miner/sample_rate": self.sample_rate,
-                        "miner/utilization": train_duration / (end_step - start_step),
-                        "miner/learning_rate": self.scheduler.get_last_lr()[0]
-                    }, step=self.global_step)
-
-            # Catch keyboard interrrupt.
-            except KeyboardInterrupt:
-                tplr.logger.info("Training interrupted by user. Stopping the run.")
-                self.stop_event.set()
-                await self.update_task
-                sys.exit(0)
+                # Catch keyboard interrrupt.
+                except KeyboardInterrupt:
+                    tplr.logger.info("Training interrupted by user. Stopping the run.")
+                    self.stop_event.set()
+                    await self.update_task
+                    sys.exit(0)
 
 
-            # Catch unknown.
-            except Exception as e:
-                message = f"Exception during training loop: {escape(str(e))}"
-                tplr.logger.exception(message)
-                continue
-            finally:
-                 self.checkpoint_manager.cleanup()
+                # Catch unknown.
+                except Exception as e:
+                    message = f"Exception during training loop: {escape(str(e))}"
+                    tplr.logger.exception(message)
+                    continue
+        finally:
+            # Wait for any pending checkpoint tasks to complete
+            if self.checkpoint_tasks:
+                tplr.logger.info(f"Waiting for {len(self.checkpoint_tasks)} checkpoint tasks to complete...")
+                await asyncio.gather(*self.checkpoint_tasks)
+            self.checkpoint_manager.cleanup()
+            tplr.logger.info("Miner shutdown complete.")
 
 
     # Returns the slice window based on a blotplr.

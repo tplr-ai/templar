@@ -108,16 +108,22 @@ async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
         with lock.acquire(timeout=5):
             # Check if file exists before trying to load
             if not os.path.exists(filename):
-                logger.warning(f"Slice file not found (may have been cleaned up): {filename}")
+                logger.warning(
+                    f"Slice file not found (may have been cleaned up): {filename}"
+                )
                 return {}
-                
+
             try:
                 return torch.load(
                     filename,
                     map_location=torch.device(device),
                     weights_only=True,
                 )
-            except (torch.serialization.pickle.UnpicklingError, RuntimeError, EOFError) as e:
+            except (
+                torch.serialization.pickle.UnpicklingError,
+                RuntimeError,
+                EOFError,
+            ) as e:
                 logger.warning(f"Failed to load corrupt slice file {filename}: {e}")
                 return {}
             except Exception as e:
@@ -281,7 +287,7 @@ async def upload_slice_for_window(
 
     # Use save_location for temporary file
     temp_file_name = os.path.join(save_location, filename)
-    
+
     try:
         # Save the file
         torch.save(slice_data, temp_file_name)
@@ -304,7 +310,9 @@ async def upload_slice_for_window(
                 logger.warning(f"Failed to upload slice {filename} to S3: {str(e)}")
                 # Don't raise, allow process to continue
     except Exception as e:
-        logger.warning(f"Error during slice preparation/upload for {filename}: {str(e)}")
+        logger.warning(
+            f"Error during slice preparation/upload for {filename}: {str(e)}"
+        )
         # Don't raise, allow process to continue
     finally:
         # Clean up the temporary file if it exists
@@ -313,7 +321,9 @@ async def upload_slice_for_window(
                 os.remove(temp_file_name)
                 logger.debug(f"Temporary file {temp_file_name} removed")
         except Exception as e:
-            logger.warning(f"Failed to remove temporary file {temp_file_name}: {str(e)}")
+            logger.warning(
+                f"Failed to remove temporary file {temp_file_name}: {str(e)}"
+            )
             # Don't raise, allow process to continue
 
 

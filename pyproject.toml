@@ -31,7 +31,6 @@ dependencies = [
     "loguru==0.7.2",
     "uvloop==0.20.0",
     "aiofiles>=24.1.0",
-    "random2",
     "pydantic>=2.9.2",
 ]
 
@@ -42,7 +41,7 @@ dev-dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/raofoundation/templar"
+Homepage = "https://github.com/tplr-ai/templar"
 
 [tool.setuptools.packages.find]
 where = ["src"]

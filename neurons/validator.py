@@ -212,6 +212,7 @@ class Validator:
             self.save_location = tempfile.gettempdir()
         else:
             os.makedirs(self.save_location, exist_ok=True)  
+        self.checkpoint_tasks = set()
         print ( self.hparams )
 
         # Configuration for weight setting
@@ -257,11 +258,45 @@ class Validator:
                 tplr.logger.debug(f"UID {uid}: Invalid or missing bucket: {bucket}")
                 self.buckets.append(None)
 
+    async def load_checkpoint_background(self):
+        """Handles checkpoint loading in the background."""
+        try:
+            tplr.logger.info(f"Loading checkpoint at step {self.global_step}")
+
+            # Load the checkpoint into a temporary model
+            temp_model = LlamaForCausalLM(config=self.hparams.model_config).to(self.config.device)
+            temp_checkpoint_manager = tplr.CheckpointManager(
+                model=temp_model,
+                checkpoint_path=self.checkpoint_path,
+                wallet=self.wallet,
+                device=self.config.device,
+            )
+
+            # Load the checkpoint from the highest stake
+            await temp_checkpoint_manager.load_from_highest_stake(
+                metagraph=self.metagraph,
+                buckets=self.buckets
+            )
+
+            # Safely update the main model's parameters
+            for param, temp_param in zip(self.model.parameters(), temp_model.parameters()):
+                param.data.copy_(temp_param.data)
+
+            tplr.logger.info(f"Checkpoint loaded at step {self.global_step}")
+
+            # Clean up the temporary model to free memory
+            del temp_model, temp_checkpoint_manager
+            torch.cuda.empty_cache()
+
+        except Exception as e:
+            tplr.logger.error(f"Error loading checkpoint in background: {str(e)}")
+
     async def run(self):
         # Main loop.
         self.loop = asyncio.get_running_loop()
         self.update_task = asyncio.create_task(self.update())
         self.listener = threading.Thread(target=self.block_listener, args=(self.loop,), daemon=True).start()
+        self.checkpoint_tasks = set()
 
         # Optionally sync the model state by pulling model states from the history.
         if self.config.sync_state:
@@ -511,7 +546,15 @@ class Validator:
                             f"moving_score: [dark_sea_green]{moving_score:.3f}[/dark_sea_green], "
                             f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green]"
                         )
-
+                    # At the end of each step, check if it's time to load the checkpoint
+                    if self.global_step % 10 == 0 and self.global_step != 0:
+                        # Create a background task for loading the checkpoint
+                        checkpoint_task = asyncio.create_task(
+                            self.load_checkpoint_background()
+                        )
+                        self.checkpoint_tasks.add(checkpoint_task)
+                        checkpoint_task.add_done_callback(self.checkpoint_tasks.discard) 
+                        
                     # Apply all deltas to the model state.
                     st = tplr.T()
                     max_global_step = await tplr.apply_slices_to_model( 
@@ -598,6 +641,10 @@ class Validator:
                     continue
 
         finally:
+            # Wait for any pending checkpoint tasks to complete
+            if self.checkpoint_tasks:
+                tplr.logger.info(f"Waiting for {len(self.checkpoint_tasks)} checkpoint tasks to complete...")
+                await asyncio.gather(*self.checkpoint_tasks)
             self.checkpoint_manager.cleanup()
             tplr.logger.info("Validator shutdown complete.")
 

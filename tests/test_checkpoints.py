@@ -12,7 +12,12 @@ import tempfile
 import glob
 from aiobotocore.session import get_session
 
-from templar.checkpoint import CheckpointManager, get_base_url, load_checkpoint, download_checkpoint_from_neuron
+from templar.checkpoint import (
+    CheckpointManager,
+    get_base_url,
+    load_checkpoint,
+    download_checkpoint_from_neuron,
+)
 from templar import __version__
 from templar.config import BUCKET_SECRETS
 from templar.constants import CF_REGION_NAME
@@ -96,7 +101,9 @@ class TestCheckpointManager(unittest.IsolatedAsyncioTestCase):
 
         # Save multiple checkpoints
         for i in range(5):
-            await checkpoint_manager.save_and_upload(global_step=i, block_number=100+i)
+            await checkpoint_manager.save_and_upload(
+                global_step=i, block_number=100 + i
+            )
 
         # Wait a moment for async tasks to finish
         await asyncio.sleep(5)
@@ -138,12 +145,22 @@ class TestCheckpointManager(unittest.IsolatedAsyncioTestCase):
 
         filename = os.path.basename(checkpoint_manager.checkpoint_path)
         s3_exists = await upload_exists_in_s3(
-            self.bucket_name, filename, self.access_key, self.secret_key, self.endpoint_url
+            self.bucket_name,
+            filename,
+            self.access_key,
+            self.secret_key,
+            self.endpoint_url,
         )
         self.assertTrue(s3_exists)
 
         # Cleanup
-        await async_delete_from_s3(self.bucket_name, filename, self.access_key, self.secret_key, self.endpoint_url)
+        await async_delete_from_s3(
+            self.bucket_name,
+            filename,
+            self.access_key,
+            self.secret_key,
+            self.endpoint_url,
+        )
         checkpoint_manager.cleanup()
 
     async def test_checkpoint_upload_with_invalid_credentials(self):
@@ -160,7 +177,7 @@ class TestCheckpointManager(unittest.IsolatedAsyncioTestCase):
                     "secret_access_key": faulty_secret_key,
                 },
             },
-            clear=False
+            clear=False,
         ):
             checkpoint_manager = CheckpointManager(
                 model=self.model,
@@ -173,7 +190,11 @@ class TestCheckpointManager(unittest.IsolatedAsyncioTestCase):
             # Check if NOT uploaded with correct creds
             filename = os.path.basename(checkpoint_manager.checkpoint_path)
             s3_exists = await upload_exists_in_s3(
-                self.bucket_name, filename, self.access_key, self.secret_key, self.endpoint_url
+                self.bucket_name,
+                filename,
+                self.access_key,
+                self.secret_key,
+                self.endpoint_url,
             )
             self.assertFalse(s3_exists)
             checkpoint_manager.cleanup()

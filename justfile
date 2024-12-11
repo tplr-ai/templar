@@ -37,4 +37,21 @@ restart-testnet:
 restart-testnet-clean: stop-testnet start-testnet
 
 
+# Run tests with uv
+test:
+    export NEST_ASYNCIO=1 && uv run pytest
+
+# Run ruff linting
+lint:
+    ruff check --fix
+
+# Run code formatting
+format:
+    ruff format 
+
+# Run all code quality checks and tests
+check: format lint test
+
+
+
 

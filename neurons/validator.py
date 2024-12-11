@@ -177,6 +177,21 @@ class Validator:
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
         self.model.eval()
+
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.hparams.learning_rate,
+            betas=(self.hparams.optimizer_beta1, self.hparams.optimizer_beta2),
+            weight_decay=self.hparams.optimizer_weight_decay,
+            foreach=True
+        )
+
+        self.scheduler = tplr.get_wsd_scheduler(
+            optimizer=self.optimizer,
+            num_warmup_steps=self.hparams.num_warmup_steps,
+            num_stable_steps=self.hparams.num_stable_steps,
+            num_decay_steps=self.hparams.num_decay_steps,
+        )
         
         # Initialize checkpoint manager
         self.checkpoint_manager = tplr.CheckpointManager(
@@ -334,8 +349,8 @@ class Validator:
                     window = self.current_window - offset
 
 
-                    # Upload checkpoint every 10 steps
-                    if self.global_step % 10 == 0:
+                    # Upload checkpoint every 100 steps
+                    if self.global_step % 100 == 0:
                         # Create background task for checkpoint operations
                         checkpoint_task = asyncio.create_task(
                             self.save_checkpoint_background(
@@ -473,6 +488,9 @@ class Validator:
                                 if self.current_window - offset != window:
                                     exhausted_window = True
                                     continue
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    self.optimizer.zero_grad()
                     step_loss = total_loss/(full_steps+1)
                     eval_duration = tplr.T() - eval_start
                     tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
@@ -490,18 +508,31 @@ class Validator:
                     # Compute the score for this slice.
                     st = tplr.T()
                     score = 0.0 
-                    for i, (name_i, param_i) in enumerate( self.model.named_parameters() ):
+                    # Collect all delta_i and grad_i into larger vectors
+                    all_delta = []
+                    all_grad = []
+
+                    for i, (name_i, param_i) in enumerate(self.model.named_parameters()):
                         if param_i.grad is None:
-                            continue  # Skip parameters without gradients
+                            continue
+                        
                         idxs_i = indices[name_i].to(self.model.device)
-                        grad_i = param_i.grad.view(-1).clone()[idxs_i].to(self.model.device) 
-                        slice_i = eval_slice_data[name_i].view(-1).to(self.model.device) 
+                        grad_i = param_i.grad.view(-1).clone()[idxs_i].to(self.model.device)
+                        slice_i = eval_slice_data[name_i].view(-1).to(self.model.device)
                         theta_i = param_i.data.view(-1)[idxs_i]
                         delta_i = theta_i - slice_i
-                        sim_i = torch.nn.functional.cosine_similarity(delta_i, grad_i, dim=0).item()
-                        weight_i = param_i.data.view(-1)[idxs_i].norm().item() + 1e-8
-                        score += weight_i * sim_i
+
+                        all_delta.append(delta_i)
+                        all_grad.append(grad_i)
+
+                    #Concatenate all parts
+                    all_delta = torch.cat(all_delta)
+                    all_grad = torch.cat(all_grad)
+
+                    # Compute global cosine similarity
+                    score = torch.nn.functional.cosine_similarity(all_delta, all_grad, dim=0).item()
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Computed score: [bold dark_sea_green]{score:.4f}[/bold dark_sea_green]")           
+
 
                     # Assign and log scores.
                     # Apply decay to miners who did not submit slices
@@ -546,15 +577,6 @@ class Validator:
                             f"moving_score: [dark_sea_green]{moving_score:.3f}[/dark_sea_green], "
                             f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green]"
                         )
-                    # At the end of each step, check if it's time to load the checkpoint
-                    if self.global_step % 10 == 0 and self.global_step != 0:
-                        # Create a background task for loading the checkpoint
-                        checkpoint_task = asyncio.create_task(
-                            self.load_checkpoint_background()
-                        )
-                        self.checkpoint_tasks.add(checkpoint_task)
-                        checkpoint_task.add_done_callback(self.checkpoint_tasks.discard) 
-                        
                     # Apply all deltas to the model state.
                     st = tplr.T()
                     max_global_step = await tplr.apply_slices_to_model( 
@@ -586,17 +608,17 @@ class Validator:
                     tplr.logger.info(f"{tplr.P(window, gs_end - gs_start)}[{window_delta_str}]: Finished step.")
                     # Log main metrics
                     wandb.log({
-                        "loss": step_loss,
-                        "tokens_per_step": tokens_per_step,
-                        "tokens_per_second": tokens_per_second,
-                        "sample_rate": self.sample_rate,
-                        "utilization": eval_duration / (gs_end - gs_start)
+                        "validator/loss": step_loss,
+                        "validator/tokens_per_step": tokens_per_step,
+                        "validator/tokens_per_second": tokens_per_second,
+                        "validator/sample_rate": self.sample_rate,
+                        "validator/utilization": eval_duration / (gs_end - gs_start)
                     }, step=self.global_step)
                     for uid_i in valid_score_indices:
                         wandb.log({
-                            f"step_scores/{uid_i.item()}": self.step_scores[uid_i].item(),
-                            f"moving_scores/{uid_i.item()}": self.scores[uid_i].item(),
-                            f"weights/{uid_i.item()}": self.weights[uid_i].item(),
+                            f"validator/step_scores/{uid_i.item()}": self.step_scores[uid_i].item(),
+                            f"validator/moving_scores/{uid_i.item()}": self.scores[uid_i].item(),
+                            f"validator/weights/{uid_i.item()}": self.weights[uid_i].item(),
                         }, step=self.global_step)
                     # Set temperatured weights on the chain.
                     if self.global_step % 100 == 0:
@@ -711,7 +733,9 @@ class Validator:
                     global_step=global_step,
                     block_number=block_number,
                     scores=scores,
-                    weights=weights
+                    weights=weights,
+                    optimizer_state=self.optimizer.state_dict(),
+                    scheduler_state=self.scheduler.state_dict()
                 )
         except Exception as e:
             tplr.logger.error(f"Error in background checkpoint save: {e}")

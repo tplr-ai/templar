@@ -261,7 +261,6 @@ class Miner:
             bucket = buckets.get(uid)
             if isinstance(bucket, bytes):
                 bucket = bucket.decode('utf-8')
-            # if bucket is not None and tplr.is_valid_bucket(bucket):
             if bucket is not None:
                 tplr.logger.debug(f"UID {uid}: Valid bucket found: {bucket}")
                 self.buckets.append(bucket)
@@ -456,15 +455,6 @@ class Miner:
                         self.sample_rate = max(0.0001, self.sample_rate * 0.95)
                     else:
                         self.sample_rate = min(1, self.sample_rate * 1.05)
-
-                    # At the end of each step, check if it's time to load the checkpoint
-                    if self.global_step % 10 == 0 and self.global_step != 0:
-                        # Create a background task for loading the checkpoint
-                        checkpoint_task = asyncio.create_task(
-                            self.load_checkpoint_background()
-                        )
-                        self.checkpoint_tasks.add(checkpoint_task)
-                        checkpoint_task.add_done_callback(self.checkpoint_tasks.discard)
 
                     # Run for non-baseline nodes.
                     if not self.config.baseline:

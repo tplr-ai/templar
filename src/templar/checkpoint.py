@@ -1,4 +1,5 @@
 import asyncio
+import time
 import aiofiles
 import torch
 import os
@@ -7,6 +8,7 @@ import re
 import shutil
 from typing import List, Optional, Union, Dict
 from aiobotocore.session import get_session
+from tqdm import tqdm
 from . import __version__
 from .config import BUCKET_SECRETS, client_config
 from .constants import CF_REGION_NAME
@@ -64,70 +66,28 @@ async def load_checkpoint(
     Uses asyncio.to_thread to avoid blocking the main event loop.
     """
     try:
-        checkpoint = await asyncio.to_thread(torch.load, filename, map_location=device)
+        logger.info(f"Loading checkpoint from {filename}")
+        checkpoint = await asyncio.to_thread(torch.load, filename, map_location=device,weights_only=True)
+        logger.info("Loading model state dict")
         model.load_state_dict(checkpoint["model_state_dict"])
         if optimizer and "optimizer_state_dict" in checkpoint:
+            logger.info("Loading optimizer state dict") 
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if scheduler and "scheduler_state_dict" in checkpoint:
+            logger.info("Loading scheduler state dict")
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         global_step = checkpoint.get("global_step", 0)
+        logger.info(f"Loaded checkpoint at global step {global_step}")
         additional_state = {
             k: checkpoint[k]
             for k in checkpoint
             if k not in ["global_step", "model_state_dict", "optimizer_state_dict", "scheduler_state_dict"]
         }
+        logger.info("Successfully loaded checkpoint")
         return global_step, additional_state
     except Exception as e:
         logger.error(f"Failed to load checkpoint from {filename}: {e}")
         return 0, {}
-
-
-async def upload_checkpoint(
-    checkpoint_path: str,
-    wallet,
-):
-    """
-    Uploads the checkpoint file to S3 storage using configured bucket.
-    """
-    filename = f"neuron_checkpoints_{wallet.hotkey.ss58_address}_v{__version__}.pth"
-    logger.debug(f"Uploading checkpoint to S3: {filename}")
-
-    bucket_name = BUCKET_SECRETS["bucket_name"].split("/")[-1]
-    temp_dir = os.path.dirname(checkpoint_path)
-    temp_file = os.path.join(temp_dir, f"temp_{filename}")
-    endpoint = get_base_url(BUCKET_SECRETS["account_id"])
-    print(f'endpoint is {endpoint}')
-
-    # Copy file to a temporary file before uploading to ensure atomicity
-    try:
-        await asyncio.to_thread(shutil.copy2, checkpoint_path, temp_file)
-
-        session = get_session()
-        async with session.create_client(
-            "s3",
-            endpoint_url=endpoint,
-            region_name=CF_REGION_NAME,
-            config=client_config,
-            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
-        ) as s3_client:
-            try:
-                async with aiofiles.open(temp_file, "rb") as f:
-                    body = await f.read()
-                    await s3_client.put_object(
-                        Bucket=bucket_name,
-                        Key=filename,
-                        Body=body,
-                    )
-                logger.info(f"Successfully uploaded checkpoint to S3: {filename}")
-            except Exception as e:
-                logger.exception(f"Failed to upload checkpoint to S3: {filename}. Error: {e}")
-                raise
-    finally:
-        if os.path.exists(temp_file):
-            await asyncio.to_thread(os.remove, temp_file)
-            logger.debug(f"Temporary file {temp_file} removed")
-
 
 async def download_checkpoint_from_neuron(
     bucket_info: Bucket,
@@ -135,10 +95,35 @@ async def download_checkpoint_from_neuron(
     checkpoint_dir: str,
 ) -> Optional[str]:
     """
-    Downloads the latest checkpoint file (by block number) from the neuron's S3 storage.
+    Downloads the latest checkpoint file with parallel processing and progress tracking.
+    Handles multiple processes and provides detailed progress information.
     """
+    start_time = time.time()
     regex_pattern = rf"neuron_checkpoint_{neuron_hotkey}_b(\d+)_v[\d\.]+\.pth"
     local_checkpoint_path = None
+    chunk_size = 8 * 1024 * 1024  # 8MB chunks
+    max_concurrent_downloads = 4
+    max_retries = 3
+    retry_delay = 5
+
+    # Ensure checkpoint directory exists with absolute path
+    checkpoint_dir = os.path.abspath(checkpoint_dir)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    def format_size(size_bytes):
+        """Convert bytes to human readable format"""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.2f} {unit}"
+            size_bytes /= 1024.0
+
+    def create_progress_bar(progress, total_size):
+        """Create a progress bar with size information"""
+        width = 50
+        filled = int(width * progress / 100)
+        bar = '█' * filled + '-' * (width - filled)
+        size_info = f"{format_size(total_size * progress / 100)}/{format_size(total_size)}"
+        return f"[{bar}] {progress:.1f}% {size_info}"
 
     session = get_session()
     async with session.create_client(
@@ -150,18 +135,17 @@ async def download_checkpoint_from_neuron(
         aws_secret_access_key=bucket_info.secret_access_key,
     ) as s3_client:
         try:
+            # Find latest checkpoint
             paginator = s3_client.get_paginator("list_objects_v2")
             latest_block_number = -1
             latest_filename = None
+            file_size = None
 
             async for page in paginator.paginate(
-                Bucket=bucket_info.name, Prefix=f"neuron_checkpoint_{neuron_hotkey}_"
+                Bucket=bucket_info.name, 
+                Prefix=f"neuron_checkpoint_{neuron_hotkey}_"
             ):
-                contents = page.get("Contents", [])
-                if not contents:
-                    continue
-
-                for obj in contents:
+                for obj in page.get("Contents", []):
                     key = obj["Key"]
                     match = re.match(regex_pattern, key)
                     if match:
@@ -169,36 +153,186 @@ async def download_checkpoint_from_neuron(
                         if block_number > latest_block_number:
                             latest_block_number = block_number
                             latest_filename = key
+                            file_size = obj["Size"]
 
-            if latest_filename:
-                local_checkpoint_path = os.path.join(checkpoint_dir, latest_filename)
-                await asyncio.to_thread(os.makedirs, os.path.dirname(local_checkpoint_path), exist_ok=True)
-
-                response = await s3_client.get_object(
-                    Bucket=bucket_info.name, Key=latest_filename
-                )
-
-                async with aiofiles.open(local_checkpoint_path, "wb") as f:
-                    while True:
-                        chunk = await response["Body"].read(1024 * 1024)
-                        if not chunk:
-                            break
-                        await f.write(chunk)
-
-                logger.debug(f"Successfully downloaded checkpoint: {local_checkpoint_path}")
-                return local_checkpoint_path
-            else:
+            if not latest_filename:
                 logger.info(f"No valid checkpoints found for neuron {neuron_hotkey}")
                 return None
 
-        except botocore.exceptions.ClientError as e:
-            logger.error(f"Error downloading checkpoint: {str(e)}")
-            return None
+            logger.info(f"Found latest checkpoint: {latest_filename} ({format_size(file_size)})")
+            local_checkpoint_path = os.path.join(checkpoint_dir, latest_filename)
+            temp_path = f"{local_checkpoint_path}.temp"
+            lock_path = f"{local_checkpoint_path}.lock"
+
+            # Check if file already exists and is complete
+            if os.path.exists(local_checkpoint_path):
+                if os.path.getsize(local_checkpoint_path) == file_size:
+                    logger.info(f"Checkpoint already exists and is complete: {local_checkpoint_path}")
+                    return local_checkpoint_path
+
+            # Try to acquire lock
+            try:
+                with open(lock_path, 'x') as _:  # Atomic file creation
+                    logger.info(f"Acquired lock for downloading: {lock_path}")
+            except FileExistsError:
+                # Another process is downloading, wait for it
+                logger.info("Another process is downloading, waiting...")
+                for _ in range(30):  # Wait up to 30 seconds
+                    await asyncio.sleep(1)
+                    if os.path.exists(local_checkpoint_path):
+                        if os.path.getsize(local_checkpoint_path) == file_size:
+                            logger.info("File downloaded by another process")
+                            try:
+                                os.remove(lock_path)  # Try to clean up lock
+                            except:
+                                pass
+                            return local_checkpoint_path
+                logger.warning("Timeout waiting for other process, proceeding with download")
+
+            try:
+                # Download chunks
+                chunks_data = {}
+                downloaded_size = 0
+                semaphore = asyncio.Semaphore(max_concurrent_downloads)
+                total_chunks = (file_size + chunk_size - 1) // chunk_size
+
+                async def download_chunk(chunk_number: int):
+                    start = chunk_number * chunk_size
+                    end = min(start + chunk_size, file_size)
+                    
+                    for attempt in range(max_retries):
+                        try:
+                            async with semaphore:
+                                response = await s3_client.get_object(
+                                    Bucket=bucket_info.name,
+                                    Key=latest_filename,
+                                    Range=f"bytes={start}-{end-1}"
+                                )
+                                chunk_data = await response["Body"].read()
+                                
+                                nonlocal downloaded_size
+                                downloaded_size += len(chunk_data)
+                                progress = (downloaded_size / file_size) * 100
+                                
+                                if chunk_number % 5 == 0 or progress >= 100:
+                                    elapsed_time = time.time() - start_time
+                                    speed = downloaded_size / (1024 * 1024 * elapsed_time)  # MB/s
+                                    progress_bar = create_progress_bar(progress, file_size)
+                                    logger.info(f"\nDownload Progress: {progress_bar} [{speed:.2f} MB/s]")
+                                
+                                chunks_data[chunk_number] = chunk_data
+                                return True
+                                
+                        except Exception as e:
+                            if attempt == max_retries - 1:
+                                logger.error(f"Failed to download chunk {chunk_number}: {str(e)}")
+                                return False
+                            await asyncio.sleep(retry_delay * (attempt + 1))
+
+                # Download all chunks
+                tasks = [download_chunk(i) for i in range(total_chunks)]
+                results = await asyncio.gather(*tasks)
+
+                if not all(results):
+                    raise Exception("Some chunks failed to download")
+
+                # Write chunks to temp file
+                logger.info("Writing chunks to temp file...")
+                async with aiofiles.open(temp_path, "wb") as f:
+                    for chunk_num in range(total_chunks):
+                        if chunk_num in chunks_data:
+                            await f.write(chunks_data[chunk_num])
+                        else:
+                            raise Exception(f"Missing chunk {chunk_num}")
+                
+                await asyncio.sleep(0.5)  # Short delay for file system
+                
+                # Verify the temp file
+                if not os.path.exists(temp_path):
+                    raise Exception(f"Temp file not found at: {temp_path}")
+                
+                actual_size = os.path.getsize(temp_path)
+                if actual_size != file_size:
+                    raise Exception(f"Size mismatch in temp file: expected {file_size}, got {actual_size}")
+                
+                # Move to final location with extra verification
+                logger.info(f"Moving temp file to final location: {local_checkpoint_path}")
+                
+                # Remove destination file if it exists
+                if os.path.exists(local_checkpoint_path):
+                    logger.info(f"Removing existing checkpoint file: {local_checkpoint_path}")
+                    os.remove(local_checkpoint_path)
+                
+                try:
+                    # Use shutil.move for more reliable cross-device moves
+                    shutil.move(temp_path, local_checkpoint_path)
+                    
+                    # Verify the move
+                    if not os.path.exists(local_checkpoint_path):
+                        raise Exception("Move operation failed - destination file doesn't exist")
+                    
+                    # Double check the source file is gone
+                    if os.path.exists(temp_path):
+                        logger.warning("Temp file still exists after move, attempting cleanup")
+                        try:
+                            os.remove(temp_path)
+                        except Exception as e:
+                            logger.warning(f"Failed to cleanup temp file: {e}")
+                    
+                    # Final size verification
+                    final_size = os.path.getsize(local_checkpoint_path)
+                    if final_size != file_size:
+                        raise Exception(f"Size mismatch in final file: expected {file_size}, got {final_size}")
+                    
+                    # Extra verification - try to open the file
+                    with open(local_checkpoint_path, 'rb') as f:
+                        # Read first few bytes to verify file is accessible
+                        f.read(1024)
+                    
+                    logger.info(f"Move operation successful and verified")
+                    
+                    total_time = time.time() - start_time
+                    avg_speed = (file_size / (1024 * 1024)) / total_time  # MB/s
+                    logger.info(f"Successfully downloaded checkpoint to: {local_checkpoint_path}")
+                    logger.info(f"Download completed in {total_time:.2f} seconds ({avg_speed:.2f} MB/s average)")
+                    
+                    return local_checkpoint_path
+                    
+                except Exception as move_e:
+                    logger.error(f"Error during move operation: {str(move_e)}")
+                    # Try to recover the temp file if move failed
+                    if os.path.exists(temp_path) and not os.path.exists(local_checkpoint_path):
+                        try:
+                            shutil.copy2(temp_path, local_checkpoint_path)
+                            logger.info("Recovered file using copy operation")
+                        except Exception as recover_e:
+                            logger.error(f"Failed to recover file: {str(recover_e)}")
+                    raise
+
+            except Exception as e:
+                logger.error(f"Error during file operations: {str(e)}")
+                # Cleanup both temp and final files if they exist
+                for filepath in [temp_path, local_checkpoint_path]:
+                    if filepath and os.path.exists(filepath):
+                        try:
+                            os.remove(filepath)
+                            logger.info(f"Cleaned up file: {filepath}")
+                        except Exception as rm_e:
+                            logger.error(f"Failed to cleanup file {filepath}: {str(rm_e)}")
+                return None
+
+            finally:
+                # Clean up lock file
+                try:
+                    os.remove(lock_path)
+                except Exception as e:
+                    logger.warning(f"Failed to remove lock file: {str(e)}")
+
         except Exception as e:
-            logger.error(f"Unexpected error downloading checkpoint: {str(e)}")
+            logger.error(f"Unexpected error: {str(e)}")
             return None
 
-
+    
 def get_all_buckets(
     subtensor,
     netuid: int,
@@ -390,6 +524,9 @@ class CheckpointManager:
                     upload_tasks = []
                     failed_parts = set()
 
+                    # Initialize progress bar
+                    pbar = tqdm(total=total_size, unit='B', unit_scale=True, desc="Uploading checkpoint")
+
                     async def upload_part_with_retry(part_number: int, offset: int) -> dict:
                         """Upload a single part with retries and verification."""
                         for attempt in range(max_retries):
@@ -412,13 +549,7 @@ class CheckpointManager:
                                         if part_size == 0:
                                             raise ValueError(f"Zero-size chunk for part {part_number}")
                                         
-                                        nonlocal uploaded_size
-                                        uploaded_size += part_size
-                                        progress = (uploaded_size / total_size) * 100
-                                        
-                                        if part_number % 5 == 0 or progress >= 100:
-                                            logger.info(f"Upload progress: {progress:.1f}% - Part {part_number}/{total_parts}")
-                                            logger.info(f"Active uploads: {len([t for t in upload_tasks if not t.done()])}")
+                                        pbar.update(part_size)
                                         
                                         return {
                                             'PartNumber': part_number,
@@ -441,6 +572,9 @@ class CheckpointManager:
                         
                     # Wait for all uploads and collect results
                     completed_parts = await asyncio.gather(*upload_tasks, return_exceptions=True)
+                    
+                    # Close progress bar
+                    pbar.close()
                     
                     # Process results and check for failures
                     for part in completed_parts:
@@ -503,6 +637,8 @@ class CheckpointManager:
                 for task in upload_tasks:
                     if not task.done():
                         task.cancel()
+
+
 
     async def _cleanup_old_checkpoints_async(self, max_checkpoints=3):
         """

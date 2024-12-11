@@ -196,7 +196,7 @@ class Validator:
 
         self.last_window = 0
         self.optimal_pages_per_step = 4
-        self.current_block = self.subtensor.block
+        self.current_block = self.subtensor.block 
         self.current_window = self.block_to_window( self.current_block )
         self.window_seeds = {self.current_window: self.window_to_seed( self.current_window) }
         self.block_event = asyncio.Event()
@@ -300,7 +300,7 @@ class Validator:
 
 
                     # Upload checkpoint every 10 steps
-                    if self.global_step % 2 == 0:
+                    if self.global_step % 10 == 0:
                         # Create background task for checkpoint operations
                         checkpoint_task = asyncio.create_task(
                             self.save_checkpoint_background(

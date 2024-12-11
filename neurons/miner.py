@@ -231,7 +231,6 @@ class Miner:
             self.save_location = tempfile.gettempdir()
         else:
             os.makedirs(self.save_location, exist_ok=True) 
-        self.global_step = 0   
         print ( self.hparams )
 
     async def update(self):

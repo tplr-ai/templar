@@ -490,7 +490,6 @@ class Validator:
                                     continue
                     self.optimizer.step()
                     self.scheduler.step()
-                    self.optimizer.zero_grad()
                     step_loss = total_loss/(full_steps+1)
                     eval_duration = tplr.T() - eval_start
                     tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
@@ -508,29 +507,45 @@ class Validator:
                     # Compute the score for this slice.
                     st = tplr.T()
                     score = 0.0 
-                    # Collect all delta_i and grad_i into larger vectors
-                    all_delta = []
-                    all_grad = []
 
-                    for i, (name_i, param_i) in enumerate(self.model.named_parameters()):
-                        if param_i.grad is None:
-                            continue
-                        
-                        idxs_i = indices[name_i].to(self.model.device)
-                        grad_i = param_i.grad.view(-1).clone()[idxs_i].to(self.model.device)
-                        slice_i = eval_slice_data[name_i].view(-1).to(self.model.device)
-                        theta_i = param_i.data.view(-1)[idxs_i]
-                        delta_i = theta_i - slice_i
+                    # Check if we have any gradients
+                    has_grads = any(param.grad is not None for name, param in self.model.named_parameters())
 
-                        all_delta.append(delta_i)
-                        all_grad.append(grad_i)
+                    if not has_grads:
+                        tplr.logger.warning("No gradients found - setting score to 0.0")
+                        score = 0.0
+                    else:
+                        # Collect all delta_i and grad_i into larger vectors
+                        all_delta = []
+                        all_grad = []
 
-                    #Concatenate all parts
-                    all_delta = torch.cat(all_delta)
-                    all_grad = torch.cat(all_grad)
+                        for i, (name_i, param_i) in enumerate(self.model.named_parameters()):
+                            if param_i.grad is None:
+                                continue
+                            
+                            if name_i not in indices or name_i not in eval_slice_data:
+                                continue
 
-                    # Compute global cosine similarity
-                    score = torch.nn.functional.cosine_similarity(all_delta, all_grad, dim=0).item()
+                            idxs_i = indices[name_i].to(self.model.device)
+                            grad_i = param_i.grad.view(-1).clone()[idxs_i].to(self.model.device)
+                            slice_i = eval_slice_data[name_i].view(-1).to(self.model.device)
+                            theta_i = param_i.data.view(-1)[idxs_i]
+                            delta_i = theta_i - slice_i
+
+                            all_delta.append(delta_i)
+                            all_grad.append(grad_i)
+
+                        if len(all_delta) > 0:
+                            #Concatenate all parts
+                            all_delta = torch.cat(all_delta)
+                            all_grad = torch.cat(all_grad)
+
+                            # Compute global cosine similarity
+                            score = torch.nn.functional.cosine_similarity(all_delta, all_grad, dim=0).item()
+                        else:
+                            tplr.logger.warning("No valid parameter tensors found - setting score to 0.0")
+                            score = 0.0
+
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Computed score: [bold dark_sea_green]{score:.4f}[/bold dark_sea_green]")           
 
 

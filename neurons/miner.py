@@ -212,7 +212,11 @@ class Miner:
         self.global_step = asyncio.run(
             self.checkpoint_manager.load_from_highest_stake(
                 metagraph=self.metagraph,
-                buckets=self.buckets
+                buckets=self.buckets,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                is_validator=False, 
+                hparams=self.hparams
             )
         )
 

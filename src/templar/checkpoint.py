@@ -56,45 +56,62 @@ async def save_checkpoint(
 async def load_checkpoint(
     filename: str,
     model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer = None,
-    scheduler: torch.optim.lr_scheduler._LRScheduler = None,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
     device: str = "cpu",
-):
+    is_validator: bool = False,
+    hparams=None,
+) -> int:
     """
     Loads the checkpoint from the specified filename asynchronously.
-    Uses asyncio.to_thread to avoid blocking the main event loop.
+    Adjusts optimizer and scheduler for miners.
     """
     try:
         logger.info(f"Loading checkpoint from {filename}")
         checkpoint = await asyncio.to_thread(
-            torch.load, filename, map_location=device, weights_only=True
+            torch.load, filename, map_location=device
         )
-        logger.info("Loading model state dict")
+
+        # Load the model state
         model.load_state_dict(checkpoint["model_state_dict"])
-        if optimizer and "optimizer_state_dict" in checkpoint:
-            logger.info("Loading optimizer state dict")
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        if scheduler and "scheduler_state_dict" in checkpoint:
-            logger.info("Loading scheduler state dict")
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         global_step = checkpoint.get("global_step", 0)
-        logger.info(f"Loaded checkpoint at global step {global_step}")
-        additional_state = {
-            k: checkpoint[k]
-            for k in checkpoint
-            if k
-            not in [
-                "global_step",
-                "model_state_dict",
-                "optimizer_state_dict",
-                "scheduler_state_dict",
-            ]
-        }
-        logger.info("Successfully loaded checkpoint")
-        return global_step, additional_state
+        logger.info(f"Loaded model state at global step {global_step}")
+
+        # Load optimizer state
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        # Adjust optimizer state if miner
+        if not is_validator:
+            # Retrieve validator's learning rate from optimizer state
+            validator_lr = optimizer.param_groups[0]['lr']
+            miner_lr = hparams.learning_rate  # Miner's learning rate
+
+            # Compute scaling factor
+            scaling_factor = validator_lr / miner_lr
+
+            # Scale optimizer's internal states
+            for state in optimizer.state.values():
+                if "exp_avg" in state:
+                    state["exp_avg"].mul_(scaling_factor)
+                if "exp_avg_sq" in state:
+                    # Optionally adjust exp_avg_sq if needed
+                    pass
+
+            # Update optimizer's learning rate to miner's learning rate
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = miner_lr
+
+            logger.info("Adjusted optimizer states for miner.")
+
+        else:
+            logger.info("Loaded optimizer states for validator.")
+
+
+        return global_step
+
     except Exception as e:
         logger.error(f"Failed to load checkpoint from {filename}: {e}")
-        return 0, {}
+        return 0
 
 
 async def download_checkpoint_from_neuron(
@@ -836,6 +853,10 @@ class CheckpointManager:
         self,
         metagraph,
         buckets,
+        optimizer,
+        scheduler,
+        is_validator: bool = False,
+        hparams=None,
     ) -> int:
         """
         Attempts to load checkpoint from the highest stake neuron.
@@ -864,8 +885,10 @@ class CheckpointManager:
                             filename=checkpoint_file,
                             model=self.model,
                             device=self.device,
-                            optimizer=self.optimizer if self.optimizer else None,
-                            scheduler=self.scheduler if self.scheduler else None,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            is_validator=is_validator,
+                            hparams=hparams
                         )
                         logger.info(f"Resumed from global step {global_step}")
                         return global_step if global_step is not None else 0

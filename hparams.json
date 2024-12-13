@@ -31,5 +31,6 @@
     "validator_weights_temperature": 10,
     "validator_window_eval_size": 3,
     "validator_sample_rate": 0.01,
-    "validator_non_submission_decay": 0.9
+    "validator_non_submission_decay": 0.9,
+    "validator_learning_rate_scale_factor": 0.1
 }

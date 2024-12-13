@@ -68,9 +68,7 @@ async def load_checkpoint(
     """
     try:
         logger.info(f"Loading checkpoint from {filename}")
-        checkpoint = await asyncio.to_thread(
-            torch.load, filename, map_location=device
-        )
+        checkpoint = await asyncio.to_thread(torch.load, filename, map_location=device)
 
         # Load the model state
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -83,7 +81,7 @@ async def load_checkpoint(
         # Adjust optimizer state if miner
         if not is_validator:
             # Retrieve validator's learning rate from optimizer state
-            validator_lr = optimizer.param_groups[0]['lr']
+            validator_lr = optimizer.param_groups[0]["lr"]
             miner_lr = hparams.learning_rate  # Miner's learning rate
 
             # Compute scaling factor
@@ -99,13 +97,12 @@ async def load_checkpoint(
 
             # Update optimizer's learning rate to miner's learning rate
             for param_group in optimizer.param_groups:
-                param_group['lr'] = miner_lr
+                param_group["lr"] = miner_lr
 
             logger.info("Adjusted optimizer states for miner.")
 
         else:
             logger.info("Loaded optimizer states for validator.")
-
 
         return global_step
 
@@ -888,7 +885,7 @@ class CheckpointManager:
                             optimizer=optimizer,
                             scheduler=scheduler,
                             is_validator=is_validator,
-                            hparams=hparams
+                            hparams=hparams,
                         )
                         logger.info(f"Resumed from global step {global_step}")
                         return global_step if global_step is not None else 0

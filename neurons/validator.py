@@ -637,6 +637,11 @@ class Validator:
                         }, step=self.global_step)
                     # Set temperatured weights on the chain.
                     if self.global_step % 100 == 0:
+                        # Check if all scores are zero
+                        if torch.all(self.weights[self.metagraph.uids] == 0):
+                            tplr.logger.info("All weights are zero, skipping weight setting")
+                            continue
+                            
                         tplr.logger.info(f"Setting weights on chain: {self.weights[self.metagraph.uids]}")
                         
                         max_retries = 3

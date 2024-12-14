@@ -33,6 +33,7 @@ import wandb
 import wandb.plot
 from asyncio import TimeoutError
 from functools import partial
+import tempfile
 
 # Local imports.
 import templar as tplr
@@ -76,10 +77,8 @@ class Validator:
             tplr.trace()
         if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
-            # Start autoupdater in a new thread
-            autoupdate_thread = threading.Thread(target=autoupdater.start)
-            autoupdate_thread.daemon = True  # Ensures thread exits when main program exits
-            autoupdate_thread.start()
+            autoupdater.daemon = True  # Ensure thread exits when main program exits
+            autoupdater.start()
         return config
 
     def __init__(self):
@@ -180,7 +179,7 @@ class Validator:
 
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            lr=self.hparams.learning_rate*self.validator_learning_rate_scale_factor,
+            lr=self.hparams.learning_rate*self.hparams.validator_learning_rate_scale_factor,
             betas=(self.hparams.optimizer_beta1, self.hparams.optimizer_beta2),
             weight_decay=self.hparams.optimizer_weight_decay,
             foreach=True
@@ -208,7 +207,7 @@ class Validator:
                 buckets=self.buckets,
                 optimizer=self.optimizer,
                 scheduler=self.scheduler,
-                is_validator=True,  # Indicate validator
+                is_validator=True, 
                 hparams=self.hparams
             )
         )
@@ -227,10 +226,18 @@ class Validator:
         self.sample_rate = 1.0
         self.save_location = self.config.save_location
         if self.save_location is None:
-            import tempfile
-            self.save_location = tempfile.gettempdir()
+            # Default to system temp dir with unique neuron directory
+            self.save_location = os.path.join(
+                tempfile.gettempdir(), f"neuron_{self.wallet.hotkey.ss58_address}"
+            )
         else:
-            os.makedirs(self.save_location, exist_ok=True)  
+            # Append neuron-specific directory to save_location
+            self.save_location = os.path.join(
+                self.config.save_location, f"neuron_{self.wallet.hotkey.ss58_address}"
+            )
+
+        # Create the directory if it doesn't exist
+        os.makedirs(self.save_location, exist_ok=True)
         self.checkpoint_tasks = set()
         print ( self.hparams )
 

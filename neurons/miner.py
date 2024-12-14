@@ -34,6 +34,7 @@ import torch.optim as optim
 from transformers import LlamaForCausalLM
 from rich.markup import escape
 import os
+import tempfile
 
 # Import local files.
 import templar as tplr
@@ -78,10 +79,8 @@ class Miner:
             tplr.trace()
         if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
-            # Start autoupdater in a new thread
-            autoupdate_thread = threading.Thread(target=autoupdater.start)
-            autoupdate_thread.daemon = True  # Ensures thread exits when main program exits
-            autoupdate_thread.start()
+            autoupdater.daemon = True  # Ensure thread exits when main program exits
+            autoupdater.start()
         return config
 
 
@@ -229,12 +228,19 @@ class Miner:
         self.new_window_event = asyncio.Event()
         self.stop_event = asyncio.Event()    
         self.last_full_steps = self.hparams.desired_batch_size // self.config.actual_batch_size
-        self.save_location = self.config.save_location
-        if self.save_location is None:
-            import tempfile
-            self.save_location = tempfile.gettempdir()
+        if self.config.save_location is None:
+            # Default to system temp dir with unique neuron directory
+            self.save_location = os.path.join(
+                tempfile.gettempdir(), f"neuron_{self.wallet.hotkey.ss58_address}"
+            )
         else:
-            os.makedirs(self.save_location, exist_ok=True)
+            # Append neuron-specific directory to save_location
+            self.save_location = os.path.join(
+                self.config.save_location, f"neuron_{self.wallet.hotkey.ss58_address}"
+            )
+
+        # Create the directory if it doesn't exist
+        os.makedirs(self.save_location, exist_ok=True)
         self.checkpoint_tasks = set()  
         print ( self.hparams )
 

@@ -104,15 +104,17 @@ async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
     """
     lock_path = f"{filename}.lock"
     try:
-        lock: FileLock = FileLock(lock_path)
-        with lock.acquire(timeout=5):
-            # Check if file exists before trying to load
-            if not os.path.exists(filename):
-                logger.warning(
-                    f"Slice file not found (may have been cleaned up): {filename}"
-                )
-                return {}
+        # Check if file exists before trying to acquire lock
+        if not os.path.exists(filename):
+            logger.warning(f"Slice file not found: {filename}")
+            return {}
 
+        lock = FileLock(lock_path)
+        with lock.acquire(timeout=1):
+            # Check again if file exists after acquiring lock
+            if not os.path.exists(filename):
+                logger.warning(f"Slice file not found after acquiring lock: {filename}")
+                return {}
             try:
                 return torch.load(
                     filename,
@@ -123,8 +125,9 @@ async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
                 torch.serialization.pickle.UnpicklingError,
                 RuntimeError,
                 EOFError,
+                FileNotFoundError,
             ) as e:
-                logger.warning(f"Failed to load corrupt slice file {filename}: {e}")
+                logger.warning(f"Failed to load slice file {filename}: {e}")
                 return {}
             except Exception as e:
                 logger.warning(f"Error loading slice file {filename}: {e}")
@@ -1019,3 +1022,15 @@ async def load_checkpoint(
     except Exception as e:
         logger.error(f"Failed to load checkpoint from {filename}: {e}")
         return 0, {}
+
+
+def get_neuron_temp_dir(wallet) -> str:
+    """
+    Returns a unique temporary directory for the neuron based on its wallet hotkey.
+    """
+
+    temp_dir = os.path.join(
+        tempfile.gettempdir(), f"neuron_{wallet.hotkey.ss58_address}"
+    )
+    os.makedirs(temp_dir, exist_ok=True)
+    return temp_dir

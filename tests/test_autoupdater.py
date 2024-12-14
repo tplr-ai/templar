@@ -5,16 +5,18 @@
 
 import os
 import tempfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, PropertyMock
 
 import git
 import pytest
+import asyncio
 
 # Import the AutoUpdate class
 from templar.autoupdate import AutoUpdate
 
 
-def test_autoupdate_version_check_no_update():
+@pytest.mark.asyncio
+async def test_autoupdate_version_check_no_update():
     """Test that no update occurs when local and remote versions are the same."""
     with tempfile.TemporaryDirectory() as temp_dir:
         # Initialize a temporary Git repository
@@ -33,8 +35,13 @@ def test_autoupdate_version_check_no_update():
         with patch("templar.autoupdate.git.Repo") as mock_repo:
             mock_repo.return_value = repo
 
-            # Mock get_remote_version to return the same version
-            with patch.object(AutoUpdate, "get_remote_version", return_value="1.0.0"):
+            # Mock get_remote_version to return the same version asynchronously
+            async def mock_get_remote_version(self):
+                return "1.0.0"
+
+            with patch.object(
+                AutoUpdate, "get_remote_version", new=mock_get_remote_version
+            ):
                 # Create a mock 'templar' module
                 mock_templar = MagicMock()
                 mock_templar.__version__ = "1.0.0"
@@ -42,13 +49,15 @@ def test_autoupdate_version_check_no_update():
                 # Inject the mock_templar into sys.modules
                 with patch.dict("sys.modules", {"templar": mock_templar}):
                     autoupdater = AutoUpdate()
-                    updated = autoupdater.check_version_updated()
+                    # Run the asynchronous check_version_updated method
+                    updated = await autoupdater.check_version_updated()
                     assert (
                         not updated
                     ), "Should not attempt to update when versions are the same"
 
 
-def test_autoupdate_version_check_update_available():
+@pytest.mark.asyncio
+async def test_autoupdate_version_check_update_available():
     """Test that an update is detected when remote version is higher."""
     with tempfile.TemporaryDirectory() as temp_dir:
         # Initialize a temporary Git repository
@@ -67,11 +76,16 @@ def test_autoupdate_version_check_update_available():
         with patch("templar.autoupdate.git.Repo") as mock_repo:
             mock_repo.return_value = repo
 
-            # Mock get_remote_version to return a higher version
-            with patch.object(AutoUpdate, "get_remote_version", return_value="1.1.0"):
-                autoupdater = AutoUpdate()
-                updated = autoupdater.check_version_updated()
+            # Mock get_remote_version to return a higher version asynchronously
+            async def mock_get_remote_version(self):
+                return "1.1.0"
 
+            with patch.object(
+                AutoUpdate, "get_remote_version", new=mock_get_remote_version
+            ):
+                autoupdater = AutoUpdate()
+                # Run the asynchronous check_version_updated method
+                updated = await autoupdater.check_version_updated()
                 assert updated, "Should detect that an update is available"
 
 
@@ -87,6 +101,7 @@ def test_autoupdate_attempt_update():
         repo.index.add(["README.md"])
         repo.index.commit("Initial commit")
 
+        # Create a remote named 'origin'
         origin = repo.create_remote("origin", url="git@github.com:user/repo.git")
 
         # Mock the Repo object
@@ -94,13 +109,29 @@ def test_autoupdate_attempt_update():
             mock_repo.return_value = repo
             autoupdater = AutoUpdate()
 
-            # Mock is_dirty to return False
-            with patch.object(repo, "is_dirty", return_value=False):
-                # Mock the git.Remote.pull method
-                with patch.object(git.Remote, "pull", return_value=None) as mock_pull:
-                    success = autoupdater.attempt_update()
-                    assert success, "Update should succeed when repo is clean"
-                    mock_pull.assert_called_once()
+            # Mock 'is_detached' property
+            with patch.object(
+                type(repo.head), "is_detached", new_callable=PropertyMock
+            ) as mock_is_detached:
+                mock_is_detached.return_value = False
+
+                # Mock 'active_branch' property
+                with patch.object(
+                    type(repo), "active_branch", new_callable=PropertyMock
+                ) as mock_active_branch:
+                    mock_branch = MagicMock()
+                    mock_branch.name = "main"
+                    mock_active_branch.return_value = mock_branch
+
+                    # Mock 'is_dirty' method
+                    with patch.object(repo, "is_dirty", return_value=False):
+                        # Mock 'pull' method on git.Remote
+                        with patch.object(
+                            git.Remote, "pull", return_value=None
+                        ) as mock_pull:
+                            success = autoupdater.attempt_update()
+                            assert success, "Update should succeed when repo is clean"
+                            mock_pull.assert_called_once()
 
 
 def test_autoupdate_restart_app():

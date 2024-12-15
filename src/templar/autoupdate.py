@@ -1,12 +1,13 @@
 # Global imports
 import asyncio
+import aiohttp
+from packaging import version
 import git
 import os
 import subprocess
 import sys
 import threading
 import time
-from packaging import version
 
 # Local imports
 from .comms import delete_old_version_files
@@ -31,38 +32,38 @@ class AutoUpdate(threading.Thread):
         except Exception as e:
             logger.exception("Failed to initialize the repository", exc_info=e)
 
-    def get_remote_version(self):
+    async def get_remote_version(self):
         """
-        Fetch the remote version string from the src/templar/__init__.py file in the repository.
+        Asynchronously fetch the remote version string from a remote HTTP endpoint.
         """
         try:
-            # Perform a git fetch to ensure we have the latest remote information
-            self.repo.remotes.origin.fetch(kill_after_timeout=5)
+            url = "https://raw.githubusercontent.com/tplr-ai/templar/main/src/templar/__init__.py"
 
-            # Get version number from remote __init__.py
-            init_blob = (
-                self.repo.remote().refs[TARGET_BRANCH].commit.tree
-                / "src"
-                / "templar"
-                / "__init__.py"
-            )
-            lines = init_blob.data_stream.read().decode("utf-8").split("\n")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=5) as response:
+                    response.raise_for_status()
+                    content = await response.text()
 
-            for line in lines:
+            for line in content.split("\n"):
                 if line.startswith("__version__"):
-                    version_info = line.split("=")[1].strip().strip(' "')
+                    version_info = line.split("=")[1].strip().strip(" \"'")
                     return version_info
+
+            logger.error("Version string not found in remote __init__.py")
+            return None
+
         except Exception as e:
             logger.exception(
                 "Failed to get remote version for version check", exc_info=e
             )
             return None
+            return None
 
-    def check_version_updated(self):
+    async def check_version_updated(self):
         """
-        Compares local and remote versions and returns True if the remote version is higher.
+        Asynchronously compares local and remote versions and returns True if the remote version is higher.
         """
-        remote_version = self.get_remote_version()
+        remote_version = await self.get_remote_version()
         if not remote_version:
             logger.error("Failed to get remote version, skipping version check")
             return False
@@ -72,7 +73,6 @@ class AutoUpdate(threading.Thread):
             import templar
             from importlib import reload
 
-            # from . import __init__
             reload(templar)
             local_version = templar.__version__
         except Exception as e:
@@ -182,27 +182,32 @@ class AutoUpdate(threading.Thread):
         """
         Automatic update entrypoint method.
         """
-        # if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
-        #     logger.info("Not on the target branch, skipping auto-update")
-        #     return
-
-        if not self.check_version_updated():
+        if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
+            logger.info("Not on the target branch, skipping auto-update")
             return
 
-        if not self.attempt_update():
-            return
-
-        # Synchronize dependencies
-        self.attempt_package_update()
-
-        # Clean up old versions from the bucket
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(self.cleanup_old_versions())
-        loop.close()
+        try:
+            is_updated = loop.run_until_complete(self.check_version_updated())
+            if not is_updated:
+                return
 
-        # Restart application
-        self.restart_app()
+            if not self.attempt_update():
+                return
+
+            # Synchronize dependencies
+            self.attempt_package_update()
+
+            # Clean up old versions from the bucket
+            loop.run_until_complete(self.cleanup_old_versions())
+
+            # Restart application
+            self.restart_app()
+        except Exception as e:
+            logger.exception("Exception during autoupdate process", exc_info=e)
+        finally:
+            loop.close()
 
     def restart_app(self):
         """Restarts the current application appropriately based on the runtime environment."""

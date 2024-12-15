@@ -33,6 +33,7 @@ import wandb
 import wandb.plot
 from asyncio import TimeoutError
 from functools import partial
+import tempfile
 
 # Local imports.
 import templar as tplr
@@ -76,10 +77,8 @@ class Validator:
             tplr.trace()
         if not config.no_autoupdate:
             autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
-            # Start autoupdater in a new thread
-            autoupdate_thread = threading.Thread(target=autoupdater.start)
-            autoupdate_thread.daemon = True  # Ensures thread exits when main program exits
-            autoupdate_thread.start()
+            autoupdater.daemon = True  # Ensure thread exits when main program exits
+            autoupdater.start()
         return config
 
     def __init__(self):
@@ -177,6 +176,21 @@ class Validator:
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
         self.model.eval()
+
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=self.hparams.learning_rate*self.hparams.validator_learning_rate_scale_factor,
+            betas=(self.hparams.optimizer_beta1, self.hparams.optimizer_beta2),
+            weight_decay=self.hparams.optimizer_weight_decay,
+            foreach=True
+        )
+
+        self.scheduler = tplr.get_wsd_scheduler(
+            optimizer=self.optimizer,
+            num_warmup_steps=self.hparams.num_warmup_steps,
+            num_stable_steps=self.hparams.num_stable_steps,
+            num_decay_steps=self.hparams.num_decay_steps,
+        )
         
         # Initialize checkpoint manager
         self.checkpoint_manager = tplr.CheckpointManager(
@@ -190,13 +204,17 @@ class Validator:
         self.global_step = asyncio.run(
             self.checkpoint_manager.load_from_highest_stake(
                 metagraph=self.metagraph,
-                buckets=self.buckets
+                buckets=self.buckets,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                is_validator=True, 
+                hparams=self.hparams
             )
         )
 
         self.last_window = 0
         self.optimal_pages_per_step = 4
-        self.current_block = self.subtensor.block
+        self.current_block = self.subtensor.block 
         self.current_window = self.block_to_window( self.current_block )
         self.window_seeds = {self.current_window: self.window_to_seed( self.current_window) }
         self.block_event = asyncio.Event()
@@ -208,10 +226,19 @@ class Validator:
         self.sample_rate = 1.0
         self.save_location = self.config.save_location
         if self.save_location is None:
-            import tempfile
-            self.save_location = tempfile.gettempdir()
+            # Default to system temp dir with unique neuron directory
+            self.save_location = os.path.join(
+                tempfile.gettempdir(), f"neuron_{self.wallet.hotkey.ss58_address}"
+            )
         else:
-            os.makedirs(self.save_location, exist_ok=True)  
+            # Append neuron-specific directory to save_location
+            self.save_location = os.path.join(
+                self.config.save_location, f"neuron_{self.wallet.hotkey.ss58_address}"
+            )
+
+        # Create the directory if it doesn't exist
+        os.makedirs(self.save_location, exist_ok=True)
+        self.checkpoint_tasks = set()
         print ( self.hparams )
 
         # Configuration for weight setting
@@ -221,6 +248,10 @@ class Validator:
             'retry_delay': 5,
             'health_check_interval': 300  # 5 minutes
         }
+
+        # At the beginning of the Validator class, add a new attribute to track checkpoint tasks
+        self.checkpoint_tasks = set()  # Track checkpoint tasks
+        self.checkpoint_lock = asyncio.Lock()  # Add lock for thread safety
 
     async def update(self):
         """Continuously updates the global state by polling every 10 minutes."""
@@ -253,11 +284,45 @@ class Validator:
                 tplr.logger.debug(f"UID {uid}: Invalid or missing bucket: {bucket}")
                 self.buckets.append(None)
 
+    async def load_checkpoint_background(self):
+        """Handles checkpoint loading in the background."""
+        try:
+            tplr.logger.info(f"Loading checkpoint at step {self.global_step}")
+
+            # Load the checkpoint into a temporary model
+            temp_model = LlamaForCausalLM(config=self.hparams.model_config).to(self.config.device)
+            temp_checkpoint_manager = tplr.CheckpointManager(
+                model=temp_model,
+                checkpoint_path=self.checkpoint_path,
+                wallet=self.wallet,
+                device=self.config.device,
+            )
+
+            # Load the checkpoint from the highest stake
+            await temp_checkpoint_manager.load_from_highest_stake(
+                metagraph=self.metagraph,
+                buckets=self.buckets
+            )
+
+            # Safely update the main model's parameters
+            for param, temp_param in zip(self.model.parameters(), temp_model.parameters()):
+                param.data.copy_(temp_param.data)
+
+            tplr.logger.info(f"Checkpoint loaded at step {self.global_step}")
+
+            # Clean up the temporary model to free memory
+            del temp_model, temp_checkpoint_manager
+            torch.cuda.empty_cache()
+
+        except Exception as e:
+            tplr.logger.error(f"Error loading checkpoint in background: {str(e)}")
+
     async def run(self):
         # Main loop.
         self.loop = asyncio.get_running_loop()
         self.update_task = asyncio.create_task(self.update())
         self.listener = threading.Thread(target=self.block_listener, args=(self.loop,), daemon=True).start()
+        self.checkpoint_tasks = set()
 
         # Optionally sync the model state by pulling model states from the history.
         if self.config.sync_state:
@@ -295,14 +360,19 @@ class Validator:
                     window = self.current_window - offset
 
 
-                    # Upload checkpoint every 10 steps
-                    if self.global_step % 10 == 0:
-                        self.checkpoint_manager.save_and_upload(
-                            global_step=self.global_step,
-                            block_number=self.current_block,
-                            scores=self.scores,
-                            weights=self.weights
+                    # Upload checkpoint every 100 steps
+                    if self.global_step % 100 == 0:
+                        # Create background task for checkpoint operations
+                        checkpoint_task = asyncio.create_task(
+                            self.save_checkpoint_background(
+                                global_step=self.global_step,
+                                block_number=self.current_block,
+                                scores=self.scores.clone(),  # Clone to avoid race conditions
+                                weights=self.weights.clone()  # Clone to avoid race conditions
+                            )
                         )
+                        self.checkpoint_tasks.add(checkpoint_task)
+                        checkpoint_task.add_done_callback(self.checkpoint_tasks.discard)
 
                     # Download the state for the eval window.
                     st = tplr.T()
@@ -429,6 +499,8 @@ class Validator:
                                 if self.current_window - offset != window:
                                     exhausted_window = True
                                     continue
+                    self.optimizer.step()
+                    self.scheduler.step()
                     step_loss = total_loss/(full_steps+1)
                     eval_duration = tplr.T() - eval_start
                     tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
@@ -446,18 +518,48 @@ class Validator:
                     # Compute the score for this slice.
                     st = tplr.T()
                     score = 0.0 
-                    for i, (name_i, param_i) in enumerate( self.model.named_parameters() ):
-                        if param_i.grad is None:
-                            continue  # Skip parameters without gradients
-                        idxs_i = indices[name_i].to(self.model.device)
-                        grad_i = param_i.grad.view(-1).clone()[idxs_i].to(self.model.device) 
-                        slice_i = eval_slice_data[name_i].view(-1).to(self.model.device) 
-                        theta_i = param_i.data.view(-1)[idxs_i]
-                        delta_i = theta_i - slice_i
-                        sim_i = torch.nn.functional.cosine_similarity(delta_i, grad_i, dim=0).item()
-                        weight_i = param_i.data.view(-1)[idxs_i].norm().item() + 1e-8
-                        score += weight_i * sim_i
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Computed score: [bold dark_sea_green]{score:.4f}[/bold dark_sea_green]")           
+
+                    # Check if we have any gradients
+                    has_grads = any(param.grad is not None for name, param in self.model.named_parameters())
+
+                    if not has_grads:
+                        tplr.logger.warning("No gradients found - setting score to 0.0")
+                        score = 0.0
+                    else:
+                        # Collect all delta_i and grad_i into larger vectors
+                        all_delta = []
+                        all_grad = []
+
+                        for i, (name_i, param_i) in enumerate(self.model.named_parameters()):
+                            if param_i.grad is None:
+                                continue
+                            
+                            if name_i not in indices or name_i not in eval_slice_data:
+                                continue
+
+                            idxs_i = indices[name_i].to(self.model.device)
+                            grad_i = param_i.grad.view(-1).clone()[idxs_i].to(self.model.device)
+                            slice_i = eval_slice_data[name_i].view(-1).to(self.model.device)
+                            theta_i = param_i.data.view(-1)[idxs_i]
+                            delta_i = theta_i - slice_i
+
+                            all_delta.append(delta_i)
+                            all_grad.append(grad_i)
+
+                        if len(all_delta) > 0:
+                            #Concatenate all parts
+                            all_delta = torch.cat(all_delta)
+                            all_grad = torch.cat(all_grad)
+
+                            # Compute global cosine similarity
+                            score = torch.nn.functional.cosine_similarity(all_delta, all_grad, dim=0).item()
+                        else:
+                            tplr.logger.warning("No valid parameter tensors found - setting score to 0.0")
+                            score = 0.0
+
+                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Computed score: [bold dark_sea_green]{score:.4f}[/bold dark_sea_green]")
+                    self.optimizer.zero_grad()        
+
 
                     # Assign and log scores.
                     # Apply decay to miners who did not submit slices
@@ -502,7 +604,6 @@ class Validator:
                             f"moving_score: [dark_sea_green]{moving_score:.3f}[/dark_sea_green], "
                             f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green]"
                         )
-
                     # Apply all deltas to the model state.
                     st = tplr.T()
                     max_global_step = await tplr.apply_slices_to_model( 
@@ -534,20 +635,25 @@ class Validator:
                     tplr.logger.info(f"{tplr.P(window, gs_end - gs_start)}[{window_delta_str}]: Finished step.")
                     # Log main metrics
                     wandb.log({
-                        "loss": step_loss,
-                        "tokens_per_step": tokens_per_step,
-                        "tokens_per_second": tokens_per_second,
-                        "sample_rate": self.sample_rate,
-                        "utilization": eval_duration / (gs_end - gs_start)
+                        "validator/loss": step_loss,
+                        "validator/tokens_per_step": tokens_per_step,
+                        "validator/tokens_per_second": tokens_per_second,
+                        "validator/sample_rate": self.sample_rate,
+                        "validator/utilization": eval_duration / (gs_end - gs_start)
                     }, step=self.global_step)
                     for uid_i in valid_score_indices:
                         wandb.log({
-                            f"step_scores/{uid_i.item()}": self.step_scores[uid_i].item(),
-                            f"moving_scores/{uid_i.item()}": self.scores[uid_i].item(),
-                            f"weights/{uid_i.item()}": self.weights[uid_i].item(),
+                            f"validator/step_scores/{uid_i.item()}": self.step_scores[uid_i].item(),
+                            f"validator/moving_scores/{uid_i.item()}": self.scores[uid_i].item(),
+                            f"validator/weights/{uid_i.item()}": self.weights[uid_i].item(),
                         }, step=self.global_step)
                     # Set temperatured weights on the chain.
                     if self.global_step % 100 == 0:
+                        # Check if all scores are zero
+                        if torch.all(self.weights[self.metagraph.uids] == 0):
+                            tplr.logger.info("All weights are zero, skipping weight setting")
+                            continue
+                            
                         tplr.logger.info(f"Setting weights on chain: {self.weights[self.metagraph.uids]}")
                         
                         max_retries = 3
@@ -589,6 +695,10 @@ class Validator:
                     continue
 
         finally:
+            # Wait for any pending checkpoint tasks to complete
+            if self.checkpoint_tasks:
+                tplr.logger.info(f"Waiting for {len(self.checkpoint_tasks)} checkpoint tasks to complete...")
+                await asyncio.gather(*self.checkpoint_tasks)
             self.checkpoint_manager.cleanup()
             tplr.logger.info("Validator shutdown complete.")
 
@@ -646,6 +756,31 @@ class Validator:
             return None, "Timeout while setting weights"
         except Exception as e:
             return None, str(e)
+
+    async def save_checkpoint_background(self, global_step: int, block_number: int, scores: torch.Tensor, weights: torch.Tensor):
+        """Handles checkpoint saving and uploading in the background"""
+        try:
+            async with self.checkpoint_lock:  # Ensure thread safety
+                await self.checkpoint_manager.save_and_upload(
+                    global_step=global_step,
+                    block_number=block_number,
+                    scores=scores,
+                    weights=weights,
+                    optimizer_state=self.optimizer.state_dict(),
+                    scheduler_state=self.scheduler.state_dict()
+                )
+        except Exception as e:
+            tplr.logger.error(f"Error in background checkpoint save: {e}")
+
+    def cleanup(self):
+        """Cleanup resources if needed."""
+        self._shutdown = True
+        # Wait for any pending checkpoint tasks to complete
+        if self.checkpoint_tasks:
+            tplr.logger.info(f"Waiting for {len(self.checkpoint_tasks)} checkpoint tasks to complete...")
+            asyncio.gather(*self.checkpoint_tasks)
+        self.checkpoint_manager.cleanup()
+        tplr.logger.info("CheckpointManager shutdown complete")
 
 if __name__ == "__main__":
     validator = Validator()

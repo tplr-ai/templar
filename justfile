@@ -18,12 +18,12 @@ restart:
 # Restart all miners with clean state
 restart-clean: stop restart
 
-
+ 
 # Start testnet miners and validator
-start-testnet:
-    pm2 start neurons/miner.py --interpreter python3 --name TM1 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey M111 --device cuda:0 --use_wandb --autoupdate --process_name TM1 --project gonso --netuid 223 --test
-    pm2 start neurons/miner.py --interpreter python3 --name TM2 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey M222 --device cuda:1 --use_wandb --autoupdate --process_name TM2 --project gonso --netuid 223 --test
-    pm2 start neurons/validator.py --interpreter python3 --name TV1 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey V11 --device cuda:2 --use_wandb --autoupdate --process_name TV1 --project gonso --netuid 223 --test
+start-testnet project='gonso-2':
+    pm2 start neurons/miner.py --interpreter python3 --name TM1 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey M111 --device cuda:0 --use_wandb --autoupdate --process_name TM1 --project {{project}} --netuid 223 --test 
+    pm2 start neurons/miner.py --interpreter python3 --name TM2 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey M222 --device cuda:1 --use_wandb --autoupdate --process_name TM2 --project {{project}} --netuid 223 --test 
+    pm2 start neurons/validator.py --interpreter python3 --name TV1 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey V11 --device cuda:2 --use_wandb --autoupdate --process_name TV1 --project {{project}} --netuid 223 --test 
 
 # Stop testnet miners and validator 
 stop-testnet:
@@ -33,8 +33,32 @@ stop-testnet:
 restart-testnet:
     pm2 restart TM1 TM2 TV1
 
+# Remove checkpoint folder
+clean-checkpoints:
+    rm -rf checkpoints/
+
+# Clean testnet data (R2 bucket and local folders)
+clean-testnet:
+    python3 scripts/clean_testnet.py
+
 # Restart testnet with clean state
-restart-testnet-clean: stop-testnet start-testnet
+restart-testnet-clean project='gonso-2': stop-testnet clean-testnet
+    just start-testnet {{project}}
+
+# Run tests with uv
+test:
+    export NEST_ASYNCIO=1 && uv run pytest
+
+# Run ruff linting
+lint:
+    ruff check --fix
+
+# Run code formatting
+format:
+    ruff format 
+
+# Run all code quality checks and tests
+check: format lint test
 
 
 

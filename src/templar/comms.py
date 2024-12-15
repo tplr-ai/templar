@@ -98,32 +98,53 @@ semaphore = asyncio.Semaphore(1000)
 
 
 async def get_slices(filename: str, device: str) -> Dict[str, torch.Tensor]:
-    """Loads model parameter slices from a file with thread-safe locking.
-
-    Args:
-        filename (str): Path to the file containing model parameter slices
-        device (str): Device to load the tensors to (e.g. 'cpu', 'cuda')
-
-    Returns:
-        Dict[str, torch.Tensor]: Dictionary mapping parameter names to their tensor values
-
-    Example:
-        >>> slices = await get_slices('model_123.pt', 'cuda')
-        >>> print(slices.keys())
-        dict_keys(['layer1.weight', 'layer1.bias'])
-
-    Raises:
-        Timeout: If unable to acquire lock within 5 seconds
-        Exception: For errors loading the file
     """
-    lock: FileLock = FileLock(f"{filename}.lock")
-    with lock.acquire(timeout=5):
-        # Lock is held during the entire read operation
-        return torch.load(
-            filename,
-            map_location=torch.device(device),
-            weights_only=True,
-        )
+    Loads model parameter slices from a file with thread-safe locking.
+    Handles missing files gracefully.
+    """
+    lock_path = f"{filename}.lock"
+    try:
+        # Check if file exists before trying to acquire lock
+        if not os.path.exists(filename):
+            logger.warning(f"Slice file not found: {filename}")
+            return {}
+
+        lock = FileLock(lock_path)
+        with lock.acquire(timeout=1):
+            # Check again if file exists after acquiring lock
+            if not os.path.exists(filename):
+                logger.warning(f"Slice file not found after acquiring lock: {filename}")
+                return {}
+            try:
+                return torch.load(
+                    filename,
+                    map_location=torch.device(device),
+                    weights_only=True,
+                )
+            except (
+                torch.serialization.pickle.UnpicklingError,
+                RuntimeError,
+                EOFError,
+                FileNotFoundError,
+            ) as e:
+                logger.warning(f"Failed to load slice file {filename}: {e}")
+                return {}
+            except Exception as e:
+                logger.warning(f"Error loading slice file {filename}: {e}")
+                return {}
+    except Timeout:
+        logger.warning(f"Timeout acquiring lock for {filename}")
+        return {}
+    except Exception as e:
+        logger.warning(f"Error during slice loading for {filename}: {e}")
+        return {}
+    finally:
+        # Cleanup lock file if it exists
+        try:
+            if os.path.exists(lock_path):
+                os.remove(lock_path)
+        except Exception as e:
+            logger.warning(f"Failed to remove lock file {lock_path}: {e}")
 
 
 async def apply_slices_to_model(
@@ -254,32 +275,8 @@ async def upload_slice_for_window(
 ):
     """
     Uploads a slice of model parameters to S3 for a specific window.
-
-    Args:
-        bucket (str): Name of the S3 bucket to upload to
-        model (torch.nn.Module): The PyTorch model to slice and upload
-        window (int): The window number this slice belongs to
-        seed (str): Seed used to determine which parameters to slice
-        wallet (bt.wallet): Wallet containing hotkey for filename
-        compression (int): Compression factor for parameter selection
-        key (str, optional): Prefix for the filename. Defaults to 'slice'
-        global_step (int, optional): Global training step. Defaults to 0
-
-    The function:
-    1. Creates a filename incorporating window, hotkey and version
-    2. Gets indices for parameter selection based on seed and compression
-    3. Creates a slice dictionary with selected parameters and global_step
-    4. Saves slice to temp file and uploads to S3 with public-read access
-    5. Cleans up temp file after upload
-
-    Example filename format:
-        slice-123-0x123...abc-v1.0.0.pt
-
-    Raises:
-        Exception: If upload to S3 fails
+    Handles concurrent file operations gracefully.
     """
-
-    # Include version in the filename
     filename = f"{key}-{window}-{wallet.hotkey.ss58_address}-v{__version__}.pt"
     logger.debug(f"Uploading slice to S3: {filename}")
 
@@ -293,28 +290,44 @@ async def upload_slice_for_window(
 
     # Use save_location for temporary file
     temp_file_name = os.path.join(save_location, filename)
-    torch.save(slice_data, temp_file_name)
 
-    # Upload the file to S3
-    session = get_session()
-    async with session.create_client(
-        "s3",
-        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
-        region_name=CF_REGION_NAME,
-        config=client_config,
-        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
-    ) as s3_client:
+    try:
+        # Save the file
+        torch.save(slice_data, temp_file_name)
+
+        # Upload the file to S3
+        session = get_session()
+        async with session.create_client(
+            "s3",
+            endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
+            region_name=CF_REGION_NAME,
+            config=client_config,
+            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+        ) as s3_client:
+            try:
+                with open(temp_file_name, "rb") as f:
+                    await s3_client.put_object(Bucket=bucket, Key=filename, Body=f)
+                logger.debug(f"Successfully uploaded slice to S3: {filename}")
+            except Exception as e:
+                logger.warning(f"Failed to upload slice {filename} to S3: {str(e)}")
+                # Don't raise, allow process to continue
+    except Exception as e:
+        logger.warning(
+            f"Error during slice preparation/upload for {filename}: {str(e)}"
+        )
+        # Don't raise, allow process to continue
+    finally:
+        # Clean up the temporary file if it exists
         try:
-            with open(temp_file_name, "rb") as f:
-                await s3_client.put_object(Bucket=bucket, Key=filename, Body=f)
-            logger.debug(f"Successfully uploaded slice to S3: {filename}")
-        except Exception:
-            logger.exception(f"Failed to upload slice {filename} to S3")
-        finally:
-            # Clean up the temporary file
-            os.remove(temp_file_name)
-            logger.debug(f"Temporary file {temp_file_name} removed")
+            if os.path.exists(temp_file_name):
+                os.remove(temp_file_name)
+                logger.debug(f"Temporary file {temp_file_name} removed")
+        except Exception as e:
+            logger.warning(
+                f"Failed to remove temporary file {temp_file_name}: {str(e)}"
+            )
+            # Don't raise, allow process to continue
 
 
 async def upload_master(bucket: str, model: torch.nn.Module, wallet: "bt.wallet"):
@@ -1009,3 +1022,15 @@ async def load_checkpoint(
     except Exception as e:
         logger.error(f"Failed to load checkpoint from {filename}: {e}")
         return 0, {}
+
+
+def get_neuron_temp_dir(wallet) -> str:
+    """
+    Returns a unique temporary directory for the neuron based on its wallet hotkey.
+    """
+
+    temp_dir = os.path.join(
+        tempfile.gettempdir(), f"neuron_{wallet.hotkey.ss58_address}"
+    )
+    os.makedirs(temp_dir, exist_ok=True)
+    return temp_dir

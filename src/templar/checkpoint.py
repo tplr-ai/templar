@@ -121,7 +121,7 @@ async def download_checkpoint_from_neuron(
     Handles multiple processes and provides detailed progress information.
     """
     start_time = time.time()
-    regex_pattern = rf"neuron_checkpoint_{neuron_hotkey}_b(\d+)_v[\d\.]+\.pth"
+    regex_pattern = rf"neuron_checkpoint_{neuron_hotkey}_b(\d+)_v({re.escape(__version__)})\.pth"
     local_checkpoint_path = None
     chunk_size = 8 * 1024 * 1024  # 8MB chunks
     max_concurrent_downloads = 4

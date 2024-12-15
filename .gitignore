@@ -42,3 +42,4 @@ uv.lock
 wandb
 checkpoint-*
 checkpoints.ipynb
+analysis.ipynb

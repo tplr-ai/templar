@@ -559,7 +559,7 @@ class Miner:
             tplr.logger.info("Miner shutdown complete.")
 
 
-    # Returns the slice window based on a blotplr.
+    # Returns the slice window based on a block.
     def block_to_window(self, block: int) -> int:
         return int( block / self.hparams.window_length ) # floor
 

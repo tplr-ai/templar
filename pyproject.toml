@@ -31,17 +31,18 @@ dependencies = [
     "loguru==0.7.2",
     "uvloop==0.20.0",
     "aiofiles>=24.1.0",
-    "random2",
     "pydantic>=2.9.2",
 ]
 
 [tool.uv]
 dev-dependencies = [
     "pytest>=8.3.3",
+    "nest_asyncio>=1.5.8",
+    "pytest-asyncio"
 ]
 
 [project.urls]
-Homepage = "https://github.com/raofoundation/templar"
+Homepage = "https://github.com/tplr-ai/templar"
 
 [tool.setuptools.packages.find]
 where = ["src"]

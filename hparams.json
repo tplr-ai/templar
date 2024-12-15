@@ -14,7 +14,7 @@
     "mixed_precision_reduce": "float32",
     "window_length": 3,
     "desired_batch_size": 512,
-    "learning_rate": 7.5e-05,
+    "learning_rate": 7e-5,
     "optimizer_beta1": 0.9,
     "optimizer_beta2": 0.95,
     "optimizer_weight_decay": 0.1,
@@ -31,5 +31,6 @@
     "validator_weights_temperature": 10,
     "validator_window_eval_size": 3,
     "validator_sample_rate": 0.01,
-    "validator_non_submission_decay": 0.9
+    "validator_non_submission_decay": 0.9,
+    "validator_learning_rate_scale_factor": 0.1
 }

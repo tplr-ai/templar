@@ -41,3 +41,5 @@ uv.lock
 # Project specific
 wandb
 checkpoint-*
+checkpoints.ipynb
+analysis.ipynb

@@ -14,7 +14,7 @@
     "mixed_precision_reduce": "float32",
     "window_length": 3,
     "desired_batch_size": 512,
-    "learning_rate": 4e-4,
+    "learning_rate": 7e-5,
     "optimizer_beta1": 0.9,
     "optimizer_beta2": 0.95,
     "optimizer_weight_decay": 0.1,

@@ -556,23 +556,9 @@ class Validator:
                         else:
                             tplr.logger.warning("No valid parameter tensors found - setting score to 0.0")
                             score = 0.0
-                    self.optimizer.zero_grad()
-                    # # Compute the score for this slice.
-                    # st = tplr.T()
-                    # score = 0.0 
-                    # for i, (name_i, param_i) in enumerate( self.model.named_parameters() ):
-                    #     if param_i.grad is None:
-                    #         continue  # Skip parameters without gradients
-                    #     idxs_i = indices[name_i].to(self.model.device)
-                    #     grad_i = param_i.grad.view(-1).clone()[idxs_i].to(self.model.device) 
-                    #     slice_i = eval_slice_data[name_i].view(-1).to(self.model.device) 
-                    #     theta_i = param_i.data.view(-1)[idxs_i]
-                    #     delta_i = theta_i - slice_i
-                    #     sim_i = torch.nn.functional.cosine_similarity(delta_i, grad_i, dim=0).item()
-                    #     weight_i = param_i.data.view(-1)[idxs_i].norm().item() + 1e-8
-                    #     score += weight_i * sim_i
-                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Computed score: [bold dark_sea_green]{score:.4f}[/bold dark_sea_green]")        
-                    # tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Computed score: [bold dark_sea_green]{score:.4f}[/bold dark_sea_green]")           
+
+                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Computed score: [bold dark_sea_green]{score:.4f}[/bold dark_sea_green]")
+                    self.optimizer.zero_grad()        
 
 
                     # Assign and log scores.

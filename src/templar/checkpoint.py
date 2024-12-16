@@ -861,6 +861,7 @@ class CheckpointManager:
         Attempts to load checkpoint from the highest stake neuron.
         """
         try:
+            await self.cleanup_old_version_checkpoints()
             highest_stake_hotkey = get_neuron_with_highest_stake(
                 metagraph=metagraph, buckets=buckets
             )
@@ -908,6 +909,89 @@ class CheckpointManager:
         except Exception as e:
             logger.error(f"Error loading checkpoint: {e}")
             return 0
+
+    async def cleanup_old_version_checkpoints(self, keep_latest: bool = True) -> None:
+        """
+        Cleans up checkpoint files that don't match the current version number.
+        Handles non-existent directories and empty paths gracefully.
+        
+        Args:
+            keep_latest (bool): If True, keeps the latest checkpoint from old versions
+                            as a backup. Defaults to True.
+        """
+        try:
+            checkpoint_dir = os.path.dirname(self.checkpoint_path)
+            
+            # Check if directory exists
+            if not os.path.exists(checkpoint_dir):
+                logger.debug(f"Checkpoint directory does not exist: {checkpoint_dir}")
+                return
+                
+            pattern = os.path.join(
+                checkpoint_dir,
+                f"neuron_checkpoint_{self.wallet.hotkey.ss58_address}_b*_v*.pth"
+            )
+            
+            # Get list of checkpoint files
+            checkpoint_files = await asyncio.to_thread(glob.glob, pattern)
+            if not checkpoint_files:
+                logger.debug(f"No checkpoint files found in {checkpoint_dir}")
+                return
+                
+            # Group checkpoints by version
+            version_groups = {}
+            for filepath in checkpoint_files:
+                if not os.path.exists(filepath):  # Check if file still exists
+                    continue
+                    
+                filename = os.path.basename(filepath)
+                match = re.match(
+                    rf"neuron_checkpoint_{self.wallet.hotkey.ss58_address}_b(\d+)_v(.+)\.pth",
+                    filename
+                )
+                if match:
+                    block_number = int(match.group(1))
+                    version = match.group(2)
+                    if version not in version_groups:
+                        version_groups[version] = []
+                    version_groups[version].append((block_number, filepath))
+            
+            if not version_groups:
+                logger.debug("No valid checkpoint files found")
+                return
+                
+            # Identify files to delete
+            to_delete = []
+            for version, checkpoints in version_groups.items():
+                if version != __version__:  # If not current version
+                    if keep_latest:
+                        # Sort by block number and keep only the latest
+                        checkpoints.sort(key=lambda x: x[0], reverse=True)
+                        to_delete.extend(filepath for _, filepath in checkpoints[1:])
+                    else:
+                        # Delete all checkpoints of old versions
+                        to_delete.extend(filepath for _, filepath in checkpoints)
+            
+            if not to_delete:
+                logger.debug("No old version checkpoints to clean up")
+                return
+                
+            # Delete files
+            deleted_count = 0
+            for filepath in to_delete:
+                try:
+                    if os.path.exists(filepath):  # Double check file exists before deletion
+                        await asyncio.to_thread(os.remove, filepath)
+                        deleted_count += 1
+                        logger.info(f"Deleted old version checkpoint: {filepath}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete checkpoint {filepath}: {e}")
+            
+            if deleted_count > 0:
+                logger.info(f"Cleaned up {deleted_count} old version checkpoint(s)")
+            
+        except Exception as e:
+            logger.error(f"Error during checkpoint cleanup: {e}")
 
     async def save_and_upload(self, global_step: int, block_number: int, **kwargs):
         """Save and upload checkpoint asynchronously."""
@@ -1010,3 +1094,4 @@ async def load_model_for_eval(
     except Exception as e:
         logger.error(f"Error loading checkpoint: {e}")
         return 0, 0
+

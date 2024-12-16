@@ -60,5 +60,16 @@ format:
 # Run all code quality checks and tests
 check: format lint test
 
+# Stop evaluator
+stop-eval:
+    pm2 delete Eval
+
+# Start evaluator
+start-eval:
+    pm2 start scripts/eval.py --interpreter python3 --name Eval -- --actual_batch_size 6 --device cuda:0 --use_wandb --process_name Eval
+
+# Restart evaluator
+restart-eval:
+    pm2 restart Eval
 
 

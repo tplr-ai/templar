@@ -121,7 +121,9 @@ async def download_checkpoint_from_neuron(
     Handles multiple processes and provides detailed progress information.
     """
     start_time = time.time()
-    regex_pattern = rf"neuron_checkpoint_{neuron_hotkey}_b(\d+)_v({re.escape(__version__)})\.pth"
+    regex_pattern = (
+        rf"neuron_checkpoint_{neuron_hotkey}_b(\d+)_v({re.escape(__version__)})\.pth"
+    )
     local_checkpoint_path = None
     chunk_size = 8 * 1024 * 1024  # 8MB chunks
     max_concurrent_downloads = 4
@@ -941,3 +943,70 @@ class CheckpointManager:
         self._shutdown = True
         # Let any pending upload tasks complete
         logger.info("CheckpointManager shutdown complete")
+
+
+async def load_model_for_eval(
+    metagraph,
+    buckets: List[Optional[Union[str, Bucket]]],
+    model: torch.nn.Module,
+    checkpoint_path: str,
+    device: str = "cuda",
+) -> tuple[int, int]:  # Return (global_step, block_number)
+    """
+    Simplified checkpoint loader that only loads model state for evaluation.
+    Returns tuple of (global_step, block_number).
+    """
+    try:
+        # Get highest stake neuron
+        highest_stake_hotkey = get_neuron_with_highest_stake(metagraph, buckets)
+        if not highest_stake_hotkey:
+            logger.warning("No neurons found. Starting from scratch.")
+            return 0, 0
+
+        uid = metagraph.hotkeys.index(highest_stake_hotkey)
+        bucket_info = buckets[uid]
+
+        if bucket_info:
+            # Download checkpoint
+            checkpoint_dir = os.path.dirname(checkpoint_path)
+            await asyncio.to_thread(os.makedirs, checkpoint_dir, exist_ok=True)
+
+            checkpoint_file = await download_checkpoint_from_neuron(
+                bucket_info=bucket_info,
+                neuron_hotkey=highest_stake_hotkey,
+                checkpoint_dir=checkpoint_dir,
+            )
+
+            if checkpoint_file:
+                # Parse block number from filename
+                regex_pattern = rf"neuron_checkpoint_{highest_stake_hotkey}_b(\d+)_v({re.escape(__version__)})\.pth"
+                match = re.match(regex_pattern, os.path.basename(checkpoint_file))
+                if not match:
+                    logger.warning(
+                        f"Could not parse block number from checkpoint filename: {checkpoint_file}"
+                    )
+                    return 0, 0
+
+                block_number = int(match.group(1))
+
+                # Load only model state
+                checkpoint = torch.load(
+                    checkpoint_file, map_location=device, weights_only=True
+                )
+                if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                    model.load_state_dict(checkpoint["model_state_dict"])
+                    global_step = checkpoint.get("global_step", 0)
+                    logger.info(
+                        f"Loaded model state at global step {global_step} from block {block_number}"
+                    )
+                    return global_step, block_number
+
+            logger.warning("Failed to download or load checkpoint")
+            return 0, 0
+
+        logger.warning(f"No bucket info for neuron {highest_stake_hotkey}")
+        return 0, 0
+
+    except Exception as e:
+        logger.error(f"Error loading checkpoint: {e}")
+        return 0, 0

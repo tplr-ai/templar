@@ -51,30 +51,37 @@ def initialize_wandb(run_prefix, uid, config, group, job_type):
             run_id = None
             os.remove(run_id_file)
 
-    # Initialize WandB with the existing run ID or create new one
+    # Initialize WandB
     run = wandb.init(
         project=f"{config.project}-v{__version__}",
         entity='tplr',
         id=run_id,
-        resume='must' if run_id else 'never',  # Force resume if we have a run_id
+        resume='must' if run_id else 'never',
         name=f'{run_prefix}{uid}',
         config=config,
         group=group,
         job_type=job_type,
         dir=wandb_dir,
         settings=wandb.Settings(
-            init_timeout=300,  # 5 minute timeout
-            _disable_stats=True,  # Reduce network traffic
+            init_timeout=300,
+            _disable_stats=True,
         )
     )
 
-    # Save the run ID if this is a new run
-    if not run_id:
-        run_id = run.id
-        with open(run_id_file, 'w') as f:
-            f.write(run_id)
-        logger.info(f"Created new WandB run with id {run_id}")
-    else:
-        logger.info(f"Resumed WandB run with id {run_id}")
+    # Special handling for evaluator
+    if run_prefix == "E":
+        tasks = config.tasks.split(',')
+        for task in tasks:
+            metric_name = f"eval/{task}"
+            # Define metric for summary
+            wandb.define_metric(metric_name, summary="max")
+            # Set up custom x-axis
+            wandb.define_metric("global_step")
+            wandb.define_metric(metric_name, step_metric="global_step")
 
-    return wandb
+    # Save run ID for future resumption
+    if not run_id:
+        with open(run_id_file, 'w') as f:
+            f.write(run.id)
+
+    return run

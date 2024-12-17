@@ -34,34 +34,47 @@ def initialize_wandb(run_prefix, uid, config, group, job_type):
         wandb_dir, f"wandb_run_id_{run_prefix}{uid}_{__version__}.txt"
     )
 
-    # Attempt to read the existing run ID
+    # Check for existing run and verify it still exists in wandb
+    run_id = None
     if os.path.exists(run_id_file):
         with open(run_id_file, 'r') as f:
             run_id = f.read().strip()
-        logger.info(f"Resuming WandB run with id {run_id}")
-    else:
-        run_id = None
-        logger.info("Starting a new WandB run.")
+        
+        # Verify if run still exists in wandb
+        try:
+            api = wandb.Api()
+            api.run(f"tplr/{config.project}-v{__version__}/{run_id}")
+            logger.info(f"Found existing run ID: {run_id}")
+        except Exception:
+            # Run doesn't exist anymore, clear the run_id
+            logger.info(f"Previous run {run_id} not found in WandB, starting new run")
+            run_id = None
+            os.remove(run_id_file)
 
-    # Initialize WandB
-    wandb.init(
+    # Initialize WandB with the existing run ID or create new one
+    run = wandb.init(
         project=f"{config.project}-v{__version__}",
         entity='tplr',
-        resume='allow',
         id=run_id,
+        resume='must' if run_id else 'never',  # Force resume if we have a run_id
         name=f'{run_prefix}{uid}',
         config=config,
         group=group,
         job_type=job_type,
         dir=wandb_dir,
-        anonymous='allow',
+        settings=wandb.Settings(
+            init_timeout=300,  # 5 minute timeout
+            _disable_stats=True,  # Reduce network traffic
+        )
     )
 
-    # Save the run ID if starting a new run
-    if run_id is None:
-        run_id = wandb.run.id
+    # Save the run ID if this is a new run
+    if not run_id:
+        run_id = run.id
         with open(run_id_file, 'w') as f:
             f.write(run_id)
-        logger.info(f"Started new WandB run with id {run_id}")
+        logger.info(f"Created new WandB run with id {run_id}")
+    else:
+        logger.info(f"Resumed WandB run with id {run_id}")
 
     return wandb

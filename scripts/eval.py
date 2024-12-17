@@ -10,6 +10,7 @@ import argparse
 import bittensor as bt
 from transformers import LlamaForCausalLM
 import templar as tplr
+import wandb
 
 
 class Evaluator:
@@ -59,7 +60,7 @@ class Evaluator:
 
         # Set checkpoint path
         if self.config.checkpoint_path is None:
-            self.checkpoint_path = "checkpoints/eval/checkpoint.pth"
+            self.checkpoint_path = "checkpoints/"
         else:
             self.checkpoint_path = self.config.checkpoint_path
         os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
@@ -70,9 +71,9 @@ class Evaluator:
         self.model.to(self.config.device)
 
         # Initialize wandb with proper group and job type
-        self.wandb = tplr.initialize_wandb(
-            run_prefix="E",  # 'E' for Evaluator
-            uid=0,  # Simple static ID since we don't need subnet identity
+        self.wandb_run = tplr.initialize_wandb(
+            run_prefix="E",
+            uid=0,
             config=self.config,
             group="eval",
             job_type="evaluation",
@@ -181,22 +182,80 @@ class Evaluator:
                     key=os.path.getctime,
                 )
 
-                with open(latest_file, "r") as f:
-                    results = json.load(f)
+                try:
+                    with open(latest_file, "r") as f:
+                        results = json.load(f)
 
-                # Log results to wandb with global_step as x-axis
-                for task_name, task_results in results["results"].items():
-                    metric_name = (
-                        "acc_norm,none" if task_name != "winogrande" else "acc,none"
-                    )
-                    if metric_value := task_results.get(metric_name):
-                        tplr.logger.info(f"{task_name}: {metric_value}")
-                        self.wandb.log(
-                            {
-                                f"eval/{task_name}": metric_value,
-                            },
-                            step=global_step,
+                    # Prepare metrics dictionary
+                    metrics = {}
+                    for task_name, task_results in results["results"].items():
+                        metric_name = "acc_norm,none" if task_name != "winogrande" else "acc,none"
+                        if metric_value := task_results.get(metric_name):
+                            tplr.logger.info(f"{task_name}: {metric_value}")
+                            # Create individual metrics for each task
+                            metrics[f"eval/{task_name}"] = float(metric_value)  # Ensure value is float
+                    
+                    # Debug logging
+                    tplr.logger.info(f"Prepared metrics for logging: {metrics}")
+                    tplr.logger.info(f"Current global step: {global_step}")
+                    
+                    # Verify wandb state
+                    if not self.wandb_run:
+                        tplr.logger.error("WandB not initialized, reinitializing...")
+                        self.wandb_run = tplr.initialize_wandb(
+                            run_prefix="E",
+                            uid=0,
+                            config=self.config,
+                            group="eval",
+                            job_type="evaluation",
                         )
+                    
+                    if not hasattr(self.wandb_run, 'run') or not self.wandb_run.run:
+                        tplr.logger.error("WandB run not active, reinitializing...")
+                        self.wandb_run = tplr.initialize_wandb(
+                            run_prefix="E",
+                            uid=0,
+                            config=self.config,
+                            group="eval",
+                            job_type="evaluation",
+                        )
+
+                    # Log metrics and update charts
+                    if metrics:
+                        # Log individual metrics
+                        self.wandb_run.log(metrics, step=global_step)
+                        
+                        # Create comparison table
+                        comparison_data = [
+                            [task.split('/')[-1], value, f"Step {global_step}"]
+                            for task, value in metrics.items()
+                        ]
+                        
+                        comparison_table = wandb.Table(
+                            columns=["Task", "Performance", "Step"],
+                            data=comparison_data
+                        )
+                        
+                        # Log table
+                        self.wandb_run.log({
+                            "task_comparison": comparison_table,
+                            "step": global_step
+                        })
+                        
+                        tplr.logger.info(f"Successfully logged metrics to wandb at step {global_step}")
+                        
+                        # Force sync
+                        try:
+                            self.wandb_run.log_artifact(latest_file, name=f"eval_results_{global_step}")
+                            tplr.logger.info("Successfully synced results to wandb")
+                        except Exception as e:
+                            tplr.logger.error(f"Error syncing to wandb: {str(e)}")
+                    else:
+                        tplr.logger.error("No metrics to log!")
+
+                except Exception as e:
+                    tplr.logger.error(f"Error processing and logging results: {str(e)}")
+                    tplr.logger.exception(e)  # Print full traceback
 
                 # Cleanup
                 shutil.rmtree(model_path)
@@ -231,14 +290,14 @@ class Evaluator:
         except Exception as e:
             tplr.logger.error(f"Evaluation failed: {str(e)}")
         finally:
-            if self.wandb:
-                self.wandb.finish()
+            if self.wandb_run:
+                self.wandb_run.finish()
 
     def cleanup(self):
         """Cleanup resources"""
         self.stop_event.set()
-        if self.wandb:
-            self.wandb.finish()
+        if self.wandb_run:
+            self.wandb_run.finish()
 
 
 if __name__ == "__main__":

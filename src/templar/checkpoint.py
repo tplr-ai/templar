@@ -68,7 +68,9 @@ async def load_checkpoint(
     """
     try:
         logger.info(f"Loading checkpoint from {filename}")
-        checkpoint = await asyncio.to_thread(torch.load, filename, map_location=device)
+        checkpoint = await asyncio.to_thread(
+            torch.load, filename, map_location=device, weights_only=True
+        )
 
         # Load the model state
         model.load_state_dict(checkpoint["model_state_dict"])
@@ -393,18 +395,18 @@ async def download_checkpoint_from_neuron(
 
 
 def get_all_buckets(
-    subtensor,
     netuid: int,
     metagraph,
+    config,
 ) -> List[Optional[Union[str, Bucket]]]:
     """
     Retrieves and parses all bucket commitments from the network.
     """
     buckets = []
     commitments = get_all_commitments(
-        substrate=subtensor.substrate,
         netuid=netuid,
         metagraph=metagraph,
+        config=config,
     )
 
     for uid in metagraph.uids:

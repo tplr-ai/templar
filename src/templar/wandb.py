@@ -73,11 +73,13 @@ def initialize_wandb(run_prefix, uid, config, group, job_type):
         tasks = config.tasks.split(',')
         for task in tasks:
             metric_name = f"eval/{task}"
-            # Define metric for summary
-            wandb.define_metric(metric_name, summary="max")
-            # Set up custom x-axis
-            wandb.define_metric("global_step")
-            wandb.define_metric(metric_name, step_metric="global_step")
+            # Set up x/y plot configuration
+            wandb.define_metric(
+                name=metric_name,
+                step_metric="global_step",  # This sets global_step as x-axis
+                plot=True,  # Ensure it creates a line plot
+                summary="max"
+            )
 
     # Save run ID for future resumption
     if not run_id:

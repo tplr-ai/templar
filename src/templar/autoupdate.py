@@ -108,7 +108,9 @@ class AutoUpdate(threading.Thread):
                 return False
             try:
                 logger.debug("Attempting to pull the latest changes...")
-                origin.pull(TARGET_BRANCH, kill_after_timeout=10, rebase=True)  # Invalid argument
+                origin.pull(
+                    TARGET_BRANCH, kill_after_timeout=10, rebase=True
+                )  # Invalid argument
                 logger.debug("Successfully pulled the latest changes")
                 return True
             except git.GitCommandError as e:

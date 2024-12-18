@@ -121,7 +121,9 @@ async def download_checkpoint_from_neuron(
     Handles multiple processes and provides detailed progress information.
     """
     start_time = time.time()
-    regex_pattern = rf"neuron_checkpoint_{neuron_hotkey}_b(\d+)_v({re.escape(__version__)})\.pth"
+    regex_pattern = (
+        rf"neuron_checkpoint_{neuron_hotkey}_b(\d+)_v({re.escape(__version__)})\.pth"
+    )
     local_checkpoint_path = None
     chunk_size = 8 * 1024 * 1024  # 8MB chunks
     max_concurrent_downloads = 4
@@ -859,6 +861,7 @@ class CheckpointManager:
         Attempts to load checkpoint from the highest stake neuron.
         """
         try:
+            await self.cleanup_old_version_checkpoints()
             highest_stake_hotkey = get_neuron_with_highest_stake(
                 metagraph=metagraph, buckets=buckets
             )
@@ -907,6 +910,91 @@ class CheckpointManager:
             logger.error(f"Error loading checkpoint: {e}")
             return 0
 
+    async def cleanup_old_version_checkpoints(self, keep_latest: bool = True) -> None:
+        """
+        Cleans up checkpoint files that don't match the current version number.
+        Handles non-existent directories and empty paths gracefully.
+
+        Args:
+            keep_latest (bool): If True, keeps the latest checkpoint from old versions
+                            as a backup. Defaults to True.
+        """
+        try:
+            checkpoint_dir = os.path.dirname(self.checkpoint_path)
+
+            # Check if directory exists
+            if not os.path.exists(checkpoint_dir):
+                logger.debug(f"Checkpoint directory does not exist: {checkpoint_dir}")
+                return
+
+            pattern = os.path.join(
+                checkpoint_dir,
+                f"neuron_checkpoint_{self.wallet.hotkey.ss58_address}_b*_v*.pth",
+            )
+
+            # Get list of checkpoint files
+            checkpoint_files = await asyncio.to_thread(glob.glob, pattern)
+            if not checkpoint_files:
+                logger.debug(f"No checkpoint files found in {checkpoint_dir}")
+                return
+
+            # Group checkpoints by version
+            version_groups = {}
+            for filepath in checkpoint_files:
+                if not os.path.exists(filepath):  # Check if file still exists
+                    continue
+
+                filename = os.path.basename(filepath)
+                match = re.match(
+                    rf"neuron_checkpoint_{self.wallet.hotkey.ss58_address}_b(\d+)_v(.+)\.pth",
+                    filename,
+                )
+                if match:
+                    block_number = int(match.group(1))
+                    version = match.group(2)
+                    if version not in version_groups:
+                        version_groups[version] = []
+                    version_groups[version].append((block_number, filepath))
+
+            if not version_groups:
+                logger.debug("No valid checkpoint files found")
+                return
+
+            # Identify files to delete
+            to_delete = []
+            for version, checkpoints in version_groups.items():
+                if version != __version__:  # If not current version
+                    if keep_latest:
+                        # Sort by block number and keep only the latest
+                        checkpoints.sort(key=lambda x: x[0], reverse=True)
+                        to_delete.extend(filepath for _, filepath in checkpoints[1:])
+                    else:
+                        # Delete all checkpoints of old versions
+                        to_delete.extend(filepath for _, filepath in checkpoints)
+
+            if not to_delete:
+                logger.debug("No old version checkpoints to clean up")
+                return
+
+            # Delete files
+            deleted_count = 0
+            for filepath in to_delete:
+                try:
+                    if os.path.exists(
+                        filepath
+                    ):  # Double check file exists before deletion
+                        await asyncio.to_thread(os.remove, filepath)
+                        deleted_count += 1
+                        logger.info(f"Deleted old version checkpoint: {filepath}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete checkpoint {filepath}: {e}")
+
+            if deleted_count > 0:
+                logger.info(f"Cleaned up {deleted_count} old version checkpoint(s)")
+
+        except Exception as e:
+            logger.error(f"Error during checkpoint cleanup: {e}")
+
     async def save_and_upload(self, global_step: int, block_number: int, **kwargs):
         """Save and upload checkpoint asynchronously."""
         try:
@@ -941,3 +1029,70 @@ class CheckpointManager:
         self._shutdown = True
         # Let any pending upload tasks complete
         logger.info("CheckpointManager shutdown complete")
+
+
+async def load_model_for_eval(
+    metagraph,
+    buckets: List[Optional[Union[str, Bucket]]],
+    model: torch.nn.Module,
+    checkpoint_path: str,
+    device: str = "cuda",
+) -> tuple[int, int]:  # Return (global_step, block_number)
+    """
+    Simplified checkpoint loader that only loads model state for evaluation.
+    Returns tuple of (global_step, block_number).
+    """
+    try:
+        # Get highest stake neuron
+        highest_stake_hotkey = get_neuron_with_highest_stake(metagraph, buckets)
+        if not highest_stake_hotkey:
+            logger.warning("No neurons found. Starting from scratch.")
+            return 0, 0
+
+        uid = metagraph.hotkeys.index(highest_stake_hotkey)
+        bucket_info = buckets[uid]
+
+        if bucket_info:
+            # Download checkpoint
+            checkpoint_dir = os.path.dirname(checkpoint_path)
+            await asyncio.to_thread(os.makedirs, checkpoint_dir, exist_ok=True)
+
+            checkpoint_file = await download_checkpoint_from_neuron(
+                bucket_info=bucket_info,
+                neuron_hotkey=highest_stake_hotkey,
+                checkpoint_dir=checkpoint_dir,
+            )
+
+            if checkpoint_file:
+                # Parse block number from filename
+                regex_pattern = rf"neuron_checkpoint_{highest_stake_hotkey}_b(\d+)_v({re.escape(__version__)})\.pth"
+                match = re.match(regex_pattern, os.path.basename(checkpoint_file))
+                if not match:
+                    logger.warning(
+                        f"Could not parse block number from checkpoint filename: {checkpoint_file}"
+                    )
+                    return 0, 0
+
+                block_number = int(match.group(1))
+
+                # Load only model state
+                checkpoint = torch.load(
+                    checkpoint_file, map_location=device, weights_only=True
+                )
+                if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+                    model.load_state_dict(checkpoint["model_state_dict"])
+                    global_step = checkpoint.get("global_step", 0)
+                    logger.info(
+                        f"Loaded model state at global step {global_step} from block {block_number}"
+                    )
+                    return global_step, block_number
+
+            logger.warning("Failed to download or load checkpoint")
+            return 0, 0
+
+        logger.warning(f"No bucket info for neuron {highest_stake_hotkey}")
+        return 0, 0
+
+    except Exception as e:
+        logger.error(f"Error loading checkpoint: {e}")
+        return 0, 0

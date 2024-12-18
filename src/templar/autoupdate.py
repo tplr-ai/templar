@@ -31,6 +31,7 @@ class AutoUpdate(threading.Thread):
             self.repo = git.Repo(search_parent_directories=True)
         except Exception as e:
             logger.exception("Failed to initialize the repository", exc_info=e)
+            sys.exit(1)  # Terminate the thread/application
 
     async def get_remote_version(self):
         """
@@ -56,7 +57,6 @@ class AutoUpdate(threading.Thread):
             logger.exception(
                 "Failed to get remote version for version check", exc_info=e
             )
-            return None
             return None
 
     async def check_version_updated(self):
@@ -108,7 +108,9 @@ class AutoUpdate(threading.Thread):
                 return False
             try:
                 logger.debug("Attempting to pull the latest changes...")
-                origin.pull(TARGET_BRANCH, kill_after_timeout=10, rebase=True)
+                origin.pull(
+                    TARGET_BRANCH, kill_after_timeout=10, rebase=True
+                )  # Invalid argument
                 logger.debug("Successfully pulled the latest changes")
                 return True
             except git.GitCommandError as e:

@@ -34,34 +34,56 @@ def initialize_wandb(run_prefix, uid, config, group, job_type):
         wandb_dir, f"wandb_run_id_{run_prefix}{uid}_{__version__}.txt"
     )
 
-    # Attempt to read the existing run ID
+    # Check for existing run and verify it still exists in wandb
+    run_id = None
     if os.path.exists(run_id_file):
         with open(run_id_file, 'r') as f:
             run_id = f.read().strip()
-        logger.info(f"Resuming WandB run with id {run_id}")
-    else:
-        run_id = None
-        logger.info("Starting a new WandB run.")
+        
+        # Verify if run still exists in wandb
+        try:
+            api = wandb.Api()
+            api.run(f"tplr/{config.project}-v{__version__}/{run_id}")
+            logger.info(f"Found existing run ID: {run_id}")
+        except Exception:
+            # Run doesn't exist anymore, clear the run_id
+            logger.info(f"Previous run {run_id} not found in WandB, starting new run")
+            run_id = None
+            os.remove(run_id_file)
 
     # Initialize WandB
-    wandb.init(
+    run = wandb.init(
         project=f"{config.project}-v{__version__}",
         entity='tplr',
-        resume='allow',
         id=run_id,
+        resume='must' if run_id else 'never',
         name=f'{run_prefix}{uid}',
         config=config,
         group=group,
         job_type=job_type,
         dir=wandb_dir,
-        anonymous='allow',
+        settings=wandb.Settings(
+            init_timeout=300,
+            _disable_stats=True,
+        )
     )
 
-    # Save the run ID if starting a new run
-    if run_id is None:
-        run_id = wandb.run.id
-        with open(run_id_file, 'w') as f:
-            f.write(run_id)
-        logger.info(f"Started new WandB run with id {run_id}")
+    # Special handling for evaluator
+    if run_prefix == "E":
+        tasks = config.tasks.split(',')
+        for task in tasks:
+            metric_name = f"eval/{task}"
+            # Set up x/y plot configuration
+            wandb.define_metric(
+                name=metric_name,
+                step_metric="global_step",  # This sets global_step as x-axis
+                plot=True,  # Ensure it creates a line plot
+                summary="max"
+            )
 
-    return wandb
+    # Save run ID for future resumption
+    if not run_id:
+        with open(run_id_file, 'w') as f:
+            f.write(run.id)
+
+    return run

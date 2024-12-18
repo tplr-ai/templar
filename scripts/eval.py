@@ -189,16 +189,20 @@ class Evaluator:
                     # Prepare metrics dictionary
                     metrics = {}
                     for task_name, task_results in results["results"].items():
-                        metric_name = "acc_norm,none" if task_name != "winogrande" else "acc,none"
+                        metric_name = (
+                            "acc_norm,none" if task_name != "winogrande" else "acc,none"
+                        )
                         if metric_value := task_results.get(metric_name):
                             tplr.logger.info(f"{task_name}: {metric_value}")
                             # Create individual metrics for each task
-                            metrics[f"eval/{task_name}"] = float(metric_value)  # Ensure value is float
-                    
+                            metrics[f"eval/{task_name}"] = float(
+                                metric_value
+                            )  # Ensure value is float
+
                     # Debug logging
                     tplr.logger.info(f"Prepared metrics for logging: {metrics}")
                     tplr.logger.info(f"Current global step: {global_step}")
-                    
+
                     # Verify wandb state
                     if not self.wandb_run:
                         tplr.logger.error("WandB not initialized, reinitializing...")
@@ -209,8 +213,8 @@ class Evaluator:
                             group="eval",
                             job_type="evaluation",
                         )
-                    
-                    if not hasattr(self.wandb_run, 'run') or not self.wandb_run.run:
+
+                    if not hasattr(self.wandb_run, "run") or not self.wandb_run.run:
                         tplr.logger.error("WandB run not active, reinitializing...")
                         self.wandb_run = tplr.initialize_wandb(
                             run_prefix="E",
@@ -224,29 +228,32 @@ class Evaluator:
                     if metrics:
                         # Log individual metrics
                         self.wandb_run.log(metrics, step=global_step)
-                        
+
                         # Create comparison table
                         comparison_data = [
-                            [task.split('/')[-1], value, f"Step {global_step}"]
+                            [task.split("/")[-1], value, f"Step {global_step}"]
                             for task, value in metrics.items()
                         ]
-                        
+
                         comparison_table = wandb.Table(
                             columns=["Task", "Performance", "Step"],
-                            data=comparison_data
+                            data=comparison_data,
                         )
-                        
+
                         # Log table
-                        self.wandb_run.log({
-                            "task_comparison": comparison_table,
-                            "step": global_step
-                        })
-                        
-                        tplr.logger.info(f"Successfully logged metrics to wandb at step {global_step}")
-                        
+                        self.wandb_run.log(
+                            {"task_comparison": comparison_table, "step": global_step}
+                        )
+
+                        tplr.logger.info(
+                            f"Successfully logged metrics to wandb at step {global_step}"
+                        )
+
                         # Force sync
                         try:
-                            self.wandb_run.log_artifact(latest_file, name=f"eval_results_{global_step}")
+                            self.wandb_run.log_artifact(
+                                latest_file, name=f"eval_results_{global_step}"
+                            )
                             tplr.logger.info("Successfully synced results to wandb")
                         except Exception as e:
                             tplr.logger.error(f"Error syncing to wandb: {str(e)}")

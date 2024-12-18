@@ -162,9 +162,9 @@ class Validator:
 
         # Retrieve bucket info for all neurons
         self.buckets = tplr.get_all_buckets(
-            subtensor=self.subtensor,
             netuid=self.config.netuid,
-            metagraph=self.metagraph
+            metagraph=self.metagraph,
+            config= self.config
         )
 
         # Init model.

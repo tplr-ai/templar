@@ -195,10 +195,12 @@ class Evaluator:
                         if metric_value := task_results.get(metric_name):
                             tplr.logger.info(f"{task_name}: {metric_value}")
                             # Log each metric with global_step
-                            self.wandb_run.log({
-                                f"eval/{task_name}": float(metric_value),
-                                "global_step": global_step
-                            })
+                            self.wandb_run.log(
+                                {
+                                    f"eval/{task_name}": float(metric_value),
+                                    "global_step": global_step,
+                                }
+                            )
 
                     # Debug logging
                     tplr.logger.info(f"Prepared metrics for logging: {metrics}")
@@ -233,23 +235,27 @@ class Evaluator:
                         # Create comparison table
                         comparison_data = []
                         for task_name, task_results in results["results"].items():
-                            metric_name = "acc_norm,none" if task_name != "winogrande" else "acc,none"
+                            metric_name = (
+                                "acc_norm,none"
+                                if task_name != "winogrande"
+                                else "acc,none"
+                            )
                             if metric_value := task_results.get(metric_name):
-                                comparison_data.append([
-                                    task_name,
-                                    float(metric_value),
-                                    int(global_step)  # Store as integer
-                                ])
+                                comparison_data.append(
+                                    [
+                                        task_name,
+                                        float(metric_value),
+                                        int(global_step),  # Store as integer
+                                    ]
+                                )
 
                         comparison_table = wandb.Table(
                             columns=["Task", "Performance", "Step"],
-                            data=comparison_data
+                            data=comparison_data,
                         )
 
                         # Log table separately
-                        self.wandb_run.log({
-                            "task_comparison": comparison_table
-                        })
+                        self.wandb_run.log({"task_comparison": comparison_table})
 
                         tplr.logger.info(
                             f"Successfully logged metrics to wandb at step {global_step}"
@@ -293,16 +299,24 @@ class Evaluator:
             while not self.stop_event.is_set():
                 # Check if new checkpoint exists
                 await self.update_state()
-                
+
                 # Get latest checkpoint info without loading model
-                latest_block = max(bucket.block_number for bucket in self.buckets if bucket.block_number)
-                
+                latest_block = max(
+                    bucket.block_number
+                    for bucket in self.buckets
+                    if bucket.block_number
+                )
+
                 if latest_block > self.last_block_number:
-                    tplr.logger.info(f"New checkpoint found at block {latest_block}, running evaluation...")
+                    tplr.logger.info(
+                        f"New checkpoint found at block {latest_block}, running evaluation..."
+                    )
                     await self.evaluate_highest_stake_model()
                 else:
-                    tplr.logger.info(f"No new checkpoint (current: {latest_block}, last: {self.last_block_number})")
-                
+                    tplr.logger.info(
+                        f"No new checkpoint (current: {latest_block}, last: {self.last_block_number})"
+                    )
+
                 # Keep original 600 second (10 minute) sleep time
                 await asyncio.sleep(600)
 

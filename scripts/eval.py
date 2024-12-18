@@ -194,10 +194,11 @@ class Evaluator:
                         )
                         if metric_value := task_results.get(metric_name):
                             tplr.logger.info(f"{task_name}: {metric_value}")
-                            # Create individual metrics for each task
-                            metrics[f"eval/{task_name}"] = float(
-                                metric_value
-                            )  # Ensure value is float
+                            # Log each metric with global_step
+                            self.wandb_run.log({
+                                f"eval/{task_name}": float(metric_value),
+                                "global_step": global_step
+                            })
 
                     # Debug logging
                     tplr.logger.info(f"Prepared metrics for logging: {metrics}")
@@ -230,20 +231,25 @@ class Evaluator:
                         self.wandb_run.log(metrics, step=global_step)
 
                         # Create comparison table
-                        comparison_data = [
-                            [task.split("/")[-1], value, f"Step {global_step}"]
-                            for task, value in metrics.items()
-                        ]
+                        comparison_data = []
+                        for task_name, task_results in results["results"].items():
+                            metric_name = "acc_norm,none" if task_name != "winogrande" else "acc,none"
+                            if metric_value := task_results.get(metric_name):
+                                comparison_data.append([
+                                    task_name,
+                                    float(metric_value),
+                                    int(global_step)  # Store as integer
+                                ])
 
                         comparison_table = wandb.Table(
                             columns=["Task", "Performance", "Step"],
-                            data=comparison_data,
+                            data=comparison_data
                         )
 
-                        # Log table
-                        self.wandb_run.log(
-                            {"task_comparison": comparison_table, "step": global_step}
-                        )
+                        # Log table separately
+                        self.wandb_run.log({
+                            "task_comparison": comparison_table
+                        })
 
                         tplr.logger.info(
                             f"Successfully logged metrics to wandb at step {global_step}"
@@ -285,11 +291,20 @@ class Evaluator:
         """Main run loop"""
         try:
             while not self.stop_event.is_set():
-                # Try to evaluate and get current global step
-                await self.evaluate_highest_stake_model()
-
-                # Wait before checking again
-                await asyncio.sleep(600)  # Check every minute for new checkpoints
+                # Check if new checkpoint exists
+                await self.update_state()
+                
+                # Get latest checkpoint info without loading model
+                latest_block = max(bucket.block_number for bucket in self.buckets if bucket.block_number)
+                
+                if latest_block > self.last_block_number:
+                    tplr.logger.info(f"New checkpoint found at block {latest_block}, running evaluation...")
+                    await self.evaluate_highest_stake_model()
+                else:
+                    tplr.logger.info(f"No new checkpoint (current: {latest_block}, last: {self.last_block_number})")
+                
+                # Keep original 600 second (10 minute) sleep time
+                await asyncio.sleep(600)
 
         except KeyboardInterrupt:
             tplr.logger.info("Evaluation interrupted by user")

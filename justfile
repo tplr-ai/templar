@@ -21,9 +21,9 @@ restart-clean: stop restart
  
 # Start testnet miners and validator
 start-testnet project='gonso-2':
-    pm2 start neurons/miner.py --interpreter python3 --name TM1 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey M111 --device cuda:0 --use_wandb --autoupdate --process_name TM1 --project {{project}} --netuid 223 --test 
-    pm2 start neurons/miner.py --interpreter python3 --name TM2 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey M222 --device cuda:1 --use_wandb --autoupdate --process_name TM2 --project {{project}} --netuid 223 --test 
-    pm2 start neurons/validator.py --interpreter python3 --name TV1 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey V11 --device cuda:2 --use_wandb --autoupdate --process_name TV1 --project {{project}} --netuid 223 --test 
+    pm2 start neurons/miner.py --interpreter python3 --name TM1 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey M111 --device cuda:1 --use_wandb --autoupdate --process_name TM1 --project {{project}} --netuid 223 --test 
+    pm2 start neurons/miner.py --interpreter python3 --name TM2 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey M222 --device cuda:2 --use_wandb --autoupdate --process_name TM2 --project {{project}} --netuid 223 --test 
+    pm2 start neurons/validator.py --interpreter python3 --name TV1 -- --actual_batch_size 6 --wallet.name Bistro --wallet.hotkey V11 --device cuda:3 --use_wandb --autoupdate --process_name TV1 --project {{project}} --netuid 223 --test 
 
 # Stop testnet miners and validator 
 stop-testnet:
@@ -60,5 +60,16 @@ format:
 # Run all code quality checks and tests
 check: format lint test
 
+# Stop evaluator
+stop-eval:
+    pm2 delete Eval
+
+# Start evaluator
+start-eval:
+    pm2 start scripts/eval.py --interpreter python3 --name Eval -- --actual_batch_size 6 --device cuda:0 --use_wandb --process_name Eval
+
+# Restart evaluator
+restart-eval:
+    pm2 restart Eval
 
 

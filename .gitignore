@@ -43,3 +43,8 @@ wandb
 checkpoint-*
 checkpoints.ipynb
 analysis.ipynb
+scratch*
+
+# Evals
+lm-evaluation-harness 
+models

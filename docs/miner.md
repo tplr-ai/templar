@@ -9,7 +9,7 @@ This document provides a guide on how to set up and run a miner using `miner.py`
   - [Table of Contents](#table-of-contents)
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
-    - [Automated Installation (Recommended)](#automated-installation-recommended)
+    - [Automated Installation (WIP](#automated-installation-recommended)
     - [Manual Installation](#manual-installation)
   - [Running the Miner](#running-the-miner)
     - [Using PM2 (Recommended)](#using-pm2-recommended)
@@ -26,8 +26,7 @@ This document provides a guide on how to set up and run a miner using `miner.py`
 ## Prerequisites
 
 - **NVIDIA GPU** with CUDA support
-  - Minimum 24GB VRAM recommended
-  - Multiple GPUs supported
+  - Minimum 80GB VRAM recommended
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Python 3.12**
 - **CUDA-compatible drivers**
@@ -59,31 +58,7 @@ This document provides a guide on how to set up and run a miner using `miner.py`
 
 ## Installation
 
-<!-- ### Automated Installation (Recommended)
-
-The easiest way to set up a miner is using the automated installation script:
-
-```bash
-# Clone the repository
-git clone https://github.com/RaoFoundation/templar
-cd templar
-
-# Make the script executable
-chmod +x scripts/run.sh
-
-# Run the installation script
-./scripts/run.sh --neuron miner --network <network> \
-  --aws-access-key-id <your-key> \
-  --aws-secret-access-key <your-secret> \
-  --bucket <your-bucket>
-```
-
-The script will:
-1. Install all required dependencies (Git, npm, pm2, Rust, uv, Python 3.12)
-2. Set up AWS credentials
-3. Create and register Bittensor wallets
-4. Configure wandb for logging
-5. Start miners on all available GPUs -->
+<!-- ### Automated Installation (WIP) -->
 
 ### Manual Installation
 
@@ -96,27 +71,35 @@ sudo add-apt-repository ppa:deadsnakes/ppa
 sudo apt-get update
 
 # Install required packages
-sudo apt-get install python3.12 python3.12-venv git npm
+sudo apt-get install git python3-pip jq npm
 ```
 
 2. **Install Node.js and PM2**:
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo bash
-sudo apt-get install -y nodejs
-npm install pm2 -g
+npm install pm2 -g && pm2 update
 ```
 
 3. **Install Rust and uv**:
 ```bash
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
+. "$HOME/.cargo/env"
 
-# Install uv
+# Install uv and set python version to 3.12
 curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+uv python install 3.12 && uv python pin 3.12
 ```
 
-4. **Set Up Python Environment**:
+4. **Clone Repo**:
+```bash
+# Git Clone
+git clone https://github.com/tplr-ai/templar.git
+cd templar
+```
+
+
+5. **Set Up Python Environment**:
 ```bash
 # Create virtual environment
 uv venv .venv
@@ -127,13 +110,10 @@ uv pip install torch --index-url https://download.pytorch.org/whl/cu118
 
 # Install requirements
 uv sync --extra all 
-
-# Install flash-attn
-uv pip install flash-attn --no-build-isolation
 ```
 
 
-5. **Create and Register Wallets**:
+6. **Create and Register Wallets**:
 ```bash
 # Create coldkey
 btcli wallet new_coldkey --wallet.name default --n-words 12
@@ -144,7 +124,7 @@ btcli wallet new_hotkey --wallet.name default --wallet.hotkey <name> --n-words 1
 btcli subnet pow_register --wallet.name default --wallet.hotkey <name> --netuid <netuid> --subtensor.network <network>
 ```
 
-6. **Log into Weights & Biases (WandB)**
+7. **Log into Weights & Biases (WandB)**
 ```bash
 # Log into WandB
 wandb login <your_api_key>
@@ -184,8 +164,6 @@ pm2 list
 - **`--sync_state`**: Synchronizes model state with network history
 - **`--actual_batch_size`**: Set based on GPU memory:
   - 80GB+ VRAM: batch size 6
-  - 40GB VRAM: batch size 3
-  - 24GB VRAM: batch size 1
 - **`--netuid`**: Network subnet ID (e.g., 223 for testnet)
 - **`--subtensor.network`**: Network name (finney/test/local)
 - **`--no_autoupdate`**: Disable automatic code updates
@@ -195,9 +173,7 @@ pm2 list
 ### Hardware Requirements
 
 - **GPU Memory Requirements**:
-  - Minimum: 24GB VRAM
-  - Recommended: 40GB+ VRAM
-  - Optimal: 80GB+ VRAM
+  - Recommended: 80GB+ VRAM
 - **Storage**: 100GB+ recommended for model and data
 - **RAM**: 32GB+ recommended
 - **Network**: Stable internet connection with good bandwidth
@@ -215,13 +191,6 @@ pm2 list
   - Network: `local`
   - Netuid: 3
   - Endpoint: `wss://localhost:9944`
-
-<!-- ### AWS Setup
-
-1. Create an S3 bucket with public read access
-2. Configure CORS for validator access
-3. Set up IAM user with S3 access
-4. Export credentials in environment -->
 
 ## Monitoring
 

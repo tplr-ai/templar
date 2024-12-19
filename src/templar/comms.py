@@ -153,7 +153,7 @@ async def apply_slices_to_model(
     seed: str,
     compression: int,
     save_location: str,
-    key: str = "slice"
+    key: str = "slice",
 ) -> Tuple[int, Dict[str, any]]:
     """
     Applies downloaded model parameter slices to a model for a specific window,
@@ -295,7 +295,7 @@ async def upload_slice_for_window(
     # Create the slice dictionary with global_step
     slice_data = {"global_step": global_step}
     if slice_metric is not None:
-        slice_data['slice_metric'] = slice_metric
+        slice_data["slice_metric"] = slice_metric
     # Create the slice dictionary with global_step
     for name, param in model.named_parameters():
         slice_data[name] = param.data.view(-1)[indices[name].to(model.device)].cpu()

@@ -17,30 +17,24 @@ from .config import (
     client_config,
     BUCKET_SECRETS
 )
-from .compress import TransformDCT, CompressDCT
 from .chain import ChainManager
 from .logging import logger
 from .schemas import Bucket
 
 CF_REGION_NAME: str = "enam"
 
-class Comms(ChainManager, TransformDCT, CompressDCT):
+class Comms(ChainManager):
     def __init__(
         self,
         bucket: Bucket,
-        model,  # Required for TransformDCT
-        target_chunk,  # Required for TransformDCT 
         save_location: str = '/tmp',
         key_prefix: str = 'slice',
         subtensor: Optional["bt.Subtensor"] = None,
         netuid: Optional[int] = None,
         metagraph = None,
-        norm: str = "ortho",  # Optional param for TransformDCT
     ):
-        # Initialize parent classes
+        # Initialize parent class
         ChainManager.__init__(self, subtensor, netuid, metagraph)
-        TransformDCT.__init__(self, model, target_chunk, norm)
-        CompressDCT.__init__(self)
         """
         Initializes the R2Communicator for interacting with Cloudflare R2 buckets.
 
@@ -52,7 +46,6 @@ class Comms(ChainManager, TransformDCT, CompressDCT):
             netuid (int, optional): Network UID for chain operations
             metagraph: Metagraph instance containing network state
         """
-        super().__init__(subtensor, netuid, metagraph)
         self.bucket = bucket
         self.save_location = save_location
         self.key_prefix = key_prefix
@@ -256,50 +249,3 @@ class Comms(ChainManager, TransformDCT, CompressDCT):
                     gather_result[param_name].append(peer_state[param_name].to(device))
 
         return gather_result
-
-
-    async def sync_model(self, model, my_uid, uids, window, key='model', timeout=30, device='cpu'):
-        """Synchronizes model parameters across peers by taking the median of gathered states.
-        
-        Args:
-            model: The model to synchronize
-            my_uid (str): This node's unique identifier
-            uids (List[str]): List of peer UIDs to sync with
-            window (int): Current window number for sync
-            key (str, optional): Key prefix for sync files. Defaults to 'model'
-            timeout (int, optional): Timeout in seconds. Defaults to 30
-            device (str, optional): Device to use. Defaults to 'cpu'
-            
-        TODO:
-        - Add error handling for failed gathers
-        - Add parameter validation
-        - Consider weighted median based on peer scores
-        """
-        logger.info(f"Starting global sync with {len(uids)} peers at window {window}")
-        logger.debug(f"Sync params - key: {key}, timeout: {timeout}, device: {device}")
-        
-        gather_result = await self.gather(
-            state_dict=model.state_dict(),
-            my_uid=my_uid,
-            uids=uids,
-            window=window,
-            key=key,
-            timeout=timeout,
-            device=device
-        )
-        
-        logger.debug(f"Gathered states from {len(gather_result[next(iter(gather_result))])} peers")
-        
-        # Take median of all peers' states
-        state_dict = {
-            name: torch.median(torch.stack(gather_result[name]), dim=0)[0]
-            for name in gather_result
-        }
-        
-        # Log parameter stats
-        for name, param in state_dict.items():
-            logger.debug(f"Param {name}: mean={param.mean():.4f}, std={param.std():.4f}")
-            
-        # Load state into the model
-        model.load_state_dict(state_dict)
-        logger.info("Global sync completed successfully")

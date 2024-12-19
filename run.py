@@ -52,12 +52,12 @@ TARGET_CHUNK = 64 # DeMo chunk size.
 SCORES_ALPHA = 0.001 # Scores moving average.
 WINDOWS_PER_WEIGHTS = 10 # Windows before validator sets weights on chain.
 
-class Miner:
+class Neuron:
     
     # Command line config items.
     @staticmethod
     def config():
-        parser = argparse.ArgumentParser(description='Miner script')
+        parser = argparse.ArgumentParser(description='Miner / Validator script')
         parser.add_argument('--netuid', type=int, default=229, help='Bittensor network UID.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training (e.g., cpu or cuda)')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
@@ -79,7 +79,7 @@ class Miner:
     
     def __init__(self):
         # Init config from command line.
-        self.config = Miner.config()
+        self.config = Neuron.config()
         
         # Init bittensor objects.
         self.wallet = bt.wallet( config = self.config )
@@ -145,14 +145,11 @@ class Miner:
         # Init Comms Class
         self.comms = tplr.comms.Comms(
             bucket=...,
-            model=self.model,
-            target_chunk=TARGET_CHUNK, 
-            save_location='/tmp',  # Adjust if needed
+            save_location='/tmp',
             key_prefix='model',
             subtensor=self.subtensor,
             netuid=self.config.netuid,
             metagraph=self.metagraph,
-            norm='ortho'  # Adjust if needed
         )
         
         # Init state params.
@@ -202,7 +199,7 @@ class Miner:
                     timeout = 30,
                     device = self.config.device
                 )
-                # Take median of all peers state.
+                # Take median of all peers state. => mean 
                 state_dict = {name: torch.median(torch.stack(gather_result[name]), dim=0)[0] for name in gather_result}
                 # Load state into model.
                 self.model.load_state_dict(state_dict)
@@ -356,4 +353,4 @@ class Miner:
 
 # Start miner/validator.
 if __name__ == "__main__":
-    asyncio.run( Miner().run() )
+    asyncio.run( Neuron().run() )

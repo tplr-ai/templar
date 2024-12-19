@@ -34,6 +34,7 @@ import wandb.plot
 from asyncio import TimeoutError
 from functools import partial
 import tempfile
+import statistics
 
 # Local imports.
 import templar as tplr
@@ -636,8 +637,8 @@ class Validator:
                     # Log main metrics
                     wandb.log({
                         "validator/loss": step_loss,
-                        "validator/tokens_per_step": tokens_per_step,
-                        "validator/tokens_per_second": tokens_per_second,
+                        "validator/tokens_per_step": sum([slice_metric['tokens_per_step'] for _, slice_metric in window_metric.items()]),
+                        "validator/tokens_per_second": sum([slice_metric['tokens_per_second'] for _, slice_metric in window_metric.items()]),
                         "validator/sample_rate": self.sample_rate,
                         "validator/utilization": eval_duration / (gs_end - gs_start),
                         "validator/global_batch_size": sum([slice_metric['batch_size'] for _, slice_metric in window_metric.items()]),

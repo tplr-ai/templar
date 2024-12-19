@@ -646,11 +646,11 @@ class Validator:
                     for hotkey, slice_metric in window_metric.items():
                         uid = self.metagraph.hotkeys.index(hotkey)
                         wandb.log({
-                            f"miner/UID{uid}/loss": slice_metric['loss'],
-                            f"miner/UID{uid}/tokens_per_step": slice_metric['tokens_per_step'],
-                            f"miner/UID{uid}/tokens_per_second": slice_metric['tokens_per_second'],
-                            f"miner/UID{uid}/sample_rate": slice_metric['sample_rate'],
-                            f"miner/UID{uid}/learning_rate": slice_metric['learning_rate'],
+                            f"miner/loss/{uid}": slice_metric['loss'],
+                            f"miner/tokens_per_step/{uid}": slice_metric['tokens_per_step'],
+                            f"miner/tokens_per_second/{uid}": slice_metric['tokens_per_second'],
+                            f"miner/sample_rate/{uid}": slice_metric['sample_rate'],
+                            f"miner/learning_rate/{uid}": slice_metric['learning_rate'],
                         }, step=self.global_step)
 
                     for uid_i in valid_score_indices:

@@ -12,3 +12,5 @@ wandb/*
 .venv
 
 .env.yaml
+
+.env.yaml

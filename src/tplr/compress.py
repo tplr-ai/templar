@@ -1,11 +1,9 @@
-
 import math
 import torch
 import torch.fft
-import torch.distributed as dist
 
 from einops import rearrange
-from typing import Optional, Callable
+
 
 class TransformDCT:
     @torch.no_grad()
@@ -28,9 +26,9 @@ class TransformDCT:
 
                 # Pregenerate DCT basis matrices
                 if sc not in self.f_dict:
-                    I = torch.eye(sc)
-                    self.f_dict[sc] = _dct(I, norm=norm).to(p.dtype).to(p.device)
-                    self.b_dict[sc] = _idct(I, norm=norm).to(p.dtype).to(p.device)
+                    identity_matrix = torch.eye(sc)
+                    self.f_dict[sc] = _dct(identity_matrix, norm=norm).to(p.dtype).to(p.device)
+                    self.b_dict[sc] = _idct(identity_matrix, norm=norm).to(p.dtype).to(p.device)
 
     @torch.no_grad()
     def einsum_2d(self, x, b, d=None):

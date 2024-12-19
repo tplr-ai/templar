@@ -9,8 +9,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "bittensor==8.4.3",
-    "bt-decode==0.2.0a0",
+    "bittensor==8.5.1",
+    "bt-decode==0.4.0",
     "torch",
     "boto3",
     "einops",
@@ -20,4 +20,5 @@ dependencies = [
     "transformers",
     "pip",
     "wandb",
+    "python-dotenv",
 ]

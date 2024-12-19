@@ -1,154 +1,305 @@
 # The MIT License (MIT)
 # © 2024 templar.tech
 
-# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
-# documentation files (the “Software”), to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
-# and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in all copies or substantial portions of
-# the Software.
-
-# THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
-# THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-# DEALINGS IN THE SOFTWARE.
-# fmt: off
-
-import os
+# Global imports
 import time
-import torch
-import asyncio
 import aiofiles
-import botocore
-import tempfile
-from typing import List, Dict
+import asyncio
+import os
+import torch
 from aiobotocore.session import get_session
+import bittensor as bt
+from typing import List, Dict, Optional
 
-import tplr as tplr
+# Local imports
+from . import __version__
+from .config import (
+    client_config,
+    BUCKET_SECRETS
+)
+from .compress import TransformDCT, CompressDCT
+from .chain import ChainManager
+from .logging import logger
+from .schemas import Bucket
 
-BUCKET = 'decis'
-CLIENT_CONFIG = botocore.config.Config(max_pool_connections=256,)
+CF_REGION_NAME: str = "enam"
 
-AWS_ACCESS_KEY = os.getenv('AWS_ACCESS_KEY_ID')
-AWS_SECRET_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+class Comms(ChainManager, TransformDCT, CompressDCT):
+    def __init__(
+        self,
+        bucket: Bucket,
+        model,  # Required for TransformDCT
+        target_chunk,  # Required for TransformDCT 
+        save_location: str = '/tmp',
+        key_prefix: str = 'slice',
+        subtensor: Optional["bt.Subtensor"] = None,
+        netuid: Optional[int] = None,
+        metagraph = None,
+        norm: str = "ortho",  # Optional param for TransformDCT
+    ):
+        # Initialize parent classes
+        ChainManager.__init__(self, subtensor, netuid, metagraph)
+        TransformDCT.__init__(self, model, target_chunk, norm)
+        CompressDCT.__init__(self)
+        """
+        Initializes the R2Communicator for interacting with Cloudflare R2 buckets.
 
-async def put(state_dict: dict, uid: str, window: int, key: str):
-    tplr.logger.debug(f"PUT {uid}/{window}/{key} -->")
-    # Save the object to temp
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as temp_file:
-        torch.save(state_dict, temp_file)
-        temp_file_path = temp_file.name
-    # Upload the object to S3 asynchronously
-    session = get_session()
-    async with session.create_client(
-        's3',
-        region_name='us-east-1',
-        config=CLIENT_CONFIG,
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY
+        Args:
+            bucket (Bucket): Contains the configuration for the R2 bucket.
+            save_location (str): Temporary directory for file operations.
+            key_prefix (str): Prefix for the filenames stored in the bucket.
+            subtensor (bt.Subtensor, optional): Subtensor instance for chain operations
+            netuid (int, optional): Network UID for chain operations
+            metagraph: Metagraph instance containing network state
+        """
+        super().__init__(subtensor, netuid, metagraph)
+        self.bucket = bucket
+        self.save_location = save_location
+        self.key_prefix = key_prefix
+        self.session = get_session()
+        self.lock = asyncio.Lock()
+
+        # Update neuron's bucket commitment
+        self.try_commit()
+        # Start the background task to fetch commitments
+        self.start_commitment_fetcher()
+        logger.debug("Started commitment fetcher background task.")
+
+    def get_base_url(self) -> str:
+        """Constructs the base URL for the R2 storage endpoint."""
+        return f"https://{self.bucket.account_id}.r2.cloudflarestorage.com"
+
+    async def put(
+        self,
+        state_dict: dict,
+        uid: str,
+        window: int,
+        key: Optional[str] = None,
+        global_step: int = 0,
+    ):
+        """
+        Uploads a slice of the model parameters to the R2 bucket.
+
+        Args:
+            state_dict (dict): The state dictionary to upload.
+            uid (str): Unique identifier for the upload (e.g., hotkey or user ID).
+            window (int): The window number for synchronization.
+            key (str, optional): Custom key for the filename. Defaults to self.key_prefix.
+            global_step (int): Global training step.
+        """
+        key = key or self.key_prefix
+        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        temp_file_path = os.path.join(self.save_location, filename)
+        # Include global_step in state_dict
+        state_dict["global_step"] = global_step
+        # Save the state_dict to a temporary file
+        torch.save(state_dict, temp_file_path)
+
+        # Upload the file to R2 bucket
+        async with self.session.create_client(
+            "s3",
+            endpoint_url=self.get_base_url(BUCKET_SECRETS["account_id"]),
+            region_name=CF_REGION_NAME,
+            config=client_config,
+            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
         ) as s3_client:
-            with open(temp_file_path, "rb") as f:
-                await s3_client.put_object(Bucket=BUCKET, Key=f"{uid}/{window}/{key}", Body=f)
-    # Delete tmp file
-    os.remove(temp_file_path)
-    tplr.logger.debug(f"PUT {uid}/{window}/{key} <--")
+            try:
+                async with aiofiles.open(temp_file_path, "rb") as f:
+                    data = await f.read()
+                    await s3_client.put_object(Bucket=self.bucket.name, Key=filename, Body=data)
+                logger.debug(f"Successfully uploaded {filename} to R2 bucket.")
+            except Exception as e:
+                logger.error(f"Failed to upload {filename} to R2 bucket: {e}")
+            finally:
+                # Clean up the temporary file
+                os.remove(temp_file_path)
 
-    
-async def get( uid: int, window: int, key: str, timeout: int = 30 ):
-    full_key = f"{uid}/{window}/{key}"
-    tplr.logger.debug(f"GET {full_key} -->")
-    try:
-        # Create a temporary file to store the downloaded object
-        with tempfile.NamedTemporaryFile(delete=True, suffix='.pt') as temp_file:
-            temp_file_path = temp_file.name
-            # Download the object with a timeout
-            session = get_session()
-            async with session.create_client(
-                's3',
-                region_name='us-east-1',
-                config=CLIENT_CONFIG,
-                aws_access_key_id=AWS_ACCESS_KEY,
-                aws_secret_access_key=AWS_SECRET_KEY
-            ) as s3_client:
-                response = await asyncio.wait_for(
-                    s3_client.get_object(Bucket=BUCKET, Key=f"{full_key}"),
-                    timeout=timeout
-                )
-                async with aiofiles.open(temp_file_path, "wb") as outfile:
-                    while True:
-                        chunk = await response["Body"].read(1 * 1024 * 1024)
-                        if not chunk:break
-                        await outfile.write(chunk)
-            # Load the object into memory
-            with open(temp_file_path, 'rb') as f:
-                state_dict = torch.load(f, weights_only=True)
-        tplr.logger.debug(f"GET {full_key} <--")
-        return state_dict
-    except asyncio.TimeoutError:
-        tplr.logger.debug(f"Timeout occurred while downloading {full_key} from S3.")
-        return None
-    except Exception as e:
-        tplr.logger.debug(f"An error occurred during GET: {full_key}: {e}")
-        return None
-    
-async def get_with_retry(uid, window, key, timeout):
-    """Attempt to get data from S3, retrying until success or timeout."""
-    start_time = time.time()
-    end_time = start_time + timeout
-    while True:
-        try:
-            state_dict = await get(uid=uid, window=window, key=key)
-            if state_dict == None:
-                raise ValueError("wait...")
-            return state_dict
-        except Exception:
-            if time.time() >= end_time:
-                tplr.logger.debug(f"GET {uid}/{window}/{key} x (timeout), {time.time()} > {int(end_time)}")
+    async def get(
+        self,
+        uid: str,
+        window: int,
+        key: Optional[str] = None,
+        timeout: int = 30,
+    ):
+        """
+        Downloads a slice of the model parameters from the R2 bucket.
+
+        Args:
+            uid (str): Unique identifier for the download.
+            window (int): The window number for synchronization.
+            key (str, optional): Custom key for the filename. Defaults to self.key_prefix.
+            timeout (int): Timeout in seconds for the download operation.
+
+        Returns:
+            dict: The state dictionary downloaded from the bucket.
+        """
+        key = key or self.key_prefix
+        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        temp_file_path = os.path.join(self.save_location, filename)
+
+        # Get bucket credentials for this uid
+        bucket = self.chain.get_bucket(uid)
+
+        async with self.session.create_client(
+            "s3",
+            endpoint_url=self.get_base_url(bucket.account_id),
+            region_name=CF_REGION_NAME,
+            config=client_config,
+            aws_access_key_id=bucket.access_key_id,
+            aws_secret_access_key=bucket.secret_access_key,
+        ) as s3_client:
+            try:
+                # Use asyncio timeout
+                async with asyncio.timeout(timeout):
+                    response = await s3_client.get_object(Bucket=self.bucket.name, Key=filename)
+                    async with aiofiles.open(temp_file_path, "wb") as f:
+                        while True:
+                            chunk = await response["Body"].read(1024 * 1024)  # Read 1 MB chunks
+                            if not chunk:
+                                break
+                            await f.write(chunk)
+                # Load the state_dict
+                state_dict = torch.load(temp_file_path, map_location="cpu")
+                logger.debug(f"Successfully downloaded {filename} from R2 bucket.")
+                return state_dict
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout while downloading {filename} from R2 bucket.")
                 return None
-            await asyncio.sleep(0.1)  # Wait before retrying
-    
-async def gather( 
-    state_dict: Dict[str, torch.Tensor], 
-    my_uid: int, 
-    uids: List[int], 
-    window: int, 
-    key:str, 
-    timeout: int,
-    device: str,
-) -> List[ Dict[str, torch.Tensor] ]:
-    # Put the object if exists.
-    if state_dict != None:
-        await put( 
-            state_dict = state_dict, 
-            uid = my_uid, 
-            window = window, 
-            key = key
+            except Exception as e:
+                logger.error(f"Failed to download {filename} from R2 bucket: {e}")
+                return None
+            finally:
+                # Clean up the temporary file
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
+
+    async def get_with_retry(
+        self,
+        uid: str,
+        window: int,
+        key: Optional[str] = None,
+        timeout: int = 30,
+        retry_interval: float = 0.1,
+    ):
+        """
+        Attempts to download data from the R2 bucket, retrying until success or timeout.
+
+        Args:
+            uid (str): Unique identifier for the download.
+            window (int): The window number for synchronization.
+            key (str, optional): Custom key for the filename.
+            timeout (int): Total timeout duration for retries.
+            retry_interval (float): Time to wait between retries.
+
+        Returns:
+            dict: The state dictionary downloaded from the bucket.
+        """
+        start_time = time.time()
+        while True:
+            state_dict = await self.get(uid, window, key, timeout)
+            if state_dict is not None:
+                return state_dict
+            if time.time() - start_time > timeout:
+                logger.error(f"Exceeded timeout while downloading data for UID {uid}.")
+                return None
+            await asyncio.sleep(retry_interval)
+
+    async def gather(
+        self,
+        state_dict: Dict[str, torch.Tensor],
+        my_uid: str,
+        uids: List[str],
+        window: int,
+        key: Optional[str] = None,
+        timeout: int = 30,
+        device: str = "cpu",
+    ) -> Dict[str, List[torch.Tensor]]:
+        """
+        Gathers slices from multiple peers and assembles them for aggregation.
+
+        Args:
+            state_dict (Dict[str, torch.Tensor]): Local state dictionary.
+            my_uid (str): This node's unique identifier.
+            uids (List[str]): List of peer UIDs to gather data from.
+            window (int): The window number for synchronization.
+            key (str, optional): Custom key for filenames.
+            timeout (int): Timeout for gathering data from each peer.
+            device (str): Device to map tensors onto.
+
+        Returns:
+            Dict[str, List[torch.Tensor]]: Aggregated state dictionaries from all peers.
+        """
+        key = key or self.key_prefix
+        # Put own state_dict to the bucket
+        await self.put(state_dict, my_uid, window, key)
+
+        # Gather state_dicts from peers
+        gather_tasks = [
+            self.get_with_retry(uid=uid, window=window, key=key, timeout=timeout)
+            for uid in uids
+        ]
+
+        responses = await asyncio.gather(*gather_tasks)
+        # Initialize the gather_result dictionary
+        gather_result = {
+            param_name: [] for param_name in state_dict.keys()
+        }
+        # Assemble the results
+        for idx, peer_state in enumerate(responses):
+            if peer_state is None:
+                # Handle missing peer data, e.g., fill with zeros or skip
+                for param_name in state_dict.keys():
+                    gather_result[param_name].append(torch.zeros_like(state_dict[param_name]).to(device))
+            else:
+                for param_name in state_dict.keys():
+                    gather_result[param_name].append(peer_state[param_name].to(device))
+
+        return gather_result
+
+
+    async def sync_model(self, model, my_uid, uids, window, key='model', timeout=30, device='cpu'):
+        """Synchronizes model parameters across peers by taking the median of gathered states.
+        
+        Args:
+            model: The model to synchronize
+            my_uid (str): This node's unique identifier
+            uids (List[str]): List of peer UIDs to sync with
+            window (int): Current window number for sync
+            key (str, optional): Key prefix for sync files. Defaults to 'model'
+            timeout (int, optional): Timeout in seconds. Defaults to 30
+            device (str, optional): Device to use. Defaults to 'cpu'
+            
+        TODO:
+        - Add error handling for failed gathers
+        - Add parameter validation
+        - Consider weighted median based on peer scores
+        """
+        logger.info(f"Starting global sync with {len(uids)} peers at window {window}")
+        logger.debug(f"Sync params - key: {key}, timeout: {timeout}, device: {device}")
+        
+        gather_result = await self.gather(
+            state_dict=model.state_dict(),
+            my_uid=my_uid,
+            uids=uids,
+            window=window,
+            key=key,
+            timeout=timeout,
+            device=device
         )
-    # Create gather tasks for all other objects.
-    gather_tasks = []
-    for uid in uids:
-        gather_tasks.append(
-            get_with_retry(
-                uid = uid,
-                window = window,
-                key = key,
-                timeout = timeout
-            )
-        )        
-    # Create buffer for responses.
-    gather_result = {
-        key: [ torch.zeros_like(value).to(device) for _ in uids ] for key, value in state_dict.items()
-    }
-    # Gather results async.
-    responses = await asyncio.gather(*gather_tasks)
-    # Fill results.
-    for uid, resp in enumerate( responses ):
-        if resp == None: continue
-        for key in state_dict.keys():
-            gather_result[ key ][ uid ] = resp[ key ].to(device)   
-    # Return gather result.   
-    return gather_result
-                
-    
+        
+        logger.debug(f"Gathered states from {len(gather_result[next(iter(gather_result))])} peers")
+        
+        # Take median of all peers' states
+        state_dict = {
+            name: torch.median(torch.stack(gather_result[name]), dim=0)[0]
+            for name in gather_result
+        }
+        
+        # Log parameter stats
+        for name, param in state_dict.items():
+            logger.debug(f"Param {name}: mean={param.mean():.4f}, std={param.std():.4f}")
+            
+        # Load state into the model
+        model.load_state_dict(state_dict)
+        logger.info("Global sync completed successfully")

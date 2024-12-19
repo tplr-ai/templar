@@ -476,7 +476,6 @@ class Miner:
                             "tokens_per_second": tokens_per_second,
                             "loss": step_loss,
                             "sample_rate": self.sample_rate,
-                            "utilization": train_duration / (end_step - start_step),
                             "learning_rate": self.scheduler.get_last_lr()[0],
                         }
                         await tplr.upload_slice_for_window(

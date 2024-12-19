@@ -338,7 +338,7 @@ class Miner:
             st = tplr.T()
             history_windows = [self.current_window - i for i in range(self.hparams.max_history - 1, -1, -1)]
             for window in tqdm(history_windows, desc="Syncing state"):
-                max_global_step = await tplr.apply_slices_to_model( 
+                max_global_step, _ = await tplr.apply_slices_to_model( 
                     model = self.model, 
                     window = window,
                     seed = window,
@@ -396,7 +396,7 @@ class Miner:
 
                         # Apply the state for the current window.
                         st = tplr.T()
-                        max_global_step = await tplr.apply_slices_to_model( 
+                        max_global_step, _ = await tplr.apply_slices_to_model( 
                             model=self.model, 
                             window=window,
                             seed=window,
@@ -470,6 +470,14 @@ class Miner:
                     if not self.config.baseline:
                         # Upload the delta for the previous window.
                         st = tplr.T()
+                        slice_metric = {
+                            "batch_size": self.config.actual_batch_size,
+                            "tokens_per_step": tokens_per_step,
+                            "tokens_per_second": tokens_per_second,
+                            "loss": step_loss,
+                            "sample_rate": self.sample_rate,
+                            "learning_rate": self.scheduler.get_last_lr()[0],
+                        }
                         await tplr.upload_slice_for_window(
                             bucket = tplr.config.BUCKET_SECRETS["bucket_name"],
                             model = self.model, 
@@ -479,13 +487,14 @@ class Miner:
                             compression = self.hparams.compression,
                             save_location = self.save_location,
                             key = 'delta',
-                            global_step = self.global_step 
+                            global_step = self.global_step, 
+                            slice_metric = slice_metric,
                         )                
                         tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Uploaded the delta.")
 
                         # Apply the delta from the previous window.
                         st = tplr.T()
-                        max_global_step = await tplr.apply_slices_to_model(
+                        max_global_step, _ = await tplr.apply_slices_to_model(
                             model=self.model, 
                             window=window - 1,
                             seed=window - 1,

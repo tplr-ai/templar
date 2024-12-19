@@ -34,7 +34,6 @@ import wandb.plot
 from asyncio import TimeoutError
 from functools import partial
 import tempfile
-import statistics
 
 # Local imports.
 import templar as tplr

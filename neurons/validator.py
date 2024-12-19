@@ -335,7 +335,7 @@ class Validator:
                 save_location=self.save_location
             )
             for window in tqdm(history_windows, desc="Syncing state"):
-                max_global_step = await tplr.apply_slices_to_model( 
+                max_global_step, _ = await tplr.apply_slices_to_model( 
                     model=self.model, 
                     window=window,
                     seed=window,
@@ -422,7 +422,7 @@ class Validator:
 
                     # Applied the model  state for the eval window.
                     st = tplr.T()
-                    max_global_step = await tplr.apply_slices_to_model( 
+                    max_global_step, _ = await tplr.apply_slices_to_model( 
                         model=self.model, 
                         window=window,
                         seed=window,
@@ -643,15 +643,14 @@ class Validator:
                         "validator/global_batch_size": sum([slice_metric['batch_size'] for _, slice_metric in window_metric.items()]),
                     }, step=self.global_step)
 
-                    for hotkey, slice_metric in window_metric.items()[:-1]:
+                    for hotkey, slice_metric in window_metric.items():
                         uid = self.metagraph.hotkeys.index(hotkey)
                         wandb.log({
-                            f"miner/UID{uid}loss": slice_metric['loss'],
-                            f"miner/UID{uid}tokens_per_step": slice_metric['tokens_per_step'],
-                            f"miner/UID{uid}tokens_per_second": slice_metric['tokens_per_second'],
-                            f"miner/UID{uid}sample_rate": slice_metric['sample_rate'],
-                            f"miner/UID{uid}utilization": slice_metric['utilization'],
-                            f"miner/UID{uid}learning_rate": slice_metric['learning_rate'],
+                            f"miner/UID{uid}/loss": slice_metric['loss'],
+                            f"miner/UID{uid}/tokens_per_step": slice_metric['tokens_per_step'],
+                            f"miner/UID{uid}/tokens_per_second": slice_metric['tokens_per_second'],
+                            f"miner/UID{uid}/sample_rate": slice_metric['sample_rate'],
+                            f"miner/UID{uid}/learning_rate": slice_metric['learning_rate'],
                         }, step=self.global_step)
 
                     for uid_i in valid_score_indices:

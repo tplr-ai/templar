@@ -30,7 +30,7 @@ import bittensor as bt
 from collections import defaultdict
 from filelock import FileLock, Timeout
 from types import SimpleNamespace
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 # Local imports
 from . import __version__
@@ -154,7 +154,7 @@ async def apply_slices_to_model(
     compression: int,
     save_location: str,
     key: str = "slice",
-) -> int:
+) -> Tuple[int, Dict[str, any]]:
     """
     Applies downloaded model parameter slices to a model for a specific window,
     weighting each contribution equally based on the norm of each miner's update
@@ -170,8 +170,11 @@ async def apply_slices_to_model(
 
     Returns:
         int: The maximum global step seen across all applied slices.
+        Dict: The metric dictionary aggregated participants' slices in a window
     """
     max_global_step = 0
+    window_metric = {}
+
     indices_dict = await get_indices_for_window(model, seed, compression)
     slice_files = await load_files_for_window(
         window=window, save_location=save_location, key=key
@@ -191,7 +194,7 @@ async def apply_slices_to_model(
         try:
             filename = os.path.basename(file_i)
             match = re.match(
-                rf"^{key}-{window}-.+-v{re.escape(__version__)}\.pt$",
+                rf"^{key}-{window}-(.+)-v{re.escape(__version__)}\.pt$",
                 filename,
             )
             if not match:
@@ -199,6 +202,7 @@ async def apply_slices_to_model(
                     f"Skipping file {file_i} due to version mismatch in filename."
                 )
                 continue
+            participant_hotkey = match.group(1)
 
             slice_i = await get_slices(file_i, model.device)
             slice_global_step = slice_i.get("global_step")
@@ -210,6 +214,10 @@ async def apply_slices_to_model(
                 continue
 
             max_global_step = max(max_global_step, slice_global_step)
+
+            slice_metric = slice_i.get("slice_metric")
+            if slice_metric is not None:
+                window_metric[participant_hotkey] = slice_metric
 
             # Compute norm of the slice
             slice_norm = 0.0
@@ -244,7 +252,7 @@ async def apply_slices_to_model(
 
     if not num_files or not slice_norms:
         logger.warning(f"No valid slices found for window {window}")
-        return max_global_step
+        return max_global_step, window_metric
 
     # Compute median norm
     median_norm = torch.median(torch.tensor(slice_norms))
@@ -259,7 +267,7 @@ async def apply_slices_to_model(
         avg_param = avg_param.to(param.data.dtype)
         param.data.view(-1)[param_indices] = avg_param.clone()
 
-    return max_global_step
+    return max_global_step, window_metric
 
 
 async def upload_slice_for_window(
@@ -272,6 +280,7 @@ async def upload_slice_for_window(
     save_location: str,
     key: str = "slice",
     global_step: int = 0,
+    slice_metric: Dict[str, any] = None,
 ):
     """
     Uploads a slice of model parameters to S3 for a specific window.
@@ -285,6 +294,9 @@ async def upload_slice_for_window(
 
     # Create the slice dictionary with global_step
     slice_data = {"global_step": global_step}
+    if slice_metric is not None:
+        slice_data["slice_metric"] = slice_metric
+    # Create the slice dictionary with global_step
     for name, param in model.named_parameters():
         slice_data[name] = param.data.view(-1)[indices[name].to(model.device)].cpu()
 

@@ -337,7 +337,7 @@ class Validator:
                 save_location=self.save_location
             )
             for window in tqdm(history_windows, desc="Syncing state"):
-                max_global_step = await tplr.apply_slices_to_model( 
+                max_global_step, _ = await tplr.apply_slices_to_model( 
                     model=self.model, 
                     window=window,
                     seed=window,
@@ -362,8 +362,8 @@ class Validator:
                     window = self.current_window - offset
 
 
-                    # Upload checkpoint every 100 steps
-                    if self.global_step % 100 == 0:
+                    # Upload checkpoint every 500 steps
+                    if self.global_step % 500 == 0:
                         # Create background task for checkpoint operations
                         checkpoint_task = asyncio.create_task(
                             self.save_checkpoint_background(
@@ -424,7 +424,7 @@ class Validator:
 
                     # Applied the model  state for the eval window.
                     st = tplr.T()
-                    max_global_step = await tplr.apply_slices_to_model( 
+                    max_global_step, _ = await tplr.apply_slices_to_model( 
                         model=self.model, 
                         window=window,
                         seed=window,
@@ -646,7 +646,7 @@ class Validator:
                         )
                     # Apply all deltas to the model state.
                     st = tplr.T()
-                    max_global_step = await tplr.apply_slices_to_model( 
+                    max_global_step, window_metric = await tplr.apply_slices_to_model( 
                         model=self.model, 
                         window=window,
                         seed=window,
@@ -676,11 +676,23 @@ class Validator:
                     # Log main metrics
                     wandb.log({
                         "validator/loss": step_loss,
-                        "validator/tokens_per_step": tokens_per_step,
-                        "validator/tokens_per_second": tokens_per_second,
+                        "validator/tokens_per_step": sum([slice_metric['tokens_per_step'] for _, slice_metric in window_metric.items()]),
+                        "validator/tokens_per_second": sum([slice_metric['tokens_per_second'] for _, slice_metric in window_metric.items()]),
                         "validator/sample_rate": self.sample_rate,
-                        "validator/utilization": eval_duration / (gs_end - gs_start)
+                        "validator/utilization": eval_duration / (gs_end - gs_start),
+                        "validator/global_batch_size": sum([slice_metric['batch_size'] for _, slice_metric in window_metric.items()]),
                     }, step=self.global_step)
+
+                    for hotkey, slice_metric in window_metric.items():
+                        uid = self.metagraph.hotkeys.index(hotkey)
+                        wandb.log({
+                            f"miner/loss/{uid}": slice_metric['loss'],
+                            f"miner/tokens_per_step/{uid}": slice_metric['tokens_per_step'],
+                            f"miner/tokens_per_second/{uid}": slice_metric['tokens_per_second'],
+                            f"miner/sample_rate/{uid}": slice_metric['sample_rate'],
+                            f"miner/learning_rate/{uid}": slice_metric['learning_rate'],
+                        }, step=self.global_step)
+
                     for uid_i in valid_score_indices:
                         wandb.log({
                             f"validator/step_scores/{uid_i.item()}": self.step_scores[uid_i].item(),
@@ -777,11 +789,12 @@ class Validator:
         try:
             # Wrap synchronous subtensor call in partial to pass arguments
             set_weights_fn = partial(
-                self.subtensor.commit_weights,
+                self.subtensor.set_weights,
                 wallet=self.wallet,
                 netuid=self.config.netuid,
                 uids=self.metagraph.uids,
                 weights=self.weights[self.metagraph.uids],
+                version_key= tplr.version_key,
                 wait_for_inclusion=True,
                 wait_for_finalization=False,
             )

@@ -34,6 +34,7 @@ import wandb.plot
 from asyncio import TimeoutError
 from functools import partial
 import tempfile
+import copy
 
 # Local imports.
 import templar as tplr
@@ -221,6 +222,7 @@ class Validator:
         self.new_window_event = asyncio.Event()
         self.stop_event = asyncio.Event()     
         self.step_scores = torch.zeros( 256, dtype = torch.float32 ) 
+        self.step_loss_scores = torch.zeros( 256, dtype = torch.float32 ) 
         self.scores = torch.zeros( 256, dtype = torch.float32 ) 
         self.weights = torch.zeros( 256, dtype = torch.float32 ) 
         self.sample_rate = 1.0
@@ -360,8 +362,8 @@ class Validator:
                     window = self.current_window - offset
 
 
-                    # Upload checkpoint every 100 steps
-                    if self.global_step % 100 == 0:
+                    # Upload checkpoint every 500 steps
+                    if self.global_step % 500 == 0:
                         # Create background task for checkpoint operations
                         checkpoint_task = asyncio.create_task(
                             self.save_checkpoint_background(
@@ -477,10 +479,31 @@ class Validator:
                     )                
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded eval pages: [light_steel_blue]{[p[1] for p in eval_pages]}[/light_steel_blue].")
 
+
+                    # Create miner model and update it with the chosen miner's slice data.
+                    miner_model = copy.deepcopy(self.model).to(self.model.device)
+                    for name_i, param_i in miner_model.named_parameters():
+                        if name_i not in indices or name_i not in eval_slice_data:
+                            continue
+                        
+                        # Get indices and slice data for this parameter
+                        idxs_i = indices[name_i].to(self.model.device)
+                        slice_i = eval_slice_data[name_i].view(-1).to(self.model.device)
+                        
+                        # Get the full parameter data and reshape it to 1D
+                        param_data = param_i.data.view(-1)
+                        
+                        # Create a new tensor with the updated values
+                        updated_param = param_data.clone()
+                        updated_param[idxs_i] = slice_i
+                        
+                        # Reshape back to original shape and update the parameter
+                        param_i.data = updated_param.view(param_i.data.shape)
                     # Accumulate gradients from this page.
                     eval_start = tplr.T()
                     self.model.zero_grad()
                     total_loss = 0.0
+                    loss_after = 0.0
                     full_steps = 0
                     total_steps = 0
                     exhausted_window = False
@@ -494,7 +517,12 @@ class Validator:
                                 labels = torch.where(labels == self.hparams.tokenizer.pad_token_id, -100, labels)
                                 with torch.amp.autocast(device_type=self.model.device.type, dtype=torch.bfloat16):  # Enable autocasting
                                     outputs = self.model(input_ids=input_ids, labels=labels)
+                                    with torch.set_grad_enabled(False):
+                                        outputs2 = miner_model(input_ids=input_ids, labels=labels)
+
                                 total_loss += outputs.loss.item()
+                                loss_after += outputs2.loss.item()
+
                                 outputs.loss.backward()
                                 if self.current_window - offset != window:
                                     exhausted_window = True
@@ -502,6 +530,15 @@ class Validator:
                     self.optimizer.step()
                     self.scheduler.step()
                     step_loss = total_loss/(full_steps+1)
+                    step_loss_after = loss_after/(full_steps+1)
+
+                    if loss_after <= step_loss:
+                        # Reward for loss reduction
+                        loss_score = 1 - (step_loss_after / step_loss)
+                    else:
+                        # Penalize for loss increase, capped at -1
+                        loss_score = -min(1, (step_loss_after - step_loss) / step_loss)
+
                     eval_duration = tplr.T() - eval_start
                     tokens_per_step = self.hparams.sequence_length * self.config.actual_batch_size * (full_steps + 1)
 
@@ -571,9 +608,10 @@ class Validator:
                         self.scores[uid] *= decay_factor
 
                     # Update the score for the evaluated miner
-                    self.step_scores[eval_uid] = score
+                    self.step_scores[eval_uid] = score + loss_score  
+                    self.step_loss_scores[eval_uid] = loss_score
                     self.scores[eval_uid] = (
-                        (1 - self.hparams.validator_moving_alpha) * score + 
+                        (1 - self.hparams.validator_moving_alpha) * self.step_scores[eval_uid] + 
                         self.hparams.validator_moving_alpha * self.scores[eval_uid]
                     )
 
@@ -598,11 +636,13 @@ class Validator:
                         moving_score = self.scores[uid].item()
                         weight = self.weights[uid].item()
                         step_score = self.step_scores[uid].item()
+                        loss_score = self.step_loss_scores[uid].item()
                         tplr.logger.info(
                             f"\tuid: [dark_sea_green]{uid}[/dark_sea_green], "
                             f"step_score: [dark_sea_green]{step_score:.3f}[/dark_sea_green], "
                             f"moving_score: [dark_sea_green]{moving_score:.3f}[/dark_sea_green], "
-                            f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green]"
+                            f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green], "
+                            f"loss_score: [dark_sea_green]{loss_score:.3f}[/dark_sea_green]"
                         )
                     # Apply all deltas to the model state.
                     st = tplr.T()
@@ -754,6 +794,7 @@ class Validator:
                 netuid=self.config.netuid,
                 uids=self.metagraph.uids,
                 weights=self.weights[self.metagraph.uids],
+                version_key= tplr.version_key,
                 wait_for_inclusion=True,
                 wait_for_finalization=False,
             )

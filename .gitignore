@@ -44,6 +44,8 @@ checkpoint-*
 checkpoints.ipynb
 analysis.ipynb
 scratch*
+bad_slices/
+good_slices
 
 # Evals
 lm-evaluation-harness 

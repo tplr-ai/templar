@@ -32,6 +32,7 @@ from collections import defaultdict
 from filelock import FileLock, Timeout
 from types import SimpleNamespace
 from typing import List, Dict, Tuple
+import toml
 
 # Local imports
 from . import __version__
@@ -45,6 +46,22 @@ from templar.constants import CF_REGION_NAME
 from templar.logging import logger
 from templar.schemas import Bucket
 
+def load_blacklisted_hotkeys():
+    blacklist_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'blacklist.toml')
+    blacklist_file = os.path.normpath(blacklist_file)
+    if os.path.exists(blacklist_file):
+        try:
+            config = toml.load(blacklist_file)
+            hotkeys = config.get('blacklist', {}).get('hotkeys', [])
+            return set(hotkeys)
+        except Exception as e:
+            logger.error(f"Error loading blacklist.toml: {e}")
+            return set()
+    else:
+        logger.warning("blacklist.toml not found.")
+        return set()
+
+BLACKLISTED_HOTKEYS = load_blacklisted_hotkeys()
 
 def get_base_url(account_id: str) -> str:
     """Gets the base URL for Cloudflare R2 storage.
@@ -204,6 +221,9 @@ async def apply_slices_to_model(
                 )
                 continue
             participant_hotkey = match.group(1)
+            if participant_hotkey in BLACKLISTED_HOTKEYS:
+                logger.info(f"Skipping blacklisted hotkey: {participant_hotkey}")
+                continue
 
             slice_i = await get_slices(file_i, model.device)
             
@@ -267,8 +287,19 @@ async def apply_slices_to_model(
             continue
         param_indices = indices_dict[name].to(model.device)
         avg_param = param_sums[name] / num_files
-        avg_param = avg_param * median_norm
+
+        # Re-normalize avg_param to have unit norm
+        avg_param_norm = torch.norm(avg_param, p=2).item()
+        if avg_param_norm > 0:
+            avg_param = avg_param * median_norm / avg_param_norm
+        else:
+            # Handle the rare case where avg_param is zero
+            avg_param = torch.zeros_like(avg_param)
+
+        # Convert to the appropriate data type
         avg_param = avg_param.to(param.data.dtype)
+
+        # Apply the averaged and scaled parameter to the model
         param.data.view(-1)[param_indices] = avg_param.clone()
 
     return max_global_step, window_metric
@@ -695,6 +726,9 @@ async def download_slices_for_buckets_and_windows(
         if not isinstance(b, Bucket):
             logger.warning(f"Invalid bucket type: {type(b)}")
             continue
+        if b.hotkey in BLACKLISTED_HOTKEYS:
+            logger.info(f"Skipping blacklisted hotkey: {b.hotkey}")
+            continue
         valid_buckets.append(b)
 
     if not valid_buckets:
@@ -1069,3 +1103,4 @@ def get_neuron_temp_dir(wallet) -> str:
     )
     os.makedirs(temp_dir, exist_ok=True)
     return temp_dir
+

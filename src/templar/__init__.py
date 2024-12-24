@@ -21,7 +21,7 @@
 # type: ignore
 
 __version__ = "0.1.27"
-version_key = 2000
+version_key = 3000
 
 # Import package.
 from .autoupdate import *

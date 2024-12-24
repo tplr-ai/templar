@@ -271,8 +271,19 @@ async def apply_slices_to_model(
             continue
         param_indices = indices_dict[name].to(model.device)
         avg_param = param_sums[name] / num_files
-        avg_param = avg_param * median_norm
+
+        # Re-normalize avg_param to have unit norm
+        avg_param_norm = torch.norm(avg_param, p=2).item()
+        if avg_param_norm > 0:
+            avg_param = avg_param * median_norm / avg_param_norm
+        else:
+            # Handle the rare case where avg_param is zero
+            avg_param = torch.zeros_like(avg_param)
+
+        # Convert to the appropriate data type
         avg_param = avg_param.to(param.data.dtype)
+
+        # Apply the averaged and scaled parameter to the model
         param.data.view(-1)[param_indices] = avg_param.clone()
 
     return max_global_step, window_metric
@@ -711,6 +722,7 @@ async def download_slices_for_buckets_and_windows(
         - Handles S3 authentication using bucket credentials
         - Returns empty dict if no valid buckets provided
     """
+    # Filter out None buckets
     # Filter out None buckets
     valid_buckets = []
     for b in buckets:

@@ -272,14 +272,7 @@ async def apply_slices_to_model(
         param_indices = indices_dict[name].to(model.device)
         avg_param = param_sums[name] / num_files
 
-        # Re-normalize avg_param to have unit norm
-        avg_param_norm = torch.norm(avg_param, p=2).item()
-        if avg_param_norm > 0:
-            avg_param = avg_param * median_norm / avg_param_norm
-        else:
-            # Handle the rare case where avg_param is zero
-            avg_param = torch.zeros_like(avg_param)
-
+        avg_param = avg_param * median_norm
         # Convert to the appropriate data type
         avg_param = avg_param.to(param.data.dtype)
 

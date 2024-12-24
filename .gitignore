@@ -46,7 +46,8 @@ analysis.ipynb
 scratch*
 bad_slices/
 good_slices
-
+slices
+foo*
 # Evals
 lm-evaluation-harness 
 models

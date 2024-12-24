@@ -3,6 +3,8 @@ import bittensor as bt
 from retry import retry
 from typing import Optional, Dict
 from websockets.exceptions import ConnectionClosedOK, WebSocketException
+import os
+import toml
 
 # Local imports
 from .logging import logger
@@ -89,6 +91,12 @@ def get_all_commitments(
 
         for key, value in result:
             hotkey = key.value
+
+            # Skip blacklisted hotkeys
+            if hotkey in BLACKLISTED_HOTKEYS:
+                logger.info(f"Skipping blacklisted hotkey: {hotkey}")
+                continue
+
             if hotkey not in hotkey_to_uid:
                 continue
 
@@ -118,6 +126,7 @@ def get_all_commitments(
                     access_key_id=concatenated[32:64],
                     secret_access_key=concatenated[64:],
                 )
+
                 commitments[uid] = bucket
                 logger.debug(f"Bucket fetched and parsed for UID {uid}: {bucket.name}")
 
@@ -132,3 +141,26 @@ def get_all_commitments(
     except Exception as e:
         logger.error(f"Failed to query commitments: {e}")
         raise
+        logger.error(f"Failed to query commitments: {e}")
+        raise
+
+
+def load_blacklisted_hotkeys():
+    blacklist_file = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "blacklist.toml"
+    )
+    blacklist_file = os.path.normpath(blacklist_file)
+    if os.path.exists(blacklist_file):
+        try:
+            config = toml.load(blacklist_file)
+            hotkeys = config.get("blacklist", {}).get("hotkeys", [])
+            return set(hotkeys)
+        except Exception as e:
+            logger.error(f"Error loading blacklist.toml: {e}")
+            return set()
+    else:
+        logger.warning("blacklist.toml not found.")
+        return set()
+
+
+BLACKLISTED_HOTKEYS = load_blacklisted_hotkeys()

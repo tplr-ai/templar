@@ -522,7 +522,7 @@ async def validate_slice_data(slice_file: str, save_location: str) -> bool:
     """
     try:
         # Load the slice data
-        slice_data = torch.load(slice_file)
+        slice_data = torch.load(slice_file, weights_only=True)
         
         # Basic validation checks
         if not isinstance(slice_data, dict):
@@ -1031,7 +1031,7 @@ async def load_checkpoint(
         additional_state (dict): Dictionary of additional state variables.
     """
     try:
-        checkpoint = torch.load(filename, map_location=device)
+        checkpoint = torch.load(filename, map_location=device, weights_only=True)
         model.load_state_dict(checkpoint["model_state_dict"])
         if optimizer and "optimizer_state_dict" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

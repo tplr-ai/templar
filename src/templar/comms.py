@@ -16,7 +16,6 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Global imports
-import shutil
 import aiofiles
 import asyncio
 import hashlib
@@ -46,13 +45,16 @@ from templar.constants import CF_REGION_NAME
 from templar.logging import logger
 from templar.schemas import Bucket
 
+
 def load_blacklisted_hotkeys():
-    blacklist_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'blacklist.toml')
+    blacklist_file = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "blacklist.toml"
+    )
     blacklist_file = os.path.normpath(blacklist_file)
     if os.path.exists(blacklist_file):
         try:
             config = toml.load(blacklist_file)
-            hotkeys = config.get('blacklist', {}).get('hotkeys', [])
+            hotkeys = config.get("blacklist", {}).get("hotkeys", [])
             return set(hotkeys)
         except Exception as e:
             logger.error(f"Error loading blacklist.toml: {e}")
@@ -61,7 +63,9 @@ def load_blacklisted_hotkeys():
         logger.warning("blacklist.toml not found.")
         return set()
 
+
 BLACKLISTED_HOTKEYS = load_blacklisted_hotkeys()
+
 
 def get_base_url(account_id: str) -> str:
     """Gets the base URL for Cloudflare R2 storage.
@@ -226,14 +230,15 @@ async def apply_slices_to_model(
                 continue
 
             slice_i = await get_slices(file_i, model.device)
-            
+
             # Handle both dictionary and tensor returns
             if isinstance(slice_i, dict):
                 slice_global_step = slice_i.get("global_step")
                 slice_metric = slice_i.get("slice_metric")
                 # Remove non-tensor items from the dictionary
-                tensor_items = {k: v for k, v in slice_i.items() 
-                              if isinstance(v, torch.Tensor)}
+                tensor_items = {
+                    k: v for k, v in slice_i.items() if isinstance(v, torch.Tensor)
+                }
             else:
                 # If it's not a dict, assume it's a tensor or tensor-like object
                 slice_global_step = None
@@ -253,7 +258,11 @@ async def apply_slices_to_model(
             try:
                 for name, param in model.named_parameters():
                     # Check if name exists in both dictionaries using dict methods
-                    if not isinstance(tensor_items, dict) or name not in indices_dict.keys() or name not in tensor_items.keys():
+                    if (
+                        not isinstance(tensor_items, dict)
+                        or name not in indices_dict.keys()
+                        or name not in tensor_items.keys()
+                    ):
                         continue
                     values = tensor_items[name].to(model.device)
                     slice_norm += torch.norm(values, p=2).item() ** 2
@@ -543,43 +552,46 @@ async def handle_file(
 async def validate_slice_data(slice_file: str, save_location: str) -> bool:
     """
     Validates a slice file and moves it to appropriate directory based on validity.
-    
+
     Args:
         slice_file (str): Path to the slice file
         save_location (str): Base directory for organizing slices
-        
+
     Returns:
         bool: True if slice is valid, False otherwise
     """
     try:
         # Load the slice data
         slice_data = torch.load(slice_file)
-        
+
         # Basic validation checks
         if not isinstance(slice_data, dict):
             raise ValueError("Slice data is not a dictionary")
-            
+
         # Check for required tensor data
         has_tensors = False
         for key, value in slice_data.items():
             if isinstance(value, torch.Tensor):
                 has_tensors = True
                 break
-        
+
         if not has_tensors:
             raise ValueError("No tensor data found in slice")
-            
+
         return True
-        
+
     except Exception as e:
         # Handle invalid slice
-        
+
         filename = os.path.basename(slice_file)
         logger.warning(f"Invalid slice {filename}: {str(e)}")
-        
+
         return False
 
-async def process_bucket(s3_client, bucket: str, windows: List[int], key: str, save_location: str):
+
+async def process_bucket(
+    s3_client, bucket: str, windows: List[int], key: str, save_location: str
+):
     """
     Processes a single S3 bucket to download files for specified windows.
 
@@ -606,20 +618,28 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str, s
         logger.debug(f"Listing objects with prefix '{prefix}' in bucket '{bucket}'")
         try:
             async for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-                logger.trace(f"Processing page for prefix '{prefix}' in bucket '{bucket}'")
+                logger.trace(
+                    f"Processing page for prefix '{prefix}' in bucket '{bucket}'"
+                )
                 if "Contents" not in page:
-                    logger.trace(f"No contents found for prefix '{prefix}' in bucket '{bucket}'")
+                    logger.trace(
+                        f"No contents found for prefix '{prefix}' in bucket '{bucket}'"
+                    )
                     continue
-                
+
                 download_tasks = []
                 for obj in page.get("Contents", []):
                     filename = obj["Key"]
-                    logger.trace(f"Processing object with key '{filename}' in bucket '{bucket}'")
+                    logger.trace(
+                        f"Processing object with key '{filename}' in bucket '{bucket}'"
+                    )
                     try:
                         # Extract hotkey and version from the filename using non-greedy matching
                         match = re.match(rf"^{key}-{window}-(.+?)-v(.+)\.pt$", filename)
                         if not match:
-                            logger.error(f"Filename '{filename}' does not conform to the expected format.")
+                            logger.error(
+                                f"Filename '{filename}' does not conform to the expected format."
+                            )
                             continue
                         slice_hotkey = match.group(1)
                         slice_version = match.group(2)
@@ -631,12 +651,12 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str, s
                                 f"(expected {__version__}, got {slice_version})."
                             )
                             continue
-                        
+
                         logger.trace(
                             f"Parsed filename '{filename}' into window '{window}', "
                             f"hotkey '{slice_hotkey}', and version '{slice_version}'"
                         )
-                        
+
                         # Add the download task
                         download_tasks.append(
                             handle_file(
@@ -653,32 +673,44 @@ async def process_bucket(s3_client, bucket: str, windows: List[int], key: str, s
                         logger.exception(f"Error parsing filename '{filename}'")
                         continue
                     except Exception as e:
-                        logger.exception(f"Unexpected error processing filename '{filename}': {e}")
+                        logger.exception(
+                            f"Unexpected error processing filename '{filename}': {e}"
+                        )
                         continue
 
                 # Download and validate files concurrently
                 try:
-                    results = await asyncio.gather(*download_tasks, return_exceptions=True)
+                    results = await asyncio.gather(
+                        *download_tasks, return_exceptions=True
+                    )
                     for res in results:
                         if isinstance(res, Exception):
                             logger.error(f"Download task failed: {res}")
                             continue
-                            
+
                         if not res:
                             continue
-                            
+
                         # Validate the downloaded slice
-                        is_valid = await validate_slice_data(res.temp_file, save_location)
+                        is_valid = await validate_slice_data(
+                            res.temp_file, save_location
+                        )
                         if is_valid:
                             files.append(res)
-                        
-                    logger.trace(f"Completed processing page for prefix '{prefix}' in bucket '{bucket}'")
+
+                    logger.trace(
+                        f"Completed processing page for prefix '{prefix}' in bucket '{bucket}'"
+                    )
                 except Exception as e:
-                    logger.exception(f"Error during asyncio.gather for prefix '{prefix}': {e}")
+                    logger.exception(
+                        f"Error during asyncio.gather for prefix '{prefix}': {e}"
+                    )
 
         except Exception as e:
-            logger.error(f"Error listing objects in bucket '{bucket}' with prefix '{prefix}': {e}")
-            
+            logger.error(
+                f"Error listing objects in bucket '{bucket}' with prefix '{prefix}': {e}"
+            )
+
     logger.trace(f"Completed processing bucket '{bucket}' for windows {windows}")
     return files
 
@@ -1103,4 +1135,3 @@ def get_neuron_temp_dir(wallet) -> str:
     )
     os.makedirs(temp_dir, exist_ok=True)
     return temp_dir
-

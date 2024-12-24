@@ -31,7 +31,6 @@ from collections import defaultdict
 from filelock import FileLock, Timeout
 from types import SimpleNamespace
 from typing import List, Dict, Tuple
-import toml
 
 # Local imports
 from . import __version__
@@ -44,27 +43,6 @@ from .config import (
 from templar.constants import CF_REGION_NAME
 from templar.logging import logger
 from templar.schemas import Bucket
-
-
-def load_blacklisted_hotkeys():
-    blacklist_file = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "..", "blacklist.toml"
-    )
-    blacklist_file = os.path.normpath(blacklist_file)
-    if os.path.exists(blacklist_file):
-        try:
-            config = toml.load(blacklist_file)
-            hotkeys = config.get("blacklist", {}).get("hotkeys", [])
-            return set(hotkeys)
-        except Exception as e:
-            logger.error(f"Error loading blacklist.toml: {e}")
-            return set()
-    else:
-        logger.warning("blacklist.toml not found.")
-        return set()
-
-
-BLACKLISTED_HOTKEYS = load_blacklisted_hotkeys()
 
 
 def get_base_url(account_id: str) -> str:
@@ -225,9 +203,6 @@ async def apply_slices_to_model(
                 )
                 continue
             participant_hotkey = match.group(1)
-            if participant_hotkey in BLACKLISTED_HOTKEYS:
-                logger.info(f"Skipping blacklisted hotkey: {participant_hotkey}")
-                continue
 
             slice_i = await get_slices(file_i, model.device)
 
@@ -748,6 +723,7 @@ async def download_slices_for_buckets_and_windows(
         - Returns empty dict if no valid buckets provided
     """
     # Filter out None buckets
+    # Filter out None buckets
     valid_buckets = []
     for b in buckets:
         if b is None:
@@ -757,9 +733,6 @@ async def download_slices_for_buckets_and_windows(
             continue
         if not isinstance(b, Bucket):
             logger.warning(f"Invalid bucket type: {type(b)}")
-            continue
-        if b.hotkey in BLACKLISTED_HOTKEYS:
-            logger.info(f"Skipping blacklisted hotkey: {b.hotkey}")
             continue
         valid_buckets.append(b)
 

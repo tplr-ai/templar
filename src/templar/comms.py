@@ -35,8 +35,6 @@ from typing import List, Dict, Tuple
 # Local imports
 from . import __version__
 from .config import (
-    AWS_ACCESS_KEY_ID,
-    AWS_SECRET_ACCESS_KEY,
     BUCKET_SECRETS,
     client_config,
 )
@@ -921,10 +919,11 @@ async def delete_old_version_files(bucket_name: str, current_version: str):
     session = get_session()
     async with session.create_client(
         "s3",
-        region_name="us-east-1",
+        endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
+        region_name=CF_REGION_NAME,
         config=client_config,
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+        aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
     ) as s3_client:
         paginator = s3_client.get_paginator("list_objects_v2")
         async for page in paginator.paginate(Bucket=bucket_name):

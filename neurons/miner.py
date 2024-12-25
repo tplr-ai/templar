@@ -61,7 +61,6 @@ class Miner:
         parser.add_argument('--test', action='store_true', help='Run on test network')
         parser.add_argument('--local', action='store_true', help='Run on local network')
         parser.add_argument('--no_autoupdate', action='store_true', help='Disable automatic updates')
-        parser.add_argument("--process_name", type=str, help="The name of the PM2 process")
         parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to save/load the checkpoint. If None, the path is set to checkpoint-M<UID>.pth.')
         parser.add_argument('--save-location', type=str, default=None, help='Directory to save/load slice files')
         bt.wallet.add_args(parser)
@@ -78,7 +77,7 @@ class Miner:
         if config.trace:
             tplr.trace()
         if not config.no_autoupdate:
-            autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
+            autoupdater = tplr.AutoUpdate()
             autoupdater.daemon = True  # Ensure thread exits when main program exits
             autoupdater.start()
         return config

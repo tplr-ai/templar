@@ -68,17 +68,10 @@ class AutoUpdate(threading.Thread):
             logger.error("Failed to get remote version, skipping version check")
             return False
 
-        # Reload the version from __init__.py to get the latest version after updates
-        try:
-            import templar
-            from importlib import reload
-
-            reload(templar)
-            local_version = templar.__version__
-        except Exception as e:
-            logger.error(f"Failed to reload local version: {e}")
-            # Fallback to imported version
-            local_version = templar.__version__
+        local_version = self.get_local_version()
+        if not local_version:
+            logger.error("Failed to get local version, skipping version check")
+            return False
 
         local_version_obj = version.parse(local_version)
         remote_version_obj = version.parse(remote_version)
@@ -92,39 +85,61 @@ class AutoUpdate(threading.Thread):
                 f"than local version ({local_version}), automatically updating..."
             )
             return True
+
         return False
 
     def attempt_update(self):
         """
-        Attempts to pull the latest changes from the remote repository.
+        Attempts to update the local repository to match the remote.
         """
-        if self.repo.is_dirty():
-            logger.error(
-                "Current changeset is dirty. Please commit changes, discard changes, or update manually."
-            )
+        if self.repo.head.is_detached:
+            logger.error("Repository is in a detached HEAD state. Cannot update.")
             return False
+
+        if self.repo.is_dirty(untracked_files=True):
+            logger.error("Repository has uncommitted changes or untracked files. Cannot update.")
+            return False
+
         try:
             origin = self.repo.remote(name="origin")
-            origin.pull(TARGET_BRANCH, ff_only=True)
-            logger.info("Successfully pulled latest changes from remote")
-            return True
-        except git.exc.GitCommandError as e:
-            # Handle merge conflicts
-            logger.error(
-                "Automatic update failed due to conflicts. Attempting to handle merge conflicts.",
-                exc_info=e,
-            )
-            try:
-                self.handle_merge_conflicts()
-                return True
-            except Exception as e:
-                logger.exception(
-                    "Failed to resolve merge conflicts, automatic update cannot proceed. Please manually pull and update.",
-                    exc_info=e,
+            # Fetch latest changes from remote
+            origin.fetch()
+            # Get the current branch
+            current_branch = self.repo.active_branch
+            if current_branch.name != TARGET_BRANCH:
+                logger.error(
+                    f"Current branch ({current_branch.name}) is not the target branch ({TARGET_BRANCH}). Cannot update."
                 )
                 return False
+
+            # Reset local branch to the remote branch
+            remote_ref = f"origin/{TARGET_BRANCH}"
+            logger.info(f"Resetting local branch '{current_branch.name}' to '{remote_ref}'")
+            self.repo.git.reset('--hard', remote_ref)
+            logger.info("Successfully reset to the latest commit from remote.")
+
+            # Verify that local and remote commits match
+            local_commit = self.repo.commit(current_branch)
+            remote_commit = self.repo.commit(remote_ref)
+            if local_commit.hexsha != remote_commit.hexsha:
+                logger.error("Local commit does not match remote commit after reset. Rolling back.")
+                self.repo.git.reset('--hard', 'HEAD@{1}')  # Reset to previous HEAD
+                return False
+
+            return True
+        except git.exc.GitCommandError as e:
+            logger.error(f"Git command failed: {e}")
+            # Rollback on failure
+            self.repo.git.reset('--hard', 'HEAD@{1}')
+            return False
         except Exception as e:
-            logger.exception("Failed to pull latest changes from remote", exc_info=e)
+            logger.exception("Failed to update repository.", exc_info=e)
+            return False
+        except git.exc.GitCommandError as e:
+            logger.error(f"Git command failed: {e}")
+            return False
+        except Exception as e:
+            logger.exception("Failed to update repository.", exc_info=e)
             return False
 
     def handle_merge_conflicts(self):
@@ -133,9 +148,9 @@ class AutoUpdate(threading.Thread):
         """
         try:
             self.repo.git.reset("--merge")
-            origin = self.repo.remotes.origin
-            current_branch = self.repo.active_branch
-            origin.pull(current_branch.name)
+            origin = self.repo.remote(name="origin")
+            current_branch = self.repo.active_branch.name
+            origin.pull(current_branch)
 
             for item in self.repo.index.diff(None):
                 file_path = item.a_path
@@ -147,7 +162,7 @@ class AutoUpdate(threading.Thread):
             return True
         except git.GitCommandError as e:
             logger.exception(
-                "Failed to resolve merge conflicts, automatic update cannot proceed. Please manually pull and update.",
+                "Failed to resolve merge conflicts. Please manually pull and update.",
                 exc_info=e,
             )
             return False
@@ -193,19 +208,30 @@ class AutoUpdate(threading.Thread):
         """
         Automatic update entrypoint method.
         """
-        # if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
-        #     logger.info("Not on the target branch, skipping auto-update")
-        #     return
 
+        if self.repo.head.is_detached or self.repo.active_branch.name != TARGET_BRANCH:
+            logger.info("Not on the target branch, skipping auto-update")
+            return
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            is_updated = loop.run_until_complete(self.check_version_updated())
-            if not is_updated:
+            logger.info("Checking for updates...")
+            # Check if remote version is newer
+            is_update_needed = loop.run_until_complete(self.check_version_updated())
+            if not is_update_needed:
+                logger.info("Local version is up to date. No updates needed.")
                 return
 
-            if not self.attempt_update():
+            logger.info("Attempting auto update")
+            # Attempt to update code
+            update_applied = self.attempt_update()
+            if not update_applied:
+                logger.info("No updates were applied. Continuing without restart.")
                 return
+
+            # Now read the local version
+            local_version = self.get_local_version()
+            logger.info(f"Local version after update: {local_version}")
 
             # Synchronize dependencies
             self.attempt_package_update()
@@ -214,6 +240,7 @@ class AutoUpdate(threading.Thread):
             loop.run_until_complete(self.cleanup_old_versions())
 
             # Restart application
+            logger.info("Attempting to restart the application...")
             self.restart_app()
         except Exception as e:
             logger.exception("Exception during autoupdate process", exc_info=e)
@@ -233,7 +260,6 @@ class AutoUpdate(threading.Thread):
         except Exception as e:
             logger.error(f"Error running `pm2 jlist`: {e}")
             return None
-
         for proc in pm2_data:
             if proc.get("pid") == current_pid:
                 return proc.get("name")
@@ -243,25 +269,22 @@ class AutoUpdate(threading.Thread):
     def restart_app(self):
         """Restarts the current application appropriately based on the runtime environment."""
         logger.info("Restarting application...")
-        # Check for PM2 environment
-        if "PM2_HOME" in os.environ:
-            pm2_name = self.get_pm2_process_name()
-            if not pm2_name:
-                logger.warning("Could not determine PM2 process name. Restart aborted.")
-                sys.exit(1)
-            # PM2 will restart the process if we exit
-            logger.info(f"Detected PM2 environment. Restarting process '{pm2_name}'")
+        pm2_name = self.get_pm2_process_name()
+        if pm2_name:
+            logger.info(f"Detected PM2 environment. Restarting PM2 process '{pm2_name}'...")
             try:
-                subprocess.check_call(["pm2", "restart", pm2_name])
-                time.sleep(5)  # Give PM2 time to restart the process
-                sys.exit(1)
-            except subprocess.CalledProcessError as e:
-                logger.exception("PM2 restart failed.", exc_info=e)
+                subprocess.run(["pm2", "restart", pm2_name], check=True)
+                logger.info(f"Successfully restarted PM2 process '{pm2_name}'.")
+                sys.exit(0)
+            except Exception as e:
+                logger.error(f"Failed to restart PM2 process '{pm2_name}': {e}")
                 sys.exit(1)
         else:
-            # Regular restart
             try:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                logger.info("PM2 process name not found. Performing regular restart using subprocess.Popen")
+                subprocess.Popen([sys.executable] + sys.argv)
+                logger.info("New process started. Exiting current process.")
+                sys.exit(0)
             except Exception as e:
                 logger.exception("Failed to restart application.", exc_info=e)
                 sys.exit(1)
@@ -275,3 +298,21 @@ class AutoUpdate(threading.Thread):
             except Exception as e:
                 logger.exception("Exception during autoupdate check", exc_info=e)
             time.sleep(60)
+
+    def get_local_version(self):
+        """
+        Reads the local __version__ from the __init__.py file.
+        """
+        try:
+            init_py_path = os.path.join(os.path.dirname(__file__), '__init__.py')
+            with open(init_py_path, 'r') as f:
+                content = f.read()
+            for line in content.split('\n'):
+                if line.startswith('__version__'):
+                    local_version = line.split('=')[1].strip().strip(" \"'")
+                    return local_version
+            logger.error("Could not find __version__ in local __init__.py")
+            return None
+        except Exception as e:
+            logger.exception("Failed to read local version", exc_info=e)
+            return None

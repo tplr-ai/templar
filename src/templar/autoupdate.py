@@ -8,8 +8,10 @@ import subprocess
 import sys
 import threading
 import time
+import json
 
 # Local imports
+from .config import BUCKET_SECRETS
 from .comms import delete_old_version_files
 from .logging import logger
 
@@ -22,10 +24,8 @@ class AutoUpdate(threading.Thread):
     Automatic update utility for templar neurons.
     """
 
-    def __init__(self, process_name=None, bucket_name=None):
+    def __init__(self):
         super().__init__()
-        self.process_name = process_name
-        self.bucket_name = bucket_name
         self.daemon = True  # Ensure thread exits when main program exits
         try:
             self.repo = git.Repo(search_parent_directories=True)
@@ -96,36 +96,36 @@ class AutoUpdate(threading.Thread):
 
     def attempt_update(self):
         """
-        Attempt to update the repository by pulling the latest changes from the remote repository.
+        Attempts to pull the latest changes from the remote repository.
         """
+        if self.repo.is_dirty():
+            logger.error(
+                "Current changeset is dirty. Please commit changes, discard changes, or update manually."
+            )
+            return False
         try:
-            origin = self.repo.remotes.origin
-
-            if self.repo.is_dirty(untracked_files=False):
-                logger.error(
-                    "Current changeset is dirty. Please commit changes, discard changes, or update manually."
-                )
-                return False
-            try:
-                logger.debug("Attempting to pull the latest changes...")
-                origin.pull(
-                    TARGET_BRANCH, kill_after_timeout=10, rebase=True
-                )  # Invalid argument
-                logger.debug("Successfully pulled the latest changes")
-                return True
-            except git.GitCommandError as e:
-                logger.exception(
-                    "Automatic update failed due to conflicts. Attempting to handle merge conflicts.",
-                    exc_info=e,
-                )
-                return self.handle_merge_conflicts()
-        except Exception as e:
-            logger.exception(
-                "Automatic update failed. Manually pull the latest changes and update.",
+            origin = self.repo.remote(name="origin")
+            origin.pull(TARGET_BRANCH, ff_only=True)
+            logger.info("Successfully pulled latest changes from remote")
+            return True
+        except git.exc.GitCommandError as e:
+            # Handle merge conflicts
+            logger.error(
+                "Automatic update failed due to conflicts. Attempting to handle merge conflicts.",
                 exc_info=e,
             )
-
-        return False
+            try:
+                self.handle_merge_conflicts()
+                return True
+            except Exception as e:
+                logger.exception(
+                    "Failed to resolve merge conflicts, automatic update cannot proceed. Please manually pull and update.",
+                    exc_info=e,
+                )
+                return False
+        except Exception as e:
+            logger.exception("Failed to pull latest changes from remote", exc_info=e)
+            return False
 
     def handle_merge_conflicts(self):
         """
@@ -160,15 +160,23 @@ class AutoUpdate(threading.Thread):
 
         try:
             uv_executable = "uv"
-            # Optionally, specify the path to 'uv' if it's not in PATH
+            # TODO: Allow specifying the path to 'uv' if it's not in PATH
 
             subprocess.check_call(
                 [uv_executable, "sync", "--extra", "all"],
                 timeout=300,
             )
             logger.info("Successfully updated packages using 'uv sync --extra all'.")
-        except Exception as e:
+        except subprocess.CalledProcessError as e:
             logger.exception("Failed to synchronize dependencies with uv", exc_info=e)
+        except FileNotFoundError:
+            logger.error(
+                "uv executable not found. Please ensure 'uv' is installed and in PATH."
+            )
+        except Exception as e:
+            logger.exception(
+                "Unexpected error during package synchronization", exc_info=e
+            )
 
     async def cleanup_old_versions(self):
         """
@@ -176,9 +184,10 @@ class AutoUpdate(threading.Thread):
         """
         from templar import __version__
 
-        bucket_name = self.bucket_name
-        logger.info(f"Cleaning up old versions from bucket {bucket_name}")
-        await delete_old_version_files(bucket_name, __version__)
+        logger.info(
+            f"Cleaning up old versions from bucket {BUCKET_SECRETS['bucket_name']}"
+        )
+        await delete_old_version_files(BUCKET_SECRETS["bucket_name"], __version__)
 
     def try_update(self):
         """
@@ -211,29 +220,51 @@ class AutoUpdate(threading.Thread):
         finally:
             loop.close()
 
+    def get_pm2_process_name(self):
+        """
+        Attempt to find the current process's PM2 name by using `pm2 jlist` and matching the current PID.
+        """
+        current_pid = os.getpid()
+        try:
+            result = subprocess.run(
+                ["pm2", "jlist"], check=True, capture_output=True, text=True
+            )
+            pm2_data = json.loads(result.stdout)
+        except Exception as e:
+            logger.error(f"Error running `pm2 jlist`: {e}")
+            return None
+
+        for proc in pm2_data:
+            if proc.get("pid") == current_pid:
+                return proc.get("name")
+
+        return None
+
     def restart_app(self):
         """Restarts the current application appropriately based on the runtime environment."""
         logger.info("Restarting application...")
         # Check for PM2 environment
         if "PM2_HOME" in os.environ:
-            if not self.process_name:
-                logger.error("PM2 environment detected but process_name not provided")
+            pm2_name = self.get_pm2_process_name()
+            if not pm2_name:
+                logger.warning("Could not determine PM2 process name. Restart aborted.")
                 sys.exit(1)
             # PM2 will restart the process if we exit
-            logger.info(
-                f"Detected PM2 environment. Restarting process: {self.process_name}"
-            )
-            subprocess.check_call(["pm2", "restart", self.process_name])
-            time.sleep(5)  # Give PM2 time to restart the process
-            sys.exit(1)
-        # TODO: Not tested
-        # elif os.getenv("RUNNING_IN_DOCKER") == "true" or os.path.exists('/.dockerenv'):
-        #     # In Docker, it's better to exit and let the orchestrator handle restarts
-        #     logger.info("Detected Docker environment. Exiting for Docker to restart the container.")
-        #     sys.exit(0)
+            logger.info(f"Detected PM2 environment. Restarting process '{pm2_name}'")
+            try:
+                subprocess.check_call(["pm2", "restart", pm2_name])
+                time.sleep(5)  # Give PM2 time to restart the process
+                sys.exit(1)
+            except subprocess.CalledProcessError as e:
+                logger.exception("PM2 restart failed.", exc_info=e)
+                sys.exit(1)
         else:
             # Regular restart
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            try:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception as e:
+                logger.exception("Failed to restart application.", exc_info=e)
+                sys.exit(1)
 
     def run(self):
         """Thread run method to periodically check for updates."""
@@ -243,4 +274,4 @@ class AutoUpdate(threading.Thread):
                 self.try_update()
             except Exception as e:
                 logger.exception("Exception during autoupdate check", exc_info=e)
-            time.sleep(60)  # Sleep for 15 mins
+            time.sleep(60)

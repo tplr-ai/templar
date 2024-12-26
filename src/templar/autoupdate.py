@@ -97,7 +97,9 @@ class AutoUpdate(threading.Thread):
             return False
 
         if self.repo.is_dirty(untracked_files=True):
-            logger.error("Repository has uncommitted changes or untracked files. Cannot update.")
+            logger.error(
+                "Repository has uncommitted changes or untracked files. Cannot update."
+            )
             return False
 
         try:
@@ -114,23 +116,27 @@ class AutoUpdate(threading.Thread):
 
             # Reset local branch to the remote branch
             remote_ref = f"origin/{TARGET_BRANCH}"
-            logger.info(f"Resetting local branch '{current_branch.name}' to '{remote_ref}'")
-            self.repo.git.reset('--hard', remote_ref)
+            logger.info(
+                f"Resetting local branch '{current_branch.name}' to '{remote_ref}'"
+            )
+            self.repo.git.reset("--hard", remote_ref)
             logger.info("Successfully reset to the latest commit from remote.")
 
             # Verify that local and remote commits match
             local_commit = self.repo.commit(current_branch)
             remote_commit = self.repo.commit(remote_ref)
             if local_commit.hexsha != remote_commit.hexsha:
-                logger.error("Local commit does not match remote commit after reset. Rolling back.")
-                self.repo.git.reset('--hard', 'HEAD@{1}')  # Reset to previous HEAD
+                logger.error(
+                    "Local commit does not match remote commit after reset. Rolling back."
+                )
+                self.repo.git.reset("--hard", "HEAD@{1}")  # Reset to previous HEAD
                 return False
 
             return True
         except git.exc.GitCommandError as e:
             logger.error(f"Git command failed: {e}")
             # Rollback on failure
-            self.repo.git.reset('--hard', 'HEAD@{1}')
+            self.repo.git.reset("--hard", "HEAD@{1}")
             return False
         except Exception as e:
             logger.exception("Failed to update repository.", exc_info=e)
@@ -271,7 +277,9 @@ class AutoUpdate(threading.Thread):
         logger.info("Restarting application...")
         pm2_name = self.get_pm2_process_name()
         if pm2_name:
-            logger.info(f"Detected PM2 environment. Restarting PM2 process '{pm2_name}'...")
+            logger.info(
+                f"Detected PM2 environment. Restarting PM2 process '{pm2_name}'..."
+            )
             try:
                 subprocess.run(["pm2", "restart", pm2_name], check=True)
                 logger.info(f"Successfully restarted PM2 process '{pm2_name}'.")
@@ -281,7 +289,9 @@ class AutoUpdate(threading.Thread):
                 sys.exit(1)
         else:
             try:
-                logger.info("PM2 process name not found. Performing regular restart using subprocess.Popen")
+                logger.info(
+                    "PM2 process name not found. Performing regular restart using subprocess.Popen"
+                )
                 subprocess.Popen([sys.executable] + sys.argv)
                 logger.info("New process started. Exiting current process.")
                 sys.exit(0)
@@ -304,12 +314,12 @@ class AutoUpdate(threading.Thread):
         Reads the local __version__ from the __init__.py file.
         """
         try:
-            init_py_path = os.path.join(os.path.dirname(__file__), '__init__.py')
-            with open(init_py_path, 'r') as f:
+            init_py_path = os.path.join(os.path.dirname(__file__), "__init__.py")
+            with open(init_py_path, "r") as f:
                 content = f.read()
-            for line in content.split('\n'):
-                if line.startswith('__version__'):
-                    local_version = line.split('=')[1].strip().strip(" \"'")
+            for line in content.split("\n"):
+                if line.startswith("__version__"):
+                    local_version = line.split("=")[1].strip().strip(" \"'")
                     return local_version
             logger.error("Could not find __version__ in local __init__.py")
             return None

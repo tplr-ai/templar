@@ -4,7 +4,7 @@
 
 import os
 import tempfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, PropertyMock
 
 import git
 import pytest
@@ -55,17 +55,15 @@ def test_autoupdate_restart_app_pm2_no_process_name_failure():
     # Mock get_pm2_process_name to return None
     with patch.object(autoupdater, "get_pm2_process_name", return_value=None):
         with patch("templar.autoupdate.logger") as mock_logger:
-            with patch(
-                "templar.autoupdate.sys.exit", side_effect=SystemExit
-            ) as mock_exit:
+            with patch("templar.autoupdate.sys.exit", side_effect=SystemExit):
                 # Mock PM2 environment
                 with patch.dict(os.environ, {"PM2_HOME": "/path/to/pm2"}):
                     with pytest.raises(SystemExit):
                         autoupdater.restart_app()
-                    mock_logger.warning.assert_called_with(
-                        "Could not determine PM2 process name. Restart aborted."
+                    # Check the correct info message is logged
+                    mock_logger.info.assert_any_call(
+                        "PM2 process name not found. Performing regular restart using subprocess.Popen"
                     )
-                    mock_exit.assert_called_with(1)
 
 
 def test_autoupdate_restart_app_pm2_success():
@@ -77,18 +75,15 @@ def test_autoupdate_restart_app_pm2_success():
     with patch.object(
         autoupdater, "get_pm2_process_name", return_value=mock_pm2_process_name
     ):
-        with patch("templar.autoupdate.subprocess.check_call") as mock_check_call:
-            with patch(
-                "templar.autoupdate.sys.exit", side_effect=SystemExit
-            ) as mock_exit:
+        with patch("templar.autoupdate.subprocess.run") as mock_run:
+            with patch("templar.autoupdate.sys.exit", side_effect=SystemExit):
                 # Mock PM2 environment
                 with patch.dict(os.environ, {"PM2_HOME": "/path/to/pm2"}):
                     with pytest.raises(SystemExit):
                         autoupdater.restart_app()
-                    mock_check_call.assert_called_with(
-                        ["pm2", "restart", mock_pm2_process_name]
+                    mock_run.assert_called_with(
+                        ["pm2", "restart", mock_pm2_process_name], check=True
                     )
-                    mock_exit.assert_called_with(1)
 
 
 @pytest.mark.asyncio
@@ -127,14 +122,41 @@ def test_autoupdate_attempt_update_success():
     """Test that attempt_update succeeds when repo is clean."""
     autoupdater = AutoUpdate()
 
-    with patch.object(autoupdater.repo, "is_dirty", return_value=False):
-        # Mock the 'remote' method to return a mock 'origin'
-        mock_origin = MagicMock()
-        mock_origin.pull.return_value = None  # Simulate successful pull
-        with patch.object(autoupdater.repo, "remote", return_value=mock_origin):
-            result = autoupdater.attempt_update()
-            mock_origin.pull.assert_called_with(TARGET_BRANCH, ff_only=True)
-            assert result is True
+    # Patch 'is_detached' property
+    with patch.object(
+        type(autoupdater.repo.head), "is_detached", new_callable=PropertyMock
+    ) as mock_is_detached:
+        mock_is_detached.return_value = False
+
+        # Patch 'active_branch' property to return a mock branch
+        mock_branch = MagicMock()
+        mock_branch.name = TARGET_BRANCH
+        with patch.object(
+            type(autoupdater.repo), "active_branch", new_callable=PropertyMock
+        ) as mock_active_branch:
+            mock_active_branch.return_value = mock_branch
+
+            with patch.object(autoupdater.repo, "is_dirty", return_value=False):
+                # Mock the 'remote' method to return a mock 'origin'
+                mock_origin = MagicMock()
+                mock_origin.fetch.return_value = None  # Simulate successful fetch
+                with patch.object(autoupdater.repo, "remote", return_value=mock_origin):
+                    # Mock 'git' attribute
+                    mock_git = MagicMock()
+                    autoupdater.repo.git = mock_git
+
+                    # Mock commits for local and remote to match
+                    mock_commit = MagicMock()
+                    mock_commit.hexsha = "abcdef"
+                    with patch.object(
+                        autoupdater.repo, "commit", return_value=mock_commit
+                    ):
+                        result = autoupdater.attempt_update()
+                        mock_origin.fetch.assert_called_once()
+                        mock_git.reset.assert_called_with(
+                            "--hard", f"origin/{TARGET_BRANCH}"
+                        )
+                        assert result is True
 
 
 def test_autoupdate_attempt_update_dirty_repo():
@@ -145,24 +167,47 @@ def test_autoupdate_attempt_update_dirty_repo():
         with patch("templar.autoupdate.logger") as mock_logger:
             result = autoupdater.attempt_update()
             mock_logger.error.assert_called_with(
-                "Current changeset is dirty. Please commit changes, discard changes, or update manually."
+                "Repository has uncommitted changes or untracked files. Cannot update."
             )
             assert result is False
 
 
 def test_autoupdate_attempt_update_pull_failure():
-    """Test that attempt_update handles pull failure."""
+    """Test that attempt_update handles fetch failure."""
     autoupdater = AutoUpdate()
 
-    with patch.object(autoupdater.repo, "is_dirty", return_value=False):
-        # Mock the 'remote' method to return a mock 'origin' that raises an exception on pull
-        mock_origin = MagicMock()
-        mock_origin.pull.side_effect = Exception("Pull failed")
-        with patch.object(autoupdater.repo, "remote", return_value=mock_origin):
-            with patch("templar.autoupdate.logger") as mock_logger:
-                result = autoupdater.attempt_update()
-                mock_logger.exception.assert_called()
-                assert result is False
+    # Patch 'is_detached' property
+    with patch.object(
+        type(autoupdater.repo.head), "is_detached", new_callable=PropertyMock
+    ) as mock_is_detached:
+        mock_is_detached.return_value = False
+
+        # Patch 'active_branch' property
+        mock_branch = MagicMock()
+        mock_branch.name = TARGET_BRANCH
+        with patch.object(
+            type(autoupdater.repo), "active_branch", new_callable=PropertyMock
+        ) as mock_active_branch:
+            mock_active_branch.return_value = mock_branch
+
+            with patch.object(autoupdater.repo, "is_dirty", return_value=False):
+                mock_origin = MagicMock()
+                mock_origin.fetch.side_effect = git.exc.GitCommandError(
+                    "fetch", "Failed to fetch"
+                )
+                with patch.object(autoupdater.repo, "remote", return_value=mock_origin):
+                    # Mock 'git' attribute
+                    mock_git = MagicMock()
+                    autoupdater.repo.git = mock_git
+
+                    with patch("templar.autoupdate.logger") as mock_logger:
+                        result = autoupdater.attempt_update()
+                        # Confirm that an error was logged
+                        mock_logger.error.assert_called_once()
+                        error_msg = mock_logger.error.call_args[0][0]
+                        assert error_msg.startswith("Git command failed:")
+                        assert "Failed to fetch" in error_msg
+                        assert result is False
 
 
 def test_autoupdate_attempt_package_update():

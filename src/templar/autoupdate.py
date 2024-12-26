@@ -38,8 +38,7 @@ class AutoUpdate(threading.Thread):
         Asynchronously fetch the remote version string from a remote HTTP endpoint.
         """
         try:
-            # url = "https://raw.githubusercontent.com/tplr-ai/templar/main/src/templar/__init__.py"
-            url = "https://raw.githubusercontent.com/distributedstatemachine/templar/main/src/templar/__init__.py"
+            url = "https://raw.githubusercontent.com/tplr-ai/templar/main/src/templar/__init__.py"
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=5) as response:
                     response.raise_for_status()

@@ -2,14 +2,14 @@
 # © 2024 templar.tech
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
-# documentation files (the “Software”), to deal in the Software without restriction, including without limitation
+# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
 # the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
 # and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
 # The above copyright notice and this permission notice shall be included in all copies or substantial portions of
 # the Software.
 
-# THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
 # THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
@@ -34,7 +34,6 @@ import wandb.plot
 from asyncio import TimeoutError
 from functools import partial
 import tempfile
-import copy
 
 # Local imports.
 import templar as tplr
@@ -480,25 +479,6 @@ class Validator:
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Downloaded eval pages: [light_steel_blue]{[p[1] for p in eval_pages]}[/light_steel_blue].")
 
 
-                    # Create miner model and update it with the chosen miner's slice data.
-                    miner_model = copy.deepcopy(self.model).to(self.model.device)
-                    for name_i, param_i in miner_model.named_parameters():
-                        if name_i not in indices or name_i not in eval_slice_data:
-                            continue
-                        
-                        # Get indices and slice data for this parameter
-                        idxs_i = indices[name_i].to(self.model.device)
-                        slice_i = eval_slice_data[name_i].view(-1).to(self.model.device)
-                        
-                        # Get the full parameter data and reshape it to 1D
-                        param_data = param_i.data.view(-1)
-                        
-                        # Create a new tensor with the updated values
-                        updated_param = param_data.clone()
-                        updated_param[idxs_i] = slice_i
-                        
-                        # Reshape back to original shape and update the parameter
-                        param_i.data = updated_param.view(param_i.data.shape)
                     # Accumulate gradients from this page.
                     eval_start = tplr.T()
                     self.model.zero_grad()
@@ -515,15 +495,40 @@ class Validator:
                                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                                 labels = input_ids.clone()
                                 labels = torch.where(labels == self.hparams.tokenizer.pad_token_id, -100, labels)
-                                with torch.amp.autocast(device_type=self.model.device.type, dtype=torch.bfloat16):  # Enable autocasting
+                                
+                                # Store original parameters
+                                original_params = {}
+                                for name_i, param_i in self.model.named_parameters():
+                                    original_params[name_i] = param_i.data.clone()
+
+                                # Apply miner's slice data to the model
+                                for name_i, param_i in self.model.named_parameters():
+                                    if name_i not in indices or name_i not in eval_slice_data:
+                                        continue
+                                    
+                                    idxs_i = indices[name_i].to(self.model.device)
+                                    slice_i = eval_slice_data[name_i].view(-1).to(self.model.device)
+                                    
+                                    # Update the parameter data at the specified indices
+                                    param_i.data.view(-1)[idxs_i] = slice_i
+
+                                # Perform forward pass with updated model (no gradients needed)
+                                with torch.no_grad(), torch.amp.autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
+                                    outputs2 = self.model(input_ids=input_ids, labels=labels)
+
+                                # Restore original parameters
+                                for name_i, param_i in self.model.named_parameters():
+                                    param_i.data.copy_(original_params[name_i])
+
+                                # Perform forward pass and compute loss with gradients
+                                with torch.enable_grad(), torch.amp.autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
                                     outputs = self.model(input_ids=input_ids, labels=labels)
-                                    with torch.set_grad_enabled(False):
-                                        outputs2 = miner_model(input_ids=input_ids, labels=labels)
+                                    loss = outputs.loss
+                                    loss.backward()
 
                                 total_loss += outputs.loss.item()
                                 loss_after += outputs2.loss.item()
 
-                                outputs.loss.backward()
                                 if self.current_window - offset != window:
                                     exhausted_window = True
                                     continue

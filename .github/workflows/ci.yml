@@ -43,4 +43,4 @@ jobs:
           args: format --check
 
       - name: Run Tests
-        run: uv run --frozen pytest
+        run: uv run pytest

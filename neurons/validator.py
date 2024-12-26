@@ -77,7 +77,7 @@ class Validator:
         if config.trace:
             tplr.trace()
         if not config.no_autoupdate:
-            autoupdater = tplr.AutoUpdate(process_name=config.process_name, bucket_name=config.bucket)
+            autoupdater = tplr.AutoUpdate()
             autoupdater.daemon = True  # Ensure thread exits when main program exits
             autoupdater.start()
         return config

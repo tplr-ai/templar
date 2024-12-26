@@ -10,7 +10,8 @@ from typing import List, Optional, Union
 from aiobotocore.session import get_session
 from tqdm import tqdm
 from . import __version__
-from .config import BUCKET_SECRETS, client_config
+from . import config  # Import config module
+from .config import client_config
 from .constants import CF_REGION_NAME
 from .logging import logger
 from .schemas import Bucket
@@ -559,7 +560,7 @@ class CheckpointManager:
             filename = os.path.basename(self.checkpoint_path)
             logger.info(f"Starting checkpoint upload to S3: {filename}")
 
-            bucket = BUCKET_SECRETS["bucket_name"].split("/")[-1]
+            bucket = config.BUCKET_SECRETS["bucket_name"].split("/")[-1]
             chunk_size = 16 * 1024 * 1024  # 16MB chunks
             max_concurrent_uploads = 50
             max_retries = 3
@@ -568,11 +569,13 @@ class CheckpointManager:
             session = get_session()
             async with session.create_client(
                 "s3",
-                endpoint_url=f"https://{BUCKET_SECRETS['account_id']}.r2.cloudflarestorage.com",
+                endpoint_url=f"https://{config.BUCKET_SECRETS['account_id']}.r2.cloudflarestorage.com",
                 region_name=CF_REGION_NAME,
                 config=client_config,
-                aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-                aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+                aws_access_key_id=config.BUCKET_SECRETS["write"]["access_key_id"],
+                aws_secret_access_key=config.BUCKET_SECRETS["write"][
+                    "secret_access_key"
+                ],
             ) as s3_client:
                 # Initialize multipart upload
                 response = await s3_client.create_multipart_upload(
@@ -791,22 +794,22 @@ class CheckpointManager:
 
     async def _delete_old_checkpoints_from_s3(self, old_checkpoints):
         logger.info(f"Starting S3 checkpoint deletion for {len(old_checkpoints)} files")
-        bucket = BUCKET_SECRETS["bucket_name"].split("/")[-1]
+        bucket = config.BUCKET_SECRETS["bucket_name"].split("/")[-1]
         logger.info(f"Using bucket: {bucket}")
 
         session = get_session()
         logger.info("Created aiobotocore session")
 
         logger.info(
-            f"Connecting to S3 endpoint: {get_base_url(BUCKET_SECRETS['account_id'])}"
+            f"Connecting to S3 endpoint: {get_base_url(config.BUCKET_SECRETS['account_id'])}"
         )
         async with session.create_client(
             "s3",
-            endpoint_url=get_base_url(BUCKET_SECRETS["account_id"]),
+            endpoint_url=get_base_url(config.BUCKET_SECRETS["account_id"]),
             region_name=CF_REGION_NAME,
             config=client_config,
-            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+            aws_access_key_id=config.BUCKET_SECRETS["write"]["access_key_id"],
+            aws_secret_access_key=config.BUCKET_SECRETS["write"]["secret_access_key"],
         ) as s3_client:
             logger.info("Successfully connected to S3")
 

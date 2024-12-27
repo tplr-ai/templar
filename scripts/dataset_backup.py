@@ -184,7 +184,7 @@ class SubsetLoader(IterableDataset):
 
 
 class DatasetLoader(SubsetLoader):
-    name: str = "HuggingFaceFW/fineweb-2"
+    name: str = "HuggingFaceFW/fineweb-edu-score-2"
     rows_base_url: str = "https://datasets-server.huggingface.co/rows"
     size_base_url: str = "https://datasets-server.huggingface.co/size"
 
@@ -197,21 +197,16 @@ class DatasetLoader(SubsetLoader):
         offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
     ):
         configs_data = await DatasetLoader.fetch_dataset_configs()
-        available_configs = [
-            config
-            for config in configs_data
-            if configs_data[config]["num_rows"] - 1 - num_rows_per_page > 0
-        ]
-
-        rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
-        rng.bit_generator.advance(offset)
+        rng = np.random.default_rng(
+            hash(seed) & 0xFFFFFFFF
+        )  # Create a generator with a seed
+        rng.bit_generator.advance(offset)  # Efficiently skip ahead `n` steps
         result = []
         for _ in range(n_pages):
-            if not available_configs:
-                raise ValueError("No available configs with sufficient num_rows.")
-            config = rng.choice(available_configs)
-            max_row = configs_data[config]["num_rows"] - 1 - num_rows_per_page
-            choice = rng.integers(0, max_row)
+            config = rng.choice(list(configs_data.keys()))
+            choice = rng.integers(
+                0, configs_data[config]["num_rows"] - 1 - num_rows_per_page
+            )
             result.append((str(config), int(choice), configs_data[config]["split"]))
         return result
 
@@ -460,6 +455,7 @@ class DatasetLoader(SubsetLoader):
         The returned value is a dictionary with dump names as keys and
         a dict of the number of rows and the split as values.
         """
+        # Request parameters
         params = dict(dataset=DatasetLoader.name)
 
         attempt = 0
@@ -467,35 +463,25 @@ class DatasetLoader(SubsetLoader):
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(
-                        f"{DatasetLoader.size_base_url}", params=params
+                        DatasetLoader.size_base_url, params=params
                     ) as response:
                         response.raise_for_status()
+
                         data = await response.json()
 
-                        # Adjust parsing based on the new data structure
-                        configs_data = {}
-                        if "size" in data and "splits" in data["size"]:
-                            configs_dict = data["size"]["splits"]
-                            configs_data = {
-                                entry["config"]: {
-                                    "num_rows": entry["num_rows"],
-                                    "split": entry["split"],
-                                }
-                                for entry in configs_dict
-                                if entry["config"] != "default"
+                        # Extract the configs dict
+                        configs_dict = data["size"]["splits"]
+
+                        # Now create a dict with config names (except 'default') as
+                        # keys, and the number of rows as values
+                        configs_data = {
+                            entry["config"]: {
+                                "num_rows": entry["num_rows"],
+                                "split": entry["split"],
                             }
-                        elif "splits" in data:
-                            # New data structure
-                            configs_dict = data["splits"]
-                            configs_data = {
-                                entry["config"]: {
-                                    "num_rows": entry.get("numExamples", 0),
-                                    "split": entry["split"],
-                                }
-                                for entry in configs_dict
-                            }
-                        else:
-                            raise ValueError("Unexpected data format from size API.")
+                            for entry in configs_dict
+                            if entry["config"] != "default"
+                        }
 
                         return configs_data
 

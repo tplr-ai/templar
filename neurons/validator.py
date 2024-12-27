@@ -521,7 +521,7 @@ class Validator:
                                 for name_i, param_i in self.model.named_parameters():
                                     param_i.data.copy_(original_params[name_i])
 
-                                # Perform forward pass and compute loss with gradients
+                                # Perform forward pass and compute loss with gradients (before applying delta)
                                 with torch.enable_grad(), torch.amp.autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
                                     outputs_before = self.model(input_ids=input_ids, labels=labels)
                                     loss = outputs_before.loss
@@ -555,8 +555,36 @@ class Validator:
                     # Compute the score for this slice.
                     st = tplr.T()
 
-                    # Compute cosine similarity between miner's delta and validator's gradients
-                    cosine_similarity = torch.nn.functional.cosine_similarity(all_delta, all_grad, dim=0).item()
+                    # Collect all delta_i and grad_i into larger vectors
+                    all_delta = []
+                    all_grad = []
+
+                    for name_i, param_i in self.model.named_parameters():
+                        if param_i.grad is None:
+                            continue
+                        
+                        if name_i not in indices or name_i not in eval_slice_data:
+                            continue
+
+                        idxs_i = indices[name_i].to(self.model.device)
+                        grad_i = param_i.grad.view(-1)[idxs_i].to(self.model.device)
+                        slice_i = eval_slice_data[name_i].view(-1).to(self.model.device)
+                        theta_i = param_i.data.view(-1)[idxs_i]
+                        delta_i = theta_i - slice_i
+
+                        all_delta.append(delta_i)
+                        all_grad.append(grad_i)
+
+                    if len(all_delta) > 0:
+                        # Concatenate all parts
+                        all_delta = torch.cat(all_delta)
+                        all_grad = torch.cat(all_grad)
+
+                        # Compute cosine similarity between miner's delta and validator's gradients
+                        cosine_similarity = torch.nn.functional.cosine_similarity(all_delta, all_grad, dim=0).item()
+                    else:
+                        tplr.logger.warning("No valid parameter tensors found - setting cosine similarity to 0.0")
+                        cosine_similarity = 0.0
 
                     # Set initial score to 0.0
                     score = 0.0

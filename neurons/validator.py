@@ -592,7 +592,7 @@ class Validator:
                     # Check if cosine similarity is greater than zero
                     if cosine_similarity > 0.0:
                         # Base score from cosine similarity
-                        base_score = 0.1
+                        base_score = 0.0
 
                         # Compute the loss difference (percentage)
                         loss_difference = step_loss_after - step_loss  # Positive if miner's loss is worse
@@ -615,31 +615,33 @@ class Validator:
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Computed score for miner {eval_uid}: [bold dark_sea_green]{score:.4f}[/bold dark_sea_green]")
                     self.optimizer.zero_grad()
 
-                    # Assign and log scores.
+                    # Update the score for the evaluated miner
+                    st = tplr.T()
+
+                    # First update the step score
+                    self.step_scores[eval_uid] = score
+
+                    # Then update the moving average score using exponential moving average (EMA)
+                    self.scores[eval_uid] = (
+                        self.hparams.validator_moving_alpha * self.step_scores[eval_uid] + 
+                        (1 - self.hparams.validator_moving_alpha) * self.scores[eval_uid]
+                    )
 
                     # Apply decay to miners who did not submit slices
                     all_uids = set(self.metagraph.uids.tolist())
                     non_submitted_uids = all_uids - submitted_uids
-
-                    decay_factor = self.hparams.validator_non_submission_decay  # e.g., 0.9
+                    decay_factor = self.hparams.validator_non_submission_decay
                     for uid in non_submitted_uids:
                         self.scores[uid] *= decay_factor
 
-                    # Update the score for the evaluated miner
-                    self.step_scores[eval_uid] = score
-                    self.scores[eval_uid] = (
-                        (1 - self.hparams.validator_moving_alpha) * self.step_scores[eval_uid] +
-                        self.hparams.validator_moving_alpha * self.scores[eval_uid]
-                    )
+                    # Prepare moving scores for softmax
+                    moving_scores_tensor = self.scores.clone()
 
-                    # Prepare scores for softmax
-                    scores_tensor = self.scores.clone()
+                    # Set moving scores <= 0 to a very negative value for softmax stability
+                    moving_scores_tensor[moving_scores_tensor <= 0] = -float('inf')
 
-                    # Set scores <= 0 to a very negative value for softmax stability
-                    scores_tensor[scores_tensor <= 0] = -float('inf')
-
-                    # Compute softmax over scores
-                    self.weights = torch.nn.functional.softmax(scores_tensor, dim=0)
+                    # Compute softmax over moving scores
+                    self.weights = torch.nn.functional.softmax(moving_scores_tensor, dim=0)
 
                     # Log updated scores and weights
                     valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)
@@ -654,6 +656,8 @@ class Validator:
                             f"moving_score: [dark_sea_green]{moving_score:.3f}[/dark_sea_green], "
                             f"weight: [dark_sea_green]{weight:.3f}[/dark_sea_green]"
                         )
+
+                    tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Updated scores and weights.")
 
                     # Apply all deltas to the model state.
                     st = tplr.T()

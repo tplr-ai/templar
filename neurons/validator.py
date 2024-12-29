@@ -546,7 +546,7 @@ class Validator:
                     tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tTotal tokens: [tan]{tokens_per_step}[/tan], Tokens per second: [tan]{tokens_per_second:.2f}[/tan]")
                     tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tLoss before applying delta: [tan]{step_loss:.4f}[/tan]")
                     tplr.logger.info(f"{tplr.P(window, eval_duration)}: \tLoss after applying delta: [tan]{step_loss_after:.4f}[/tan]")
-
+                    
                     if exhausted_window:
                         self.sample_rate = max(0.0001, self.sample_rate * 0.95)
                     else:
@@ -598,9 +598,9 @@ class Validator:
                         loss_difference = step_loss_after - step_loss  # Positive if miner's loss is worse
                         percentage_loss_difference = loss_difference / step_loss  # Fractional change
 
-                        if percentage_loss_difference < 0:  # Miner improved the loss
+                        if loss_difference < 0:  # Miner improved the loss
                             # Miner improved the loss, add to base score
-                            score = base_score + (-percentage_loss_difference)  # Negative because loss decreased
+                            score = base_score + (-loss_difference * 100)  # Negative because loss decreased
                         elif percentage_loss_difference <= 0.25:
                             # Loss did not improve but is not worse by more than 25%
                             score = base_score  # Only base score
@@ -611,7 +611,7 @@ class Validator:
                     else:
                         tplr.logger.info(f"Cosine similarity ({cosine_similarity:.4f}) not positive. Setting score to 0.0")
                         score = 0.0
-
+                    tplr.logger.info(f"Cosine similarity: [bold dark_sea_green]{cosine_similarity:.4f}[/bold dark_sea_green]")
                     tplr.logger.info(f"{tplr.P(window, tplr.T() - st)}: Computed score for miner {eval_uid}: [bold dark_sea_green]{score:.4f}[/bold dark_sea_green]")
                     self.optimizer.zero_grad()
 
@@ -636,12 +636,11 @@ class Validator:
 
                     # Prepare moving scores for softmax
                     moving_scores_tensor = self.scores.clone()
+                    # Set negative moving scores to 0
+                    moving_scores_tensor[moving_scores_tensor < 0] = 0
 
-                    # Set moving scores <= 0 to a very negative value for softmax stability
-                    moving_scores_tensor[moving_scores_tensor <= 0] = -float('inf')
-
-                    # Compute softmax over moving scores
-                    self.weights = torch.nn.functional.softmax(moving_scores_tensor, dim=0)
+                    # Use moving scores directly as weights
+                    self.weights = moving_scores_tensor
 
                     # Log updated scores and weights
                     valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)

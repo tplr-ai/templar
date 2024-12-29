@@ -621,7 +621,7 @@ class Validator:
                     # First update the step score
                     self.step_scores[eval_uid] = score
 
-                    # Then update the moving average score using exponential moving average (EMA)
+                    # Then update the moving average score using EMA
                     self.scores[eval_uid] = (
                         self.hparams.validator_moving_alpha * self.step_scores[eval_uid] + 
                         (1 - self.hparams.validator_moving_alpha) * self.scores[eval_uid]
@@ -634,13 +634,20 @@ class Validator:
                     for uid in non_submitted_uids:
                         self.scores[uid] *= decay_factor
 
-                    # Prepare moving scores for softmax
+                    # Prepare moving scores for normalization
                     moving_scores_tensor = self.scores.clone()
                     # Set negative moving scores to 0
                     moving_scores_tensor[moving_scores_tensor < 0] = 0
 
-                    # Use moving scores directly as weights
-                    self.weights = moving_scores_tensor
+                    # Normalize the positive moving average scores to get weights
+                    positive_scores = moving_scores_tensor
+                    sum_positive_scores = positive_scores.sum()
+
+                    if sum_positive_scores > 0:
+                        self.weights = positive_scores / sum_positive_scores
+                    else:
+                        # Handle the case where all scores are zero or negative
+                        self.weights = positive_scores  # All zeros in this case
 
                     # Log updated scores and weights
                     valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)

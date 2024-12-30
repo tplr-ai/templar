@@ -1,6 +1,6 @@
 services:
   node:
-    image: ghcr.io/tplr-ai/templar:a67379b
+    image: ghcr.io/tplr-ai/templar:v0.0.2
     container_name: templar-${NODE_TYPE:-miner}-${WALLET_HOTKEY}
     restart: unless-stopped
     volumes:
@@ -14,6 +14,7 @@ services:
       - NETWORK=${NETWORK:-finney}
       - DEBUG=${DEBUG:-false}
       - WANDB_API_KEY=${WANDB_API_KEY}
+      - HOST_CUDA_VERSION=12.6
     deploy:
       resources:
         reservations:
@@ -28,10 +29,12 @@ services:
     image: containrrr/watchtower
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /root/.docker/config.json:/config.json
+      - ${HOME}/.docker/config.json:/config.json:ro
     command: --interval 30 --cleanup --label-enable
     restart: unless-stopped
     environment:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_LABEL_ENABLE=true
       - WATCHTOWER_INCLUDE_RESTARTING=true
+      - REPO_USER=${GITHUB_USER}
+      - REPO_PASSWORD=${GITHUB_TOKEN}

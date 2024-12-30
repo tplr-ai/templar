@@ -1,6 +1,6 @@
 services:
   node:
-    image: ghcr.io/tplr-ai/templar:latest
+    image: ghcr.io/tplr-ai/templar:a67379b
     container_name: templar-${NODE_TYPE:-miner}-${WALLET_HOTKEY}
     restart: unless-stopped
     volumes:

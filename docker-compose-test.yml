@@ -2,7 +2,7 @@ services:
   miner1:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: templar-miner-M111
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
@@ -26,7 +26,7 @@ services:
   miner2:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: templar-miner-M222
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
@@ -50,7 +50,7 @@ services:
   validator:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/Dockerfile
     container_name: templar-validator-V11
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
@@ -69,4 +69,4 @@ services:
           devices:
             - driver: nvidia
               device_ids: ['0', '1', '2']
-              capabilities: [gpu]
+              capabilities: [gpu] 

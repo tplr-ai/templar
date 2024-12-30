@@ -2,7 +2,7 @@
 set -e
 
 # Check required environment variables
-for var in WALLET_NAME WALLET_HOTKEY NODE_TYPE WANDB_API_KEY; do
+for var in WALLET_NAME WALLET_HOTKEY NODE_TYPE WANDB_API_KEY NETUID; do
     if [ -z "${!var}" ]; then
         echo "Error: $var environment variable is required"
         exit 1
@@ -42,6 +42,7 @@ if [ "$NODE_TYPE" = "miner" ]; then
     exec python3 neurons/miner.py \
         --wallet.name ${WALLET_NAME} \
         --wallet.hotkey ${WALLET_HOTKEY} \
+        --netuid ${NETUID} \
         --device ${CUDA_DEVICE} \
         --subtensor.network ${NETWORK} \
         --use_wandb \
@@ -51,6 +52,7 @@ elif [ "$NODE_TYPE" = "validator" ]; then
     exec python3 neurons/validator.py \
         --wallet.name ${WALLET_NAME} \
         --wallet.hotkey ${WALLET_HOTKEY} \
+        --netuid ${NETUID} \
         --device ${CUDA_DEVICE} \
         --subtensor.network ${NETWORK} \
         --use_wandb \

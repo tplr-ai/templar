@@ -1,6 +1,6 @@
 services:
   node:
-    image: ghcr.io/tplr-ai/templar:v0.0.4
+    image: ghcr.io/tplr-ai/templar:v0.0.6
     container_name: templar-${NODE_TYPE:-miner}-${WALLET_HOTKEY}
     restart: unless-stopped
     volumes:
@@ -13,6 +13,7 @@ services:
       - CUDA_DEVICE=${CUDA_DEVICE:-cuda:0}
       - NETWORK=${NETWORK:-finney}
       - DEBUG=${DEBUG:-false}
+      - NETUID=${NETUID:-268}
       - WANDB_API_KEY=${WANDB_API_KEY}
       - HOST_CUDA_VERSION=12.6
       - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}

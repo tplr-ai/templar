@@ -1,0 +1,55 @@
+#!/bin/bash
+set -e
+
+# Function to prompt for input with default value
+prompt_with_default() {
+    local prompt="$1"
+    local default="$2"
+    local response
+
+    echo -n "$prompt [$default]: "
+    read response
+    echo "${response:-$default}"
+}
+
+# Function to prompt for required input
+prompt_required() {
+    local prompt="$1"
+    local response=""
+    
+    while [ -z "$response" ]; do
+        echo -n "$prompt: "
+        read response
+        if [ -z "$response" ]; then
+            echo "This field is required"
+        fi
+    done
+    echo "$response"
+}
+
+# Prompt for configuration
+echo "🤖 Templar Mining Docker Configuration"
+echo "-------------------------------------"
+
+NODE_TYPE=$(prompt_with_default "Enter node type (miner/validator)" "miner")
+WALLET_NAME=$(prompt_required "Enter wallet name")
+WALLET_HOTKEY=$(prompt_required "Enter wallet hotkey")
+WANDB_API_KEY=$(prompt_required "Enter Weights & Biases API key")
+NETWORK=$(prompt_with_default "Enter network" "test")
+CUDA_DEVICE=$(prompt_with_default "Enter CUDA device" "cuda:0")
+DEBUG=$(prompt_with_default "Enable debug mode? (true/false)" "false")
+
+# Export variables for docker-compose
+export WALLET_NAME WALLET_HOTKEY WANDB_API_KEY NETWORK CUDA_DEVICE DEBUG
+
+# Choose compose file based on node type
+COMPOSE_FILE="docker/compose.${NODE_TYPE}.yml"
+
+# Start the containers
+echo -e "\n📦 Starting containers..."
+docker compose -f "$COMPOSE_FILE" up -d
+
+echo -e "\n✅ Containers started successfully!"
+echo "📝 Logs are available in the ./logs directory"
+echo -e "\nTo follow logs, run:"
+echo "docker compose -f $COMPOSE_FILE logs -f" 

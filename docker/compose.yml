@@ -1,0 +1,37 @@
+services:
+  node:
+    image: ghcr.io/tplr-ai/templar:latest
+    container_name: templar-${NODE_TYPE:-miner}-${WALLET_HOTKEY}
+    restart: unless-stopped
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets
+      - ./logs:/app/logs
+    environment:
+      - NODE_TYPE=${NODE_TYPE:-miner}
+      - WALLET_NAME=${WALLET_NAME}
+      - WALLET_HOTKEY=${WALLET_HOTKEY}
+      - CUDA_DEVICE=${CUDA_DEVICE:-cuda:0}
+      - NETWORK=${NETWORK:-finney}
+      - DEBUG=${DEBUG:-false}
+      - WANDB_API_KEY=${WANDB_API_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '0', '1', '2' ]
+              capabilities: [ gpu ]
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/.docker/config.json:/config.json
+    command: --interval 30 --cleanup --label-enable
+    restart: unless-stopped
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true

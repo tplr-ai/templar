@@ -1,53 +1,18 @@
-.env.yaml
-.env
-*.pth
-
-# Python
+# Python-generated files
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
+*.py[oc]
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
 wheels/
-*.egg-info/
-.installed.cfg
-*.egg
+wandb/
+wandb/*
+*.egg-info
 
-# UV specific
-.uv/
-.venv/
-venv/
-.env/
-uv.lock
+# Virtual environments
+.venv
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-.DS_Store
+.env.yaml
 
-# Project specific
-wandb
-checkpoint-*
-checkpoints.ipynb
-analysis.ipynb
-scratch*
-bad_slices/
-good_slices
-slices
-foo*
-# Evals
-lm-evaluation-harness 
-models
+.env
+
+logs

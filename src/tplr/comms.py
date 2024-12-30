@@ -73,36 +73,25 @@ class Comms(ChainManager):
         self.bucket_secrets = BUCKET_SECRETS
 
     def get_own_bucket(self) -> Bucket:
-        """Parses the credentials from .env.yaml to create a Bucket object."""
-        env_file = ".env.yaml"
-        if not os.path.isfile(env_file):
-            logger.error(f"The {env_file} file was not found.")
-            raise FileNotFoundError(f"The {env_file} file was not found.")
-
+        """Gets bucket configuration from environment variables via config.BUCKET_SECRETS."""
         try:
-            with open(env_file, "r") as file:
-                credentials = yaml.safe_load(file)
-        except yaml.YAMLError as e:
-            logger.error(f"Error parsing {env_file}: {e}")
-            raise e
 
-        try:
-            account_id = credentials["account_id"]
-            read_access_key_id = credentials["read"]["access_key_id"]
-            read_secret_access_key = credentials["read"]["secret_access_key"]
-
-            # Create a Bucket object
+            # Create a Bucket object using write credentials from BUCKET_SECRETS
             bucket = Bucket(
-                name=account_id,
-                account_id=account_id,
-                access_key_id=read_access_key_id,
-                secret_access_key=read_secret_access_key,
+                name=BUCKET_SECRETS["account_id"],
+                account_id=BUCKET_SECRETS["account_id"],
+                access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+                secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
             )
-            logger.debug(f"Parsed bucket from {env_file}: {bucket}")
+            logger.debug(f"Created bucket from environment: {bucket}")
             return bucket
+
         except KeyError as e:
-            logger.error(f"Missing key in {env_file}: {e}")
-            raise e
+            logger.error(f"Missing required R2 configuration: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Error creating bucket: {e}")
+            raise
 
     async def put(
         self,

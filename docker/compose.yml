@@ -1,6 +1,6 @@
 services:
   node:
-    image: ghcr.io/tplr-ai/templar:v0.0.2
+    image: ghcr.io/tplr-ai/templar:v0.0.4
     container_name: templar-${NODE_TYPE:-miner}-${WALLET_HOTKEY}
     restart: unless-stopped
     volumes:
@@ -15,6 +15,11 @@ services:
       - DEBUG=${DEBUG:-false}
       - WANDB_API_KEY=${WANDB_API_KEY}
       - HOST_CUDA_VERSION=12.6
+      - R2_ACCOUNT_ID=${R2_ACCOUNT_ID}
+      - R2_READ_ACCESS_KEY_ID=${R2_READ_ACCESS_KEY_ID}
+      - R2_READ_SECRET_ACCESS_KEY=${R2_READ_SECRET_ACCESS_KEY}
+      - R2_WRITE_ACCESS_KEY_ID=${R2_WRITE_ACCESS_KEY_ID}
+      - R2_WRITE_SECRET_ACCESS_KEY=${R2_WRITE_SECRET_ACCESS_KEY}
     deploy:
       resources:
         reservations:

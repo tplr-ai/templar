@@ -19,26 +19,50 @@
 # Global imports
 import os
 import sys
-import yaml
 from pathlib import Path
 
 # Local imports
 import botocore.config
-from dotenv import dotenv_values
+from dotenv import load_dotenv
 from .logging import logger
 
 # Load environment variables
-env_config = {**dotenv_values(".env"), **os.environ}
-envfile_path = Path(__file__).parents[2] / ".env.yaml"
-try:
-    with open(envfile_path, "r") as file:
-        BUCKET_SECRETS = yaml.safe_load(file)
-except FileNotFoundError:
+env_path = Path(__file__).parents[2] / ".env"
+if not env_path.exists():
     logger.error(
-        f"{envfile_path} not found. Please create it with the help of `.env-template.yaml`."
+        f"{env_path} not found. Please create it with the required R2 configuration."
     )
-    sys.exit()
-BUCKET_SECRETS["bucket_name"] = BUCKET_SECRETS["account_id"]
+    sys.exit(1)
+
+load_dotenv(env_path)
+
+# Configure bucket secrets
+BUCKET_SECRETS = {
+    "account_id": os.getenv("R2_ACCOUNT_ID"),
+    "bucket_name": os.getenv("R2_ACCOUNT_ID"),  # Using account_id as bucket name
+    "read": {
+        "access_key_id": os.getenv("R2_READ_ACCESS_KEY_ID"),
+        "secret_access_key": os.getenv("R2_READ_SECRET_ACCESS_KEY")
+    },
+    "write": {
+        "access_key_id": os.getenv("R2_WRITE_ACCESS_KEY_ID"),
+        "secret_access_key": os.getenv("R2_WRITE_SECRET_ACCESS_KEY")
+    }
+}
+
+# Validate required environment variables
+required_vars = [
+    "R2_ACCOUNT_ID",
+    "R2_READ_ACCESS_KEY_ID",
+    "R2_READ_SECRET_ACCESS_KEY",
+    "R2_WRITE_ACCESS_KEY_ID",
+    "R2_WRITE_SECRET_ACCESS_KEY"
+]
+
+missing_vars = [var for var in required_vars if not os.getenv(var)]
+if missing_vars:
+    logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+    sys.exit(1)
 
 # Configure the S3 client
 client_config = botocore.config.Config(

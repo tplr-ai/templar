@@ -264,16 +264,6 @@ class Comms(ChainManager):
     ) -> Optional[Dict[str, torch.Tensor]]:
         """
         Downloads data from the R2 bucket. Handles both model state dicts and large checkpoint files.
-        
-        Args:
-            uid (str): Unique identifier for the download.
-            window (int): The window number for synchronization.
-            key (str, optional): Custom key for the filename.
-            timeout (int): Timeout in seconds for the download operation.
-            local (bool): If True, keeps the downloaded file on disk.
-
-        Returns:
-            Optional[Dict[str, torch.Tensor]]: The downloaded state dictionary.
         """
         key = key or self.key_prefix
         hotkey = self.get_hotkey(int(uid))
@@ -298,15 +288,34 @@ class Comms(ChainManager):
                 aws_access_key_id=bucket.access_key_id,
                 aws_secret_access_key=bucket.secret_access_key,
             ) as s3_client:
-                # Check file size first
-                response = await s3_client.head_object(
-                    Bucket=bucket.name,
-                    Key=filename
-                )
-                file_size = response['ContentLength']
-                
-                # Use multipart download for files larger than 100MB
-                if file_size > 100 * 1024 * 1024:
+                # Check if file exists first
+                try:
+                    # List objects with the prefix to check existence
+                    paginator = s3_client.get_paginator('list_objects_v2')
+                    file_exists = False
+                    
+                    async for page in paginator.paginate(
+                        Bucket=bucket.name,
+                        Prefix=filename
+                    ):
+                        for obj in page.get('Contents', []):
+                            if obj['Key'] == filename:
+                                file_exists = True
+                                file_size = obj['Size']
+                                break
+                        if file_exists:
+                            break
+
+                    if not file_exists:
+                        logger.debug(f"File {filename} not found in bucket. Skipping...")
+                        return None
+
+                except Exception as e:
+                    logger.debug(f"Error checking file existence: {e}")
+                    return None
+
+                # File exists, proceed with download
+                if file_size > 100 * 1024 * 1024:  # 100MB
                     success = await self._download_large_file(s3_client, filename, temp_file_path)
                     if not success:
                         return None

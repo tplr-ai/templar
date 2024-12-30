@@ -187,10 +187,11 @@ class ChainManager:
             wallet (bt.wallet): Wallet to sign the commitment
             bucket (Bucket): Bucket configuration to commit
         """
+        subtensor = bt.subtensor(config=self.config)
         concatenated = (
             bucket.account_id + bucket.access_key_id + bucket.secret_access_key
         )
-        self.subtensor.commit(wallet, self.netuid, concatenated)
+        subtensor.commit(wallet, self.netuid, concatenated)
         logger.info(
             f"Committed bucket configuration to chain for hotkey {wallet.hotkey.ss58_address}"
         )

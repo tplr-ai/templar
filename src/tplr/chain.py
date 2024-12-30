@@ -188,7 +188,7 @@ class ChainManager:
             bucket (Bucket): Bucket configuration to commit
         """
         if self.netuid:
-            raise ValueError("Subtensor and netuid must be set for chain operations")
+            raise ValueError("netuid must be set for chain operations")
 
         concatenated = (
             bucket.account_id + bucket.access_key_id + bucket.secret_access_key

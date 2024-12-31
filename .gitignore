@@ -44,3 +44,5 @@ uv.lock
 # Project specific
 wandb
 *ipynb
+lm-evaluation-harness/
+models/

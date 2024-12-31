@@ -1,18 +1,46 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-wandb/
-wandb/*
-*.egg-info
-
-# Virtual environments
-.venv
-
 .env.yaml
-
 .env
+*.pth
 
-logs
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# UV specific
+.uv/
+.venv/
+venv/
+.env/
+uv.lock
+
+# Ruff sepcific
+.ruff*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Project specific
+wandb
+*ipynb

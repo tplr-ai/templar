@@ -37,7 +37,7 @@ This guide will help you set up and run a validator for **τemplar**. Validators
 ## Prerequisites
 
 - **NVIDIA GPU** with CUDA support
-  - Minimum 24GB VRAM recommended
+  - Minimum H100 recommended
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Docker** and **Docker Compose**
 - **Git**
@@ -124,7 +124,7 @@ This guide will help you set up and run a validator for **τemplar**. Validators
    Start the validator using Docker Compose:
 
    ```bash
-   docker-compose up -d node
+   docker compose -f docker/compose.yml up -d
    ```
 
 ### Manual Installation

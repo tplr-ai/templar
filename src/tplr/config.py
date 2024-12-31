@@ -19,9 +19,9 @@
 # Global imports
 import os
 import sys
+import botocore.config
 
 # Local imports
-import botocore.config
 from .logging import logger
 
 # Configure bucket secrets from environment variables

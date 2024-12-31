@@ -22,7 +22,6 @@ import logging
 from rich.logging import RichHandler
 from rich.highlighter import NullHighlighter
 
-
 def T() -> float:
     """
     Returns the current time in seconds since the epoch.

@@ -54,7 +54,7 @@ class Validator:
     def config():
         parser = argparse.ArgumentParser(description='Validator script')
         parser.add_argument('--netuid', type=int, default=268, help='Bittensor network UID.')
-        parser.add_argument('--project', type=str, default='llama-demo-1', help='Wandb project.')
+        parser.add_argument('--project', type=str, default='templar-1', help='Wandb project.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
@@ -129,7 +129,7 @@ class Validator:
             milestones=[250]
         )
 
-        # Init comms
+        # Init comms with required chain management args
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
             save_location='/tmp',
@@ -155,14 +155,22 @@ class Validator:
 
         # Init scores
         self.scores = torch.zeros(self.metagraph.n, dtype=torch.float32)
+        self.moving_avg_scores = torch.zeros(self.metagraph.n, dtype=torch.float32)  # Add moving average tracking
+        self.ma_alpha = 0.95  # Moving average decay factor
 
-        # Init wandb
-        if self.config.use_wandb:
-            self.wandb = tplr.WandbManager(
-                uid=self.uid,
-                config=self.config,
-                is_validator=True
-            ).run
+        # Add step tracking
+        self.global_step = 0
+        self.window_step = 0
+        self.eval_count = 0  # Track number of evaluations
+        
+        # Initialize WandB
+        self.wandb = tplr.initialize_wandb(
+            run_prefix='V',
+            uid=self.uid,
+            config=self.config,
+            group='validator',
+            job_type='validation'
+        )
 
     async def run(self):
         # Try to load latest checkpoint
@@ -173,7 +181,8 @@ class Validator:
                     uid=str(validator_uid),
                     window=self.current_window,
                     key='checkpoint',
-                    timeout=240
+                    timeout=240,
+                    local=False
                 )
                 if state_dict is not None:
                     self.model.load_state_dict(state_dict)
@@ -193,6 +202,7 @@ class Validator:
         ).start()
 
         while True:
+            step_window = self.current_window
             # Wait for validator offset
             while self.sync_window >= (self.current_window - self.hparams.validator_offset):
                 tplr.logger.info(f'Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}')
@@ -205,14 +215,22 @@ class Validator:
                 try:
                     # Upload the model state directly using put
                     await self.comms.put(
-                        state_dict_or_path=self.model.state_dict(),
+                        state_dict=self.model.state_dict(),
                         uid=self.uid,
-                        window_or_block=self.current_window,
-                        key='checkpoint'
+                        window=self.current_window,
+                        key='checkpoint',
+                        local=False
                     )
                     tplr.logger.info(f"Successfully created checkpoint at window {self.current_window}")
                 except Exception as e:
                     tplr.logger.error(f"Failed to create checkpoint: {e}")
+
+            # Log checkpoint creation
+            if self.current_window % 500 == 0:
+                self.wandb.log({
+                    "checkpoint_window": self.current_window,
+                    "global_step": self.global_step,
+                }, step=self.global_step)
 
             # Catch up to current - validator_offset
             while self.sync_window < (self.current_window - self.hparams.validator_offset):
@@ -228,8 +246,14 @@ class Validator:
                     key='gradient',
                     timeout=5,
                     device=self.config.device,
-                    local=True,
+                    local=False
                 )
+                # Log gradient stats
+                tplr.logger.info(f"Gradient stats - Window: {self.sync_window}")
+                # Check if any gradients were gathered
+                if not step_grads == 0:
+                    tplr.logger.info("No gradients received, waiting for next window.")
+                    continue
 
                 # Decompress state and apply to gradients
                 for n, p in self.model.named_parameters():                
@@ -251,8 +275,8 @@ class Validator:
                 # Apply the optimizer step
                 self.optimizer.step()
                 self.scheduler.step()
-                if self.config.use_wandb:
-                    self.wandb.log({"lr": self.scheduler.get_last_lr()[0]})
+                
+                self.wandb.log({"lr": self.scheduler.get_last_lr()[0]}, step=self.global_step)
                 
             # Get a random peer to eval on their gradient at self.sync_window + 1
             eval_uid = random.choice(self.peers)
@@ -270,22 +294,27 @@ class Validator:
             )   
             tplr.logger.info(f'Evaluating uid: {eval_uid} on window: {self.sync_window + 1} with state from: {self.sync_window} and pages: {[p[1] for p in pages]}')
             
-            # Get loss on all samples from this window
+            # Compute and log loss before gradient application
             loss_before = 0
+            n_tokens = 0
             for i, batch in enumerate(loader):
                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                 labels = input_ids.clone()
                 labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
                 loss_before += self.model(input_ids=input_ids, labels=labels).loss.item()
-            tplr.logger.info(f'Computed total loss before: {loss_before}')
-                                
+                n_tokens += (labels != -100).sum().item()
+            
+            loss_before_per_token = loss_before / n_tokens if n_tokens > 0 else 0
+            tplr.logger.info(f'Computed total loss before: {loss_before} ({loss_before_per_token:.4f} per token)')
+
             # Get the gradients from this miner on this window
             eval_grad = await self.comms.get(
-                uid=eval_uid, 
-                window=self.sync_window + 1, 
-                key='gradient', 
-                timeout=5, 
-                local=True, 
+                uid=eval_uid,
+                window=self.sync_window + 1,
+                key='gradient',
+                timeout=5,
+                local=False,
+                stale_retention=10
             )
             if eval_grad is None:
                 score = 0
@@ -306,14 +335,21 @@ class Validator:
                 # Apply this grad to the param of the model using the learning rate of the scheduler
                 p.data.sub_(decompressed_grad, alpha=self.scheduler.get_last_lr()[0]) 
                 
-            # Get loss after we apply the gradient
+            # Compute loss after gradient application
             loss_after = 0
+            n_tokens = 0
             for i, batch in enumerate(loader):
                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                 labels = input_ids.clone()
                 labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
                 loss_after += self.model(input_ids=input_ids, labels=labels).loss.item()
-            tplr.logger.info(f'Computed total loss after: {loss_after}')
+                n_tokens += (labels != -100).sum().item()
+                if self.current_window != step_window:
+                    tplr.logger.info('<Exhausted window>')
+                    break
+            
+            loss_after_per_token = loss_after / n_tokens if n_tokens > 0 else 0
+            tplr.logger.info(f'Computed total loss after: {loss_after} ({loss_after_per_token:.4f} per token)')
      
             # Remove gradient from the model
             for n, p in self.model.named_parameters():  
@@ -329,17 +365,69 @@ class Validator:
                 # Apply this grad to the param of the model using the learning rate of the scheduler
                 p.data.add_(decompressed_grad, alpha=self.scheduler.get_last_lr()[0]) 
                 
+            # Compute improvement metrics
+            loss_improvement = loss_before - loss_after
+            improvement_percentage = ((loss_before - loss_after) / loss_before * 100) if loss_before != 0 else 0
+
             # Compute score
             score = loss_before - loss_after
             tplr.logger.info(f'score: {score}')
-            
+
+            # Log comprehensive metrics
+            self.wandb.log({
+                "validator/loss_before": loss_before_per_token,
+                "validator/loss_after": loss_after_per_token,
+                "validator/loss_improvement": loss_improvement,
+                "validator/improvement_percentage": improvement_percentage,
+                "validator/eval_count": self.eval_count,
+                "validator/tokens_evaluated": n_tokens,
+                "validator/learning_rate": self.scheduler.get_last_lr()[0],
+                "validator/window": self.current_window,
+                "validator/global_step": self.global_step,
+                "validator/current_score": score,
+            }, step=self.global_step)
+
+            # Update counters
+            self.global_step += 1
+            self.eval_count += 1
+
             # Set weights if needed
             if self.sync_window % self.hparams.windows_per_weights == 0:
                 # Update scores with new score
                 self.scores[eval_uid] = self.hparams.scores_alpha * score + (1 - self.hparams.scores_alpha) * self.scores[eval_uid]
-                # Compute weights from scores
-                weights = torch.softmax(self.scores, dim=0)
-                
+                # Update moving average scores
+                self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
+                # Compute weights from moving average scores
+                weights = torch.softmax(self.moving_avg_scores, dim=0)
+
+                # Log per-UID metrics
+                valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)
+                for uid_i in valid_score_indices:
+                    uid = uid_i.item()
+                    self.wandb.log({
+                        f"validator/scores/{uid}": self.scores[uid_i].item(),
+                        f"validator/moving_avg_scores/{uid}": self.moving_avg_scores[uid_i].item(),
+                        f"validator/weights/{uid}": weights[uid_i].item(),
+                        f"validator/stakes/{uid}": self.metagraph.S[uid_i].item(),
+                        f"validator/current_score/{uid}": score if uid == eval_uid else 0,
+                    }, step=self.global_step)
+
+                # Log aggregate network statistics
+                self.wandb.log({
+                    "validator/active_miners": len(valid_score_indices),
+                    "validator/mean_score": self.scores[valid_score_indices].mean().item(),
+                    "validator/mean_moving_avg_score": self.moving_avg_scores[valid_score_indices].mean().item(),
+                    "validator/max_score": self.scores.max().item(),
+                    "validator/max_moving_avg_score": self.moving_avg_scores.max().item(),
+                    "validator/mean_weight": weights[valid_score_indices].mean().item(),
+                    "validator/weight_std": weights[valid_score_indices].std().item(),
+                    
+                    # Histograms
+                    "validator/scores_distribution": self.wandb.Histogram(self.scores[valid_score_indices].cpu().numpy()),
+                    "validator/moving_avg_scores_distribution": self.wandb.Histogram(self.moving_avg_scores[valid_score_indices].cpu().numpy()),
+                    "validator/weights_distribution": self.wandb.Histogram(weights[valid_score_indices].cpu().numpy()),
+                }, step=self.global_step)
+
                 # Set weights on chain
                 self.subtensor.set_weights(
                     wallet=self.wallet,
@@ -350,6 +438,21 @@ class Validator:
                     wait_for_finalization=False,
                 )
                 tplr.logger.info(f'Set weights on chain for window {self.sync_window}')
+
+                # Log weight update metrics
+                self.wandb.log({
+                    "validator/weight_update_window": self.sync_window,
+                    "validator/mean_weight": weights.mean().item(),
+                    "validator/max_weight": weights.max().item(),
+                    "validator/min_weight": weights.min().item(),
+                    "validator/weight_std": weights.std().item(),
+                }, step=self.global_step)
+
+            # Apply the optimizer step
+            tplr.logger.info("Finish and step.")
+            self.optimizer.step()
+            self.scheduler.step()
+            tplr.logger.info(f"Total optimization steps: {self.global_step}")
 
     def block_listener(self, loop):
         def handler(event, _u, _s):

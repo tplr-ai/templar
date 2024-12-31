@@ -22,9 +22,8 @@ import typing
 import asyncio
 import aiohttp
 import numpy as np
-from torch.utils.data import IterableDataset
 from transformers import AutoTokenizer
-
+from torch.utils.data import IterableDataset
 
 class SubsetLoader(IterableDataset):
     """

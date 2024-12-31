@@ -136,4 +136,4 @@ def load_hparams(hparams_file: str = "hparams.json") -> SimpleNamespace:
         raise
     except Exception as e:
         logger.error(f"Error loading hyperparameters: {e}")
-        raise 
+        raise

@@ -17,14 +17,12 @@
 # fmt: off
 
 # Standard library
-import os
 import sys
 import time
 import random
 import asyncio
 import argparse
 import threading
-from typing import Dict
 
 # Third party
 import torch
@@ -60,11 +58,10 @@ class Miner:
     def config():
         parser = argparse.ArgumentParser(description='Miner script')
         parser.add_argument('--netuid', type=int, default=268, help='Bittensor network UID.')
-        parser.add_argument('--project', type=str, default='llama-demo-1', help='Wandb project.')
+        parser.add_argument('--project', type=str, default='templar-1', help='Wandb project.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
-        parser.add_argument('--use_wandb', action='store_true', help='Use Weights and Biases for logging')
         parser.add_argument('--peers', type=int, nargs='+', default=[], help='List of UIDs to peer with')
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
@@ -108,7 +105,7 @@ class Miner:
             self.optimizer,
             start_factor=0.1,
             end_factor=1.0,
-            total_iters=250,
+            total_iters=10,
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
@@ -119,7 +116,7 @@ class Miner:
         self.scheduler = SequentialLR(
             self.optimizer,
             schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[250],
+            milestones=[10],
         )
 
         # Init compression
@@ -153,14 +150,24 @@ class Miner:
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+        self.step_counter = 0
 
-        # Init wandb
-        if self.config.use_wandb:
-            self.wandb = tplr.WandbManager(
-                uid=self.uid,
-                config=self.config,
-                is_validator=False,
-            ).run
+        # Add step tracking
+        self.global_step = 0
+        self.window_step = 0
+        
+        # Track additional metrics
+        self.total_tokens_processed = 0
+        self.batch_times = []  # For tracking processing speed
+        
+        # Initialize WandB
+        self.wandb = tplr.initialize_wandb(
+            run_prefix='M',
+            uid=self.uid,
+            config=self.config,
+            group='miner',
+            job_type='mining'
+        )
 
     # Main training loop.
     async def run(self):
@@ -172,7 +179,9 @@ class Miner:
                     uid=str(validator_uid),
                     window=self.current_window,
                     key='checkpoint',
-                    timeout=240
+                    timeout=240,
+                    local=False,
+                    stale_retention=10
                 )
                 if state_dict is not None:
                     self.model.load_state_dict(state_dict)
@@ -208,36 +217,87 @@ class Miner:
                 pages_info = pages,
                 tokenizer = self.tokenizer
             )   
-            tplr.logger.info(f"Pages: {[p[1] for p in pages]} for UID: {self.config.uid} and Window: {step_window}")
+            tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}")
             
-            # Accumulate gradient.
+            # Accumulate gradient
             start_time = time.time()
             tplr.logger.info("Start accumulating...")
             self.optimizer.zero_grad()
             self.model.zero_grad()
             total_loss = 0
+            batch_tokens = 0
+            
             for i, batch in enumerate(loader):
                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                 labels = input_ids.clone()
                 labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                
                 with torch.amp.autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
                     outputs = self.model(input_ids=input_ids, labels=labels)
+                
                 total_loss += outputs.loss.item()
                 outputs.loss.backward()
+                
+                # Track tokens
+                batch_tokens += (labels != -100).sum().item()
+                
                 tplr.logger.info(f'loss: {outputs.loss.item()}')
                 if self.current_window != step_window:
                     tplr.logger.info('<Exhausted window>')
                     break
             tplr.logger.info(f"Stopped accumulating: {i+1} batches with {(i+1) * self.hparams.batch_size * self.hparams.sequence_length} tokens")
+
+            # Calculate processing metrics
             duration = time.time() - start_time
-            
-            # Log metrics
-            if self.config.use_wandb:
+            self.batch_times.append(duration)
+            self.total_tokens_processed += batch_tokens
+
+            # Enhanced wandb logging with both existing and new metrics
+            self.wandb.log({
+                # Training metrics
+                "miner/loss": total_loss/(i+1),
+                "miner/tokens_per_sec": ((i+1) * self.hparams.batch_size * self.hparams.sequence_length)/duration,
+                "miner/batch_duration": duration,
+                "miner/total_tokens": self.total_tokens_processed,
+                "miner/batch_tokens": batch_tokens,
+                "miner/global_step": self.global_step,
+                
+                # Resource metrics
+                "miner/gpu_memory_allocated": torch.cuda.memory_allocated() / 1024**2,  # MB
+                "miner/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,  # MB
+                
+                # Network metrics
+                "miner/active_peers": len(self.peers),
+                "miner/effective_batch_size": len(self.peers) * self.hparams.batch_size,
+                
+                # Optimization metrics
+                "miner/learning_rate": self.scheduler.get_last_lr()[0],
+            }, step=self.global_step)
+
+            # Log gradient metrics
+            grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+            weight_norms = [p.norm().item() for p in self.model.parameters()]
+            momentum_norms = [m.norm().item() for m in self.momentum.values()]
+
+            self.wandb.log({
+                # Gradient metrics
+                "miner/mean_grad_norm": sum(grad_norms) / len(grad_norms) if grad_norms else 0,
+                "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
+                "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
+                "miner/mean_momentum_norm": sum(momentum_norms) / len(momentum_norms),
+                
+                # Distribution metrics
+                "miner/grad_norm_distribution": self.wandb.Histogram(grad_norms),
+                "miner/weight_norm_distribution": self.wandb.Histogram(weight_norms),
+                "miner/momentum_norm_distribution": self.wandb.Histogram(momentum_norms),
+            }, step=self.global_step)
+
+            # Log per-peer metrics
+            for peer_uid in self.peers:
                 self.wandb.log({
-                    "loss": total_loss/(i+1),
-                    "tokens_per_sec": ((i+1) * self.hparams.batch_size * self.hparams.sequence_length)/duration
-                })
-            
+                    f"miner/peer_stake/{peer_uid}": self.metagraph.S[peer_uid].item(),
+                }, step=self.global_step)
+
             # Reduce gradient using DeMo.
             gradient = {}
             xshapes = {}
@@ -277,37 +337,56 @@ class Miner:
                 window=step_window,
                 key='gradient',
                 timeout=5,
-                device=self.config.device
+                device=self.config.device,
+                local=False,
+                stale_retention=10
             )
             
-            # Decompress state and apply grad
+            # Decompress state and apply to grad.
             for n, p in self.model.named_parameters():
-                # Decompress all gradients in batch form
-                new_grad = self.transformer.decode(
-                    self.compressor.batch_decompress(
-                        p, gather_result[n + 'idxs'], gather_result[n + 'vals'], 
-                        xshapes[n], totalks[n]
+                idxs_key = n + 'idxs'
+                vals_key = n + 'vals'
+                idxs = gather_result.state_dict.get(idxs_key)
+                vals = gather_result.state_dict.get(vals_key)
+                if idxs is not None and vals is not None:
+                    # Ensure idx and val are lists of tensors
+                    if not isinstance(idxs, (list, tuple)):
+                        idxs = [idxs]
+                    if not isinstance(vals, (list, tuple)):
+                        vals = [vals]
+                    
+                    new_grad = self.transformer.decode(
+                        self.compressor.batch_decompress(
+                            p.to(self.config.device),
+                            idxs,
+                            vals,
+                            xshapes[n],
+                            totalks[n]
+                        )
                     )
-                )
-                # Set recomputed gathered gradient
-                if p.grad is None:
-                    p.grad = new_grad
+                    # Set recomputed gathered gradient.
+                    if p.grad is None:
+                        p.grad = new_grad
+                    else:
+                        p.grad.copy_(new_grad)
+                    # Sign-SGD
+                    p.grad.sign_()
                 else:
-                    p.grad.copy_(new_grad)
-                # Sign-SGD
-                p.grad.sign_()
-                
+                    tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
+
             # Apply optimizer step
             tplr.logger.info("Finish and step.")
             self.optimizer.step()
             self.scheduler.step()
-            if self.config.use_wandb:
-                self.wandb.log({"lr": self.scheduler.get_last_lr()[0]})
+            self.global_step += 1
+            self.window_step += 1
+            tplr.logger.info(f"Total optimization steps: {self.global_step}")
 
-            # Wait for end of window
+            # Wait for next window
             tplr.logger.info("Wait for next window...")
             while self.current_window == step_window:
                 await asyncio.sleep(0.1)
+            self.window_step = 0
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

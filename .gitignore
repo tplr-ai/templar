@@ -31,6 +31,9 @@ venv/
 .env/
 uv.lock
 
+# Ruff sepcific
+.ruff*
+
 # IDE
 .idea/
 .vscode/
@@ -40,14 +43,4 @@ uv.lock
 
 # Project specific
 wandb
-checkpoint-*
-checkpoints.ipynb
-analysis.ipynb
-scratch*
-bad_slices/
-good_slices
-slices
-foo*
-# Evals
-lm-evaluation-harness 
-models
+*ipynb

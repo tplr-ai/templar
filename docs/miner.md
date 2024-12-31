@@ -1,179 +1,308 @@
+Sure, I'll update the documentation to reflect the new recommended method using Docker Compose and ensure it's coherent following the Diátaxis framework. I'll also populate the `.env.example` file with the required variables and provide instructions for running without Docker.
+
+---
 
 # Miner Setup
 
-This document provides a guide on how to set up and run a miner using `miner.py`. It explains the workflow, configuration options, and step-by-step instructions to get a miner up and running.
+This document provides a comprehensive guide on how to set up and run a miner using `miner.py`. Miners are crucial components of **τemplar**, responsible for training the model on assigned data subsets and sharing their gradients with peers.
 
 ## Table of Contents
 
 - [Miner Setup](#miner-setup)
-  - [Table of Contents](#table-of-contents)
+  - [Introduction](#introduction)
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
-    - [Automated Installation (WIP](#automated-installation-recommended)
+    - [Using Docker Compose (Recommended)](#using-docker-compose-recommended)
     - [Manual Installation](#manual-installation)
   - [Running the Miner](#running-the-miner)
-    - [Using PM2 (Recommended)](#using-pm2-recommended)
-    - [Important Flags](#important-flags)
+    - [Using Docker Compose](#using-docker-compose)
+    - [Running Without Docker](#running-without-docker)
   - [Configuration](#configuration)
+    - [Environment Variables](#environment-variables)
     - [Hardware Requirements](#hardware-requirements)
     - [Network Options](#network-options)
-    - [AWS Setup](#aws-setup)
   - [Monitoring](#monitoring)
     - [Logs](#logs)
     - [Performance](#performance)
   - [Troubleshooting](#troubleshooting)
+  - [Miner Operations](#miner-operations)
+    - [Model Synchronization](#model-synchronization)
+    - [Training Process](#training-process)
+    - [Gradient Sharing](#gradient-sharing)
+
+---
+
+## Introduction
+
+This guide will help you set up and run a miner for **τemplar**. We'll cover both the recommended Docker Compose method and manual installation for environments where Docker is not preferred.
+
+---
 
 ## Prerequisites
 
 - **NVIDIA GPU** with CUDA support
-  - Minimum 80GB VRAM recommended
+  - Minimum 24GB VRAM recommended
 - **Ubuntu** (or Ubuntu-based Linux distribution)
-- **Python 3.12**
-- **CUDA-compatible drivers**
+- **Docker** and **Docker Compose**
+- **Git**
+- **Cloudflare R2 Bucket Configuration**:
+  - Permissions remain the same as before.
+  - **Bucket Setup**:
+    1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
+    2. **Generate Tokens**:
+       - **Read Token**: Admin Read permissions.
+       - **Write Token**: Admin Read & Write permissions.
+    3. **Store Credentials**: You'll need these for the `.env` file.
 
-
-## Cloudflare R2 Bucket Configuration
-  To use buckets for sharing model slices, do the following:
-  1. **Navigate to R2 Object Storage and Create a Bucket**:
-     - Name the bucket the same as your CloudFlare **account ID**. This can be found on the your [Cloudflare Dashboard](https://dash.cloudflare.com) in the lower right corner or the right side of the R2 Object Storage Overview page. Account IDs are not sensitive and are safe to share. 
-     - Set the **region** to **ENAM** (Eastern North America).
-
-  2. **Generate Tokens**:
-     - Navigate to the R2 Object Storage Overview page, on the left side, click "Manage R2 API Tokens".
-     - Create seperate **read** and  **read/write**  tokens.
-     - Note down the access key IDs and secret access keys for each token. These can also be retrieved at any time from your R2 API Token Management page
-     - ***Heads up***: The access key id and secret access key for your *read* token will be shared
-  with other neurons through commits to the network. The secrets for your write
-  token will stay secret.
-
-  3. **Update `.env.yaml`**:
-     - Create the file `.env.yaml` by copying [`.env-template.yaml`](../.env-template.yaml)
-       and populate it with values from the previous steps:
-       ```
-         cp .env-template.yaml .env.yaml
-       ```
-     
-
-
+---
 
 ## Installation
 
-<!-- ### Automated Installation (WIP) -->
+### Using Docker Compose (Recommended)
+
+1. **Install Docker and Docker Compose**:
+
+   ```bash
+   # Update package list
+   sudo apt-get update
+
+   # Install prerequisites
+   sudo apt-get install \
+     ca-certificates \
+     curl \
+     gnupg \
+     lsb-release
+
+   # Add Docker’s official GPG key
+   sudo mkdir -p /etc/apt/keyrings
+   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+
+   # Set up the repository
+   echo \
+     "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+     $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+   # Install Docker Engine
+   sudo apt-get update
+   sudo apt-get install docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+   # Install Docker Compose
+   sudo apt-get install docker-compose
+   ```
+
+2. **Clone the Repository**:
+
+   ```bash
+   git clone https://github.com/tplr-ai/templar.git
+   cd templar
+   ```
+
+3. **Navigate to the Docker Directory**:
+
+   ```bash
+   cd docker
+   ```
+
+4. **Create and Populate the `.env` File**:
+
+   Create a `.env` file in the `docker` directory by copying the `.env.example`:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Populate the `.env` file with your configuration. The variables that need to be set are:
+
+   ```dotenv:docker/.env
+   WANDB_API_KEY=your_wandb_api_key
+
+   # Cloudflare R2 Credentials
+   R2_ACCOUNT_ID=your_r2_account_id
+
+   R2_READ_ACCESS_KEY_ID=your_r2_read_access_key_id
+   R2_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
+
+   R2_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
+   R2_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
+
+   # Wallet Configuration
+   WALLET_NAME=default
+   WALLET_HOTKEY=your_miner_hotkey_name
+
+   # Network Configuration
+   NETWORK=finney
+   NETUID=3
+
+   # GPU Configuration
+   CUDA_DEVICE=cuda:0
+
+   # Additional Settings
+   DEBUG=false
+   ```
+
+   Replace the placeholders with your actual values.
+
+5. **Update `docker-compose.yml`**:
+
+   Ensure that the `docker-compose.yml` file is correctly configured for your setup (usually no changes are needed).
+
+6. **Run Docker Compose**:
+
+   Start the miner using Docker Compose:
+
+   ```bash
+   docker-compose up -d node
+   ```
+
+   This will start the miner in detached mode.
 
 ### Manual Installation
 
-If you prefer to install manually, follow these steps:
+If you prefer to run the miner without Docker, follow the instructions in the [Running Without Docker](#running-without-docker) section.
 
-1. **Install System Dependencies**:
-```bash
-# Add Python 3.12 repository
-sudo add-apt-repository ppa:deadsnakes/ppa
-sudo apt-get update
-
-# Install required packages
-sudo apt-get install git python3-pip jq npm
-```
-
-2. **Install Node.js and PM2**:
-```bash
-npm install pm2 -g && pm2 update
-```
-
-3. **Install Rust and uv**:
-```bash
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-. "$HOME/.cargo/env"
-
-# Install uv and set python version to 3.12
-curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
-uv python install 3.12 && uv python pin 3.12
-```
-
-4. **Clone Repo**:
-```bash
-# Git Clone
-git clone https://github.com/tplr-ai/templar.git
-cd templar
-```
-
-
-5. **Set Up Python Environment**:
-```bash
-# Create virtual environment
-uv venv .venv
-source .venv/bin/activate
-
-# Install PyTorch
-uv pip install torch --index-url https://download.pytorch.org/whl/cu118
-
-# Install requirements
-uv sync --extra all 
-```
-
-
-6. **Create and Register Wallets**:
-```bash
-# Create coldkey
-btcli wallet new_coldkey --wallet.name default --n-words 12
-
-
-# Create and register hotkey
-btcli wallet new_hotkey --wallet.name default --wallet.hotkey <name> --n-words 12
-btcli subnet pow_register --wallet.name default --wallet.hotkey <name> --netuid <netuid> --subtensor.network <network>
-```
-
-7. **Log into Weights & Biases (WandB)**
-```bash
-# Log into WandB
-wandb login <your_api_key>
-```
+---
 
 ## Running the Miner
 
-### Using PM2 (Recommended)
+### Using Docker Compose
 
-PM2 automatically manages your miner processes and restarts them if they crash:
+Assuming you've completed the installation steps above, your miner should now be running. You can verify this by listing running containers:
 
 ```bash
-# Start a miner on each GPU
-  pm2 start neurons/miner.py --interpreter python3 --name miner -- \
-    --actual_batch_size <batch_size> \
-    --wallet.name default \
-    --wallet.hotkey "name" \
-    --device "cuda" \
-    --use_wandb \
-    --netuid <netuid> \
-    --subtensor.network <network> \
-    --process_name miner \  # Must match PM2's --name
-    --sync_state
-
-
-# Monitor logs
-pm2 logs
-
-# Check status
-pm2 list
+docker ps
 ```
 
-> **Important**: When using PM2, the `--process_name` argument must match the PM2 process name specified by `--name`. For example, if PM2 process is named `miner_C0`, use `--process_name miner_C0`.
+You should see a container named `templar-miner-<WALLET_HOTKEY>`.
 
-### Important Flags
-- **`--process_name`**: (Required) Must match the PM2 process name when using PM2
-- **`--sync_state`**: Synchronizes model state with network history
-- **`--actual_batch_size`**: Set based on GPU memory:
-  - 80GB+ VRAM: batch size 6
-- **`--netuid`**: Network subnet ID (e.g., 223 for testnet)
-- **`--subtensor.network`**: Network name (finney/test/local)
-- **`--no_autoupdate`**: Disable automatic code updates
+### Running Without Docker
+
+1. **Install System Dependencies**:
+
+   ```bash
+   # Add Python 3.12 repository
+   sudo add-apt-repository ppa:deadsnakes/ppa
+   sudo apt-get update
+
+   # Install required packages
+   sudo apt-get install python3.12 python3.12-venv git
+   ```
+
+2. **Install NVIDIA CUDA Drivers**:
+
+   Install the appropriate NVIDIA CUDA drivers for your GPU.
+
+3. **Clone the Repository**:
+
+   ```bash
+   git clone https://github.com/tplr-ai/templar.git
+   cd templar
+   ```
+
+4. **Set Up Python Environment**:
+
+   ```bash
+   # Create virtual environment
+   python3.12 -m venv .venv
+   source .venv/bin/activate
+
+   # Upgrade pip
+   pip install --upgrade pip
+
+   # Install PyTorch with CUDA support
+   pip install torch --index-url https://download.pytorch.org/whl/cu118
+
+   # Install other requirements
+   pip install -r requirements.txt
+
+   # Install uv tool (if needed)
+   pip install uv
+   ```
+
+5. **Create and Register Wallets**:
+
+   ```bash
+   # Create coldkey
+   btcli wallet new_coldkey --wallet.name default --n-words 12
+
+   # Create and register hotkey
+   btcli wallet new_hotkey --wallet.name default --wallet.hotkey miner --n-words 12
+   btcli subnet pow_register --wallet.name default --wallet.hotkey miner --netuid <netuid> --subtensor.network <network>
+   ```
+
+6. **Log into Weights & Biases (WandB)**:
+
+   ```bash
+   wandb login your_wandb_api_key
+   ```
+
+7. **Set Environment Variables**:
+
+   Export necessary environment variables or create a `.env` file in the project root.
+
+   ```bash
+   export WANDB_API_KEY=your_wandb_api_key
+   export R2_ACCOUNT_ID=your_r2_account_id
+   export R2_READ_ACCESS_KEY_ID=your_r2_read_access_key_id
+   export R2_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
+   export R2_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
+   export R2_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
+   ```
+
+8. **Run the Miner**:
+
+   ```bash
+   python neurons/miner.py \
+     --actual_batch_size 6 \
+     --wallet.name default \
+     --wallet.hotkey miner \
+     --device cuda \
+     --use_wandb \
+     --netuid <netuid> \
+     --subtensor.network <network> \
+     --sync_state
+   ```
+
+---
 
 ## Configuration
 
+### Environment Variables
+
+When using Docker Compose, set the following variables in the `docker/.env` file:
+
+```dotenv:docker/.env
+WANDB_API_KEY=your_wandb_api_key
+
+# Cloudflare R2 Credentials
+R2_ACCOUNT_ID=your_r2_account_id
+
+R2_READ_ACCESS_KEY_ID=your_r2_read_access_key_id
+R2_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
+
+R2_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
+R2_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
+
+# Wallet Configuration
+WALLET_NAME=default
+WALLET_HOTKEY=your_miner_hotkey_name
+
+# Network Configuration
+NETWORK=finney
+NETUID=3
+
+# GPU Configuration
+CUDA_DEVICE=cuda:0
+
+# Additional Settings
+DEBUG=false
+```
+
+**Note**: The R2 permissions remain unchanged from previous configurations.
+
 ### Hardware Requirements
 
-- **GPU Memory Requirements**:
-  - Recommended: 80GB+ VRAM
+- **GPU Requirements**:
+  - Minimum: NVIDIA H100 with 80GB VRAM
 - **Storage**: 100GB+ recommended for model and data
 - **RAM**: 32GB+ recommended
 - **Network**: Stable internet connection with good bandwidth
@@ -182,36 +311,66 @@ pm2 list
 
 - **Mainnet (Finney)**:
   - Network: `finney`
-  - Netuid: 3
+  - Netuid: `3`
 - **Testnet**:
   - Network: `test`
-  - Netuid: 223
-  - Endpoint: `wss://test.finney.opentensor.ai:443/`
+  - Netuid: `223`
 - **Local**:
   - Network: `local`
-  - Netuid: 3
-  - Endpoint: `wss://localhost:9944`
+  - Netuid: `1`
+
+---
 
 ## Monitoring
 
 ### Logs
 
-- **PM2 Logs**: `pm2 logs [miner_name]`
-- **System Monitoring**: `pm2 monit`
-- **Weights & Biases**: Enable with `--use_wandb`
+- **Docker Logs**:
+
+  ```bash
+  docker logs -f templar-miner-${WALLET_HOTKEY}
+  ```
+
+- **Weights & Biases**:
+
+  - Ensure `--use_wandb` is enabled
+  - Monitor training metrics and performance on your WandB dashboard
 
 ### Performance
 
-Monitor key metrics:
+Keep an eye on:
+
 - GPU utilization
 - Memory usage
 - Network bandwidth
 - Training progress
 - Rewards and weights
 
-<!-- ## Troubleshooting
+---
 
-Common issues and solutions:
-- CUDA out of memory
-- Network synchronization issues
-- Registration failures -->
+## Troubleshooting
+
+- **CUDA Out of Memory**: Reduce `--actual_batch_size` in your run command.
+- **Network Synchronization Issues**: Verify your network connection and ensure the correct `NETWORK` and `NETUID` are set.
+- **Registration Failures**: Make sure your wallet is properly registered and funded.
+
+---
+
+## Miner Operations
+
+### Model Synchronization
+
+- The miner synchronizes its model with the latest global state at startup.
+- Attempts to load the latest checkpoint from the validator with the highest stake.
+
+### Training Process
+
+- Data is deterministically assigned based on the miner's UID and the current window.
+- The miner trains on its assigned data and computes gradients.
+
+### Gradient Sharing
+
+- Gradients are compressed and shared with peers via the communication module.
+- The miner gathers gradients from peers, decompresses them, and updates its model.
+
+---

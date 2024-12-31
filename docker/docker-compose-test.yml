@@ -1,0 +1,93 @@
+services:
+  miner1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: templar-miner-M111
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets
+      - ../logs:/app/logs
+    environment:
+      NODE_TYPE: miner
+      WALLET_NAME: Bistro
+      WALLET_HOTKEY: M111
+      CUDA_DEVICE: cuda:0
+      NETWORK: test
+      DEBUG: 'true'
+      WANDB_API_KEY: ${WANDB_API_KEY}
+      NETUID: 268
+      HOST_CUDA_VERSION: 12.6
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '0', '1', '2' ]
+              capabilities: [ gpu ]
+
+  miner2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: templar-miner-M222
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets
+      - ../logs:/app/logs
+    environment:
+      NODE_TYPE: miner
+      WALLET_NAME: Bistro
+      WALLET_HOTKEY: M222
+      CUDA_DEVICE: cuda:1
+      NETWORK: test
+      DEBUG: 'true'
+      WANDB_API_KEY: ${WANDB_API_KEY}
+      NETUID: 268
+      HOST_CUDA_VERSION: 12.6
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '0', '1', '2' ]
+              capabilities: [ gpu ]
+
+  validator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: templar-validator-V11
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets
+      - ../logs:/app/logs
+    environment:
+      NODE_TYPE: validator
+      WALLET_NAME: Bistro
+      WALLET_HOTKEY: V11
+      CUDA_DEVICE: cuda:2
+      NETWORK: test
+      DEBUG: 'true'
+      WANDB_API_KEY: ${WANDB_API_KEY}
+      NETUID: 268
+      HOST_CUDA_VERSION : 12.6
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
+      R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID}
+      R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY}
+      R2_WRITE_ACCESS_KEY_ID : ${R2_WRITE_ACCESS_KEY_ID}
+      R2_WRITE_SECRET_ACCESS_KEY : ${R2_WRITE_SECRET_ACCESS_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '0', '1', '2' ]
+              capabilities: [ gpu ]

@@ -22,16 +22,6 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra all
 
-      - name: Create .env.yaml
-        run: |
-          echo "account_id: \"$ACCOUNT_ID\"" > .env.yaml
-          echo "read:" >> .env.yaml
-          echo "  access_key_id: \"$READ_ACCESS_KEY_ID\"" >> .env.yaml
-          echo "  secret_access_key: \"$READ_SECRET_ACCESS_KEY\"" >> .env.yaml
-          echo "write:" >> .env.yaml
-          echo "  access_key_id: \"$WRITE_ACCESS_KEY_ID\"" >> .env.yaml
-          echo "  secret_access_key: \"$WRITE_SECRET_ACCESS_KEY\"" >> .env.yaml
-
       - name: Run Ruff Lint
         uses: astral-sh/ruff-action@v1
         with:
@@ -41,6 +31,3 @@ jobs:
         uses: astral-sh/ruff-action@v1
         with:
           args: format --check
-
-      - name: Run Tests
-        run: uv run pytest

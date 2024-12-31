@@ -248,34 +248,48 @@ class Validator:
                     device=self.config.device,
                     local=False
                 )
-                # Log gradient stats
-                tplr.logger.info(f"Gradient stats - Window: {self.sync_window}")
+
                 # Check if any gradients were gathered
-                if not step_grads == 0:
+                if step_grads is None:
                     tplr.logger.info("No gradients received, waiting for next window.")
                     continue
 
+                tplr.logger.info(f"Received gradients from UIDs: {step_grads.uids}")
+
                 # Decompress state and apply to gradients
-                for n, p in self.model.named_parameters():                
-                    new_grad = self.transformer.decode(
-                        self.compressor.batch_decompress(
-                            p.to(self.config.device), 
-                            step_grads.state_dict[n + 'idxs'], 
-                            step_grads.state_dict[n + 'vals'], 
-                            self.xshapes[n], self.totalks[n]
+                for n, p in self.model.named_parameters():
+                    # Initialize an empty tensor for the aggregated gradient
+                    aggregated_grad = torch.zeros_like(p, device=self.config.device)
+
+                    # Sum gradients from all valid UIDs
+                    for idx, uid in enumerate(step_grads.uids):
+                        new_grad = self.transformer.decode(
+                            self.compressor.decompress(
+                                p.to(self.config.device),
+                                step_grads.state_dict.__dict__[n + 'idxs'][idx],
+                                step_grads.state_dict.__dict__[n + 'vals'][idx],
+                                self.xshapes[n], self.totalks[n]
+                            )
                         )
-                    )
-                    # Set recomputed gathered gradient
+
+                        # Aggregate the gradients (e.g., sum or average)
+                        # Here, we'll sum them up
+                        aggregated_grad.add_(new_grad)
+
+                    # Optionally average the gradient
+                    aggregated_grad.div_(len(step_grads.uids))
+
+                    # Set the aggregated gradient
                     if p.grad is None:
-                        p.grad = new_grad
+                        p.grad = aggregated_grad
                     else:
-                        p.grad.copy_(new_grad)
+                        p.grad.copy_(aggregated_grad)
                     p.grad.sign_()
-                        
+
                 # Apply the optimizer step
                 self.optimizer.step()
                 self.scheduler.step()
-                
+
                 self.wandb.log({"lr": self.scheduler.get_last_lr()[0]}, step=self.global_step)
                 
             # Get a random peer to eval on their gradient at self.sync_window + 1

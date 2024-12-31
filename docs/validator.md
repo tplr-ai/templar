@@ -164,7 +164,22 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
 
 4. **Set Up Python Environment**:
 
-   Same as in the miner setup.
+   ```bash
+   export WANDB_API_KEY=your_wandb_api_key
+   export NODE_TYPE=your_node_type
+   export WALLET_NAME=your_wallet_name
+   export WALLET_HOTKEY=your_wallet_hotkey
+   export CUDA_DEVICE=your_cuda_device
+   export NETWORK=your_network
+   export NETUID=your_netuid
+   export DEBUG=your_debug_setting
+   export R2_ACCOUNT_ID=your_r2_account_id
+   export R2_READ_ACCESS_KEY_ID=your_r2_read_access_key_id
+   export R2_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
+   export R2_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
+   export R2_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
+   export GITHUB_USER=your_github_username
+   ```
 
 5. **Create and Register Validator Wallet**:
 

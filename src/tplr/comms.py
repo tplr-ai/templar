@@ -278,7 +278,7 @@ class Comms(ChainManager):
 
                 # Check file size
                 file_size = os.path.getsize(temp_file_path)
-                object_key = f"{uid}/{window}/{filename}"
+                object_key = filename
 
                 if file_size > 5 * 1024 * 1024 * 1024:  # 5GB
                     # Use multipart upload for large files
@@ -336,54 +336,66 @@ class Comms(ChainManager):
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
 
-                # Check file size first
+                # Get the peer's bucket from commitments
+                peer_bucket = self.commitments.get(int(uid))
+                if not peer_bucket:
+                    tplr.logger.debug(f"No bucket found for UID {uid}")
+                    return None
+
                 async with self.session.create_client(
                     "s3",
-                    endpoint_url=self.get_base_url(self.bucket.account_id),
+                    endpoint_url=self.get_base_url(peer_bucket.account_id),
                     region_name=CF_REGION_NAME,
                     config=client_config,
-                    aws_access_key_id=self.bucket.access_key_id,
-                    aws_secret_access_key=self.bucket.secret_access_key,
+                    aws_access_key_id=peer_bucket.access_key_id,
+                    aws_secret_access_key=peer_bucket.secret_access_key,
                 ) as s3_client:
                     try:
-                        response = await s3_client.head_object(
-                            Bucket=self.bucket.name, Key=full_key
+                        # Check if file exists first
+                        await s3_client.head_object(
+                            Bucket=peer_bucket.name, Key=filename
                         )
-                        file_size = response["ContentLength"]
                     except (
                         botocore.exceptions.ClientError,
                         botocore.exceptions.BotoCoreError,
                     ) as e:
-                        tplr.logger.debug(f"Failed to get object metadata: {e}")
-                        return None
+                        error_code = e.response["Error"]["Code"]
+                        if error_code == "404":
+                            tplr.logger.debug(
+                                f"Gradient not found for uid {uid} at window {window}. Skipping."
+                            )
+                            return None
+                        else:
+                            raise  # Re-raise if it's a different exception
 
-                # Create a temporary file for download
-                with tempfile.NamedTemporaryFile(
-                    delete=False, suffix=".pt"
-                ) as temp_file:
-                    temp_file_path = temp_file.name
+                    # Proceed to get the object if it exists
+                    response = await asyncio.wait_for(
+                        s3_client.get_object(Bucket=peer_bucket.name, Key=filename),
+                        timeout=timeout,
+                    )
 
-                try:
-                    if file_size > 5 * 1024 * 1024 * 1024:  # 5GB
-                        # Use multipart download for large files
-                        success = await self.download_large_file(
-                            full_key, temp_file_path
-                        )
-                        if not success:
-                            raise Exception("Large file download failed")
-                    else:
-                        # Use regular download for smaller files
-                        state_dict = await self.s3_get_object(full_key, timeout)
-                        return state_dict
+                    # Save to a temporary file and load
+                    with tempfile.NamedTemporaryFile(
+                        delete=True, suffix=".pt"
+                    ) as temp_file:
+                        temp_file_path = temp_file.name
+                        async with aiofiles.open(temp_file_path, "wb") as outfile:
+                            while True:
+                                chunk = await response["Body"].read(1 * 1024 * 1024)
+                                if not chunk:
+                                    break
+                                await outfile.write(chunk)
 
-                    # Load the state dict from the temporary file
-                    state_dict = torch.load(temp_file_path, weights_only=True)
-                    return state_dict
-
-                finally:
-                    # Clean up temporary file
-                    if os.path.exists(temp_file_path):
-                        os.remove(temp_file_path)
+                        # Load the object
+                        try:
+                            with open(temp_file_path, "rb") as f:
+                                state_dict = torch.load(f, weights_only=True)
+                            return state_dict
+                        except Exception as e:
+                            tplr.logger.debug(
+                                f"Error loading state_dict from {full_key}: {e}"
+                            )
+                            return None
 
         except Exception as e:
             tplr.logger.debug(f"GET error {full_key}: {e}")
@@ -473,31 +485,40 @@ class Comms(ChainManager):
         # Initialize the aggregated state dict
         aggregated_state_dict = {}
         successes = []
+        valid_uids = []
 
         # Process responses
         responses = await asyncio.gather(*gather_tasks)
         for idx, resp in enumerate(responses):
+            uid = uids[idx]
             if resp is None:
                 successes.append(False)
                 continue
 
             successes.append(True)
+            valid_uids.append(uid)
 
             # Initialize aggregated_state_dict if empty
             if not aggregated_state_dict:
-                aggregated_state_dict = {
-                    param_name: [torch.zeros_like(tensor).to(device) for _ in uids]
-                    for param_name, tensor in resp.items()
-                }
+                aggregated_state_dict = {param_name: [] for param_name in resp.keys()}
 
-            # Fill in data from this response
+            # Append tensors to aggregated_state_dict
             for param_name, tensor in resp.items():
-                aggregated_state_dict[param_name][idx] = tensor.to(device)
+                aggregated_state_dict[param_name].append(tensor.to(device))
                 metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
 
-        # Calculate success metrics
+        # Compute success rate
         success_rate = sum(successes) / len(successes) if successes else 0
         total_time = time.time() - start_time
+
+        # If no gradients were gathered, return an indicator
+        if not valid_uids:
+            tplr.logger.info("No gradients received from any UID.")
+            return None  # or return an appropriate indicator
+
+        # For batch processing, ensure the lists are aligned
+        # with the same order for each parameter
+        aggregated_state_dict_namespace = SimpleNamespace(**aggregated_state_dict)
 
         return SimpleNamespace(
             time=total_time,
@@ -505,7 +526,8 @@ class Comms(ChainManager):
             download_bytes=metrics["download_bytes"],
             success_rate=success_rate,
             successes=successes,
-            state_dict=aggregated_state_dict,
+            state_dict=aggregated_state_dict_namespace,
+            uids=valid_uids,  # Include the list of UIDs that provided gradients
         )
 
     async def upload_large_file(self, file_path: str, filename: str) -> bool:
@@ -671,7 +693,6 @@ class Comms(ChainManager):
     def get_highest_stake_validator(self) -> Tuple[Optional[int], float]:
         """Returns the UID and stake of the neuron with the highest stake."""
         stakes = self.metagraph.S
-        tplr.logger.info(stakes)
 
         # Convert numpy array to torch tensor if needed
         if isinstance(stakes, np.ndarray):

@@ -42,7 +42,7 @@ class ChainManager:
         netuid: Optional[int] = None,
         metagraph=None,
         hparams=None,
-        fetch_interval: int = 60,  # Fetch interval in seconds
+        fetch_interval: int = 600,  # Fetch interval in seconds
         wallet: Optional["bt.wallet"] = None,
         bucket: Optional[Bucket] = None,
     ):
@@ -346,7 +346,7 @@ class ChainManager:
                     secret_access_key=concatenated[64:],
                 )
                 commitments[uid] = bucket
-                logger.success(f"Retrieved bucket commitment for UID {uid}")
+                logger.debug(f"Retrieved bucket commitment for UID {uid}")
 
             except Exception as e:
                 logger.error(f"Failed to decode commitment for UID {uid}: {e}")

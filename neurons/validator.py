@@ -54,7 +54,7 @@ class Validator:
     def config():
         parser = argparse.ArgumentParser(description='Validator script')
         parser.add_argument('--netuid', type=int, default=268, help='Bittensor network UID.')
-        parser.add_argument('--project', type=str, default='templar-1', help='Wandb project.')
+        parser.add_argument('--project', type=str, default='templar', help='Wandb project.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
@@ -418,14 +418,13 @@ class Validator:
                     "validator/mean_score": self.scores[valid_score_indices].mean().item(),
                     "validator/mean_moving_avg_score": self.moving_avg_scores[valid_score_indices].mean().item(),
                     "validator/max_score": self.scores.max().item(),
+                    "validator/min_score": self.scores.min().item(),
                     "validator/max_moving_avg_score": self.moving_avg_scores.max().item(),
+                    "validator/min_moving_avg_score": self.moving_avg_scores.min().item(),
                     "validator/mean_weight": weights[valid_score_indices].mean().item(),
                     "validator/weight_std": weights[valid_score_indices].std().item(),
-                    
-                    # Histograms
-                    "validator/scores_distribution": self.wandb.Histogram(self.scores[valid_score_indices].cpu().numpy()),
-                    "validator/moving_avg_scores_distribution": self.wandb.Histogram(self.moving_avg_scores[valid_score_indices].cpu().numpy()),
-                    "validator/weights_distribution": self.wandb.Histogram(weights[valid_score_indices].cpu().numpy()),
+                    "validator/score_std": self.scores[valid_score_indices].std().item(),
+                    "validator/moving_avg_score_std": self.moving_avg_scores[valid_score_indices].std().item(),
                 }, step=self.global_step)
 
                 # Set weights on chain

@@ -58,7 +58,7 @@ class Miner:
     def config():
         parser = argparse.ArgumentParser(description='Miner script')
         parser.add_argument('--netuid', type=int, default=268, help='Bittensor network UID.')
-        parser.add_argument('--project', type=str, default='templar-1', help='Wandb project.')
+        parser.add_argument('--project', type=str, default='templar', help='Wandb project.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
@@ -252,7 +252,12 @@ class Miner:
             self.batch_times.append(duration)
             self.total_tokens_processed += batch_tokens
 
-            # Enhanced wandb logging with both existing and new metrics
+            # Log gradient metrics
+            grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+            weight_norms = [p.norm().item() for p in self.model.parameters()]
+            momentum_norms = [m.norm().item() for m in self.momentum.values()]
+
+            # Enhanced wandb logging with all metrics
             self.wandb.log({
                 # Training metrics
                 "miner/loss": total_loss/(i+1),
@@ -272,24 +277,14 @@ class Miner:
                 
                 # Optimization metrics
                 "miner/learning_rate": self.scheduler.get_last_lr()[0],
-            }, step=self.global_step)
-
-            # Log gradient metrics
-            grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
-            weight_norms = [p.norm().item() for p in self.model.parameters()]
-            momentum_norms = [m.norm().item() for m in self.momentum.values()]
-
-            self.wandb.log({
-                # Gradient metrics
+                
+                # Gradient statistics as points
                 "miner/mean_grad_norm": sum(grad_norms) / len(grad_norms) if grad_norms else 0,
                 "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
+                "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
+                "miner/grad_norm_std": torch.tensor(grad_norms).std().item() if grad_norms else 0,
                 "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
                 "miner/mean_momentum_norm": sum(momentum_norms) / len(momentum_norms),
-                
-                # Distribution metrics
-                "miner/grad_norm_distribution": self.wandb.Histogram(grad_norms),
-                "miner/weight_norm_distribution": self.wandb.Histogram(weight_norms),
-                "miner/momentum_norm_distribution": self.wandb.Histogram(momentum_norms),
             }, step=self.global_step)
 
             # Log per-peer metrics

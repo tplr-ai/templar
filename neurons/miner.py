@@ -287,12 +287,6 @@ class Miner:
                 "miner/mean_momentum_norm": sum(momentum_norms) / len(momentum_norms),
             }, step=self.global_step)
 
-            # Log per-peer metrics
-            for peer_uid in self.peers:
-                self.wandb.log({
-                    f"miner/peer_stake/{peer_uid}": self.metagraph.S[peer_uid].item(),
-                }, step=self.global_step)
-
             # Reduce gradient using DeMo.
             gradient = {}
             xshapes = {}
@@ -341,8 +335,8 @@ class Miner:
             for n, p in self.model.named_parameters():
                 idxs_key = n + 'idxs'
                 vals_key = n + 'vals'
-                idxs = gather_result.state_dict.get(idxs_key)
-                vals = gather_result.state_dict.get(vals_key)
+                idxs = getattr(gather_result.state_dict, idxs_key, None)
+                vals = getattr(gather_result.state_dict, vals_key, None)
                 if idxs is not None and vals is not None:
                     # Ensure idx and val are lists of tensors
                     if not isinstance(idxs, (list, tuple)):

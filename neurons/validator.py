@@ -155,7 +155,7 @@ class Validator:
 
         # Init scores
         self.scores = torch.zeros(self.metagraph.n, dtype=torch.float32)
-        self.moving_avg_scores = torch.zeros(self.metagraph.n, dtype=torch.float32)  # Add moving average tracking
+        self.moving_avg_scores = torch.zeros(self.metagraph.n, dtype=torch.float32) 
         self.ma_alpha = 0.95  # Moving average decay factor
 
         # Add step tracking
@@ -226,7 +226,7 @@ class Validator:
                     tplr.logger.error(f"Failed to create checkpoint: {e}")
 
             # Log checkpoint creation
-            if self.current_window % 500 == 0:
+            if self.global_step % 500 == 0:
                 self.wandb.log({
                     "checkpoint_window": self.current_window,
                     "global_step": self.global_step,
@@ -293,7 +293,7 @@ class Validator:
                 self.wandb.log({"lr": self.scheduler.get_last_lr()[0]}, step=self.global_step)
                 
             # Get a random peer to eval on their gradient at self.sync_window + 1
-            eval_uid = random.choice(self.peers)
+            eval_uid = random.choice(step_grads.uids)
             # Get the pages for the window infront of the current sync window
             pages = await tplr.dataset.DatasetLoader.next_pages(
                 offset=self.sync_window + 1,
@@ -385,7 +385,7 @@ class Validator:
 
             # Compute score
             score = loss_before - loss_after
-            tplr.logger.info(f'score: {score}')
+            tplr.logger.info(f'score: {score}, loss_before: {loss_before_per_token:.4f}, loss_after: {loss_after_per_token:.4f}, loss_improvement: {loss_improvement:.4f}, improvement_percentage: {improvement_percentage:.2f}%, uid: {eval_uid}')
 
             # Log comprehensive metrics
             self.wandb.log({
@@ -396,51 +396,50 @@ class Validator:
                 "validator/eval_count": self.eval_count,
                 "validator/tokens_evaluated": n_tokens,
                 "validator/learning_rate": self.scheduler.get_last_lr()[0],
-                "validator/window": self.current_window,
-                "validator/global_step": self.global_step,
-                "validator/current_score": score,
             }, step=self.global_step)
 
             # Update counters
             self.global_step += 1
             self.eval_count += 1
 
-            # Set weights if needed
-            if self.sync_window % self.hparams.windows_per_weights == 0:
-                # Update scores with new score
-                self.scores[eval_uid] = self.hparams.scores_alpha * score + (1 - self.hparams.scores_alpha) * self.scores[eval_uid]
-                # Update moving average scores
-                self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
-                # Compute weights from moving average scores
-                weights = torch.softmax(self.moving_avg_scores, dim=0)
+            # Update scores with new score
+            self.scores[eval_uid] = self.hparams.scores_alpha * score + (1 - self.hparams.scores_alpha) * self.scores[eval_uid]
+            # Update moving average scores
+            self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
+            # Compute weights from moving average scores
+            # Zero out negative scores and apply softmax only on positive scores
+            positive_scores = torch.where(self.moving_avg_scores > 0, self.moving_avg_scores, torch.zeros_like(self.moving_avg_scores))
+            weights = positive_scores / positive_scores.sum() if positive_scores.sum() > 0 else torch.zeros_like(positive_scores)
 
-                # Log per-UID metrics
-                valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)
-                for uid_i in valid_score_indices:
-                    uid = uid_i.item()
-                    self.wandb.log({
-                        f"validator/scores/{uid}": self.scores[uid_i].item(),
-                        f"validator/moving_avg_scores/{uid}": self.moving_avg_scores[uid_i].item(),
-                        f"validator/weights/{uid}": weights[uid_i].item(),
-                        f"validator/stakes/{uid}": self.metagraph.S[uid_i].item(),
-                        f"validator/current_score/{uid}": score if uid == eval_uid else 0,
-                    }, step=self.global_step)
-
-                # Log aggregate network statistics
+            # Log per-UID metrics
+            valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)
+            for uid_i in valid_score_indices:
+                uid = uid_i.item()
                 self.wandb.log({
-                    "validator/active_miners": len(valid_score_indices),
-                    "validator/mean_score": self.scores[valid_score_indices].mean().item(),
-                    "validator/mean_moving_avg_score": self.moving_avg_scores[valid_score_indices].mean().item(),
-                    "validator/max_score": self.scores.max().item(),
-                    "validator/min_score": self.scores.min().item(),
-                    "validator/max_moving_avg_score": self.moving_avg_scores.max().item(),
-                    "validator/min_moving_avg_score": self.moving_avg_scores.min().item(),
-                    "validator/mean_weight": weights[valid_score_indices].mean().item(),
-                    "validator/weight_std": weights[valid_score_indices].std().item(),
-                    "validator/score_std": self.scores[valid_score_indices].std().item(),
-                    "validator/moving_avg_score_std": self.moving_avg_scores[valid_score_indices].std().item(),
+                    f"validator/scores/{uid}": self.scores[uid_i].item(),
+                    f"validator/moving_avg_scores/{uid}": self.moving_avg_scores[uid_i].item(),
+                    f"validator/weights/{uid}": weights[uid_i].item(),
                 }, step=self.global_step)
 
+            # Log aggregate network statistics
+            self.wandb.log({
+                "validator/active_miners": len(valid_score_indices),
+                "validator/mean_score": self.scores[valid_score_indices].mean().item(),
+                "validator/mean_moving_avg_score": self.moving_avg_scores[valid_score_indices].mean().item(),
+                "validator/max_score": self.scores.max().item(),
+                "validator/min_score": self.scores.min().item(),
+                "validator/max_moving_avg_score": self.moving_avg_scores.max().item(),
+                "validator/min_moving_avg_score": self.moving_avg_scores.min().item(),
+                "validator/mean_weight": weights[valid_score_indices].mean().item(),
+                "validator/weight_std": weights[valid_score_indices].std().item(),
+                "validator/score_std": self.scores[valid_score_indices].std().item(),
+                "validator/moving_avg_score_std": self.moving_avg_scores[valid_score_indices].std().item(),
+                "validator/max_weight": weights.max().item(),
+                "validator/min_weight": weights.min().item(),
+            }, step=self.global_step)
+
+
+            if self.sync_window % self.hparams.windows_per_weights == 0:
                 # Set weights on chain
                 self.subtensor.set_weights(
                     wallet=self.wallet,
@@ -452,14 +451,7 @@ class Validator:
                 )
                 tplr.logger.info(f'Set weights on chain for window {self.sync_window}')
 
-                # Log weight update metrics
-                self.wandb.log({
-                    "validator/weight_update_window": self.sync_window,
-                    "validator/mean_weight": weights.mean().item(),
-                    "validator/max_weight": weights.max().item(),
-                    "validator/min_weight": weights.min().item(),
-                    "validator/weight_std": weights.std().item(),
-                }, step=self.global_step)
+
 
             # Apply the optimizer step
             tplr.logger.info("Finish and step.")

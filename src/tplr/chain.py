@@ -86,18 +86,7 @@ class ChainManager:
         self.wallet = wallet
         self.bucket = bucket
 
-        # # Try to commit bucket to the chain
-        # if self.wallet and self.bucket:
-        #     # Commit bucket synchronously
-        #     asyncio.run(self.try_commit(self.wallet, self.bucket))
-        # else:
-        #     logger.warning("Wallet and bucket not provided; skipping try_commit.")
 
-        # Fetch commitments synchronously to populate self.commitments
-        # self.fetch_commitments()
-
-        # Start fetching commitments
-        # self.start_commitment_fetcher()
 
     async def setup(self):
         """Call once after creation, from the user side, to do any initial on-chain ops."""
@@ -123,6 +112,8 @@ class ChainManager:
         """Background task to periodically fetch commitments."""
         while True:
             try:
+                # Refresh Metagraph
+                await asyncio.to_thread(self.metagraph.sync())
                 commitments = await  asyncio.to_thread(self.get_commitments()),
                 if commitments:
                     self.commitments = commitments

@@ -86,34 +86,44 @@ class ChainManager:
         self.wallet = wallet
         self.bucket = bucket
 
-        # Try to commit bucket to the chain
+        # # Try to commit bucket to the chain
+        # if self.wallet and self.bucket:
+        #     # Commit bucket synchronously
+        #     asyncio.run(self.try_commit(self.wallet, self.bucket))
+        # else:
+        #     logger.warning("Wallet and bucket not provided; skipping try_commit.")
+
+        # Fetch commitments synchronously to populate self.commitments
+        # self.fetch_commitments()
+
+        # Start fetching commitments
+        # self.start_commitment_fetcher()
+
+    async def setup(self):
+        """Call once after creation, from the user side, to do any initial on-chain ops."""
         if self.wallet and self.bucket:
-            # Commit bucket synchronously
-            asyncio.run(self.try_commit(self.wallet, self.bucket))
+            # Now do async:
+            await self.try_commit(self.wallet, self.bucket)
         else:
             logger.warning("Wallet and bucket not provided; skipping try_commit.")
 
-        # Fetch commitments synchronously to populate self.commitments
-        self.fetch_commitments()
-
-        # Start fetching commitments
+        # Then fetch once
+        await self.fetch_commitments()
+        # Then start the background task
         self.start_commitment_fetcher()
 
     def start_commitment_fetcher(self):
-        """Starts the background task to fetch commitments periodically."""
+        """Attach to the already-running event loop."""
         if self._fetch_task is None:
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            self._fetch_task = loop.create_task(self._fetch_commitments_periodically())
+            self._fetch_task = asyncio.create_task(
+                self._fetch_commitments_periodically()
+            )
 
     async def _fetch_commitments_periodically(self):
         """Background task to periodically fetch commitments."""
         while True:
             try:
-                commitments = await self.get_commitments()
+                commitments = await  asyncio.to_thread(self.get_commitments()),
                 if commitments:
                     self.commitments = commitments
                     self.update_peers_with_buckets()
@@ -299,10 +309,6 @@ class ChainManager:
         Returns:
             Dict[int, Bucket]: Mapping of UIDs to their bucket configurations
         """
-        # if self.netuid or not self.metagraph:
-        #     raise ValueError(
-        #         "Subtensor, netuid and metagraph must be set for chain operations"
-        #     )
         subtensor = bt.subtensor(config=self.config)
         substrate = subtensor.substrate
         result = substrate.query_map(
@@ -412,6 +418,7 @@ class ChainManager:
     def update_peers_with_buckets(self):
         """Updates the list of peers (UIDs) that have buckets, excluding validators."""
         # Create a mapping from UIDs to their stakes
+
         uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
         
         # Filter peers that have buckets and have stake <= 10000 (miners)

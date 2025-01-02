@@ -166,7 +166,7 @@ This section provides a detailed explanation of the incentive mechanism employed
      
    - Compute weights using a softmax function over the moving average scores:
    
-     $w_i = \frac{e^{\bar{s}_i}}{\sum_{j \in \mathcal{M}} e^{\bar{s}_j}}$
+     $w_i = \frac{e^{\bar{s}_i}}{\sum\limits_{j \in \mathcal{M}} e^{\bar{s}_j}}$
 
 7. **Blockchain Update**:
    - Validators set these weights on the blockchain, influencing reward distribution and miner reputation.
@@ -191,7 +191,7 @@ This section provides a detailed explanation of the incentive mechanism employed
   
 - **Assigned Weight**:
   
-  $w_i = \frac{e^{\bar{s}_i}}{\sum_{j} e^{\bar{s}_j}}$
+  $w_i = \frac{e^{\bar{s}_i}}{\sum\limits_{j \in \mathcal{M}} e^{\bar{s}_j}}$
 
 ---
 
@@ -225,7 +225,7 @@ The incentive mechanism in **τemplar** aims to:
 4. **Weight Computation**:
    - Apply the softmax function to the moving average scores to compute the weights:
    
-     $w_i = \frac{e^{\bar{s}_i}}{\sum_{j} e^{\bar{s}_j}}$
+     $w_i = \frac{e^{\bar{s}_i}}{\sum\limits_{j \in \mathcal{M}} e^{\bar{s}_j}}$
      
    - Ensures that miners with higher contributions receive proportionally higher weights.
 
@@ -257,7 +257,7 @@ The incentive mechanism in **τemplar** aims to:
 
 Miners aim to maximize their expected reward, which is proportional to their assigned weight $w_i$:
 
-$\max_{\delta_i} \quad w_i = \frac{e^{\bar{s}_i}}{\sum_{j} e^{\bar{s}_j}}$
+$\max_{\delta_i} \quad w_i = \frac{e^{\bar{s}_i}}{\sum\limits_{j \in \mathcal{M}} e^{\bar{s}_j}}$
 
 Subject to:
 

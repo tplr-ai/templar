@@ -140,6 +140,8 @@ class Validator:
             hparams=self.hparams,
         )
 
+        self.comms.setup()
+        
         # Init peers
         if not self.config.peers:
             self.peers = self.comms.peers

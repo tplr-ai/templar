@@ -321,7 +321,7 @@ class Miner:
 
             # All-gather share state from peers
             tplr.logger.info(f"Start gather: {self.peers}")
-            gather_result = await self.comms.gather(
+            gather_result, global_steps = await self.comms.gather(
                 state_dict=gradient,
                 my_uid=self.uid,
                 uids=self.peers,
@@ -330,7 +330,8 @@ class Miner:
                 timeout=5,
                 device=self.config.device,
                 local=False,
-                stale_retention=10
+                stale_retention=10,
+                global_step=self.global_step,
             )
             
             # Decompress state and apply to grad.
@@ -378,6 +379,16 @@ class Miner:
             while self.current_window == step_window:
                 await asyncio.sleep(0.1)
             self.window_step = 0
+
+            # After gathering
+            max_global_step = max(global_steps + [self.global_step])
+
+            if max_global_step > self.global_step:
+                tplr.logger.info(f"Updating global_step from {self.global_step} to {max_global_step}")
+                self.global_step = max_global_step
+                # Update optimizer and scheduler steps
+                self.optimizer._step_count = self.global_step
+                self.scheduler.last_epoch = self.global_step
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

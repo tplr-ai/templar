@@ -241,11 +241,12 @@ class Comms(ChainManager):
 
     async def put(
         self,
-        state_dict: dict,
+        state_dict: Dict[str, torch.Tensor],
         uid: str,
         window: int,
         key: str,
-        local: bool = True,
+        global_step: int = 0,
+        local: bool = False,
         stale_retention: int = 10,
     ):
         """PUT operation: Store the state_dict either locally or in R2."""
@@ -258,8 +259,12 @@ class Comms(ChainManager):
         temp_file_path = tempfile.mktemp(suffix=".pt")
 
         try:
+            # Prepare the data to be saved
+            data_to_save = state_dict.copy()
+            data_to_save['global_step'] = torch.tensor(global_step)
+
             # Save state_dict to the temporary file
-            torch.save(state_dict, temp_file_path)
+            torch.save(data_to_save, temp_file_path)
 
             if local:
                 # Local storage logic remains unchanged
@@ -307,10 +312,10 @@ class Comms(ChainManager):
         uid: str,
         window: int,
         key: str,
-        timeout: int = 30,
-        local: bool = True,
+        timeout: int = 120,
+        local: bool = False,
         stale_retention: int = 10,
-    ) -> Optional[dict]:
+    ) -> Tuple[Optional[dict], Optional[int]]:
         """GET operation: Retrieve state_dict from local or R2 storage."""
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         full_key = f"{uid}/{window}/{filename}"
@@ -327,9 +332,13 @@ class Comms(ChainManager):
                 )
                 if not os.path.exists(local_path):
                     tplr.logger.debug(f"Local file not found: {local_path}")
-                    return None
+                    return None, None
                 state_dict = torch.load(local_path, weights_only=True)
-                return state_dict
+                if 'global_step' in state_dict:
+                    global_step = state_dict.pop('global_step').item()
+                else:
+                    global_step = None
+                return state_dict, global_step
             else:
                 # Cleanup old S3 data
                 await self.cleanup_s3_data(
@@ -340,7 +349,7 @@ class Comms(ChainManager):
                 peer_bucket = self.commitments.get(int(uid))
                 if not peer_bucket:
                     tplr.logger.debug(f"No bucket found for UID {uid}")
-                    return None
+                    return None, None
 
                 async with self.session.create_client(
                     "s3",
@@ -364,7 +373,7 @@ class Comms(ChainManager):
                             tplr.logger.debug(
                                 f"Gradient not found for uid {uid} at window {window}. Skipping."
                             )
-                            return None
+                            return None, None
                         else:
                             raise  # Re-raise if it's a different exception
 
@@ -390,16 +399,20 @@ class Comms(ChainManager):
                         try:
                             with open(temp_file_path, "rb") as f:
                                 state_dict = torch.load(f, weights_only=True)
-                            return state_dict
+                            if 'global_step' in state_dict:
+                                global_step = state_dict.pop('global_step').item()
+                            else:
+                                global_step = None
+                            return state_dict, global_step
                         except Exception as e:
                             tplr.logger.debug(
                                 f"Error loading state_dict from {full_key}: {e}"
                             )
-                            return None
+                            return None, None
 
         except Exception as e:
             tplr.logger.debug(f"GET error {full_key}: {e}")
-            return None
+            return None, None
 
         finally:
             tplr.logger.debug(f"GET {full_key} <--")
@@ -437,27 +450,31 @@ class Comms(ChainManager):
 
     async def gather(
         self,
-        state_dict: Dict[str, torch.Tensor],
-        my_uid: str,
-        uids: List[str],
-        window: int,
-        key: str,
-        timeout: int,
-        device: str,
-        local: bool = True,
+        state_dict: Dict[str, torch.Tensor] = None,
+        my_uid: int = None,
+        uids: List[int] = None,
+        window: int = None,
+        key: str = 'gradient',
+        timeout: int = 5,
+        device: str = 'cpu',
+        local: bool = False,
         stale_retention: int = 10,
+        global_step: int = 0,
     ) -> SimpleNamespace:
         """Gather operation."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
         # Put own state_dict if available
-        if state_dict is not None:
+        if state_dict is not None and my_uid is not None:
+            state_dict['global_step'] = torch.tensor(global_step)
             await self.put(
                 state_dict=state_dict,
                 uid=str(my_uid),
                 window=window,
                 key=key,
+                timeout=timeout,
+                global_step=global_step,
                 local=local,
                 stale_retention=stale_retention,
             )
@@ -477,7 +494,7 @@ class Comms(ChainManager):
                 key=key,
                 timeout=timeout,
                 local=local,
-                stale_retention=stale_retention,
+                stale_retention=stale_retention
             )
             for uid in uids
         ]

@@ -240,15 +240,15 @@ class Validator:
                 tplr.logger.info(f'Syncing window: {self.sync_window} current: {self.current_window}')
 
                 # Gather gradients from this window
-                step_grads = await self.comms.gather(
-                    state_dict={},
-                    my_uid=self.uid,
+                step_grads, global_steps = await self.comms.gather(
                     uids=self.peers,
                     window=self.sync_window,
                     key='gradient',
                     timeout=5,
                     device=self.config.device,
-                    local=False
+                    local=False,
+                    stale_retention=10,
+                    global_step=self.global_step,
                 )
 
                 # Check if any gradients were gathered
@@ -460,6 +460,14 @@ class Validator:
             self.optimizer.step()
             self.scheduler.step()
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
+
+            max_global_step = max(global_steps + [self.global_step])
+            if max_global_step > self.global_step:
+                tplr.logger.info(f"Validator updating global_step from {self.global_step} to {max_global_step}")
+                self.global_step = max_global_step
+                # Update optimizer and scheduler steps
+                self.optimizer._step_count = self.global_step
+                self.scheduler.last_epoch = self.global_step
 
     def block_listener(self, loop):
         def handler(event, _u, _s):

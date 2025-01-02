@@ -1,7 +1,3 @@
-Sure, I'll update the documentation to reflect the new recommended method using Docker Compose and ensure it's coherent following the Diátaxis framework. I'll also populate the `.env.example` file with the required variables and provide instructions for running without Docker.
-
----
-
 # Miner Setup
 
 This document provides a comprehensive guide on how to set up and run a miner using `miner.py`. Miners are crucial components of **τemplar**, responsible for training the model on assigned data subsets and sharing their gradients with peers.
@@ -46,7 +42,6 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 - **Docker** and **Docker Compose**
 - **Git**
 - **Cloudflare R2 Bucket Configuration**:
-  - Permissions remain the same as before.
   - **Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:

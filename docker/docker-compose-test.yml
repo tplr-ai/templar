@@ -1,9 +1,15 @@
+networks:
+  test:
+    driver: bridge
+
 services:
   miner1:
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: templar-miner-M111
+    networks:
+      - test
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ../logs:/app/logs
@@ -27,7 +33,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: [ '0', '1', '2' ]
+              device_ids: [ '3' ]
               capabilities: [ gpu ]
 
   miner2:
@@ -35,6 +41,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: templar-miner-M222
+    networks:
+      - test
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ../logs:/app/logs
@@ -42,7 +50,7 @@ services:
       NODE_TYPE: miner
       WALLET_NAME: Bistro
       WALLET_HOTKEY: M222
-      CUDA_DEVICE: cuda:1
+      CUDA_DEVICE: cuda:0
       NETWORK: test
       DEBUG: 'true'
       WANDB_API_KEY: ${WANDB_API_KEY}
@@ -58,7 +66,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: [ '0', '1', '2' ]
+              device_ids: [ '1' ]
               capabilities: [ gpu ]
 
   validator:
@@ -66,6 +74,8 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: templar-validator-V11
+    networks:
+      - test
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ../logs:/app/logs
@@ -73,21 +83,22 @@ services:
       NODE_TYPE: validator
       WALLET_NAME: Bistro
       WALLET_HOTKEY: V11
-      CUDA_DEVICE: cuda:2
+      CUDA_DEVICE: cuda:0
       NETWORK: test
       DEBUG: 'true'
       WANDB_API_KEY: ${WANDB_API_KEY}
       NETUID: 268
-      HOST_CUDA_VERSION : 12.6
+      HOST_CUDA_VERSION: 12.6
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID}
       R2_READ_ACCESS_KEY_ID: ${R2_READ_ACCESS_KEY_ID}
       R2_READ_SECRET_ACCESS_KEY: ${R2_READ_SECRET_ACCESS_KEY}
-      R2_WRITE_ACCESS_KEY_ID : ${R2_WRITE_ACCESS_KEY_ID}
-      R2_WRITE_SECRET_ACCESS_KEY : ${R2_WRITE_SECRET_ACCESS_KEY}
+      R2_WRITE_ACCESS_KEY_ID: ${R2_WRITE_ACCESS_KEY_ID}
+      R2_WRITE_SECRET_ACCESS_KEY: ${R2_WRITE_SECRET_ACCESS_KEY}
+    restart: always
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: [ '0', '1', '2' ]
+              device_ids: [ '2' ]
               capabilities: [ gpu ]

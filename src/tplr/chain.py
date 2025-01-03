@@ -77,6 +77,7 @@ class ChainManager:
         # Initialize bucket storage
         self.commitments = {}
         self.peers = []
+        self.eval_peers = []
         self.fetch_interval = fetch_interval
         self._fetch_task = None
 
@@ -447,49 +448,41 @@ class ChainManager:
             return None
 
     def update_peers_with_buckets(self):
-        """Updates the list of peers based on incentive scores and bucket availability."""
+        """Updates both peers for gradient gathering and evaluation peers."""
         # Create mappings
         uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
         uid_to_incentive = dict(zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist()))
         
         # Filter miners with buckets (stake <= 10000)
-        miners_with_buckets = [
-            int(uid) for uid in self.commitments.keys()
-            if uid_to_stake.get(int(uid), 0) <= 10000
-        ]
-        # Create mappings
-        uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
-        uid_to_incentive = dict(zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist()))
-        
-        # Filter miners with buckets (stake <= 10000)
-        miners_with_buckets = [
+        self.eval_peers = [
             int(uid) for uid in self.commitments.keys()
             if uid_to_stake.get(int(uid), 0) <= 10000
         ]
         
-        # If total miners is less than minimum_peers, use all miners
-        if len(miners_with_buckets) <= self.hparams.minimum_peers:
-            self.peers = miners_with_buckets
+        # If total miners is less than minimum_peers, use all miners for both lists
+        if len(self.eval_peers) <= self.hparams.minimum_peers:
+            self.peers = self.eval_peers
             logger.warning(
-                f"Total miners ({len(miners_with_buckets)}) below minimum_peers ({self.hparams.minimum_peers}). "
+                f"Total miners ({len(self.eval_peers)}) below minimum_peers ({self.hparams.minimum_peers}). "
                 f"Using all available miners as peers."
             )
             return
         
-        # Otherwise, select based on incentive scores
-        miner_incentives = [(uid, uid_to_incentive.get(uid, 0)) for uid in miners_with_buckets]
+        # Otherwise, select based on incentive scores for gradient gathering
+        miner_incentives = [(uid, uid_to_incentive.get(uid, 0)) for uid in self.eval_peers]
         miner_incentives.sort(key=lambda x: x[1], reverse=True)
         
         # Calculate number of peers based on topk percentage
         n_topk_peers = max(1, int(len(miner_incentives) * (self.hparams.topk_peers / 100)))
         n_peers = max(self.hparams.minimum_peers, n_topk_peers)
         
-        # Take top n_peers by incentive
+        # Take top n_peers by incentive for gradient gathering
         self.peers = [uid for uid, _ in miner_incentives[:n_peers]]
         
         logger.info(
-            f"Updated peers (top {self.hparams.topk_peers}% or minimum {self.hparams.minimum_peers}): {self.peers}"
+            f"Updated gather peers (top {self.hparams.topk_peers}% or minimum {self.hparams.minimum_peers}): {self.peers}"
         )
+        logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
 
 
 def get_own_bucket() -> Bucket:

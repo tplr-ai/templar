@@ -177,8 +177,8 @@ class Miner:
     # Main training loop.
     async def run(self):
         # Try to load latest checkpoint
-        validator_uid, stake = self.comms.get_highest_stake_validator()
-        if stake > 0:
+        validator_uid = self.metagraph.S.argmax()[0]
+        if validator_uid is not None:
             try:
                 # Calculate the most recent window that should have a checkpoint
                 expected_checkpoint_window = (self.current_window // self.hparams.checkpoint_frequency) * self.hparams.checkpoint_frequency
@@ -357,7 +357,7 @@ class Miner:
                 uids=self.peers,
                 window=step_window,
                 key='gradient',
-                timeout=20,
+                timeout=5,
                 device=self.config.device,
                 local=False,
                 stale_retention=10,

@@ -186,6 +186,11 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    # Install required packages
    sudo apt-get install python3.12 python3.12-venv git
    ```
+  *PM2 Support Installation
+  ```bash
+   # Install required packages
+   apt update && apt upgrade -y && apt-get install -y nano git python3-pip jq npm && npm install pm2 -g && pm2 update
+   ```
 
 2. **Install NVIDIA CUDA Drivers**:
 
@@ -214,6 +219,19 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
 
    # Install uv tool (if needed)
    pip install uv
+   ```
+   
+  *PM2 Support Installation
+  ```bash
+   # Install uv and configure venv
+   pip install uv && uv python install 3.12 && uv python pin 3.12 && uv venv .venv
+   source .venv/bin/activate
+
+   # Install PyTorch with CUDA support
+   uv pip install torch --index-url https://download.pytorch.org/whl/cu118\
+
+   # uv sync to install required packages
+   uv sync --extra all
    ```
 
 5. **Create and Register Wallets**:
@@ -266,6 +284,19 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
      --subtensor.network <network> \
      --sync_state
    ```
+
+  *PM2 Support Installation
+  ```bash
+   pm2 start neurons/miner.py --interpreter python3 --name sn3miner -- \
+   --actual_batch_size 6 \
+   --wallet.name default \
+   --wallet.hotkey miner \
+   --device cuda \
+   --subtensor.network <network> \
+   --sync_state \
+   --use_wandb \
+   --netuid <netuid> 
+  ```
 
 ---
 

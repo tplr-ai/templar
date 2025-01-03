@@ -362,36 +362,37 @@ class Validator:
                     p.data.add_(decompressed_grad, alpha=self.scheduler.get_last_lr()[0]) 
                     
                 # Compute improvement metrics
-                loss_improvement = loss_before_per_batch - loss_after_per_batch
-                improvement_percentage = ((loss_before_per_batch - loss_after_per_batch) / loss_before_per_batch * 100) if loss_before_per_batch != 0 else 0
+                # loss_improvement = loss_before_per_batch - loss_after_per_batch
+                # improvement_percentage = ((loss_before_per_batch - loss_after_per_batch) / loss_before_per_batch * 100) if loss_before_per_batch != 0 else 0
 
                 # Compute score using per-batch losses
                 score = loss_before_per_batch - loss_after_per_batch
                 score = max(0.0, score)  # Zero out negative improvements
 
-                # Update scores and moving averages only for active UIDs
-                active_uids = set(self.peers)  # Only consider peers we're actually evaluating
+                # Update scores and moving averages only for evaluated UIDs
+                if eval_uid not in self.evaluated_uids:
+                    self.evaluated_uids.add(eval_uid)
+
                 self.scores[eval_uid] = score
                 self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
 
-                # Calculate weights only for active UIDs
-                active_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
-                active_mask[list(active_uids)] = True
-                active_scores = self.moving_avg_scores * active_mask
+                # Calculate weights only for evaluated UIDs
+                evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
+                evaluated_mask[list(self.evaluated_uids)] = True
+                evaluated_scores = self.moving_avg_scores * evaluated_mask
 
-                # Compute proportional weights (sum of active scores = 1)
-                total_score = active_scores.sum()
+                # Compute proportional weights (sum of evaluated scores = 1)
+                total_score = evaluated_scores.sum()
                 if total_score > 0:
                     weights = torch.zeros_like(self.moving_avg_scores)
-                    weights[active_mask] = active_scores[active_mask] / total_score
+                    weights[evaluated_mask] = evaluated_scores[evaluated_mask] / total_score
                 else:
-                    # If all scores are 0, distribute equally among active UIDs
+                    # If all scores are 0, assign zero weights
                     weights = torch.zeros_like(self.moving_avg_scores)
-                    weights[active_mask] = 1.0 / len(active_uids)
 
-                # Log only active UIDs
-                tplr.logger.info('Updated scores for active UIDs:')
-                for uid in active_uids:
+                # Log only evaluated UIDs
+                tplr.logger.info('Updated scores for evaluated UIDs:')
+                for uid in self.evaluated_uids:
                     tplr.logger.info(f'UID {uid}:')
                     tplr.logger.info(f'  - Raw score: {score if uid == eval_uid else "N/A"}')
                     tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')

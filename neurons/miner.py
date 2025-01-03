@@ -105,7 +105,7 @@ class Miner:
             self.optimizer,
             start_factor=0.1,
             end_factor=1.0,
-            total_iters=10,
+            total_iters=250,
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,

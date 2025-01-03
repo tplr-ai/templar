@@ -22,3 +22,6 @@ dependencies = [
     "wandb",
     "python-dotenv",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

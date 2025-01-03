@@ -35,7 +35,6 @@ services:
     image: containrrr/watchtower
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ${HOME}/.docker/config.json:/config.json:ro
     command: --interval 30 --cleanup --label-enable
     restart: unless-stopped
     environment:

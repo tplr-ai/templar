@@ -58,8 +58,6 @@ class ChainManager:
             wallet (bt.wallet, optional): Wallet to sign commitments
             bucket (Bucket, optional): Bucket configuration to commit
         """
-        # self.subtensor = bt.subtensor(config=config)
-        # chain argument instead
         self.config = config
         self.netuid = netuid
         self.metagraph = metagraph
@@ -87,20 +85,6 @@ class ChainManager:
         self.bucket = bucket
 
 
-
-    async def setup(self):
-        """Call once after creation, from the user side, to do any initial on-chain ops."""
-        if self.wallet and self.bucket:
-            # Now do async:
-            await self.try_commit(self.wallet, self.bucket)
-        else:
-            logger.warning("Wallet and bucket not provided; skipping try_commit.")
-
-        # Then fetch once
-        await self.fetch_commitments()
-        # Then start the background task
-        self.start_commitment_fetcher()
-
     def start_commitment_fetcher(self):
         """Attach to the already-running event loop."""
         if self._fetch_task is None:
@@ -113,8 +97,8 @@ class ChainManager:
         while True:
             try:
                 # Refresh Metagraph
-                await asyncio.to_thread(self.metagraph.sync())
-                commitments = await  asyncio.to_thread(self.get_commitments()),
+                await asyncio.to_thread(self.metagraph.sync)
+                commitments = await  asyncio.to_thread(self.get_commitments_sync)
                 if commitments:
                     self.commitments = commitments
                     self.update_peers_with_buckets()
@@ -197,7 +181,7 @@ class ChainManager:
             f"Committed bucket configuration to chain for hotkey {wallet.hotkey.ss58_address}"
         )
 
-    async def try_commit(self, wallet: Wallet, bucket: Bucket) -> None:
+    def try_commit(self, wallet: Wallet, bucket: Bucket) -> None:
         """Attempts to verify existing commitment matches current bucket config and commits if not.
 
         Args:
@@ -227,7 +211,7 @@ class ChainManager:
 
         except Exception as e:
             logger.error(f"Commitment error: {str(e)}")
-            await self.commit(wallet, bucket)
+            self.commit(wallet, bucket)
 
     def get_commitment(self, uid: int) -> Bucket:
         """Retrieves and parses committed bucket configuration data for a given
@@ -291,6 +275,7 @@ class ChainManager:
         except ValidationError as e:
             raise ValueError(f"Invalid data in commitment: {e}")
 
+
     async def get_commitments(self, block: Optional[int] = None) -> Dict[int, Bucket]:
         """Retrieves all bucket commitments from the chain.
 
@@ -351,6 +336,67 @@ class ChainManager:
 
         return commitments
 
+    def get_commitments_sync(self, block: Optional[int] = None) -> Dict[int, Bucket]:
+        """Retrieves all bucket commitments from the chain.
+
+        Args:
+            block (int, optional): Block number to query at
+
+        Returns:
+            Dict[int, Bucket]: Mapping of UIDs to their bucket configurations
+        """
+        subtensor = bt.subtensor(config=self.config)
+        substrate = subtensor.substrate
+        result = substrate.query_map(
+            module="Commitments",
+            storage_function="CommitmentOf", 
+            params=[self.netuid],
+            block_hash=None if block is None else substrate.get_block_hash(block),
+        )
+
+        hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids))
+        commitments = {}
+
+        for key, value in result:
+            hotkey = key.value
+            if hotkey not in hotkey_to_uid:
+                continue
+
+            uid = hotkey_to_uid[hotkey]
+            commitment_info = value.value.get("info", {})
+            fields = commitment_info.get("fields", [])
+
+            if not fields or not isinstance(fields[0], dict):
+                continue
+
+            field_value = next(iter(fields[0].values()))
+            if field_value.startswith("0x"):
+                field_value = field_value[2:]
+
+            try:
+                concatenated = bytes.fromhex(field_value).decode("utf-8").strip()
+                if len(concatenated) != 128:
+                    logger.error(
+                        f"Invalid commitment length for UID {uid}: {len(concatenated)}"
+                    )
+                    continue
+
+                bucket = Bucket(
+                    name=concatenated[:32],
+                    account_id=concatenated[:32],
+                    access_key_id=concatenated[32:64],
+                    secret_access_key=concatenated[64:],
+                )
+                commitments[uid] = bucket
+                logger.debug(f"Retrieved bucket commitment for UID {uid}")
+
+            except Exception as e:
+                logger.error(f"Failed to decode commitment for UID {uid}: {e}")
+                continue
+
+        return commitments
+
+
     async def get_bucket_for_neuron(self, wallet: "bt.wallet") -> Optional[Bucket]:
         """Get bucket configuration for a specific neuron's wallet
 
@@ -371,18 +417,12 @@ class ChainManager:
             return None
 
     def fetch_commitments(self):
-        """Synchronously fetches commitments and updates self.commitments."""
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        commitments = loop.run_until_complete(self.get_commitments())
+        """Fetches commitments and updates self.commitments."""
+        commitments = self.get_commitments_sync()
         if commitments:
             self.commitments = commitments
             self.update_peers_with_buckets()
-            logger.debug(f"Fetched commitments synchronously: {self.commitments}")
+            logger.debug(f"Fetched commitments: {self.commitments}")
         else:
             logger.warning("No commitments fetched.")
 
@@ -407,17 +447,49 @@ class ChainManager:
             return None
 
     def update_peers_with_buckets(self):
-        """Updates the list of peers (UIDs) that have buckets, excluding validators."""
-        # Create a mapping from UIDs to their stakes
-
+        """Updates the list of peers based on incentive scores and bucket availability."""
+        # Create mappings
         uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
+        uid_to_incentive = dict(zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist()))
         
-        # Filter peers that have buckets and have stake <= 10000 (miners)
-        self.peers = [
+        # Filter miners with buckets (stake <= 10000)
+        miners_with_buckets = [
             int(uid) for uid in self.commitments.keys()
             if uid_to_stake.get(int(uid), 0) <= 10000
         ]
-        logger.info(f"Updated peers with buckets (excluding validators): {self.peers}")
+        # Create mappings
+        uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
+        uid_to_incentive = dict(zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist()))
+        
+        # Filter miners with buckets (stake <= 10000)
+        miners_with_buckets = [
+            int(uid) for uid in self.commitments.keys()
+            if uid_to_stake.get(int(uid), 0) <= 10000
+        ]
+        
+        # If total miners is less than minimum_peers, use all miners
+        if len(miners_with_buckets) <= self.hparams.minimum_peers:
+            self.peers = miners_with_buckets
+            logger.warning(
+                f"Total miners ({len(miners_with_buckets)}) below minimum_peers ({self.hparams.minimum_peers}). "
+                f"Using all available miners as peers."
+            )
+            return
+        
+        # Otherwise, select based on incentive scores
+        miner_incentives = [(uid, uid_to_incentive.get(uid, 0)) for uid in miners_with_buckets]
+        miner_incentives.sort(key=lambda x: x[1], reverse=True)
+        
+        # Calculate number of peers based on topk percentage
+        n_topk_peers = max(1, int(len(miner_incentives) * (self.hparams.topk_peers / 100)))
+        n_peers = max(self.hparams.minimum_peers, n_topk_peers)
+        
+        # Take top n_peers by incentive
+        self.peers = [uid for uid, _ in miner_incentives[:n_peers]]
+        
+        logger.info(
+            f"Updated peers (top {self.hparams.topk_peers}% or minimum {self.hparams.minimum_peers}): {self.peers}"
+        )
 
 
 def get_own_bucket() -> Bucket:

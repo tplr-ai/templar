@@ -23,6 +23,7 @@ import random
 import asyncio
 import argparse
 import threading
+import os
 
 # Third party
 import torch
@@ -140,6 +141,10 @@ class Validator:
             hparams=self.hparams,
         )
 
+        self.bucket = self.comms.get_own_bucket()
+        self.comms.try_commit(self.wallet, self.bucket)
+        self.comms.fetch_commitments()
+        
         # Init peers
         if not self.config.peers:
             self.peers = self.comms.peers
@@ -153,10 +158,11 @@ class Validator:
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         self.sync_window = self.current_window
 
-        # Init scores
+        # Init scores and tracking
         self.scores = torch.zeros(self.metagraph.n, dtype=torch.float32)
         self.moving_avg_scores = torch.zeros(self.metagraph.n, dtype=torch.float32) 
         self.ma_alpha = 0.95  # Moving average decay factor
+        self.evaluated_uids = set()  # Track which UIDs we've seen
 
         # Add step tracking
         self.global_step = 0
@@ -173,22 +179,48 @@ class Validator:
         )
 
     async def run(self):
-        # Try to load latest checkpoint
+        # Try to load the latest checkpoint
         validator_uid, stake = self.comms.get_highest_stake_validator()
         if stake > 0:
             try:
-                state_dict = await self.comms.get(
-                    uid=str(validator_uid),
-                    window=self.current_window,
-                    key='checkpoint',
-                    timeout=240,
-                    local=False
-                )
-                if state_dict is not None:
-                    self.model.load_state_dict(state_dict)
-                    tplr.logger.info(f"Loaded checkpoint from validator {validator_uid} at window {self.current_window}")
+                # Calculate the most recent window that should have a checkpoint
+                expected_checkpoint_window = (self.current_window // self.hparams.checkpoint_frequency) * self.hparams.checkpoint_frequency
+
+                # Try last few windows in case of missed checkpoints
+                for window in range(expected_checkpoint_window, max(0, expected_checkpoint_window - 3 * self.hparams.checkpoint_frequency), -self.hparams.checkpoint_frequency):
+                    result = await self.comms.get(
+                        uid=str(validator_uid),
+                        window=window,
+                        key='checkpoint',
+                        timeout=240,
+                        local=False,
+                        stale_retention=10
+                    )
+                    if result is None:
+                        tplr.logger.debug(f"No checkpoint found for window {window}")
+                        continue
+
+                    checkpoint_data, global_step = result
+                    try:
+                        # Load state dicts from dictionary
+                        self.model.load_state_dict(checkpoint_data['model_state_dict'])
+                        self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+                        self.scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
+                        self.momentum = checkpoint_data['momentum']
+                        self.global_step = checkpoint_data['global_step']
+                        
+                        # Update optimizer and scheduler steps to match
+                        self.optimizer._step_count = self.global_step
+                        self.scheduler.last_epoch = self.global_step
+                        
+                        tplr.logger.info(f"Loaded checkpoint from validator {validator_uid} at window {window}, global_step={self.global_step}")
+                        break  # Successfully loaded checkpoint, exit loop
+                    except KeyError as e:
+                        tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
+                    except Exception as e:
+                        tplr.logger.error(f"Failed to load checkpoint: {e}")
                 else:
-                    tplr.logger.info("No checkpoint found, starting from scratch")
+                    tplr.logger.info("No valid checkpoints found in recent windows")
             except Exception as e:
                 tplr.logger.warning(f"Failed to load checkpoint: {e}")
         else:
@@ -200,6 +232,7 @@ class Validator:
             args=(self.loop,), 
             daemon=True
         ).start()
+        self.comms.start_commitment_fetcher()
 
         while True:
             step_window = self.current_window
@@ -207,257 +240,250 @@ class Validator:
             while self.sync_window >= (self.current_window - self.hparams.validator_offset):
                 tplr.logger.info(f'Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}')
                 await asyncio.sleep(12)
-
-            # Check if checkpointing is needed (every 500 windows)
-            if self.current_window % 500 == 0:
-                tplr.logger.info(f'Creating checkpoint at window {self.current_window}')
                 
-                try:
-                    # Upload the model state directly using put
-                    await self.comms.put(
-                        state_dict=self.model.state_dict(),
-                        uid=self.uid,
-                        window=self.current_window,
-                        key='checkpoint',
-                        local=False
-                    )
-                    tplr.logger.info(f"Successfully created checkpoint at window {self.current_window}")
-                except Exception as e:
-                    tplr.logger.error(f"Failed to create checkpoint: {e}")
-
-            # Log checkpoint creation
-            if self.global_step % 500 == 0:
-                self.wandb.log({
-                    "checkpoint_window": self.current_window,
-                    "global_step": self.global_step,
-                }, step=self.global_step)
-
             # Catch up to current - validator_offset
             while self.sync_window < (self.current_window - self.hparams.validator_offset):
                 self.sync_window += 1
+                # check this
+                step_window = self.sync_window + 1 
                 tplr.logger.info(f'Syncing window: {self.sync_window} current: {self.current_window}')
 
-                # Gather gradients from this window
-                step_grads = await self.comms.gather(
-                    state_dict={},
+                # Get gradients from all peers
+                gather_result = await self.comms.gather(
+                    state_dict=None,
                     my_uid=self.uid,
                     uids=self.peers,
-                    window=self.sync_window,
+                    window=step_window,
                     key='gradient',
-                    timeout=5,
+                    timeout=20,
                     device=self.config.device,
-                    local=False
+                    local=False,
+                    stale_retention=10,
+                    global_step=self.global_step,
                 )
 
-                # Check if any gradients were gathered
-                if step_grads is None:
-                    tplr.logger.info("No gradients received, waiting for next window.")
+                if gather_result is None:
+                    tplr.logger.info("No gradients received from any UID. Waiting for next window.")
                     continue
 
-                tplr.logger.info(f"Received gradients from UIDs: {step_grads.uids}")
+                # Now we know gather_result is not None and has uids
+                eval_uid = random.choice(self.comms.eval_peers)
+                tplr.logger.info(f'Evaluating uid: {eval_uid}')
 
-                # Decompress state and apply to gradients
-                for n, p in self.model.named_parameters():
-                    # Initialize an empty tensor for the aggregated gradient
-                    aggregated_grad = torch.zeros_like(p, device=self.config.device)
+                # Get the pages for the window infront of the current sync window
+                pages = await tplr.dataset.DatasetLoader.next_pages(
+                    offset=self.sync_window + 1,
+                    n_pages=self.hparams.pages_per_window,
+                    seed=eval_uid
+                )            
+                loader = await tplr.dataset.DatasetLoader.create(
+                    batch_size=self.hparams.batch_size,
+                    sequence_length=self.hparams.sequence_length,
+                    pages_info=pages,
+                    tokenizer=self.tokenizer
+                )   
+                tplr.logger.info(f'Evaluating uid: {eval_uid} on window: {self.sync_window + 1} with state from: {self.sync_window} and pages: {[p[1] for p in pages]}')
 
-                    # Sum gradients from all valid UIDs
-                    for idx, uid in enumerate(step_grads.uids):
-                        new_grad = self.transformer.decode(
-                            self.compressor.decompress(
-                                p.to(self.config.device),
-                                step_grads.state_dict.__dict__[n + 'idxs'][idx],
-                                step_grads.state_dict.__dict__[n + 'vals'][idx],
-                                self.xshapes[n], self.totalks[n]
-                            )
+                # Compute and log loss before gradient application
+                loss_before = 0
+                n_batches = 0
+                n_tokens = 0
+                for i, batch in enumerate(loader):
+                    input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
+                    labels = input_ids.clone()
+                    labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                    loss_before += self.model(input_ids=input_ids, labels=labels).loss.item()
+                    n_batches += 1
+                    n_tokens += (labels != -100).sum().item()
+
+                loss_before_per_batch = loss_before / n_batches if n_batches > 0 else 0
+                tplr.logger.info(f'Computed total loss before: {loss_before_per_batch}')
+
+                # Get the gradients from this miner on this window
+                eval_grad, _ = await self.comms.get(
+                    uid=eval_uid,
+                    window=self.sync_window + 1,
+                    key='gradient',
+                    timeout=5,
+                    local=False,
+                    stale_retention=10
+                )
+                if eval_grad is None:
+                    score = 0
+                    tplr.logger.info(f'Miner with uind: {eval_uid} has no gradient for window: {self.sync_window + 1}')
+                    while self.current_window == step_window:
+                        await asyncio.sleep(0.1)
+                    continue  # Proceed to the next window iteration
+
+                # Apply grad to model which is at state sync_window
+                for n, p in self.model.named_parameters():  
+                    # Decompress their gradient
+                    decompressed_grad = self.transformer.decode( 
+                        self.compressor.decompress(
+                            p.to(self.config.device),
+                            eval_grad[n + 'idxs'].to(self.config.device), 
+                            eval_grad[n + 'vals'].to(self.config.device),
+                            self.xshapes[n], self.totalks[n],
                         )
-
-                        # Aggregate the gradients (e.g., sum or average)
-                        # Here, we'll sum them up
-                        aggregated_grad.add_(new_grad)
-
-                    # Optionally average the gradient
-                    aggregated_grad.div_(len(step_grads.uids))
-
-                    # Set the aggregated gradient
-                    if p.grad is None:
-                        p.grad = aggregated_grad
-                    else:
-                        p.grad.copy_(aggregated_grad)
-                    p.grad.sign_()
-
-                # Apply the optimizer step
-                self.optimizer.step()
-                self.scheduler.step()
-
-                self.wandb.log({"lr": self.scheduler.get_last_lr()[0]}, step=self.global_step)
-                
-            # Get a random peer to eval on their gradient at self.sync_window + 1
-            eval_uid = random.choice(step_grads.uids)
-            # Get the pages for the window infront of the current sync window
-            pages = await tplr.dataset.DatasetLoader.next_pages(
-                offset=self.sync_window + 1,
-                n_pages=self.hparams.pages_per_window,
-                seed=eval_uid
-            )            
-            loader = await tplr.dataset.DatasetLoader.create(
-                batch_size=self.hparams.batch_size,
-                sequence_length=self.hparams.sequence_length,
-                pages_info=pages,
-                tokenizer=self.tokenizer
-            )   
-            tplr.logger.info(f'Evaluating uid: {eval_uid} on window: {self.sync_window + 1} with state from: {self.sync_window} and pages: {[p[1] for p in pages]}')
-            
-            # Compute and log loss before gradient application
-            loss_before = 0
-            n_tokens = 0
-            for i, batch in enumerate(loader):
-                input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
-                labels = input_ids.clone()
-                labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                loss_before += self.model(input_ids=input_ids, labels=labels).loss.item()
-                n_tokens += (labels != -100).sum().item()
-            
-            loss_before_per_token = loss_before / n_tokens if n_tokens > 0 else 0
-            tplr.logger.info(f'Computed total loss before: {loss_before} ({loss_before_per_token:.4f} per token)')
-
-            # Get the gradients from this miner on this window
-            eval_grad = await self.comms.get(
-                uid=eval_uid,
-                window=self.sync_window + 1,
-                key='gradient',
-                timeout=5,
-                local=False,
-                stale_retention=10
-            )
-            if eval_grad is None:
-                score = 0
-                tplr.logger.info(f'Miner with uid: {eval_uid} has no gradient for window: {self.sync_window + 1}')
-                continue
-
-            # Apply grad to model which is at state sync_window
-            for n, p in self.model.named_parameters():  
-                # Decompress their gradient
-                decompressed_grad = self.transformer.decode( 
-                    self.compressor.decompress(
-                        p.to(self.config.device),
-                        eval_grad[n + 'idxs'].to(self.config.device), 
-                        eval_grad[n + 'vals'].to(self.config.device),
-                        self.xshapes[n], self.totalks[n],
                     )
-                )
-                # Apply this grad to the param of the model using the learning rate of the scheduler
-                p.data.sub_(decompressed_grad, alpha=self.scheduler.get_last_lr()[0]) 
-                
-            # Compute loss after gradient application
-            loss_after = 0
-            n_tokens = 0
-            for i, batch in enumerate(loader):
-                input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
-                labels = input_ids.clone()
-                labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                loss_after += self.model(input_ids=input_ids, labels=labels).loss.item()
-                n_tokens += (labels != -100).sum().item()
-                if self.current_window != step_window:
-                    tplr.logger.info('<Exhausted window>')
-                    break
-            
-            loss_after_per_token = loss_after / n_tokens if n_tokens > 0 else 0
-            tplr.logger.info(f'Computed total loss after: {loss_after} ({loss_after_per_token:.4f} per token)')
-     
-            # Remove gradient from the model
-            for n, p in self.model.named_parameters():  
-                # Decompress their gradient
-                decompressed_grad = self.transformer.decode( 
-                    self.compressor.decompress(
-                        p.to(self.config.device),
-                        eval_grad[n + 'idxs'].to(self.config.device), 
-                        eval_grad[n + 'vals'].to(self.config.device),
-                        self.xshapes[n], self.totalks[n],
+                    # Apply this grad to the param of the model using the learning rate of the scheduler
+                    p.data.sub_(decompressed_grad, alpha=self.scheduler.get_last_lr()[0]) 
+                    
+                # Compute loss after gradient application
+                loss_after = 0
+                n_batches = 0
+                n_tokens = 0
+                for i, batch in enumerate(loader):
+                    input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
+                    labels = input_ids.clone()
+                    labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                    loss_after += self.model(input_ids=input_ids, labels=labels).loss.item()
+                    n_batches += 1
+                    n_tokens += (labels != -100).sum().item()
+                    if self.current_window != step_window:
+                        tplr.logger.info('<Exhausted window>')
+                        break
+
+                loss_after_per_batch = loss_after / n_batches if n_batches > 0 else 0
+                tplr.logger.info(f'Computed total loss after: {loss_after_per_batch}')
+
+                # Remove gradient from the model
+                for n, p in self.model.named_parameters():  
+                    # Decompress their gradient
+                    decompressed_grad = self.transformer.decode( 
+                        self.compressor.decompress(
+                            p.to(self.config.device),
+                            eval_grad[n + 'idxs'].to(self.config.device), 
+                            eval_grad[n + 'vals'].to(self.config.device),
+                            self.xshapes[n], self.totalks[n],
+                        )
                     )
-                )
-                # Apply this grad to the param of the model using the learning rate of the scheduler
-                p.data.add_(decompressed_grad, alpha=self.scheduler.get_last_lr()[0]) 
-                
-            # Compute improvement metrics
-            loss_improvement = loss_before - loss_after
-            improvement_percentage = ((loss_before - loss_after) / loss_before * 100) if loss_before != 0 else 0
+                    # Apply this grad to the param of the model using the learning rate of the scheduler
+                    p.data.add_(decompressed_grad, alpha=self.scheduler.get_last_lr()[0]) 
+                    
+                # Compute improvement metrics
+                # loss_improvement = loss_before_per_batch - loss_after_per_batch
+                # improvement_percentage = ((loss_before_per_batch - loss_after_per_batch) / loss_before_per_batch * 100) if loss_before_per_batch != 0 else 0
 
-            # Compute score
-            score = loss_before - loss_after
-            tplr.logger.info(f'score: {score}, loss_before: {loss_before_per_token:.4f}, loss_after: {loss_after_per_token:.4f}, loss_improvement: {loss_improvement:.4f}, improvement_percentage: {improvement_percentage:.2f}%, uid: {eval_uid}')
+                # Compute score using per-batch losses
+                score = loss_before_per_batch - loss_after_per_batch
+                score = max(0.0, score)  # Zero out negative improvements
 
-            # Log comprehensive metrics
-            self.wandb.log({
-                "validator/loss_before": loss_before_per_token,
-                "validator/loss_after": loss_after_per_token,
-                "validator/loss_improvement": loss_improvement,
-                "validator/improvement_percentage": improvement_percentage,
-                "validator/eval_count": self.eval_count,
-                "validator/tokens_evaluated": n_tokens,
-                "validator/learning_rate": self.scheduler.get_last_lr()[0],
-            }, step=self.global_step)
+                # Update scores and moving averages only for evaluated UIDs
+                if eval_uid not in self.evaluated_uids:
+                    self.evaluated_uids.add(eval_uid)
 
-            # Update counters
-            self.global_step += 1
-            self.eval_count += 1
+                self.scores[eval_uid] = score
+                self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
 
-            # Update scores with new score
-            self.scores[eval_uid] = self.hparams.scores_alpha * score + (1 - self.hparams.scores_alpha) * self.scores[eval_uid]
-            # Update moving average scores
-            self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
-            # Compute weights from moving average scores
-            # Zero out negative scores and apply softmax only on positive scores
-            positive_scores = torch.where(self.moving_avg_scores > 0, self.moving_avg_scores, torch.zeros_like(self.moving_avg_scores))
-            weights = positive_scores / positive_scores.sum() if positive_scores.sum() > 0 else torch.zeros_like(positive_scores)
+                # Calculate weights only for evaluated UIDs
+                evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
+                evaluated_mask[list(self.evaluated_uids)] = True
+                evaluated_scores = self.moving_avg_scores * evaluated_mask
 
-            # Log per-UID metrics
-            valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)
-            for uid_i in valid_score_indices:
-                uid = uid_i.item()
+                # Compute proportional weights (sum of evaluated scores = 1)
+                total_score = evaluated_scores.sum()
+                if total_score > 0:
+                    weights = torch.zeros_like(self.moving_avg_scores)
+                    weights[evaluated_mask] = evaluated_scores[evaluated_mask] / total_score
+                else:
+                    # If all scores are 0, assign zero weights
+                    weights = torch.zeros_like(self.moving_avg_scores)
+
+                # Log only evaluated UIDs
+                tplr.logger.info('Updated scores for evaluated UIDs:')
+                for uid in self.evaluated_uids:
+                    tplr.logger.info(f'UID {uid}:')
+                    tplr.logger.info(f'  - Raw score: {score if uid == eval_uid else "N/A"}')
+                    tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')
+                    tplr.logger.info(f'  - Weight: {weights[uid]:.4f}')
+
+                # Log per-UID metrics
+                valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)
+                for uid_i in valid_score_indices:
+                    uid = uid_i.item()
+                    self.wandb.log({
+                        f"validator/scores/{uid}": self.scores[uid_i].item(),
+                        f"validator/moving_avg_scores/{uid}": self.moving_avg_scores[uid_i].item(),
+                        f"validator/weights/{uid}": weights[uid_i].item(),
+                    }, step=self.global_step)
+
+                # Log aggregate network statistics
                 self.wandb.log({
-                    f"validator/scores/{uid}": self.scores[uid_i].item(),
-                    f"validator/moving_avg_scores/{uid}": self.moving_avg_scores[uid_i].item(),
-                    f"validator/weights/{uid}": weights[uid_i].item(),
+                    "validator/active_miners": len(valid_score_indices),
+                    "validator/mean_score": self.scores[valid_score_indices].mean().item(),
+                    "validator/mean_moving_avg_score": self.moving_avg_scores[valid_score_indices].mean().item(),
+                    "validator/max_score": self.scores.max().item(),
+                    "validator/min_score": self.scores.min().item(),
+                    "validator/max_moving_avg_score": self.moving_avg_scores.max().item(),
+                    "validator/min_moving_avg_score": self.moving_avg_scores.min().item(),
+                    "validator/mean_weight": weights[valid_score_indices].mean().item(),
+                    "validator/max_weight": weights.max().item(),
+                    "validator/min_weight": weights.min().item(),
                 }, step=self.global_step)
 
-            # Log aggregate network statistics
-            self.wandb.log({
-                "validator/active_miners": len(valid_score_indices),
-                "validator/mean_score": self.scores[valid_score_indices].mean().item(),
-                "validator/mean_moving_avg_score": self.moving_avg_scores[valid_score_indices].mean().item(),
-                "validator/max_score": self.scores.max().item(),
-                "validator/min_score": self.scores.min().item(),
-                "validator/max_moving_avg_score": self.moving_avg_scores.max().item(),
-                "validator/min_moving_avg_score": self.moving_avg_scores.min().item(),
-                "validator/mean_weight": weights[valid_score_indices].mean().item(),
-                "validator/weight_std": weights[valid_score_indices].std().item(),
-                "validator/score_std": self.scores[valid_score_indices].std().item(),
-                "validator/moving_avg_score_std": self.moving_avg_scores[valid_score_indices].std().item(),
-                "validator/max_weight": weights.max().item(),
-                "validator/min_weight": weights.min().item(),
-            }, step=self.global_step)
 
+                if self.sync_window % self.hparams.windows_per_weights == 0:
+                    # Set weights on chain
+                    self.subtensor.set_weights(
+                        wallet=self.wallet,
+                        netuid=self.config.netuid,
+                        uids=self.metagraph.uids,
+                        weights=weights,
+                        wait_for_inclusion=False,
+                        wait_for_finalization=False,
+                    )
+                    tplr.logger.info(f'Set weights on chain for window {self.sync_window}')
 
-            if self.sync_window % self.hparams.windows_per_weights == 0:
-                # Set weights on chain
-                self.subtensor.set_weights(
-                    wallet=self.wallet,
-                    netuid=self.config.netuid,
-                    uids=self.metagraph.uids,
-                    weights=weights,
-                    wait_for_inclusion=False,
-                    wait_for_finalization=False,
-                )
-                tplr.logger.info(f'Set weights on chain for window {self.sync_window}')
+                # Apply the optimizer step
+                tplr.logger.info("Finish and step.")
+                self.optimizer.step()
+                self.scheduler.step()
+                tplr.logger.info(f"Total optimization steps: {self.global_step}")
+                if self.global_step % self.hparams.checkpoint_frequency == 0:
+                    tplr.logger.info(f"Creating checkpoint at global_step {self.global_step}")
 
+                    # Create CPU copy of the checkpoint data to avoid GPU memory competition
+                    checkpoint_data = {
+                        'model_state_dict': {k: v.cpu().clone() for k, v in self.model.state_dict().items()},
+                        'optimizer_state_dict': {k: v.cpu().clone() if torch.is_tensor(v) else v 
+                                               for k, v in self.optimizer.state_dict().items()},
+                        'scheduler_state_dict': self.scheduler.state_dict(),
+                        'momentum': {k: v.cpu().clone() for k, v in self.momentum.items()},
+                        'global_step': self.global_step
+                    }
 
+                    async def _save():
+                        start_time = time.time()
+                        try:
+                            # Use a separate thread for CPU-intensive serialization
+                            loop = asyncio.get_event_loop()
+                            await loop.run_in_executor(None, lambda: torch.save(checkpoint_data, '/tmp/temp_checkpoint.pt'))
+                            
+                            await self.comms.put(
+                                state_dict=checkpoint_data,
+                                uid=str(self.uid),
+                                window=self.current_window,
+                                key='checkpoint',
+                                global_step=self.global_step,
+                                local=False
+                            )
+                            elapsed_time = time.time() - start_time
+                            tplr.logger.info(f"Successfully saved checkpoint at global_step {self.global_step} (took {elapsed_time:.2f}s)")
+                            
+                            self.wandb.log({
+                                "checkpoint/save_time": elapsed_time,
+                                "checkpoint/global_step": self.global_step,
+                            }, step=self.global_step)
+                            
+                        except Exception as e:
+                            tplr.logger.error(f"Failed to save checkpoint: {e}")
+                        finally:
+                            # Cleanup temp file
+                            if os.path.exists('/tmp/temp_checkpoint.pt'):
+                                os.remove('/tmp/temp_checkpoint.pt')
 
-            # Apply the optimizer step
-            tplr.logger.info("Finish and step.")
-            self.optimizer.step()
-            self.scheduler.step()
-            tplr.logger.info(f"Total optimization steps: {self.global_step}")
+                    asyncio.create_task(_save())
 
     def block_listener(self, loop):
         def handler(event, _u, _s):

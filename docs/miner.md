@@ -42,7 +42,6 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 - **Docker** and **Docker Compose**
 - **Git**
 - **Cloudflare R2 Bucket Configuration**:
-  - Permissions remain the same as before.
   - **Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:

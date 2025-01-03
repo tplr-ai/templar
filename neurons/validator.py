@@ -158,10 +158,11 @@ class Validator:
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         self.sync_window = self.current_window
 
-        # Init scores
+        # Init scores and tracking
         self.scores = torch.zeros(self.metagraph.n, dtype=torch.float32)
         self.moving_avg_scores = torch.zeros(self.metagraph.n, dtype=torch.float32) 
         self.ma_alpha = 0.95  # Moving average decay factor
+        self.evaluated_uids = set()  # Track which UIDs we've seen
 
         # Add step tracking
         self.global_step = 0
@@ -266,7 +267,7 @@ class Validator:
                     continue
 
                 # Now we know gather_result is not None and has uids
-                eval_uid = random.choice(gather_result.uids)
+                eval_uid = random.choice(self.comms.eval_peers)
                 tplr.logger.info(f'Evaluating uid: {eval_uid}')
 
                 # Get the pages for the window infront of the current sync window
@@ -366,43 +367,35 @@ class Validator:
 
                 # Compute score using per-batch losses
                 score = loss_before_per_batch - loss_after_per_batch
-                tplr.logger.info(f'score: {score}, loss_before: {loss_before_per_batch:.4f}, loss_after: {loss_after_per_batch:.4f}, loss_improvement: {loss_improvement:.4f}, improvement_percentage: {improvement_percentage:.2f}%, uid: {eval_uid}')
+                score = max(0.0, score)  # Zero out negative improvements
 
-                # Log comprehensive metrics
-                self.wandb.log({
-                    "validator/loss_before": loss_before_per_batch,
-                    "validator/loss_after": loss_after_per_batch,
-                    "validator/loss_improvement": loss_improvement,
-                    "validator/improvement_percentage": improvement_percentage,
-                    "validator/eval_count": self.eval_count,
-                    "validator/tokens_evaluated": n_tokens,
-                    "validator/learning_rate": self.scheduler.get_last_lr()[0],
-                }, step=self.global_step)
-
-                # Update counters
-                self.global_step += 1
-                self.eval_count += 1
-
-                # Update scores with new score
-                self.scores[eval_uid] = self.hparams.scores_alpha * score + (1 - self.hparams.scores_alpha) * self.scores[eval_uid]
-                # Update moving average scores
+                # Update scores and moving averages only for active UIDs
+                active_uids = set(self.peers)  # Only consider peers we're actually evaluating
+                self.scores[eval_uid] = score
                 self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
-                # Compute weights from moving average scores
-                # Zero out negative scores and apply softmax only on positive scores
-                positive_scores = torch.where(self.moving_avg_scores > 0, self.moving_avg_scores, torch.zeros_like(self.moving_avg_scores))
-                weights = positive_scores / positive_scores.sum() if positive_scores.sum() > 0 else torch.zeros_like(positive_scores)
 
-                # Log weight updates for all UIDs
-                                    # Log updated scores and weights
-                valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)
-                tplr.logger.info('Updated scores for all UIDs:')
-                for uid_i in valid_score_indices:
-                    uid = uid_i.item()
+                # Calculate weights only for active UIDs
+                active_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
+                active_mask[list(active_uids)] = True
+                active_scores = self.moving_avg_scores * active_mask
+
+                # Compute proportional weights (sum of active scores = 1)
+                total_score = active_scores.sum()
+                if total_score > 0:
+                    weights = torch.zeros_like(self.moving_avg_scores)
+                    weights[active_mask] = active_scores[active_mask] / total_score
+                else:
+                    # If all scores are 0, distribute equally among active UIDs
+                    weights = torch.zeros_like(self.moving_avg_scores)
+                    weights[active_mask] = 1.0 / len(active_uids)
+
+                # Log only active UIDs
+                tplr.logger.info('Updated scores for active UIDs:')
+                for uid in active_uids:
                     tplr.logger.info(f'UID {uid}:')
-                    tplr.logger.info(f'  - Score: {self.scores[uid_i]:.4f}')
-                    tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid_i]:.4f}') 
-                    tplr.logger.info(f'  - Weight: {weights[uid_i]:.4f}')
-
+                    tplr.logger.info(f'  - Raw score: {score if uid == eval_uid else "N/A"}')
+                    tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')
+                    tplr.logger.info(f'  - Weight: {weights[uid]:.4f}')
 
                 # Log per-UID metrics
                 valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)

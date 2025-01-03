@@ -289,7 +289,6 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    --device cuda \
    --subtensor.network <network> \
    --sync_state \
-   --use_wandb \
    --netuid <netuid> 
   ```
 

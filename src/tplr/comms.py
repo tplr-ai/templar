@@ -245,10 +245,11 @@ class Comms(ChainManager):
         uid: str,
         window: int,
         key: str,
+        global_step: int = 0,
         local: bool = True,
         stale_retention: int = 10,
     ):
-        """PUT operation: Store the state_dict either locally or in R2."""
+        """PUT operation: Store the state_dict and global_step."""
         tplr.logger.debug(f"PUT {uid}/{window}/{key} -->")
 
         # Create versioned filename
@@ -258,8 +259,19 @@ class Comms(ChainManager):
         temp_file_path = tempfile.mktemp(suffix=".pt")
 
         try:
-            # Save state_dict to the temporary file
-            torch.save(state_dict, temp_file_path)
+            # Prepare the data to be saved
+            if key == "checkpoint":
+                save_data = (
+                    state_dict  # state_dict already contains all checkpoint data
+                )
+            else:
+                save_data = {
+                    "state_dict": state_dict,
+                    "global_step": global_step,
+                }
+
+            # Save the combined data
+            torch.save(save_data, temp_file_path)
 
             if local:
                 # Local storage logic remains unchanged
@@ -310,8 +322,8 @@ class Comms(ChainManager):
         timeout: int = 30,
         local: bool = True,
         stale_retention: int = 10,
-    ) -> Optional[dict]:
-        """GET operation: Retrieve state_dict from local or R2 storage."""
+    ) -> Optional[Tuple[dict, int]]:
+        """GET operation: Retrieve state_dict and global_step."""
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         full_key = f"{uid}/{window}/{filename}"
         tplr.logger.debug(f"GET {full_key} -->")
@@ -328,8 +340,12 @@ class Comms(ChainManager):
                 if not os.path.exists(local_path):
                     tplr.logger.debug(f"Local file not found: {local_path}")
                     return None
-                state_dict = torch.load(local_path, weights_only=True)
-                return state_dict
+                loaded_data = torch.load(local_path, weights_only=True)
+                if key == "checkpoint":
+                    return loaded_data, None
+                state_dict = loaded_data.get("state_dict")
+                global_step = loaded_data.get("global_step", 0)
+                return state_dict, global_step
             else:
                 # Cleanup old S3 data
                 await self.cleanup_s3_data(
@@ -362,7 +378,7 @@ class Comms(ChainManager):
                         error_code = e.response["Error"]["Code"]
                         if error_code == "404":
                             tplr.logger.debug(
-                                f"Gradient not found for uid {uid} at window {window}. Skipping."
+                                f"Data not found for uid {uid} at window {window}. Skipping."
                             )
                             return None
                         else:
@@ -389,11 +405,15 @@ class Comms(ChainManager):
                         # Load the object
                         try:
                             with open(temp_file_path, "rb") as f:
-                                state_dict = torch.load(f, weights_only=True)
-                            return state_dict
+                                loaded_data = torch.load(f, weights_only=True)
+                            if key == "checkpoint":
+                                return loaded_data, None
+                            state_dict = loaded_data.get("state_dict")
+                            global_step = loaded_data.get("global_step", 0)
+                            return state_dict, global_step
                         except Exception as e:
                             tplr.logger.debug(
-                                f"Error loading state_dict from {full_key}: {e}"
+                                f"Error loading data from {full_key}: {e}"
                             )
                             return None
 
@@ -437,27 +457,29 @@ class Comms(ChainManager):
 
     async def gather(
         self,
-        state_dict: Dict[str, torch.Tensor],
+        state_dict: Optional[Dict[str, torch.Tensor]],
         my_uid: str,
         uids: List[str],
         window: int,
         key: str,
         timeout: int,
         device: str,
+        global_step: int,
         local: bool = True,
         stale_retention: int = 10,
-    ) -> SimpleNamespace:
+    ) -> Optional[SimpleNamespace]:
         """Gather operation."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
-        # Put own state_dict if available
-        if state_dict is not None:
+        # Put own state if provided
+        if my_uid is not None and state_dict is not None:
             await self.put(
                 state_dict=state_dict,
                 uid=str(my_uid),
                 window=window,
                 key=key,
+                global_step=global_step,
                 local=local,
                 stale_retention=stale_retention,
             )
@@ -482,53 +504,60 @@ class Comms(ChainManager):
             for uid in uids
         ]
 
-        # Initialize the aggregated state dict
+        # Initialize variables
         aggregated_state_dict = {}
-        successes = []
         valid_uids = []
+        global_steps = []
 
         # Process responses
         responses = await asyncio.gather(*gather_tasks)
-        for idx, resp in enumerate(responses):
+        for idx, response in enumerate(responses):
             uid = uids[idx]
-            if resp is None:
-                successes.append(False)
+
+            # Skip if no response
+            if response is None:
+                tplr.logger.debug(f"No data received from UID {uid}")
                 continue
 
-            successes.append(True)
+            try:
+                state_dict_resp, global_step_resp = response
+            except (TypeError, ValueError) as e:
+                tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
+                continue
+
+            # Skip if no state dict
+            if state_dict_resp is None:
+                tplr.logger.debug(f"Empty state dict from UID {uid}")
+                continue
+
             valid_uids.append(uid)
+            global_steps.append(global_step_resp)
 
-            # Initialize aggregated_state_dict if empty
-            if not aggregated_state_dict:
-                aggregated_state_dict = {param_name: [] for param_name in resp.keys()}
-
-            # Append tensors to aggregated_state_dict
-            for param_name, tensor in resp.items():
+            # Add tensors to aggregated_state_dict
+            for param_name, tensor in state_dict_resp.items():
+                if param_name not in aggregated_state_dict:
+                    aggregated_state_dict[param_name] = []
                 aggregated_state_dict[param_name].append(tensor.to(device))
                 metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
 
-        # Compute success rate
-        success_rate = sum(successes) / len(successes) if successes else 0
-        total_time = time.time() - start_time
-
-        # If no gradients were gathered, return an indicator
+        # If no valid responses, return None
         if not valid_uids:
-            tplr.logger.info("No gradients received from any UID.")
-            return None  # or return an appropriate indicator
+            tplr.logger.info("No valid gradients received from any UID")
+            return None
 
-        # For batch processing, ensure the lists are aligned
-        # with the same order for each parameter
-        aggregated_state_dict_namespace = SimpleNamespace(**aggregated_state_dict)
-
-        return SimpleNamespace(
-            time=total_time,
+        # Create result namespace
+        result = SimpleNamespace(
+            time=time.time() - start_time,
             upload_bytes=metrics["upload_bytes"],
             download_bytes=metrics["download_bytes"],
-            success_rate=success_rate,
-            successes=successes,
-            state_dict=aggregated_state_dict_namespace,
-            uids=valid_uids,  # Include the list of UIDs that provided gradients
+            success_rate=len(valid_uids) / len(uids),
+            state_dict=SimpleNamespace(**aggregated_state_dict),
+            uids=valid_uids,
+            global_steps=global_steps,
         )
+
+        tplr.logger.debug(f"Successfully gathered from UIDs: {valid_uids}")
+        return result
 
     async def upload_large_file(self, file_path: str, filename: str) -> bool:
         """

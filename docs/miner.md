@@ -1,7 +1,3 @@
-Sure, I'll update the documentation to reflect the new recommended method using Docker Compose and ensure it's coherent following the Diátaxis framework. I'll also populate the `.env.example` file with the required variables and provide instructions for running without Docker.
-
----
-
 # Miner Setup
 
 This document provides a comprehensive guide on how to set up and run a miner using `miner.py`. Miners are crucial components of **τemplar**, responsible for training the model on assigned data subsets and sharing their gradients with peers.

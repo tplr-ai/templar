@@ -300,7 +300,7 @@ class Validator:
                 tplr.logger.info(f'Computed total loss before: {loss_before_per_batch}')
 
                 # Get the gradients from this miner on this window
-                eval_grad, _ = await self.comms.get(
+                result = await self.comms.get(
                     uid=eval_uid,
                     window=self.sync_window + 1,
                     key='gradient',
@@ -308,12 +308,19 @@ class Validator:
                     local=False,
                     stale_retention=10
                 )
-                if eval_grad is None:
-                    score = 0
-                    tplr.logger.info(f'Miner with uind: {eval_uid} has no gradient for window: {self.sync_window + 1}')
+                if result is None:
+                    tplr.logger.info(f'Miner with uid: {eval_uid} has no gradient for window: {self.sync_window + 1}')
+                    # Set score to 0 for this evaluation
+                    score = 0.0
+                    self.scores[eval_uid] = score
+                    self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid]
+                    
+                    # Skip to next window
                     while self.current_window == step_window:
                         await asyncio.sleep(0.1)
-                    continue  # Proceed to the next window iteration
+                    continue
+
+                eval_grad, _ = result  # Unpack only if result is not None
 
                 # Apply grad to model which is at state sync_window
                 for n, p in self.model.named_parameters():  

@@ -166,7 +166,7 @@ class ChainManager:
             except Exception:
                 time.sleep(1)
 
-    async def commit(self, wallet: "bt.wallet", bucket: Bucket) -> None:
+    def commit(self, wallet: "bt.wallet", bucket: Bucket) -> None:
         """Commits bucket configuration to the chain.
 
         Args:

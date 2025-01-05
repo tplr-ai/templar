@@ -116,7 +116,7 @@ class Miner:
         self.scheduler = SequentialLR(
             self.optimizer,
             schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[10],
+            milestones=[250],
         )
 
         # Init compression

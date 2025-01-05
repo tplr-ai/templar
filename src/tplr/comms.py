@@ -325,8 +325,8 @@ class Comms(ChainManager):
     ) -> Optional[Tuple[dict, int]]:
         """GET operation: Retrieve state_dict and global_step."""
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
-        full_key = f"{uid}/{window}/{filename}"
-        tplr.logger.debug(f"GET {full_key} -->")
+        # full_key = f"{uid}/{window}/{filename}"
+        tplr.logger.debug(f"GET {filename} -->")
 
         try:
             if local:
@@ -354,6 +354,7 @@ class Comms(ChainManager):
 
                 # Get the peer's bucket from commitments
                 peer_bucket = self.commitments.get(int(uid))
+                tplr.logger.info(f'getting checkpoint from peer : {peer_bucket}')
                 if not peer_bucket:
                     tplr.logger.debug(f"No bucket found for UID {uid}")
                     return None
@@ -413,16 +414,16 @@ class Comms(ChainManager):
                             return state_dict, global_step
                         except Exception as e:
                             tplr.logger.debug(
-                                f"Error loading data from {full_key}: {e}"
+                                f"Error loading data from {filename}: {e}"
                             )
                             return None
 
         except Exception as e:
-            tplr.logger.debug(f"GET error {full_key}: {e}")
+            tplr.logger.debug(f"GET error {filename}: {e}")
             return None
 
         finally:
-            tplr.logger.debug(f"GET {full_key} <--")
+            tplr.logger.debug(f"GET {filename} <--")
 
     async def get_with_retry(
         self,

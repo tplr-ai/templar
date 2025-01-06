@@ -200,7 +200,6 @@ class Validator:
         self.comms.start_commitment_fetcher()
 
         while True:
-            loop_start = perf_counter()
             step_window = self.current_window
 
             # 1. Wait for validator offset - single wait loop
@@ -240,8 +239,10 @@ class Validator:
                         vals = getattr(gather_result.state_dict, vals_key, None)
                         
                         if idxs is not None and vals is not None:
-                            if not isinstance(idxs, (list, tuple)): idxs = [idxs]
-                            if not isinstance(vals, (list, tuple)): vals = [vals]
+                            if not isinstance(idxs, (list, tuple)):
+                                idxs = [idxs]
+                            if not isinstance(vals, (list, tuple)):
+                                vals = [vals]
                             
                             new_grad = self.transformer.decode(
                                 self.compressor.batch_decompress(
@@ -265,7 +266,13 @@ class Validator:
             # 4. Select miner to evaluate
             eval_uid = random.choice(self.comms.eval_peers)
             tplr.logger.info(f'Evaluating uid: {eval_uid}')
-            
+
+            # Save original model state before evaluation
+            original_state = {
+                'model_state': self.model.state_dict().copy(),
+                'optimizer_state': self.optimizer.state_dict()
+            }
+
             # 5. Get individual miner's gradient
             eval_result = await self.comms.get(
                 uid=str(eval_uid),
@@ -294,6 +301,7 @@ class Validator:
             )   
 
             # 7. Compute initial loss
+            self.model.eval()
             loss_before = 0
             n_batches = 0
             n_tokens = 0
@@ -309,24 +317,26 @@ class Validator:
                     torch.cuda.empty_cache()
 
             loss_before_per_batch = loss_before / n_batches if n_batches > 0 else 0
-            tplr.logger.info(f'Loss before: {loss_before_per_batch:.4f} (total tokens: {n_tokens})')
+            tplr.logger.info(f'Loss before: {loss_before_per_batch} (total tokens: {n_tokens})')
 
             # Apply evaluated miner's gradient
+            self.model.train()
             if eval_result is not None:
-                state_dict, _ = eval_result  # Unpack the tuple returned by get()
+                state_dict, _ = eval_result
                 self.optimizer.zero_grad()
                 self.model.zero_grad()
                 
                 for n, p in self.model.named_parameters():
                     idxs_key = n + 'idxs'
                     vals_key = n + 'vals'
-                    # Get attributes from state_dict directly as it's a dictionary
                     idxs = state_dict.get(idxs_key)
                     vals = state_dict.get(vals_key)
                     
                     if idxs is not None and vals is not None:
-                        if not isinstance(idxs, (list, tuple)): idxs = [idxs]
-                        if not isinstance(vals, (list, tuple)): vals = [vals]
+                        if not isinstance(idxs, (list, tuple)):
+                            idxs = [idxs]
+                        if not isinstance(vals, (list, tuple)):
+                            vals = [vals]
                         
                         new_grad = self.transformer.decode(
                             self.compressor.batch_decompress(
@@ -342,10 +352,14 @@ class Validator:
                         else:
                             p.grad.copy_(new_grad)
                         p.grad.sign_()
-
+                
+                # Add gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
                 torch.cuda.empty_cache()
 
             # 8. Compute final loss
+            self.model.eval()
             loss_after = 0
             n_batches = 0
             n_tokens = 0
@@ -361,10 +375,16 @@ class Validator:
                     torch.cuda.empty_cache()
 
             loss_after_per_batch = loss_after / n_batches if n_batches > 0 else 0
-            
+            tplr.logger.info(f'Loss after: {loss_after_per_batch} (total tokens: {n_tokens})')
+            tplr.logger.info(f"Loss improvement: {(loss_before_per_batch - loss_after_per_batch)}")
+
+            # Revert to original state
+            self.model.load_state_dict(original_state['model_state'])
+            self.optimizer.load_state_dict(original_state['optimizer_state'])
+            self.model.train()
 
             # 9. Update scores
-            score = loss_before_per_batch - loss_after_per_batch
+            score = (loss_before_per_batch - loss_after_per_batch)* 10e6
             score = max(0.0, score)
             
             if eval_uid not in self.evaluated_uids:
@@ -387,7 +407,7 @@ class Validator:
             tplr.logger.info('Updated scores for evaluated UIDs:')
             for uid in self.evaluated_uids:
                 tplr.logger.info(f'UID {uid}:')
-                tplr.logger.info(f'  - Raw score: {self.scores[uid]}')
+                tplr.logger.info(f'  - Last score: {self.scores[uid]}')
                 tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')
                 tplr.logger.info(f'  - Weight: {weights[uid]:.4f}')
 
@@ -432,6 +452,52 @@ class Validator:
                 "validator/scores/mean": self.scores[valid_score_indices].mean().item(),
                 "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item()
             }, step=self.global_step)
+
+            # Add back checkpointing logic after the optimizer step
+            if self.global_step % self.hparams.checkpoint_frequency == 0:
+                tplr.logger.info(f"Creating checkpoint at global_step {self.global_step}")
+
+                # Create CPU copy of the checkpoint data to avoid GPU memory competition
+                checkpoint_data = {
+                    'model_state_dict': {k: v.cpu().clone() for k, v in self.model.state_dict().items()},
+                    'optimizer_state_dict': {k: v.cpu().clone() if torch.is_tensor(v) else v 
+                                           for k, v in self.optimizer.state_dict().items()},
+                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'momentum': {k: v.cpu().clone() for k, v in self.momentum.items()},
+                    'global_step': self.global_step
+                }
+
+                async def _save():
+                    start_time = time.time()
+                    try:
+                        # Use a separate thread for CPU-intensive serialization
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(None, lambda: torch.save(checkpoint_data, '/tmp/temp_checkpoint.pt'))
+                        
+                        await self.comms.put(
+                            state_dict=checkpoint_data,
+                            uid=str(self.uid),
+                            window=self.current_window,
+                            key='checkpoint',
+                            global_step=self.global_step,
+                            local=False
+                        )
+                        elapsed_time = time.time() - start_time
+                        tplr.logger.info(f"Successfully saved checkpoint at global_step {self.global_step} (took {elapsed_time:.2f}s)")
+                        
+                        self.wandb.log({
+                            "checkpoint/save_time": elapsed_time,
+                            "checkpoint/global_step": self.global_step,
+                        }, step=self.global_step)
+                        
+                    except Exception as e:
+                        tplr.logger.error(f"Failed to save checkpoint: {e}")
+                    finally:
+                        # Cleanup temp file
+                        if os.path.exists('/tmp/temp_checkpoint.pt'):
+                            os.remove('/tmp/temp_checkpoint.pt')
+
+                asyncio.create_task(_save())
 
     def block_listener(self, loop):
         def handler(event, _u, _s):

@@ -11,46 +11,31 @@ from .logging import logger
 def initialize_wandb(
     run_prefix: str, uid: str, config: any, group: str, job_type: str
 ) -> Run:
-    """Initialize WandB run with persistence and resumption capabilities.
-
-    Args:
-        run_prefix (str): Prefix for the run name (e.g., 'V' for validator, 'M' for miner)
-        uid (str): Unique identifier for the run
-        config (any): Configuration object containing project and other settings
-        group (str): Group name for organizing runs
-        job_type (str): Type of job (e.g., 'validation', 'training')
-
-    Returns:
-        Run: Initialized WandB run object
-    """
-    # Ensure the wandb directory exists
+    """Initialize WandB run with version tracking for unified workspace management."""
     wandb_dir = os.path.join(os.getcwd(), "wandb")
     os.makedirs(wandb_dir, exist_ok=True)
 
-    # Define the run ID file path inside the wandb directory
-    run_id_file = os.path.join(
-        wandb_dir, f"wandb_run_id_{run_prefix}{uid}_{__version__}.txt"
-    )
+    # Modified run ID file to not include version
+    run_id_file = os.path.join(wandb_dir, f"wandb_run_id_{run_prefix}{uid}.txt")
 
-    # Check for existing run and verify it still exists in wandb
+    # Check for existing run
     run_id = None
     if os.path.exists(run_id_file):
         with open(run_id_file, "r") as f:
             run_id = f.read().strip()
 
-        # Verify if run still exists in wandb
         try:
             api = wandb.Api()
-            api.run(f"tplr/{config.project}-v{__version__}/{run_id}")
+            api.run(f"tplr/{config.project}/{run_id}")
             logger.info(f"Found existing run ID: {run_id}")
         except Exception:
             logger.info(f"Previous run {run_id} not found in WandB, starting new run")
             run_id = None
             os.remove(run_id_file)
 
-    # Initialize WandB
+    # Initialize WandB with version as a tag
     run = wandb.init(
-        project=f"{config.project}-v{__version__}",
+        project=config.project,
         entity="tplr",
         id=run_id,
         resume="must" if run_id else "never",
@@ -59,20 +44,69 @@ def initialize_wandb(
         group=group,
         job_type=job_type,
         dir=wandb_dir,
+        tags=[f"v{__version__}"],
         settings=wandb.Settings(
             init_timeout=300,
             _disable_stats=True,
         ),
     )
 
-    # Special handling for evaluator
-    if run_prefix == "E":
-        tasks = config.tasks.split(",")
-        for task in tasks:
-            metric_name = f"eval/{task}"
-            wandb.define_metric(
-                name=metric_name, step_metric="global_step", plot=True, summary="max"
-            )
+    # Add version history to run config
+    if "version_history" not in run.config:
+        run.config.update({"version_history": [__version__]}, allow_val_change=True)
+    elif __version__ not in run.config.version_history:
+        version_history = run.config.version_history + [__version__]
+        run.config.update({"version_history": version_history}, allow_val_change=True)
+
+    # Keep current version in config
+    run.config.update({"current_version": __version__}, allow_val_change=True)
+
+    # Track the last step seen for each version
+    version_steps = {}
+
+    # Get the current global step from WandB if resuming
+    if run_id:
+        try:
+            api = wandb.Api()
+            run_data = api.run(f"tplr/{config.project}/{run_id}")
+            history = run_data.scan_history()
+            global_step = max((row.get("_step", 0) for row in history), default=0)
+            version_steps["global"] = global_step
+        except Exception:
+            version_steps["global"] = 0
+    else:
+        version_steps["global"] = 0
+
+    # Create a wrapper for wandb.log that automatically adds version
+    original_log = run.log
+
+    def log_with_version(metrics, **kwargs):
+        # Increment global step
+        version_steps["global"] += 1
+        current_step = version_steps["global"]
+
+        # Initialize version step if needed
+        if __version__ not in version_steps:
+            version_steps[__version__] = current_step
+
+        # Use version-specific step counter
+        versioned_metrics = {}
+        for k, v in metrics.items():
+            # Add metric under current version
+            versioned_metrics[f"v{__version__}/{k}"] = v
+            # Also log under "latest/{k}" with version-specific step
+            versioned_metrics[f"latest/{k}"] = v
+
+        # Add version-specific step counter
+        versioned_metrics[f"v{__version__}/step"] = current_step
+
+        # Always use the global step for logging
+        kwargs["step"] = current_step
+
+        # Log metrics
+        original_log(versioned_metrics, **kwargs)
+
+    run.log = log_with_version
 
     # Save run ID for future resumption
     if not run_id:
@@ -80,9 +114,3 @@ def initialize_wandb(
             f.write(run.id)
 
     return run
-
-
-# TODO: Add error handling for network issues
-# TODO: Add retry mechanism for wandb initialization
-# TODO: Add cleanup mechanism for old run ID files
-# TODO: Add support for custom wandb settings

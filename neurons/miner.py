@@ -116,7 +116,7 @@ class Miner:
         self.scheduler = SequentialLR(
             self.optimizer,
             schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[10],
+            milestones=[250],
         )
 
         # Init compression
@@ -177,8 +177,9 @@ class Miner:
     # Main training loop.
     async def run(self):
         # Try to load latest checkpoint
-        validator_uid, stake = self.comms.get_highest_stake_validator()
-        if stake > 0:
+        validator_uid =  self.metagraph.S.argmax().item()
+        tplr.logger.info(f"Found validator with highest stake: {validator_uid}")
+        if validator_uid is not None:
             try:
                 # Calculate the most recent window that should have a checkpoint
                 expected_checkpoint_window = (self.current_window // self.hparams.checkpoint_frequency) * self.hparams.checkpoint_frequency

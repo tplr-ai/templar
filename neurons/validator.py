@@ -467,6 +467,26 @@ class Validator:
                 }, step=self.global_step)
                 tplr.logger.info(f"Window {self.sync_window} completed in {window_duration:.2f}s")
 
+                # Increment global step and sync optimizer/scheduler
+                self.global_step += 1
+                self.optimizer._step_count = self.global_step
+                self.scheduler.last_epoch = self.global_step
+
+                # Log metrics with updated step
+                self.wandb.log({
+                    "validator/active_miners": len(valid_score_indices),
+                    "validator/mean_score": self.scores[valid_score_indices].mean().item(),
+                    "validator/mean_moving_avg_score": self.moving_avg_scores[valid_score_indices].mean().item(),
+                    "validator/max_score": self.scores.max().item(),
+                    "validator/min_score": self.scores.min().item(),
+                    "validator/max_moving_avg_score": self.moving_avg_scores.max().item(),
+                    "validator/min_moving_avg_score": self.moving_avg_scores.min().item(),
+                    "validator/mean_weight": weights[valid_score_indices].mean().item(),
+                    "validator/max_weight": weights.max().item(),
+                    "validator/min_weight": weights.min().item(),
+                    "optimizer/learning_rate": self.scheduler.get_last_lr()[0],
+                }, step=self.global_step)
+
             loop_duration = perf_counter() - loop_start
             self.wandb.log({
                 "timing/main_loop_duration": loop_duration,

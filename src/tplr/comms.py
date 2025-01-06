@@ -354,7 +354,7 @@ class Comms(ChainManager):
 
                 # Get the peer's bucket from commitments
                 peer_bucket = self.commitments.get(int(uid))
-                tplr.logger.info(f'getting checkpoint from peer : {peer_bucket}')
+                tplr.logger.debug(f"getting {key} from peer : {peer_bucket}")
                 if not peer_bucket:
                     tplr.logger.debug(f"No bucket found for UID {uid}")
                     return None
@@ -719,24 +719,3 @@ class Comms(ChainManager):
 
         except Exception as e:
             tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
-
-    def get_highest_stake_validator(self) -> Tuple[Optional[int], float]:
-        """Returns the UID and stake of the neuron with the highest stake."""
-        stakes = self.metagraph.S
-
-        # Convert numpy array to torch tensor if needed
-        if isinstance(stakes, np.ndarray):
-            stakes = torch.from_numpy(stakes)
-
-        # Check if any stakes are non-zero
-        if torch.all(stakes == 0):
-            return None, 0.0
-
-        highest_stake_uid = torch.argmax(stakes).item()
-        stake = stakes[highest_stake_uid].item()
-
-        # Validate the stake is actually non-zero
-        if stake == 0:
-            return None, 0.0
-
-        return highest_stake_uid, stake

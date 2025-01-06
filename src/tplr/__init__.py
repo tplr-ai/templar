@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "0.0.55556"
+__version__ = "0.0.555590"
 
 # Import package.
 from .chain import *

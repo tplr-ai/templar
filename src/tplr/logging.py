@@ -58,7 +58,7 @@ logging.basicConfig(
             rich_tracebacks=True,
             highlighter=NullHighlighter(),
             show_level=False,
-            show_time=False,
+            show_time=True,
             show_path=False,
         )
     ],

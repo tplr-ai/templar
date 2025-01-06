@@ -4,7 +4,6 @@ import torch
 import asyncio
 import aiofiles
 import tempfile
-import numpy as np
 import bittensor as bt
 from typing import List, Dict, Optional, Tuple
 from types import SimpleNamespace
@@ -325,8 +324,8 @@ class Comms(ChainManager):
     ) -> Optional[Tuple[dict, int]]:
         """GET operation: Retrieve state_dict and global_step."""
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
-        full_key = f"{uid}/{window}/{filename}"
-        tplr.logger.debug(f"GET {full_key} -->")
+        # full_key = f"{uid}/{window}/{filename}"
+        tplr.logger.debug(f"GET {filename} -->")
 
         try:
             if local:
@@ -354,6 +353,7 @@ class Comms(ChainManager):
 
                 # Get the peer's bucket from commitments
                 peer_bucket = self.commitments.get(int(uid))
+                tplr.logger.debug(f"getting {key} from peer : {peer_bucket}")
                 if not peer_bucket:
                     tplr.logger.debug(f"No bucket found for UID {uid}")
                     return None
@@ -413,16 +413,16 @@ class Comms(ChainManager):
                             return state_dict, global_step
                         except Exception as e:
                             tplr.logger.debug(
-                                f"Error loading data from {full_key}: {e}"
+                                f"Error loading data from {filename}: {e}"
                             )
                             return None
 
         except Exception as e:
-            tplr.logger.debug(f"GET error {full_key}: {e}")
+            tplr.logger.debug(f"GET error {filename}: {e}")
             return None
 
         finally:
-            tplr.logger.debug(f"GET {full_key} <--")
+            tplr.logger.debug(f"GET {filename} <--")
 
     async def get_with_retry(
         self,
@@ -718,24 +718,3 @@ class Comms(ChainManager):
 
         except Exception as e:
             tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
-
-    def get_highest_stake_validator(self) -> Tuple[Optional[int], float]:
-        """Returns the UID and stake of the neuron with the highest stake."""
-        stakes = self.metagraph.S
-
-        # Convert numpy array to torch tensor if needed
-        if isinstance(stakes, np.ndarray):
-            stakes = torch.from_numpy(stakes)
-
-        # Check if any stakes are non-zero
-        if torch.all(stakes == 0):
-            return None, 0.0
-
-        highest_stake_uid = torch.argmax(stakes).item()
-        stake = stakes[highest_stake_uid].item()
-
-        # Validate the stake is actually non-zero
-        if stake == 0:
-            return None, 0.0
-
-        return highest_stake_uid, stake

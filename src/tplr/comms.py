@@ -4,7 +4,6 @@ import torch
 import asyncio
 import aiofiles
 import tempfile
-import numpy as np
 import bittensor as bt
 from typing import List, Dict, Optional, Tuple
 from types import SimpleNamespace

@@ -59,7 +59,7 @@ def timer(name: str, wandb_obj=None, step=None):
     duration = perf_counter() - start
     tplr.logger.debug(f"{name} took {duration:.2f}s")
     if wandb_obj and step is not None:
-        wandb_obj.log({f"timing/{name}": duration}, step=step)
+        wandb_obj.log({f"validator/{name}": duration}, step=step)
 
 class Validator:
     @staticmethod
@@ -309,6 +309,41 @@ class Validator:
                     torch.cuda.empty_cache()
 
             loss_before_per_batch = loss_before / n_batches if n_batches > 0 else 0
+            tplr.logger.info(f'Loss before: {loss_before_per_batch:.4f} (total tokens: {n_tokens})')
+
+            # Apply evaluated miner's gradient
+            if eval_result is not None:
+                state_dict, _ = eval_result  # Unpack the tuple returned by get()
+                self.optimizer.zero_grad()
+                self.model.zero_grad()
+                
+                for n, p in self.model.named_parameters():
+                    idxs_key = n + 'idxs'
+                    vals_key = n + 'vals'
+                    # Get attributes from state_dict directly as it's a dictionary
+                    idxs = state_dict.get(idxs_key)
+                    vals = state_dict.get(vals_key)
+                    
+                    if idxs is not None and vals is not None:
+                        if not isinstance(idxs, (list, tuple)): idxs = [idxs]
+                        if not isinstance(vals, (list, tuple)): vals = [vals]
+                        
+                        new_grad = self.transformer.decode(
+                            self.compressor.batch_decompress(
+                                p.to(self.config.device),
+                                idxs,
+                                vals,
+                                self.xshapes[n],
+                                self.totalks[n]
+                            )
+                        )
+                        if p.grad is None:
+                            p.grad = new_grad
+                        else:
+                            p.grad.copy_(new_grad)
+                        p.grad.sign_()
+
+                torch.cuda.empty_cache()
 
             # 8. Compute final loss
             loss_after = 0
@@ -326,6 +361,7 @@ class Validator:
                     torch.cuda.empty_cache()
 
             loss_after_per_batch = loss_after / n_batches if n_batches > 0 else 0
+            
 
             # 9. Update scores
             score = loss_before_per_batch - loss_after_per_batch
@@ -334,20 +370,30 @@ class Validator:
             if eval_uid not in self.evaluated_uids:
                 self.evaluated_uids.add(eval_uid)
             
+            # Update scores and moving averages
             self.scores[eval_uid] = score
             self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
 
-            # 10. Set weights if needed
+            # Calculate weights
+            weights = torch.zeros_like(self.moving_avg_scores)
+            evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
+            evaluated_mask[list(self.evaluated_uids)] = True
+            evaluated_scores = self.moving_avg_scores * evaluated_mask
+            total_score = evaluated_scores.sum()
+            if total_score > 0:
+                weights[evaluated_mask] = evaluated_scores[evaluated_mask] / total_score
+
+            # Log only evaluated UIDs
+            tplr.logger.info('Updated scores for evaluated UIDs:')
+            for uid in self.evaluated_uids:
+                tplr.logger.info(f'UID {uid}:')
+                tplr.logger.info(f'  - Raw score: {self.scores[uid]}')
+                tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')
+                tplr.logger.info(f'  - Weight: {weights[uid]:.4f}')
+
+            # Only set weights periodically
             if self.sync_window % self.hparams.windows_per_weights == 0:
                 with timer("set_weights", self.wandb, self.global_step):
-                    weights = torch.zeros_like(self.moving_avg_scores)
-                    evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
-                    evaluated_mask[list(self.evaluated_uids)] = True
-                    evaluated_scores = self.moving_avg_scores * evaluated_mask
-                    total_score = evaluated_scores.sum()
-                    if total_score > 0:
-                        weights[evaluated_mask] = evaluated_scores[evaluated_mask] / total_score
-                    
                     self.subtensor.set_weights(
                         wallet=self.wallet,
                         netuid=self.config.netuid,
@@ -357,7 +403,7 @@ class Validator:
                         wait_for_finalization=False,
                     )
 
-            # 11. Log metrics and cleanup
+            # 10. Log metrics and cleanup
             self.global_step += 1
             del loader, pages  # Explicit cleanup of dataset objects
             torch.cuda.empty_cache()
@@ -384,14 +430,7 @@ class Validator:
                 "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
                 "validator/network/active_miners": len(valid_score_indices),
                 "validator/scores/mean": self.scores[valid_score_indices].mean().item(),
-                "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item(),
-                "validator/scores/max": self.scores.max().item(),
-                "validator/scores/min": self.scores[valid_score_indices].min().item(),
-                "validator/moving_avg_scores/max": self.moving_avg_scores.max().item(),
-                "validator/moving_avg_scores/min": self.moving_avg_scores[valid_score_indices].min().item(),
-                "validator/weights/mean": weights[valid_score_indices].mean().item(),
-                "validator/weights/max": weights.max().item(),
-                "validator/weights/min": weights[valid_score_indices].min().item(),
+                "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item()
             }, step=self.global_step)
 
     def block_listener(self, loop):

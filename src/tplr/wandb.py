@@ -35,7 +35,7 @@ def initialize_wandb(
 
     # Initialize WandB with version as a tag
     run = wandb.init(
-        project=config.project,  # Remove version from project name
+        project=config.project,
         entity="tplr",
         id=run_id,
         resume="must" if run_id else "never",
@@ -44,23 +44,67 @@ def initialize_wandb(
         group=group,
         job_type=job_type,
         dir=wandb_dir,
-        tags=[f"v{__version__}"],  # Add version as a tag
+        tags=[f"v{__version__}"],
         settings=wandb.Settings(
             init_timeout=300,
             _disable_stats=True,
         ),
     )
 
-    # Add version to run config
-    run.config.update({"version": __version__})
+    # Add version history to run config
+    if "version_history" not in run.config:
+        run.config.update({"version_history": [__version__]}, allow_val_change=True)
+    elif __version__ not in run.config.version_history:
+        version_history = run.config.version_history + [__version__]
+        run.config.update({"version_history": version_history}, allow_val_change=True)
+
+    # Keep current version in config
+    run.config.update({"current_version": __version__}, allow_val_change=True)
+
+    # Track the last step seen for each version
+    version_steps = {}
+
+    # Get the current global step from WandB if resuming
+    if run_id:
+        try:
+            api = wandb.Api()
+            run_data = api.run(f"tplr/{config.project}/{run_id}")
+            history = run_data.scan_history()
+            global_step = max((row.get("_step", 0) for row in history), default=0)
+            version_steps["global"] = global_step
+        except Exception:
+            version_steps["global"] = 0
+    else:
+        version_steps["global"] = 0
 
     # Create a wrapper for wandb.log that automatically adds version
     original_log = run.log
 
     def log_with_version(metrics, **kwargs):
-        # Add version to each metric name
-        versioned_metrics = {f"v{__version__}/{k}": v for k, v in metrics.items()}
-        return original_log(versioned_metrics, **kwargs)
+        # Increment global step
+        version_steps["global"] += 1
+        current_step = version_steps["global"]
+
+        # Initialize version step if needed
+        if __version__ not in version_steps:
+            version_steps[__version__] = current_step
+
+        # Use version-specific step counter
+        versioned_metrics = {}
+        for k, v in metrics.items():
+            # Add metric under current version
+            versioned_metrics[f"v{__version__}/{k}"] = v
+            # Also log under "latest/{k}" with version-specific step
+            versioned_metrics[f"latest/{k}"] = v
+
+        # Add version-specific step counter
+        versioned_metrics[f"v{__version__}/step"] = current_step
+
+        # Always use the global step for logging
+        kwargs["step"] = current_step
+
+        # Log metrics
+        original_log(versioned_metrics, **kwargs)
 
     run.log = log_with_version
 
@@ -70,4 +114,3 @@ def initialize_wandb(
             f.write(run.id)
 
     return run
-

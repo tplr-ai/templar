@@ -56,14 +56,15 @@ class Comms(ChainManager):
         self.current_window = int(
             self.metagraph.subtensor.block / self.hparams.blocks_per_window
         )
-        self.loop = asyncio.get_event_loop()
-        # Start updating current_window in background
-        self.loop.create_task(self.update_current_window())
         self.recent_windows = (
             self.hparams.recent_windows
         )  # Number of recent windows to check
 
-        self.loop.create_task(self.track_active_peers())  # Start the background task
+    def start_background_tasks(self):
+        self.loop = asyncio.get_running_loop()
+        # Start background tasks
+        self.loop.create_task(self.update_current_window())
+        self.loop.create_task(self.track_active_peers())
 
     async def update_current_window(self):
         """Background task to keep current_window updated."""

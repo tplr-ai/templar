@@ -141,16 +141,6 @@ class Miner:
         self.comms.try_commit(self.wallet, self.bucket)
         self.comms.fetch_commitments()
 
-
-        # Init peers
-        if not self.config.peers:
-            self.peers = self.comms.peers
-            tplr.logger.info(f'Filtered peers with buckets: {self.peers}')
-        else:
-            self.peers = self.config.peers
-        if self.uid not in self.peers:
-            self.peers.append(self.uid)
-
         # Init state params
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
@@ -224,6 +214,15 @@ class Miner:
         else:
             tplr.logger.info("No active validators found, starting from scratch")
             self.global_step = 0
+
+        # Load Peers
+        if not self.config.peers:
+            self.peers = self.comms.peers
+            tplr.logger.info(f'Filtered gather peers with buckets: {self.peers}')
+        else:
+            self.peers = self.config.peers
+        if self.uid not in self.peers:
+            self.peers.append(self.uid)
 
         # Start background block listener
         self.loop = asyncio.get_running_loop()

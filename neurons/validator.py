@@ -384,24 +384,31 @@ class Validator:
             self.model.train()
 
             # 9. Update scores
-            score = (loss_before_per_batch - loss_after_per_batch)* 10e6
-            score = max(0.0, score)
-            
+            relative_improvement = (1 - loss_after_per_batch/loss_before_per_batch)
+            score = relative_improvement * 10e6  # Allow negative scores for bad updates
+
+            if loss_before_per_batch < 1e-6:  # Prevent division by very small numbers
+                score = 0.0
+
             if eval_uid not in self.evaluated_uids:
                 self.evaluated_uids.add(eval_uid)
-            
+
             # Update scores and moving averages
             self.scores[eval_uid] = score
             self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
 
-            # Calculate weights
+            # Calculate weights - only positive moving averages get weights
             weights = torch.zeros_like(self.moving_avg_scores)
             evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
             evaluated_mask[list(self.evaluated_uids)] = True
-            evaluated_scores = self.moving_avg_scores * evaluated_mask
+
+            # Only consider positive moving averages for weight calculation
+            positive_mask = (self.moving_avg_scores > 0) & evaluated_mask
+            evaluated_scores = self.moving_avg_scores * positive_mask
+
             total_score = evaluated_scores.sum()
             if total_score > 0:
-                weights[evaluated_mask] = evaluated_scores[evaluated_mask] / total_score
+                weights[positive_mask] = evaluated_scores[positive_mask] / total_score
 
             # Log only evaluated UIDs
             tplr.logger.info('Updated scores for evaluated UIDs:')

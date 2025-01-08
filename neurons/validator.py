@@ -66,7 +66,7 @@ class Validator:
     def config():
         parser = argparse.ArgumentParser(description='Validator script')
         parser.add_argument('--netuid', type=int, default=268, help='Bittensor network UID.')
-        parser.add_argument('--project', type=str, default='templar-test', help='Wandb project.')
+        parser.add_argument('--project', type=str, default='templar-test1', help='Wandb project.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
@@ -206,6 +206,7 @@ class Validator:
             daemon=True
         ).start()
         self.comms.start_commitment_fetcher()
+        self.comms.start_background_tasks()
 
         while True:
             step_window = self.current_window
@@ -240,17 +241,14 @@ class Validator:
                     global_step=self.global_step,
                 )
 
-            # 4. Evaluate selected miner before applying gathered gradients
-            eval_uid = random.choice(self.comms.eval_peers)
+            # Save original model parameters
+            original_params = {n: p.clone() for n, p in self.model.named_parameters()}
+
+            # Evaluate selected miner before applying gathered gradients
+            eval_uid = random.choice(self.eval_peers)
             tplr.logger.info(f'Evaluating uid: {eval_uid}')
 
-            # Save original model state before evaluation
-            original_state = {
-                'model_state': self.model.state_dict().copy(),
-                'optimizer_state': self.optimizer.state_dict()
-            }
-
-            # 5. Get individual miner's gradient
+            # Get individual miner's gradient
             eval_result = await self.comms.get(
                 uid=str(eval_uid),
                 window=step_window,
@@ -264,110 +262,104 @@ class Validator:
                 tplr.logger.info(f"No gradient received from UID {eval_uid}. Skipping evaluation.")
                 continue
 
-            # 6. Load evaluation data
+            # Load evaluation data
             pages = await tplr.dataset.DatasetLoader.next_pages(
                 offset=self.sync_window + 1,
                 n_pages=self.hparams.pages_per_window,
                 seed=eval_uid
-            )            
+            )
             loader = await tplr.dataset.DatasetLoader.create(
                 batch_size=self.hparams.batch_size,
                 sequence_length=self.hparams.sequence_length,
                 pages_info=pages,
                 tokenizer=self.tokenizer
-            )   
+            )
 
-            # 7. Compute initial loss
+            # Compute initial loss before applying the gradient
             self.model.eval()
-            loss_before = 0
+            loss_before = 0.0
             n_batches = 0
-            n_tokens = 0
             with torch.no_grad():
                 for i, batch in enumerate(loader):
                     input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                     labels = input_ids.clone()
                     labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                    loss_before += self.model(input_ids=input_ids, labels=labels).loss.item()
+                    outputs = self.model(input_ids=input_ids, labels=labels)
+                    loss_before += outputs.loss.item()
                     n_batches += 1
-                    n_tokens += (labels != -100).sum().item()
-                    del input_ids, labels
+                    del input_ids, labels, outputs
                     torch.cuda.empty_cache()
 
             loss_before_per_batch = loss_before / n_batches if n_batches > 0 else 0
-            tplr.logger.info(f'Loss before: {loss_before_per_batch} (total tokens: {n_tokens})')
+            tplr.logger.info(f'Loss before: {loss_before_per_batch}')
 
-            # Apply evaluated miner's gradient
-            self.model.train()
-            if eval_result is not None:
-                state_dict, _ = eval_result
-                self.optimizer.zero_grad()
-                self.model.zero_grad()
-                
-                for n, p in self.model.named_parameters():
-                    idxs_key = n + 'idxs'
-                    vals_key = n + 'vals'
-                    idxs = state_dict.get(idxs_key)
-                    vals = state_dict.get(vals_key)
-                    
-                    if idxs is not None and vals is not None:
-                        if not isinstance(idxs, (list, tuple)):
-                            idxs = [idxs]
-                        if not isinstance(vals, (list, tuple)):
-                            vals = [vals]
-                        
-                        new_grad = self.transformer.decode(
-                            self.compressor.batch_decompress(
-                                p.to(self.config.device),
-                                idxs,
-                                vals,
-                                self.xshapes[n],
-                                self.totalks[n],
-                                median=True
-                            )
+            # Before applying the gradient
+            self.optimizer.zero_grad()
+            self.model.zero_grad()
+
+            for n, p in self.model.named_parameters():
+                idxs_key = n + 'idxs'
+                vals_key = n + 'vals'
+                idxs = getattr(eval_result[0], idxs_key, None)
+                vals = getattr(eval_result[0], vals_key, None)
+
+                if idxs is not None and vals is not None:
+                    if not isinstance(idxs, (list, tuple)):
+                        idxs = [idxs]
+                    if not isinstance(vals, (list, tuple)):
+                        vals = [vals]
+
+                    # Decode the gradient
+                    grad = self.transformer.decode(
+                        self.compressor.batch_decompress(
+                            p.to(self.config.device),
+                            idxs,
+                            vals,
+                            self.xshapes[n],
+                            self.totalks[n],
+                            median=True
                         )
-                        if p.grad is None:
-                            p.grad = new_grad
-                        else:
-                            p.grad.copy_(new_grad)
-                        p.grad.sign_()
-                
-                self.optimizer.step()
-                torch.cuda.empty_cache()
+                    )
 
-            # 8. Compute final loss
-            self.model.eval()
-            loss_after = 0
+                    # Assign the gradient to p.grad
+                    if p.grad is None:
+                        p.grad = grad
+                    else:
+                        p.grad.copy_(grad)
+                    p.grad.sign_()  # If needed as per your old script
+
+
+            # Update parameters using the optimizer
+            self.optimizer.step()
+
+            # Compute loss after applying the gradient
+            loss_after = 0.0
             n_batches = 0
-            n_tokens = 0
             with torch.no_grad():
                 for i, batch in enumerate(loader):
                     input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                     labels = input_ids.clone()
                     labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                    loss_after += self.model(input_ids=input_ids, labels=labels).loss.item()
+                    outputs = self.model(input_ids=input_ids, labels=labels)
+                    loss_after += outputs.loss.item()
                     n_batches += 1
-                    n_tokens += (labels != -100).sum().item()
-                    del input_ids, labels
+                    del input_ids, labels, outputs
                     torch.cuda.empty_cache()
 
             loss_after_per_batch = loss_after / n_batches if n_batches > 0 else 0
-            tplr.logger.info(f'Loss after: {loss_after_per_batch} (total tokens: {n_tokens})')
-            tplr.logger.info(f"Loss improvement: {(loss_before_per_batch - loss_after_per_batch)}")
+            tplr.logger.info(f'Loss after: {loss_after_per_batch}')
 
-            # Revert to original model state
-            self.model.load_state_dict(original_state['model_state'])
-            self.optimizer.load_state_dict(original_state['optimizer_state'])
-            self.model.train()
+            # Calculate loss improvement
+            loss_improvement = loss_before_per_batch - loss_after_per_batch
+            tplr.logger.info(f'Loss improvement: {loss_improvement}')
 
-            # 9. Update scores
-            relative_improvement = (1 - loss_after_per_batch/loss_before_per_batch)
-            score = relative_improvement * 10e6  # Allow negative scores for bad updates
+            # Revert model parameters to original state
+            for n, p in self.model.named_parameters():
+                p.data.copy_(original_params[n])
 
-            if loss_before_per_batch < 1e-6:  # Prevent division by very small numbers
-                score = 0.0
-
-            if eval_uid not in self.evaluated_uids:
-                self.evaluated_uids.add(eval_uid)
+            # Update scores
+            relative_improvement = loss_improvement / loss_before_per_batch if loss_before_per_batch > 0 else 0.0
+            score = relative_improvement * 1e6  # Scaling factor
 
             # Update scores and moving averages
             self.scores[eval_uid] = score
@@ -499,30 +491,44 @@ class Validator:
                     for n, p in self.model.named_parameters():
                         idxs_key = n + 'idxs'
                         vals_key = n + 'vals'
-                        idxs = getattr(gather_result.state_dict, idxs_key, None)
-                        vals = getattr(gather_result.state_dict, vals_key, None)
+                        idxs_list = getattr(gather_result.state_dict, idxs_key, None)
+                        vals_list = getattr(gather_result.state_dict, vals_key, None)
                         
-                        if idxs is not None and vals is not None:
-                            if not isinstance(idxs, (list, tuple)):
-                                idxs = [idxs]
-                            if not isinstance(vals, (list, tuple)):
-                                vals = [vals]
+                        if idxs_list is not None and vals_list is not None:
+                            if not isinstance(idxs_list, list):
+                                idxs_list = [idxs_list]
+                            if not isinstance(vals_list, list):
+                                vals_list = [vals_list]
                             
-                            new_grad = self.transformer.decode(
-                                self.compressor.batch_decompress(
-                                    p.to(self.config.device),
-                                    idxs,
-                                    vals,
-                                    self.xshapes[n],
-                                    self.totalks[n],
-                                    median=True
+                            # Decode and sum gradients from all miners
+                            agg_grad = torch.zeros_like(p.data)
+                            for idxs, vals in zip(idxs_list, vals_list):
+                                # Decode the gradient
+                                grad = self.transformer.decode(
+                                    self.compressor.decompress(
+                                        p.to(self.config.device),
+                                        idxs,
+                                        vals,
+                                        self.xshapes[n],
+                                        self.totalks[n],
+                                        median=True
+                                    )
                                 )
-                            )
-                            if p.grad is None:
-                                p.grad = new_grad
-                            else:
-                                p.grad.copy_(new_grad)
-                            p.grad.sign_()
+                                agg_grad.add_(grad)
+
+                            # Momentum decay
+                            self.momentum[n].mul_(self.hparams.momentum_decay)
+
+                            # Update validator's momentum with aggregated gradient
+                            lr = self.scheduler.get_last_lr()[0]
+                            self.momentum[n].add_(agg_grad, alpha=lr)
+
+                            # Apply weight decay
+                            decay = 1.0 - lr * self.hparams.weight_decay
+                            p.data.mul_(decay)
+
+                            # Assign gradient for optimizer step
+                            p.grad = self.momentum[n].sign()
 
                     self.optimizer.step()
                     self.scheduler.step()

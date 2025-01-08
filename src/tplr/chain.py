@@ -102,7 +102,7 @@ class ChainManager:
                 commitments = await  asyncio.to_thread(self.get_commitments_sync)
                 if commitments:
                     self.commitments = commitments
-                    self.update_peers_with_buckets()
+                    await self.update_peers_with_buckets()
                     logger.debug(f"Updated commitments: {self.commitments}")
             except Exception as e:
                 logger.error(f"Error fetching commitments: {e}")

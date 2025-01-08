@@ -339,7 +339,7 @@ class Miner:
                 )
                 # Estimate transmitted gradient
                 transmit_grad = self.transformer.decode(
-                    self.compressor.decompress(p, idxs, vals, xshape, totalk)
+                    self.compressor.decompress(p, idxs, vals, xshape, totalk, median=True)
                 )
                 # Remove transmitted from delta
                 self.momentum[n].sub_(transmit_grad)
@@ -400,7 +400,8 @@ class Miner:
                             idxs,
                             vals,
                             xshapes[n],
-                            totalks[n]
+                            totalks[n],
+                            median=True
                         )
                     )
                     # Set recomputed gathered gradient.

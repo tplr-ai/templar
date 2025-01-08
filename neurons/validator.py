@@ -259,7 +259,8 @@ class Validator:
                                     idxs,
                                     vals,
                                     self.xshapes[n],
-                                    self.totalks[n]
+                                    self.totalks[n],
+                                    median=True
                                 )
                             )
                             if p.grad is None:
@@ -353,7 +354,8 @@ class Validator:
                                 idxs,
                                 vals,
                                 self.xshapes[n],
-                                self.totalks[n]
+                                self.totalks[n],
+                                median=True
                             )
                         )
                         if p.grad is None:

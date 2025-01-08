@@ -212,7 +212,7 @@ class Validator:
             step_window = self.sync_window + 1
             tplr.logger.info(f'Processing window: {self.sync_window} current: {self.current_window}')
 
-            # 3. Update model with collective gradients
+            # 3. Gather gradients from peers, but do not apply them yet
             with timer("gather_gradients", self.wandb, self.global_step):
                 gather_result = await self.comms.gather(
                     state_dict=None,
@@ -227,53 +227,7 @@ class Validator:
                     global_step=self.global_step,
                 )
 
-            if gather_result is not None:
-                # Update self.global_step based on the maximum global_step received
-                max_global_step = max(gather_result.global_steps + [self.global_step])
-                if max_global_step > self.global_step:
-                    tplr.logger.info(f"Updating global_step from {self.global_step} to {max_global_step}")
-                    self.global_step = max_global_step
-                    # Update optimizer and scheduler steps
-                    self.optimizer._step_count = self.global_step
-                    self.scheduler.last_epoch = self.global_step
-
-                with timer("update_model_with_gathered", self.wandb, self.global_step):
-                    self.optimizer.zero_grad()
-                    self.model.zero_grad()
-                    
-                    for n, p in self.model.named_parameters():
-                        idxs_key = n + 'idxs'
-                        vals_key = n + 'vals'
-                        idxs = getattr(gather_result.state_dict, idxs_key, None)
-                        vals = getattr(gather_result.state_dict, vals_key, None)
-                        
-                        if idxs is not None and vals is not None:
-                            if not isinstance(idxs, (list, tuple)):
-                                idxs = [idxs]
-                            if not isinstance(vals, (list, tuple)):
-                                vals = [vals]
-                            
-                            new_grad = self.transformer.decode(
-                                self.compressor.batch_decompress(
-                                    p.to(self.config.device),
-                                    idxs,
-                                    vals,
-                                    self.xshapes[n],
-                                    self.totalks[n],
-                                    median=True
-                                )
-                            )
-                            if p.grad is None:
-                                p.grad = new_grad
-                            else:
-                                p.grad.copy_(new_grad)
-                            p.grad.sign_()
-
-                    self.optimizer.step()
-                    self.scheduler.step()
-                    torch.cuda.empty_cache()  # Clear GPU memory after model update
-
-            # 4. Select miner to evaluate
+            # 4. Evaluate selected miner before applying gathered gradients
             eval_uid = random.choice(self.comms.eval_peers)
             tplr.logger.info(f'Evaluating uid: {eval_uid}')
 
@@ -387,7 +341,7 @@ class Validator:
             tplr.logger.info(f'Loss after: {loss_after_per_batch} (total tokens: {n_tokens})')
             tplr.logger.info(f"Loss improvement: {(loss_before_per_batch - loss_after_per_batch)}")
 
-            # Revert to original state
+            # Revert to original model state
             self.model.load_state_dict(original_state['model_state'])
             self.optimizer.load_state_dict(original_state['optimizer_state'])
             self.model.train()
@@ -514,6 +468,52 @@ class Validator:
                             os.remove('/tmp/temp_checkpoint.pt')
 
                 asyncio.create_task(_save())
+
+            # Now apply the gathered gradients
+            if gather_result is not None:
+                # Update self.global_step based on the maximum global_step received
+                max_global_step = max(gather_result.global_steps + [self.global_step])
+                if max_global_step > self.global_step:
+                    tplr.logger.info(f"Updating global_step from {self.global_step} to {max_global_step}")
+                    self.global_step = max_global_step
+                    self.optimizer._step_count = self.global_step
+                    self.scheduler.last_epoch = self.global_step
+
+                with timer("update_model_with_gathered", self.wandb, self.global_step):
+                    self.optimizer.zero_grad()
+                    self.model.zero_grad()
+                    
+                    for n, p in self.model.named_parameters():
+                        idxs_key = n + 'idxs'
+                        vals_key = n + 'vals'
+                        idxs = getattr(gather_result.state_dict, idxs_key, None)
+                        vals = getattr(gather_result.state_dict, vals_key, None)
+                        
+                        if idxs is not None and vals is not None:
+                            if not isinstance(idxs, (list, tuple)):
+                                idxs = [idxs]
+                            if not isinstance(vals, (list, tuple)):
+                                vals = [vals]
+                            
+                            new_grad = self.transformer.decode(
+                                self.compressor.batch_decompress(
+                                    p.to(self.config.device),
+                                    idxs,
+                                    vals,
+                                    self.xshapes[n],
+                                    self.totalks[n],
+                                    median=True
+                                )
+                            )
+                            if p.grad is None:
+                                p.grad = new_grad
+                            else:
+                                p.grad.copy_(new_grad)
+                            p.grad.sign_()
+
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    torch.cuda.empty_cache()
 
     def block_listener(self, loop):
         def handler(event, _u, _s):

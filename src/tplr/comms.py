@@ -49,6 +49,32 @@ class Comms(ChainManager):
         self.key_prefix = key_prefix
         self.session = get_session()
         self.lock = asyncio.Lock()
+        self.active_peers = set()  # Set to store active peers
+        self.active_check_interval = (
+            self.hparams.active_check_interval
+        )  # Interval in seconds
+        self.current_window = int(
+            self.metagraph.subtensor.block / self.hparams.blocks_per_window
+        )
+        self.loop = asyncio.get_event_loop()
+        # Start updating current_window in background
+        self.loop.create_task(self.update_current_window())
+        self.recent_windows = (
+            self.hparams.recent_windows
+        )  # Number of recent windows to check
+
+        self.loop.create_task(self.track_active_peers())  # Start the background task
+
+    async def update_current_window(self):
+        """Background task to keep current_window updated."""
+        while True:
+            self.current_block = self.metagraph.subtensor.block
+            self.current_window = int(
+                self.current_block / self.hparams.blocks_per_window
+            )
+            await asyncio.sleep(
+                self.hparams.window_update_interval
+            )  # Adjust interval as needed
 
     def get_own_bucket(self) -> Bucket:
         """Gets bucket configuration from environment variables via config.BUCKET_SECRETS."""
@@ -718,3 +744,75 @@ class Comms(ChainManager):
 
         except Exception as e:
             tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
+
+    async def is_miner_active(self, uid: int, recent_windows: int = 3) -> bool:
+        """Check if the miner has uploaded gradients in the last few windows."""
+        tplr.logger.debug(f"Checking if UID {uid} is active")
+        current_window = self.current_window
+
+        peer_bucket = self.commitments.get(uid)
+        if not peer_bucket:
+            tplr.logger.debug(f"No bucket committed for UID {uid}")
+            return False
+
+        try:
+            async with self.session.create_client(
+                "s3",
+                endpoint_url=self.get_base_url(peer_bucket.account_id),
+                region_name=CF_REGION_NAME,
+                config=client_config,
+                aws_access_key_id=peer_bucket.access_key_id,
+                aws_secret_access_key=peer_bucket.secret_access_key,
+            ) as s3_client:
+                for window in range(
+                    current_window - recent_windows, current_window + 1
+                ):
+                    filename = f"gradient-{window}-{uid}-v{__version__}.pt"
+                    tplr.logger.debug(
+                        f"Checking for {filename} in bucket {peer_bucket.name}"
+                    )
+                    try:
+                        await s3_client.head_object(
+                            Bucket=peer_bucket.name, Key=filename
+                        )
+                        tplr.logger.debug(f"Found {filename} for UID {uid}")
+                        return True
+                    except botocore.exceptions.ClientError as e:
+                        if e.response["Error"]["Code"] != "404":
+                            tplr.logger.error(
+                                f"Error checking activity for UID {uid}: {e}"
+                            )
+                            return False
+                        tplr.logger.debug(f"{filename} not found for UID {uid}")
+        except Exception as e:
+            tplr.logger.error(f"Error accessing bucket for UID {uid}: {e}")
+            return False
+
+        return False
+
+    async def track_active_peers(self):
+        """Background task to keep track of active peers."""
+        while True:
+            active_peers = set()
+            tasks = []
+            semaphore = asyncio.Semaphore(10)  # Limit concurrent S3 requests
+
+            tplr.logger.debug(f"Commitments: {self.commitments}")
+
+            async def check_peer(uid):
+                async with semaphore:
+                    is_active = await self.is_miner_active(
+                        uid, recent_windows=self.recent_windows
+                    )
+                    if is_active:
+                        active_peers.add(uid)
+
+            for uid in self.commitments.keys():
+                tasks.append(check_peer(uid))
+
+            await asyncio.gather(*tasks)
+            self.active_peers = active_peers
+
+            tplr.logger.info(f"Updated active peers: {self.active_peers}")
+
+            await asyncio.sleep(self.active_check_interval)

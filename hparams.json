@@ -27,5 +27,7 @@
     "validator_offset": 4,
     "checkpoint_frequency": 1000,
     "topk_peers": 20,
-    "minimum_peers": 5
+    "minimum_peers": 5,
+    "active_check_interval": 60,
+    "recent_windows": 3
 }

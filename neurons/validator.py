@@ -66,7 +66,7 @@ class Validator:
     def config():
         parser = argparse.ArgumentParser(description='Validator script')
         parser.add_argument('--netuid', type=int, default=268, help='Bittensor network UID.')
-        parser.add_argument('--project', type=str, default='templar', help='Wandb project.')
+        parser.add_argument('--project', type=str, default='templar-test', help='Wandb project.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
@@ -156,6 +156,7 @@ class Validator:
         self.comms.try_commit(self.wallet, self.bucket)
         self.comms.fetch_commitments()
         
+        
         # Init state params
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
@@ -182,6 +183,9 @@ class Validator:
             job_type='validation'
         )
 
+        # Initialize peers
+        self.peers = []
+        self.eval_peers = []
 
 
     async def run(self):
@@ -215,6 +219,11 @@ class Validator:
             self.sync_window += 1
             step_window = self.sync_window + 1
             tplr.logger.info(f'Processing window: {self.sync_window} current: {self.current_window}')
+
+            await self.comms.update_peers_with_buckets()
+            # Update local references
+            self.peers = self.comms.peers
+            self.eval_peers = self.comms.eval_peers
 
             # 3. Gather gradients from peers, but do not apply them yet
             with timer("gather_gradients", self.wandb, self.global_step):

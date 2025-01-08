@@ -58,7 +58,7 @@ class Miner:
     def config():
         parser = argparse.ArgumentParser(description='Miner script')
         parser.add_argument('--netuid', type=int, default=268, help='Bittensor network UID.')
-        parser.add_argument('--project', type=str, default='templar', help='Wandb project.')
+        parser.add_argument('--project', type=str, default='templar-test', help='Wandb project.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
@@ -236,6 +236,10 @@ class Miner:
         while True:
             step_window = self.current_window
             tplr.logger.info(f"\n{'-' * 40} Window: {step_window} {'-' * 40}")
+            await self.comms.update_peers_with_buckets()
+            # Update local references
+            self.peers = self.comms.peers
+            # self.eval_peers = self.comms.eval_peers
 
             # Get the pages for this window.
             pages = await tplr.dataset.DatasetLoader.next_pages(

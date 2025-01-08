@@ -364,8 +364,6 @@ class Validator:
                             p.grad.copy_(new_grad)
                         p.grad.sign_()
                 
-                # Add gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
                 torch.cuda.empty_cache()
 

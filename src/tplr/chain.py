@@ -447,41 +447,43 @@ class ChainManager:
         else:
             return None
 
-    def update_peers_with_buckets(self):
+    async def update_peers_with_buckets(self):
         """Updates both peers for gradient gathering and evaluation peers."""
         # Create mappings
         uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
         uid_to_incentive = dict(zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist()))
-        
-        # Filter miners with buckets (stake <= 10000)
+
+        # Use active peers from background task
+        active_peers = self.active_peers if hasattr(self, 'active_peers') else set(self.commitments.keys())
+
+        # Filter active miners with buckets (stake <= 10000)
         self.eval_peers = [
-            int(uid) for uid in self.commitments.keys()
+            int(uid) for uid in active_peers
             if uid_to_stake.get(int(uid), 0) <= 10000
         ]
-        
+
         # If total miners is less than minimum_peers, use all miners for both lists
         if len(self.eval_peers) <= self.hparams.minimum_peers:
             self.peers = self.eval_peers
             logger.warning(
-                f"Total miners ({len(self.eval_peers)}) below minimum_peers ({self.hparams.minimum_peers}). "
+                f"Total active miners ({len(self.eval_peers)}) below minimum_peers ({self.hparams.minimum_peers}). "
                 f"Using all available miners as peers."
             )
             return
-        
-        # Otherwise, select based on incentive scores greater than 0 for gradient gathering
+
+        # Select based on incentive scores for gradient gathering
         miner_incentives = [
             (uid, uid_to_incentive.get(uid, 0)) for uid in self.eval_peers
-            if uid_to_incentive.get(uid, 0) > 0
         ]
         miner_incentives.sort(key=lambda x: x[1], reverse=True)
-        
+
         # Calculate number of peers based on topk percentage
         n_topk_peers = max(1, int(len(miner_incentives) * (self.hparams.topk_peers / 100)))
         n_peers = max(self.hparams.minimum_peers, n_topk_peers)
-        
+
         # Take top n_peers by incentive for gradient gathering
         self.peers = [uid for uid, _ in miner_incentives[:n_peers]]
-        
+
         logger.info(
             f"Updated gather peers (top {self.hparams.topk_peers}% or minimum {self.hparams.minimum_peers}): {self.peers}"
         )

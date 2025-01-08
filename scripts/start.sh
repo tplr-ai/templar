@@ -37,6 +37,6 @@ pm2 start neurons/validator.py --interpreter python3 --name TV1 -- \
   --subtensor.network test \
   --debug \
   --netuid 268 \
-  # --use_wandb \
+  --use_wandb 
   # --project "${PROJECT_NAME}"
 

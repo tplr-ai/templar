@@ -156,13 +156,6 @@ class Validator:
         self.comms.try_commit(self.wallet, self.bucket)
         self.comms.fetch_commitments()
         
-        # Init peers
-        if not self.config.peers:
-            self.peers = self.comms.peers
-            tplr.logger.info(f'Filtered peers with buckets: {self.peers}')
-        else:
-            self.peers = self.config.peers
-
         # Init state params
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
@@ -189,7 +182,18 @@ class Validator:
             job_type='validation'
         )
 
+
+
     async def run(self):
+        # Load Peers
+        if not self.config.peers:
+            self.peers = self.comms.peers
+            tplr.logger.info(f'Filtered gather peers with buckets: {self.peers}')
+        else:
+            self.peers = self.config.peers
+        if self.uid not in self.peers:
+            self.peers.append(self.uid)
+
         # Start block listener
         self.loop = asyncio.get_running_loop()
         self.listener = threading.Thread(

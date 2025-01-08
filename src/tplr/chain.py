@@ -468,8 +468,11 @@ class ChainManager:
             )
             return
         
-        # Otherwise, select based on incentive scores for gradient gathering
-        miner_incentives = [(uid, uid_to_incentive.get(uid, 0)) for uid in self.eval_peers]
+        # Otherwise, select based on incentive scores greater than 0 for gradient gathering
+        miner_incentives = [
+            (uid, uid_to_incentive.get(uid, 0)) for uid in self.eval_peers
+            if uid_to_incentive.get(uid, 0) > 0
+        ]
         miner_incentives.sort(key=lambda x: x[1], reverse=True)
         
         # Calculate number of peers based on topk percentage

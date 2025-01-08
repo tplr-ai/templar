@@ -228,6 +228,15 @@ class Validator:
                 )
 
             if gather_result is not None:
+                # Update self.global_step based on the maximum global_step received
+                max_global_step = max(gather_result.global_steps + [self.global_step])
+                if max_global_step > self.global_step:
+                    tplr.logger.info(f"Updating global_step from {self.global_step} to {max_global_step}")
+                    self.global_step = max_global_step
+                    # Update optimizer and scheduler steps
+                    self.optimizer._step_count = self.global_step
+                    self.scheduler.last_epoch = self.global_step
+
                 with timer("update_model_with_gathered", self.wandb, self.global_step):
                     self.optimizer.zero_grad()
                     self.model.zero_grad()

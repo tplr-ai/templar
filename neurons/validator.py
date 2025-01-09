@@ -359,6 +359,8 @@ class Validator:
             # Update scores
             relative_improvement = loss_improvement / loss_before_per_batch if loss_before_per_batch > 0 else 0.0
             score = relative_improvement * 1e6  # Scaling factor
+            # Add the evaluated UID to the set
+            self.evaluated_uids.add(eval_uid)
 
             # Update scores and moving averages
             self.scores[eval_uid] = score

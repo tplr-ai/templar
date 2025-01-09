@@ -150,7 +150,7 @@ class CompressDCT:
                 x = rearrange(x, "y x h w -> y x (h w)")
 
             # First pass: standard scatter_reduce
-            x.scatter_reduce_(dim=-1, index=idx, src=val, reduce="mean", include_self=False)
+            x.scatter_reduce_(dim=-1, index=idx, src=val, reduce="mean", include_self=False).reshape(xshape)
             
             if median:
                 # Store original shape and flatten preserving the last dimension

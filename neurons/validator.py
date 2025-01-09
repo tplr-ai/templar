@@ -275,6 +275,8 @@ class Validator:
                 tokenizer=self.tokenizer
             )
 
+            state_dict, _ = eval_result
+
             # Compute initial loss before applying the gradient
             self.model.eval()
             loss_before = 0.0
@@ -300,8 +302,8 @@ class Validator:
             for n, p in self.model.named_parameters():
                 idxs_key = n + 'idxs'
                 vals_key = n + 'vals'
-                idxs = getattr(eval_result[0], idxs_key, None)
-                vals = getattr(eval_result[0], vals_key, None)
+                idxs = state_dict.get(idxs_key, None)
+                vals = state_dict.get(vals_key, None)
 
                 if idxs is not None and vals is not None:
                     if not isinstance(idxs, (list, tuple)):
@@ -317,7 +319,7 @@ class Validator:
                             vals,
                             self.xshapes[n],
                             self.totalks[n],
-                            median=True
+                            median=False
                         )
                     )
 
@@ -328,9 +330,6 @@ class Validator:
                         p.grad.copy_(grad)
                     p.grad.sign_()  # If needed as per your old script
 
-
-            # Update parameters using the optimizer
-            self.optimizer.step()
 
             # Compute loss after applying the gradient
             loss_after = 0.0

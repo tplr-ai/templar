@@ -422,7 +422,9 @@ class ChainManager:
         commitments = self.get_commitments_sync()
         if commitments:
             self.commitments = commitments
-            self.update_peers_with_buckets()
+            # Get the current event loop instead of using undefined loop
+            loop = asyncio.get_event_loop()
+            asyncio.run_coroutine_threadsafe(self.update_peers_with_buckets(), loop)
             logger.debug(f"Fetched commitments: {self.commitments}")
         else:
             logger.warning("No commitments fetched.")

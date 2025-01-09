@@ -17,7 +17,6 @@
 # fmt: off
 
 # Adapted from https://github.com/bloc97/DeMo and NousResearch
-# Original implementation by bloc97 (https://github.com/bloc97/DeMo)
 
 
 # Global imports
@@ -144,6 +143,8 @@ class CompressDCT:
 
     @torch.no_grad()
     def decompress(self, p, idx, val, xshape, totalk, median=False):
+            idx = idx.to(x.device)
+            val = val.to(x.device)
             x = torch.zeros(xshape, device=p.device, dtype=p.dtype)
 
             if len(x.shape) > 2:  # 2D weights

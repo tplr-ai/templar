@@ -135,26 +135,18 @@ class Miner:
             netuid=self.config.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
+            uid=self.uid,  
         )
 
         self.bucket = self.comms.get_own_bucket()
         self.comms.try_commit(self.wallet, self.bucket)
         self.comms.fetch_commitments()
 
-
-        # Init peers
-        if not self.config.peers:
-            self.peers = self.comms.peers
-            tplr.logger.info(f'Filtered peers with buckets: {self.peers}')
-        else:
-            self.peers = self.config.peers
-        if self.uid not in self.peers:
-            self.peers.append(self.uid)
-
         # Init state params
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+        self.comms.current_window = self.current_window 
         self.step_counter = 0
 
         # Add step tracking
@@ -177,53 +169,47 @@ class Miner:
     # Main training loop.
     async def run(self):
         # Try to load latest checkpoint
-        validator_uid =  self.metagraph.S.argmax().item()
-        tplr.logger.info(f"Found validator with highest stake: {validator_uid}")
-        if validator_uid is not None:
+        result = await self.comms.get_latest_checkpoint()
+        if result:
+            checkpoint_data, window = result
             try:
-                # Calculate the most recent window that should have a checkpoint
-                expected_checkpoint_window = (self.current_window // self.hparams.checkpoint_frequency) * self.hparams.checkpoint_frequency
+                # Load state dicts from dictionary and move to device
+                self.model.load_state_dict({k: v.to(self.config.device) for k,v in checkpoint_data['model_state_dict'].items()})
+                self.model.to(self.config.device)
+                
+                # Move optimizer state to device
+                for state in self.optimizer.state.values():
+                    for k, v in state.items():
+                        if torch.is_tensor(v):
+                            state[k] = v.to(self.config.device)
+                            
+                self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+                self.scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
+                self.momentum = checkpoint_data['momentum']
+                self.global_step = checkpoint_data['global_step']
+                
+                # Update optimizer and scheduler steps to match
+                self.optimizer._step_count = self.global_step  
+                self.scheduler.last_epoch = self.global_step
 
-                # Try last few windows in case of missed checkpoints
-                for window in range(expected_checkpoint_window, max(0, expected_checkpoint_window - 3 * self.hparams.checkpoint_frequency), -self.hparams.checkpoint_frequency):
-                    result = await self.comms.get(
-                        uid=str(validator_uid),
-                        window=window,
-                        key='checkpoint',
-                        timeout=240,
-                        local=False,
-                        stale_retention=10
-                    )
-                    if result is None:
-                        tplr.logger.debug(f"No checkpoint found for window {window}")
-                        continue
-
-                    checkpoint_data, global_step = result
-                    try:
-                        # Load state dicts from dictionary
-                        self.model.load_state_dict(checkpoint_data['model_state_dict'])
-                        self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
-                        self.scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
-                        self.momentum = checkpoint_data['momentum']
-                        self.global_step = checkpoint_data['global_step']
-                        
-                        # Update optimizer and scheduler steps to match
-                        self.optimizer._step_count = self.global_step
-                        self.scheduler.last_epoch = self.global_step
-                        
-                        tplr.logger.info(f"Loaded checkpoint from validator {validator_uid} at window {window}, global_step={self.global_step}")
-                        break  # Successfully loaded checkpoint, exit loop
-                    except KeyError as e:
-                        tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
-                    except Exception as e:
-                        tplr.logger.error(f"Failed to load checkpoint: {e}")
-                else:
-                    tplr.logger.info("No valid checkpoints found in recent windows")
+                tplr.logger.info(f"Loaded checkpoint from window {window}, global_step={self.global_step}")
+            except KeyError as e:
+                tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
             except Exception as e:
-                tplr.logger.warning(f"Failed to load checkpoint: {e}")
+                tplr.logger.error(f"Failed to load checkpoint: {e}")
         else:
-            tplr.logger.info("No active validators found, starting from scratch")
+            tplr.logger.info("No valid checkpoints found, starting from scratch")
             self.global_step = 0
+            self.model.to(self.config.device)
+
+        # Load Peers
+        if not self.config.peers:
+            self.peers = self.comms.peers
+            tplr.logger.info(f'Filtered gather peers with buckets: {self.peers}')
+        else:
+            self.peers = self.config.peers
+        if self.uid not in self.peers:
+            self.peers.append(self.uid)
 
         # Start background block listener
         self.loop = asyncio.get_running_loop()
@@ -233,10 +219,14 @@ class Miner:
             daemon=True,
         ).start()
         self.comms.start_commitment_fetcher()
+        self.comms.start_background_tasks()
 
         while True:
             step_window = self.current_window
             tplr.logger.info(f"\n{'-' * 40} Window: {step_window} {'-' * 40}")
+            self.comms.update_peers_with_buckets()
+            # Update local references
+            self.peers = self.comms.peers
 
             # Get the pages for this window.
             pages = await tplr.dataset.DatasetLoader.next_pages(
@@ -400,7 +390,8 @@ class Miner:
                             idxs,
                             vals,
                             xshapes[n],
-                            totalks[n]
+                            totalks[n],
+                            # median=True
                         )
                     )
                     # Set recomputed gathered gradient.
@@ -412,6 +403,8 @@ class Miner:
                     p.grad.sign_()
                 else:
                     tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
+
+                
 
             # Apply optimizer step
             tplr.logger.info("Finish and step.")
@@ -431,8 +424,10 @@ class Miner:
     def block_listener(self, loop):
         def handler(event, _u, _s):
             self.current_block = int(event['header']['number'])
-            if int(self.current_block / self.hparams.blocks_per_window) != self.current_window:
-                self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+            new_window = int(self.current_block / self.hparams.blocks_per_window)
+            if new_window != self.current_window:
+                self.current_window = new_window
+                self.comms.current_window = self.current_window  # Synchronize comms current_window
         while not self.stop_event.is_set():
             try:
                 bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler)

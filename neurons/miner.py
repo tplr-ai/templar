@@ -190,7 +190,15 @@ class Miner:
                 # Update optimizer and scheduler steps to match
                 self.optimizer._step_count = self.global_step  
                 self.scheduler.last_epoch = self.global_step
-                
+
+                # Reset the optimizer's learning rate
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = self.hparams.learning_rate
+
+                # Reset the scheduler's base learning rates if necessary
+                if hasattr(self.scheduler, 'base_lrs'):
+                    self.scheduler.base_lrs = [self.hparams.learning_rate for _ in self.scheduler.base_lrs]
+
                 tplr.logger.info(f"Loaded checkpoint from window {window}, global_step={self.global_step}")
             except KeyError as e:
                 tplr.logger.error(f"Invalid checkpoint format: missing key {e}")

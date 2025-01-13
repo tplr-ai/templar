@@ -135,6 +135,7 @@ class Miner:
             netuid=self.config.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
+            uid=self.uid,  
         )
 
         self.bucket = self.comms.get_own_bucket()
@@ -191,14 +192,6 @@ class Miner:
                 self.optimizer._step_count = self.global_step  
                 self.scheduler.last_epoch = self.global_step
 
-                # Reset the optimizer's learning rate
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = self.hparams.learning_rate
-
-                # Reset the scheduler's base learning rates if necessary
-                if hasattr(self.scheduler, 'base_lrs'):
-                    self.scheduler.base_lrs = [self.hparams.learning_rate for _ in self.scheduler.base_lrs]
-
                 tplr.logger.info(f"Loaded checkpoint from window {window}, global_step={self.global_step}")
             except KeyError as e:
                 tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
@@ -234,7 +227,6 @@ class Miner:
             self.comms.update_peers_with_buckets()
             # Update local references
             self.peers = self.comms.peers
-            # self.eval_peers = self.comms.eval_peers
 
             # Get the pages for this window.
             pages = await tplr.dataset.DatasetLoader.next_pages(

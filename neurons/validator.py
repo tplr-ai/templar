@@ -127,12 +127,14 @@ class Validator:
         # Set up scheduler setup
         warmup_scheduler = LinearLR(
             self.optimizer,
-            total_iters=250
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=250,
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
             T_0=10000,
-            T_mult=1,
+            T_mult=2,
             eta_min=self.hparams.learning_rate * 0.1
         )
         self.scheduler = SequentialLR(
@@ -150,6 +152,7 @@ class Validator:
             netuid=self.config.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
+            uid=self.uid, 
         )
 
 
@@ -248,16 +251,17 @@ class Validator:
         ).start()
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
-        self.comms.track_active_peers()
+        # self.comms.track_active_peers()
 
         while True:
             step_window = self.current_window
 
+            tplr.logger.info(f'Step window: {step_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
             # 1. Wait for validator offset - single wait loop
             while self.sync_window >= (self.current_window - self.hparams.validator_offset):
                 tplr.logger.info(f'Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}')
                 await asyncio.sleep(12)
-
+            tplr.logger.info(f'Step window: {step_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
             # 2. Process one window at a time
             self.sync_window += 1
             step_window = self.sync_window + 1
@@ -286,7 +290,7 @@ class Validator:
                     global_step=self.global_step,
                 )
 
-            # Save original model parameters
+            # # Save original model parameters
             original_params = {n: p.clone() for n, p in self.model.named_parameters()}
 
             # Evaluate selected miner before applying gathered gradients
@@ -309,7 +313,7 @@ class Validator:
 
             # Load evaluation data
             pages = await tplr.dataset.DatasetLoader.next_pages(
-                offset=self.sync_window + 1,
+                offset=self.sync_window,
                 n_pages=self.hparams.pages_per_window,
                 seed=eval_uid
             )
@@ -323,9 +327,12 @@ class Validator:
             state_dict, _ = eval_result
 
             # Compute initial loss before applying the gradient
-            self.model.eval()
+            self.model.train()
+            self.optimizer.zero_grad()  # Zero gradients at start
+            self.model.zero_grad()
             loss_before = 0.0
             n_batches = 0
+
             with torch.no_grad():
                 for i, batch in enumerate(loader):
                     input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
@@ -447,7 +454,6 @@ class Validator:
                     )
 
             # 10. Log metrics and cleanup
-            self.global_step += 1
             del loader, pages  # Explicit cleanup of dataset objects
             torch.cuda.empty_cache()
 
@@ -476,7 +482,7 @@ class Validator:
                 "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item()
             }, step=self.global_step)
 
-            # Add back checkpointing logic after the optimizer step
+            # Checkpoints
             if self.global_step % self.hparams.checkpoint_frequency == 0:
                 tplr.logger.info(f"Creating checkpoint at global_step {self.global_step}")
 
@@ -568,23 +574,21 @@ class Validator:
                         else:
                             tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
 
-                    # **Adjust the learning rate based on the number of gather peers**
-                    num_peers = len(self.peers)
-                    current_lr = self.scheduler.get_last_lr()[0]
-                    adjusted_lr = current_lr * num_peers  # Increase learning rate proportionally
-                    for param_group in self.optimizer.param_groups:
-                        param_group['lr'] = adjusted_lr
-
-                    tplr.logger.info(f"Adjusted learning rate to {adjusted_lr} based on {num_peers} peers.")
-
                     # **Perform optimization step**
                     self.optimizer.step()
                     self.scheduler.step()
                     torch.cuda.empty_cache()
 
-                    # **Reset the learning rate to original for the scheduler**
-                    for param_group in self.optimizer.param_groups:
-                        param_group['lr'] = current_lr
+                    # Increment global_step
+                    self.global_step += 1
+                    self.optimizer._step_count = self.global_step  # Ensure optimizer's step count matches
+
+                    # Log steps to wandb
+                    self.wandb.log({
+                        "validator/global_step": self.global_step,
+                        "validator/optimizer_step_count": self.optimizer._step_count,
+                        "validator/scheduler_last_epoch": self.scheduler.last_epoch,
+                    }, step=self.global_step)
 
     def block_listener(self, loop):
         def handler(event, _u, _s):

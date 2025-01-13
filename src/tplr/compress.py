@@ -1,3 +1,6 @@
+# ruff: noqa
+
+
 # The MIT License (MIT)
 # © 2024 templar.tech
 
@@ -17,13 +20,14 @@
 # fmt: off
 
 # Adapted from https://github.com/bloc97/DeMo and NousResearch
-# Original implementation by bloc97 (https://github.com/bloc97/DeMo)
 
 
 # Global imports
+
 import math
 import torch
 import torch.fft
+
 from einops import rearrange
 
 
@@ -48,9 +52,9 @@ class TransformDCT:
 
                 # Pregenerate DCT basis matrices
                 if sc not in self.f_dict:
-                    identity_matrix = torch.eye(sc)
-                    self.f_dict[sc] = _dct(identity_matrix, norm=norm).to(p.dtype).to(p.device)
-                    self.b_dict[sc] = _idct(identity_matrix, norm=norm).to(p.dtype).to(p.device)
+                    I = torch.eye(sc)
+                    self.f_dict[sc] = _dct(I, norm=norm).to(p.dtype).to(p.device)
+                    self.b_dict[sc] = _idct(I, norm=norm).to(p.dtype).to(p.device)
 
     @torch.no_grad()
     def einsum_2d(self, x, b, d=None):
@@ -150,7 +154,9 @@ class CompressDCT:
             x = rearrange(x, "y x h w -> y x (h w)")
 
         # TODO: Careful, this is nondeterministic across different CUDA devices! might cause errors to accumulate between nodes!
-        x.scatter_reduce_(dim=-1, index=idx, src=val, reduce="mean", include_self=False).reshape(xshape)
+        x.scatter_reduce_(
+            dim=-1, index=idx, src=val, reduce="mean", include_self=False
+        ).reshape(xshape)
 
         if len(x.shape) > 2:  # 2D weights
             x = rearrange(x, "y x (h w) -> y x h w", h=xshape[2])
@@ -230,7 +236,11 @@ def _idct(X, norm=None):
         X_v[:, 0] *= math.sqrt(N) * 2
         X_v[:, 1:] *= math.sqrt(N / 2) * 2
 
-    k = torch.arange(x_shape[-1], dtype=X.dtype, device=X.device)[None, :] * math.pi / (2 * N)
+    k = (
+        torch.arange(x_shape[-1], dtype=X.dtype, device=X.device)[None, :]
+        * math.pi
+        / (2 * N)
+    )
     W_r = torch.cos(k)
     W_i = torch.sin(k)
 

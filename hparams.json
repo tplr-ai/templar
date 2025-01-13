@@ -24,8 +24,10 @@
     "warmup_steps": 250,
     "alpha_f": 0.1,
     "t_max": 20000,
-    "validator_offset": 4,
-    "checkpoint_frequency": 1000,
+    "validator_offset": 2,
+    "checkpoint_frequency": 50,
     "topk_peers": 20,
-    "minimum_peers": 5
+    "minimum_peers": 5,
+    "active_check_interval": 60,
+    "recent_windows": 3
 }

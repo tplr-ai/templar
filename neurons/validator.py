@@ -127,12 +127,14 @@ class Validator:
         # Set up scheduler setup
         warmup_scheduler = LinearLR(
             self.optimizer,
-            total_iters=250
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=250,
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
             T_0=10000,
-            T_mult=1,
+            T_mult=2,
             eta_min=self.hparams.learning_rate * 0.1
         )
         self.scheduler = SequentialLR(
@@ -150,23 +152,20 @@ class Validator:
             netuid=self.config.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
+            uid=self.uid, 
         )
+
 
         self.bucket = self.comms.get_own_bucket()
         self.comms.try_commit(self.wallet, self.bucket)
         self.comms.fetch_commitments()
         
-        # Init peers
-        if not self.config.peers:
-            self.peers = self.comms.peers
-            tplr.logger.info(f'Filtered peers with buckets: {self.peers}')
-        else:
-            self.peers = self.config.peers
-
+        
         # Init state params
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+        self.comms.current_window = self.current_window 
         self.sync_window = self.current_window
 
         # Init scores and tracking
@@ -189,7 +188,60 @@ class Validator:
             job_type='validation'
         )
 
+        # Initialize peers
+        self.peers = []
+        self.eval_peers = []
+
+
     async def run(self):
+        # Load Peers
+        if not self.config.peers:
+            self.peers = self.comms.peers
+            tplr.logger.info(f'Filtered gather peers with buckets: {self.peers}')
+        else:
+            self.peers = self.config.peers
+        if self.uid not in self.peers:
+            self.peers.append(self.uid)
+
+        self.comms.commitments = self.comms.get_commitments_sync()
+        self.comms.update_peers_with_buckets()
+        tplr.logger.info(f"Loaded commitments: {self.comms.commitments.keys()}")
+
+        # Try to load latest checkpoint
+        result = await self.comms.get_latest_checkpoint()
+        if result:
+            checkpoint_data, window = result
+            try:
+                # Load state dicts from dictionary and move to device
+                self.model.load_state_dict({k: v.to(self.config.device) for k,v in checkpoint_data['model_state_dict'].items()})
+                self.model.to(self.config.device)
+                
+                # Move optimizer state to device
+                for state in self.optimizer.state.values():
+                    for k, v in state.items():
+                        if torch.is_tensor(v):
+                            state[k] = v.to(self.config.device)
+                            
+                self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+                self.scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
+                self.momentum = checkpoint_data['momentum']
+                self.global_step = checkpoint_data['global_step']
+                
+                # Update optimizer and scheduler steps to match
+                self.optimizer._step_count = self.global_step  
+                self.scheduler.last_epoch = self.global_step
+                
+                tplr.logger.info(f"Loaded checkpoint from window {window}, global_step={self.global_step}")
+            except KeyError as e:
+                tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
+            except Exception as e:
+                tplr.logger.error(f"Failed to load checkpoint: {e}")
+        else:
+            tplr.logger.info("No valid checkpoints found, starting from scratch")
+            self.global_step = 0
+            self.model.to(self.config.device)
+    
+
         # Start block listener
         self.loop = asyncio.get_running_loop()
         self.listener = threading.Thread(
@@ -198,21 +250,32 @@ class Validator:
             daemon=True
         ).start()
         self.comms.start_commitment_fetcher()
+        self.comms.start_background_tasks()
+        # self.comms.track_active_peers()
 
         while True:
             step_window = self.current_window
 
+            tplr.logger.info(f'Step window: {step_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
             # 1. Wait for validator offset - single wait loop
             while self.sync_window >= (self.current_window - self.hparams.validator_offset):
                 tplr.logger.info(f'Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}')
                 await asyncio.sleep(12)
-
+            tplr.logger.info(f'Step window: {step_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
             # 2. Process one window at a time
             self.sync_window += 1
             step_window = self.sync_window + 1
             tplr.logger.info(f'Processing window: {self.sync_window} current: {self.current_window}')
 
-            # 3. Update model with collective gradients
+            self.comms.update_peers_with_buckets()
+            # Update local references
+            self.peers = self.comms.peers
+            self.eval_peers = self.comms.eval_peers
+
+            tplr.logger.info(f'Current gather peers: {self.peers}')
+            tplr.logger.info(f'Current evaluation peers: {self.eval_peers}')
+
+            # 3. Gather gradients from peers, but do not apply them yet
             with timer("gather_gradients", self.wandb, self.global_step):
                 gather_result = await self.comms.gather(
                     state_dict=None,
@@ -227,53 +290,14 @@ class Validator:
                     global_step=self.global_step,
                 )
 
-            if gather_result is not None:
-                with timer("update_model_with_gathered", self.wandb, self.global_step):
-                    self.optimizer.zero_grad()
-                    self.model.zero_grad()
-                    
-                    for n, p in self.model.named_parameters():
-                        idxs_key = n + 'idxs'
-                        vals_key = n + 'vals'
-                        idxs = getattr(gather_result.state_dict, idxs_key, None)
-                        vals = getattr(gather_result.state_dict, vals_key, None)
-                        
-                        if idxs is not None and vals is not None:
-                            if not isinstance(idxs, (list, tuple)):
-                                idxs = [idxs]
-                            if not isinstance(vals, (list, tuple)):
-                                vals = [vals]
-                            
-                            new_grad = self.transformer.decode(
-                                self.compressor.batch_decompress(
-                                    p.to(self.config.device),
-                                    idxs,
-                                    vals,
-                                    self.xshapes[n],
-                                    self.totalks[n]
-                                )
-                            )
-                            if p.grad is None:
-                                p.grad = new_grad
-                            else:
-                                p.grad.copy_(new_grad)
-                            p.grad.sign_()
+            # # Save original model parameters
+            original_params = {n: p.clone() for n, p in self.model.named_parameters()}
 
-                    self.optimizer.step()
-                    self.scheduler.step()
-                    torch.cuda.empty_cache()  # Clear GPU memory after model update
-
-            # 4. Select miner to evaluate
-            eval_uid = random.choice(self.comms.eval_peers)
+            # Evaluate selected miner before applying gathered gradients
+            eval_uid = random.choice(self.eval_peers)
             tplr.logger.info(f'Evaluating uid: {eval_uid}')
 
-            # Save original model state before evaluation
-            original_state = {
-                'model_state': self.model.state_dict().copy(),
-                'optimizer_state': self.optimizer.state_dict()
-            }
-
-            # 5. Get individual miner's gradient
+            # Get individual miner's gradient
             eval_result = await self.comms.get(
                 uid=str(eval_uid),
                 window=step_window,
@@ -287,121 +311,127 @@ class Validator:
                 tplr.logger.info(f"No gradient received from UID {eval_uid}. Skipping evaluation.")
                 continue
 
-            # 6. Load evaluation data
+            # Load evaluation data
             pages = await tplr.dataset.DatasetLoader.next_pages(
-                offset=self.sync_window + 1,
+                offset=self.sync_window,
                 n_pages=self.hparams.pages_per_window,
                 seed=eval_uid
-            )            
+            )
             loader = await tplr.dataset.DatasetLoader.create(
                 batch_size=self.hparams.batch_size,
                 sequence_length=self.hparams.sequence_length,
                 pages_info=pages,
                 tokenizer=self.tokenizer
-            )   
+            )
 
-            # 7. Compute initial loss
-            self.model.eval()
-            loss_before = 0
+            state_dict, _ = eval_result
+
+            # Compute initial loss before applying the gradient
+            self.model.train()
+            self.optimizer.zero_grad()  # Zero gradients at start
+            self.model.zero_grad()
+            loss_before = 0.0
             n_batches = 0
-            n_tokens = 0
+
             with torch.no_grad():
                 for i, batch in enumerate(loader):
                     input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                     labels = input_ids.clone()
                     labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                    loss_before += self.model(input_ids=input_ids, labels=labels).loss.item()
+                    outputs = self.model(input_ids=input_ids, labels=labels)
+                    loss_before += outputs.loss.item()
                     n_batches += 1
-                    n_tokens += (labels != -100).sum().item()
-                    del input_ids, labels
+                    del input_ids, labels, outputs
                     torch.cuda.empty_cache()
 
             loss_before_per_batch = loss_before / n_batches if n_batches > 0 else 0
-            tplr.logger.info(f'Loss before: {loss_before_per_batch} (total tokens: {n_tokens})')
+            tplr.logger.info(f'Loss before: {loss_before_per_batch}')
 
-            # Apply evaluated miner's gradient
-            self.model.train()
-            if eval_result is not None:
-                state_dict, _ = eval_result
-                self.optimizer.zero_grad()
-                self.model.zero_grad()
-                
-                for n, p in self.model.named_parameters():
-                    idxs_key = n + 'idxs'
-                    vals_key = n + 'vals'
-                    idxs = state_dict.get(idxs_key)
-                    vals = state_dict.get(vals_key)
+            # Before applying the gradient
+            self.optimizer.zero_grad()
+            self.model.zero_grad()
+
+            for n, p in self.model.named_parameters():
+                idxs_key = n + 'idxs'
+                vals_key = n + 'vals'
+                idxs = state_dict.get(idxs_key, None)
+                vals = state_dict.get(vals_key, None)
+
+                if idxs is not None and vals is not None:
+                    # Move indices and values to validator's device
+                    idxs = idxs.to(self.config.device)
+                    vals = vals.to(self.config.device)
                     
-                    if idxs is not None and vals is not None:
-                        if not isinstance(idxs, (list, tuple)):
-                            idxs = [idxs]
-                        if not isinstance(vals, (list, tuple)):
-                            vals = [vals]
-                        
-                        new_grad = self.transformer.decode(
-                            self.compressor.batch_decompress(
-                                p.to(self.config.device),
-                                idxs,
-                                vals,
-                                self.xshapes[n],
-                                self.totalks[n]
-                            )
+                    # Decode the gradient
+                    grad = self.transformer.decode(
+                        self.compressor.decompress(
+                            p.to(self.config.device),  # Ensure parameter is on correct device
+                            idxs,
+                            vals,
+                            self.xshapes[n],
+                            self.totalks[n],
+                            # median=False
                         )
-                        if p.grad is None:
-                            p.grad = new_grad
-                        else:
-                            p.grad.copy_(new_grad)
-                        p.grad.sign_()
-                
-                # Add gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-                self.optimizer.step()
-                torch.cuda.empty_cache()
+                    ).to(self.config.device)  # Ensure final gradient is on correct device
 
-            # 8. Compute final loss
-            self.model.eval()
-            loss_after = 0
+                    # Assign the gradient to p.grad
+                    if p.grad is None:
+                        p.grad = grad
+                    else:
+                        p.grad.copy_(grad)
+                    p.grad.sign_()
+
+                    p.data.sub_(grad, alpha = self.scheduler.get_last_lr()[0] ) 
+
+                    
+            # Compute loss after applying the gradient
+            loss_after = 0.0
             n_batches = 0
-            n_tokens = 0
             with torch.no_grad():
                 for i, batch in enumerate(loader):
                     input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                     labels = input_ids.clone()
                     labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                    loss_after += self.model(input_ids=input_ids, labels=labels).loss.item()
+                    outputs = self.model(input_ids=input_ids, labels=labels)
+                    loss_after += outputs.loss.item()
                     n_batches += 1
-                    n_tokens += (labels != -100).sum().item()
-                    del input_ids, labels
+                    del input_ids, labels, outputs
                     torch.cuda.empty_cache()
 
             loss_after_per_batch = loss_after / n_batches if n_batches > 0 else 0
-            tplr.logger.info(f'Loss after: {loss_after_per_batch} (total tokens: {n_tokens})')
-            tplr.logger.info(f"Loss improvement: {(loss_before_per_batch - loss_after_per_batch)}")
+            tplr.logger.info(f'Loss after: {loss_after_per_batch}')
 
-            # Revert to original state
-            self.model.load_state_dict(original_state['model_state'])
-            self.optimizer.load_state_dict(original_state['optimizer_state'])
-            self.model.train()
+            # Calculate loss improvement
+            loss_improvement = loss_before_per_batch - loss_after_per_batch
+            tplr.logger.info(f'Loss improvement: {loss_improvement}')
 
-            # 9. Update scores
-            score = (loss_before_per_batch - loss_after_per_batch)* 10e6
-            score = max(0.0, score)
-            
-            if eval_uid not in self.evaluated_uids:
-                self.evaluated_uids.add(eval_uid)
-            
+            # Revert model parameters to original state
+            for n, p in self.model.named_parameters():
+                p.data.copy_(original_params[n])
+
+            # Update scores
+            relative_improvement = loss_improvement / loss_before_per_batch if loss_before_per_batch > 0 else 0.0
+            tplr.logger.info(f"Relative improvement: {relative_improvement:.4f}")
+            score = relative_improvement
+            # Add the evaluated UID to the set
+            self.evaluated_uids.add(eval_uid)
+
             # Update scores and moving averages
             self.scores[eval_uid] = score
             self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
 
-            # Calculate weights
+            # Calculate weights - only positive moving averages get weights
             weights = torch.zeros_like(self.moving_avg_scores)
             evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
             evaluated_mask[list(self.evaluated_uids)] = True
-            evaluated_scores = self.moving_avg_scores * evaluated_mask
+
+            # Only consider positive moving averages for weight calculation
+            positive_mask = (self.moving_avg_scores > 0) & evaluated_mask
+            evaluated_scores = self.moving_avg_scores * positive_mask
+
             total_score = evaluated_scores.sum()
             if total_score > 0:
-                weights[evaluated_mask] = evaluated_scores[evaluated_mask] / total_score
+                weights[positive_mask] = evaluated_scores[positive_mask] / total_score
 
             # Log only evaluated UIDs
             tplr.logger.info('Updated scores for evaluated UIDs:')
@@ -424,7 +454,6 @@ class Validator:
                     )
 
             # 10. Log metrics and cleanup
-            self.global_step += 1
             del loader, pages  # Explicit cleanup of dataset objects
             torch.cuda.empty_cache()
 
@@ -453,7 +482,7 @@ class Validator:
                 "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item()
             }, step=self.global_step)
 
-            # Add back checkpointing logic after the optimizer step
+            # Checkpoints
             if self.global_step % self.hparams.checkpoint_frequency == 0:
                 tplr.logger.info(f"Creating checkpoint at global_step {self.global_step}")
 
@@ -486,8 +515,8 @@ class Validator:
                         tplr.logger.info(f"Successfully saved checkpoint at global_step {self.global_step} (took {elapsed_time:.2f}s)")
                         
                         self.wandb.log({
-                            "checkpoint/save_time": elapsed_time,
-                            "checkpoint/global_step": self.global_step,
+                            "validator/save_time": elapsed_time,
+                            "validator/global_step": self.global_step,
                         }, step=self.global_step)
                         
                     except Exception as e:
@@ -499,11 +528,75 @@ class Validator:
 
                 asyncio.create_task(_save())
 
+            # Now apply the gathered gradients
+            if gather_result is not None:
+                # Update self.global_step based on the maximum global_step received
+                max_global_step = max(gather_result.global_steps + [self.global_step])
+                if max_global_step > self.global_step:
+                    tplr.logger.info(f"Updating global_step from {self.global_step} to {max_global_step}")
+                    self.global_step = max_global_step
+                    self.optimizer._step_count = self.global_step
+                    self.scheduler.last_epoch = self.global_step
+
+                with timer("update_model_with_gathered", self.wandb, self.global_step):
+                    self.optimizer.zero_grad()
+                    self.model.zero_grad()
+                    
+                    for n, p in self.model.named_parameters():
+                        idxs_key = n + 'idxs'
+                        vals_key = n + 'vals'
+                        idxs = getattr(gather_result.state_dict, idxs_key, None)
+                        vals = getattr(gather_result.state_dict, vals_key, None)
+                        if idxs is not None and vals is not None:
+                            # Ensure idx and val are lists of tensors
+                            if not isinstance(idxs, (list, tuple)):
+                                idxs = [idxs]
+                            if not isinstance(vals, (list, tuple)):
+                                vals = [vals]
+                            
+                            new_grad = self.transformer.decode(
+                                self.compressor.batch_decompress(
+                                    p.to(self.config.device),
+                                    idxs,
+                                    vals,
+                                    self.xshapes[n],
+                                    self.totalks[n],
+                                    # median=True
+                                )
+                            )
+                            # Set recomputed gathered gradient.
+                            if p.grad is None:
+                                p.grad = new_grad
+                            else:
+                                p.grad.copy_(new_grad)
+                            # Sign-SGD
+                            p.grad.sign_()
+                        else:
+                            tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
+
+                    # **Perform optimization step**
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    torch.cuda.empty_cache()
+
+                    # Increment global_step
+                    self.global_step += 1
+                    self.optimizer._step_count = self.global_step  # Ensure optimizer's step count matches
+
+                    # Log steps to wandb
+                    self.wandb.log({
+                        "validator/global_step": self.global_step,
+                        "validator/optimizer_step_count": self.optimizer._step_count,
+                        "validator/scheduler_last_epoch": self.scheduler.last_epoch,
+                    }, step=self.global_step)
+
     def block_listener(self, loop):
         def handler(event, _u, _s):
             self.current_block = int(event['header']['number'])
-            if int(self.current_block / self.hparams.blocks_per_window) != self.current_window:
-                self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+            new_window = int(self.current_block / self.hparams.blocks_per_window)
+            if new_window != self.current_window:
+                self.current_window = new_window
+                self.comms.current_window = self.current_window  # Synchronize comms current_window
         while not self.stop_event.is_set():
             try:
                 bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler)

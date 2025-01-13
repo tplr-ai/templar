@@ -14,9 +14,9 @@ pm2 start neurons/miner.py --interpreter python3 --name TM1 -- \
   --wallet.name Bistro \
   --wallet.hotkey M111 \
   --device cuda:3 \
-  --subtensor.network test \
+  --subtensor.network ws://127.0.0.1:9945 t \
   --debug \
-  --netuid 268 \
+  --netuid 1 \
   --use_wandb \
   --project "${PROJECT_NAME}"
 
@@ -24,9 +24,9 @@ pm2 start neurons/miner.py --interpreter python3 --name TM2 -- \
   --wallet.name Bistro \
   --wallet.hotkey M222 \
   --device cuda:1 \
-  --subtensor.network test \
+  --subtensor.network ws://127.0.0.1:9945  \
   --debug \
-  --netuid 268 \
+  --netuid 1 \
   --use_wandb \
   --project "${PROJECT_NAME}"
 
@@ -34,9 +34,9 @@ pm2 start neurons/validator.py --interpreter python3 --name TV1 -- \
   --wallet.name Bistro \
   --wallet.hotkey V11 \
   --device cuda:2 \
-  --subtensor.network test \
+  --subtensor.network ws://127.0.0.1:9945  \
   --debug \
-  --netuid 268 \
+  --netuid 1 \
   --use_wandb \
   --project "${PROJECT_NAME}"
 

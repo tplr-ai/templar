@@ -152,6 +152,7 @@ class Validator:
             hparams=self.hparams,
         )
 
+
         self.bucket = self.comms.get_own_bucket()
         self.comms.try_commit(self.wallet, self.bucket)
         self.comms.fetch_commitments()
@@ -161,6 +162,7 @@ class Validator:
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+        self.comms.current_window = self.current_window 
         self.sync_window = self.current_window
 
         # Init scores and tracking
@@ -198,6 +200,11 @@ class Validator:
         if self.uid not in self.peers:
             self.peers.append(self.uid)
 
+        self.comms.commitments = self.comms.get_commitments_sync()
+        self.comms.update_peers_with_buckets()
+        tplr.logger.info(f"Loaded commitments: {self.comms.commitments.keys()}")
+    
+
         # Start block listener
         self.loop = asyncio.get_running_loop()
         self.listener = threading.Thread(
@@ -207,6 +214,7 @@ class Validator:
         ).start()
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
+        self.comms.track_active_peers()
 
         while True:
             step_window = self.current_window
@@ -221,10 +229,13 @@ class Validator:
             step_window = self.sync_window + 1
             tplr.logger.info(f'Processing window: {self.sync_window} current: {self.current_window}')
 
-            await self.comms.update_peers_with_buckets()
+            self.comms.update_peers_with_buckets()
             # Update local references
             self.peers = self.comms.peers
             self.eval_peers = self.comms.eval_peers
+
+            tplr.logger.info(f'Current gather peers: {self.peers}')
+            tplr.logger.info(f'Current evaluation peers: {self.eval_peers}')
 
             # 3. Gather gradients from peers, but do not apply them yet
             with timer("gather_gradients", self.wandb, self.global_step):
@@ -306,31 +317,32 @@ class Validator:
                 vals = state_dict.get(vals_key, None)
 
                 if idxs is not None and vals is not None:
-                    if not isinstance(idxs, (list, tuple)):
-                        idxs = [idxs]
-                    if not isinstance(vals, (list, tuple)):
-                        vals = [vals]
-
+                    # Move indices and values to validator's device
+                    idxs = idxs.to(self.config.device)
+                    vals = vals.to(self.config.device)
+                    
                     # Decode the gradient
                     grad = self.transformer.decode(
-                        self.compressor.batch_decompress(
-                            p.to(self.config.device),
+                        self.compressor.decompress(
+                            p.to(self.config.device),  # Ensure parameter is on correct device
                             idxs,
                             vals,
                             self.xshapes[n],
                             self.totalks[n],
-                            median=False
+                            # median=False
                         )
-                    )
+                    ).to(self.config.device)  # Ensure final gradient is on correct device
 
                     # Assign the gradient to p.grad
                     if p.grad is None:
                         p.grad = grad
                     else:
                         p.grad.copy_(grad)
-                    p.grad.sign_()  # If needed as per your old script
+                    p.grad.sign_()
 
+                    p.data.sub_(grad, alpha = self.scheduler.get_last_lr()[0] ) 
 
+                    
             # Compute loss after applying the gradient
             loss_after = 0.0
             n_batches = 0
@@ -358,7 +370,8 @@ class Validator:
 
             # Update scores
             relative_improvement = loss_improvement / loss_before_per_batch if loss_before_per_batch > 0 else 0.0
-            score = relative_improvement * 1e6  # Scaling factor
+            tplr.logger.info(f"Relative improvement: {relative_improvement:.4f}")
+            score = relative_improvement
             # Add the evaluated UID to the set
             self.evaluated_uids.add(eval_uid)
 
@@ -462,8 +475,8 @@ class Validator:
                         tplr.logger.info(f"Successfully saved checkpoint at global_step {self.global_step} (took {elapsed_time:.2f}s)")
                         
                         self.wandb.log({
-                            "checkpoint/save_time": elapsed_time,
-                            "checkpoint/global_step": self.global_step,
+                            "validator/save_time": elapsed_time,
+                            "validator/global_step": self.global_step,
                         }, step=self.global_step)
                         
                     except Exception as e:
@@ -492,45 +505,36 @@ class Validator:
                     for n, p in self.model.named_parameters():
                         idxs_key = n + 'idxs'
                         vals_key = n + 'vals'
-                        idxs_list = getattr(gather_result.state_dict, idxs_key, None)
-                        vals_list = getattr(gather_result.state_dict, vals_key, None)
-                        
-                        if idxs_list is not None and vals_list is not None:
-                            if not isinstance(idxs_list, list):
-                                idxs_list = [idxs_list]
-                            if not isinstance(vals_list, list):
-                                vals_list = [vals_list]
+                        idxs = getattr(gather_result.state_dict, idxs_key, None)
+                        vals = getattr(gather_result.state_dict, vals_key, None)
+                        if idxs is not None and vals is not None:
+                            # Ensure idx and val are lists of tensors
+                            if not isinstance(idxs, (list, tuple)):
+                                idxs = [idxs]
+                            if not isinstance(vals, (list, tuple)):
+                                vals = [vals]
                             
-                            # Decode and sum gradients from all miners
-                            agg_grad = torch.zeros_like(p.data)
-                            for idxs, vals in zip(idxs_list, vals_list):
-                                # Decode the gradient
-                                grad = self.transformer.decode(
-                                    self.compressor.decompress(
-                                        p.to(self.config.device),
-                                        idxs,
-                                        vals,
-                                        self.xshapes[n],
-                                        self.totalks[n],
-                                        median=True
-                                    )
+                            new_grad = self.transformer.decode(
+                                self.compressor.batch_decompress(
+                                    p.to(self.config.device),
+                                    idxs,
+                                    vals,
+                                    self.xshapes[n],
+                                    self.totalks[n],
+                                    # median=True
                                 )
-                                agg_grad.add_(grad)
+                            )
+                            # Set recomputed gathered gradient.
+                            if p.grad is None:
+                                p.grad = new_grad
+                            else:
+                                p.grad.copy_(new_grad)
+                            # Sign-SGD
+                            p.grad.sign_()
+                        else:
+                            tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
 
-                            # Momentum decay
-                            self.momentum[n].mul_(self.hparams.momentum_decay)
-
-                            # Update validator's momentum with aggregated gradient
-                            lr = self.scheduler.get_last_lr()[0]
-                            self.momentum[n].add_(agg_grad, alpha=lr)
-
-                            # Apply weight decay
-                            decay = 1.0 - lr * self.hparams.weight_decay
-                            p.data.mul_(decay)
-
-                            # Assign gradient for optimizer step
-                            p.grad = self.momentum[n].sign()
-
+                    # Perform optimization step
                     self.optimizer.step()
                     self.scheduler.step()
                     torch.cuda.empty_cache()
@@ -538,8 +542,10 @@ class Validator:
     def block_listener(self, loop):
         def handler(event, _u, _s):
             self.current_block = int(event['header']['number'])
-            if int(self.current_block / self.hparams.blocks_per_window) != self.current_window:
-                self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+            new_window = int(self.current_block / self.hparams.blocks_per_window)
+            if new_window != self.current_window:
+                self.current_window = new_window
+                self.comms.current_window = self.current_window  # Synchronize comms current_window
         while not self.stop_event.is_set():
             try:
                 bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler)

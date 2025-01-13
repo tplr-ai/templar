@@ -1,3 +1,6 @@
+# ruff: noqa
+
+
 # The MIT License (MIT)
 # © 2024 templar.tech
 
@@ -20,9 +23,11 @@
 
 
 # Global imports
+
 import math
 import torch
 import torch.fft
+
 from einops import rearrange
 
 
@@ -47,9 +52,9 @@ class TransformDCT:
 
                 # Pregenerate DCT basis matrices
                 if sc not in self.f_dict:
-                    identity_matrix = torch.eye(sc)
-                    self.f_dict[sc] = _dct(identity_matrix, norm=norm).to(p.dtype).to(p.device)
-                    self.b_dict[sc] = _idct(identity_matrix, norm=norm).to(p.dtype).to(p.device)
+                    I = torch.eye(sc)
+                    self.f_dict[sc] = _dct(I, norm=norm).to(p.dtype).to(p.device)
+                    self.b_dict[sc] = _idct(I, norm=norm).to(p.dtype).to(p.device)
 
     @torch.no_grad()
     def einsum_2d(self, x, b, d=None):
@@ -142,54 +147,27 @@ class CompressDCT:
         return idx, val, xshape, totalk
 
     @torch.no_grad()
-    def decompress(self, p, idx, val, xshape, totalk, median=False):
-            idx = idx.to(x.device)
-            val = val.to(x.device)
-            x = torch.zeros(xshape, device=p.device, dtype=p.dtype)
+    def decompress(self, p, idx, val, xshape, totalk):
+        x = torch.zeros(xshape, device=p.device, dtype=p.dtype)
 
-            if len(x.shape) > 2:  # 2D weights
-                x = rearrange(x, "y x h w -> y x (h w)")
+        if len(xshape) > 2:  # 2D weights
+            x = rearrange(x, "y x h w -> y x (h w)")
 
-            # First pass: standard scatter_reduce
-            x.scatter_reduce_(dim=-1, index=idx, src=val, reduce="mean", include_self=False).reshape(xshape)
-            
-            if median:
-                # Store original shape and flatten preserving the last dimension
-                original_shape = x.shape
-                x_flat = x.reshape(-1, x.shape[-1])
-                idx_flat = idx.reshape(-1, idx.shape[-1])
-                val_flat = val.reshape(-1, val.shape[-1])
-                
-                # Count collisions
-                counts = torch.zeros_like(x_flat)
-                counts.scatter_add_(dim=-1, index=idx_flat, src=torch.ones_like(val_flat))
-                
-                # Find indices with 3 or more collisions
-                collision_mask = counts >= 3
-                collision_indices = torch.nonzero(collision_mask)
-                
-                # Process each collision point
-                for i, k in collision_indices:
-                    mask = (idx_flat[i] == k)
-                    values = val_flat[i][mask]
-                    if values.numel() > 0:
-                        x_flat[i, k] = torch.median(values)
-                
-                # Restore shape before continuing with original flow
-                x = x_flat.reshape(original_shape)
-            else:
-                x = x.reshape(xshape)
+        # TODO: Careful, this is nondeterministic across different CUDA devices! might cause errors to accumulate between nodes!
+        x.scatter_reduce_(
+            dim=-1, index=idx, src=val, reduce="mean", include_self=False
+        ).reshape(xshape)
 
-            if len(xshape) > 2:  # 2D weights
-                x = rearrange(x, "y x (h w) -> y x h w", h=xshape[2])
+        if len(x.shape) > 2:  # 2D weights
+            x = rearrange(x, "y x (h w) -> y x h w", h=xshape[2])
 
-            return x
+        return x
 
     @torch.no_grad()
-    def batch_decompress(self, p, idx, val, xshape, totalk, median=False):
+    def batch_decompress(self, p, idx, val, xshape, totalk):
         idx = torch.concatenate(idx, dim=-1).to(device=p.device)
         val = torch.concatenate(val, dim=-1).to(device=p.device)
-        return self.decompress(p, idx, val, xshape, totalk, median=median)
+        return self.decompress(p, idx, val, xshape, totalk)
 
 
 # Code modified and sourced from https://github.com/zh217/torch-dct
@@ -258,7 +236,11 @@ def _idct(X, norm=None):
         X_v[:, 0] *= math.sqrt(N) * 2
         X_v[:, 1:] *= math.sqrt(N / 2) * 2
 
-    k = torch.arange(x_shape[-1], dtype=X.dtype, device=X.device)[None, :] * math.pi / (2 * N)
+    k = (
+        torch.arange(x_shape[-1], dtype=X.dtype, device=X.device)[None, :]
+        * math.pi
+        / (2 * N)
+    )
     W_r = torch.cos(k)
     W_i = torch.sin(k)
 

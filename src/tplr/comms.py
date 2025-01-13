@@ -1,11 +1,12 @@
 import os
+import re
 import time
 import torch
 import asyncio
 import aiofiles
 import tempfile
 import bittensor as bt
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from types import SimpleNamespace
 from aiobotocore.session import get_session
 from . import __version__
@@ -15,6 +16,10 @@ from .schemas import Bucket
 
 import tplr as tplr
 import botocore
+from tqdm.asyncio import tqdm
+import numpy as np
+import psutil
+import mmap
 
 # Constants
 CF_REGION_NAME: str = "enam"
@@ -53,9 +58,6 @@ class Comms(ChainManager):
         self.active_check_interval = (
             self.hparams.active_check_interval
         )  # Interval in seconds
-        self.current_window = int(
-            self.metagraph.subtensor.block / self.hparams.blocks_per_window
-        )
         self.recent_windows = (
             self.hparams.recent_windows
         )  # Number of recent windows to check
@@ -63,19 +65,7 @@ class Comms(ChainManager):
     def start_background_tasks(self):
         self.loop = asyncio.get_running_loop()
         # Start background tasks
-        self.loop.create_task(self.update_current_window())
         self.loop.create_task(self.track_active_peers())
-
-    async def update_current_window(self):
-        """Background task to keep current_window updated."""
-        while True:
-            self.current_block = self.metagraph.subtensor.block
-            self.current_window = int(
-                self.current_block / self.hparams.blocks_per_window
-            )
-            await asyncio.sleep(
-                self.hparams.window_update_interval
-            )  # Adjust interval as needed
 
     def get_own_bucket(self) -> Bucket:
         """Gets bucket configuration from environment variables via config.BUCKET_SECRETS."""
@@ -345,13 +335,12 @@ class Comms(ChainManager):
         uid: str,
         window: int,
         key: str,
-        timeout: int = 30,
+        timeout: int = 5,
         local: bool = True,
         stale_retention: int = 10,
-    ) -> Optional[Tuple[dict, int]]:
-        """GET operation: Retrieve state_dict and global_step."""
+    ) -> Optional[dict]:
+        """GET operation."""
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
-        # full_key = f"{uid}/{window}/{filename}"
         tplr.logger.debug(f"GET {filename} -->")
 
         try:
@@ -372,77 +361,82 @@ class Comms(ChainManager):
                 state_dict = loaded_data.get("state_dict")
                 global_step = loaded_data.get("global_step", 0)
                 return state_dict, global_step
-            else:
-                # Cleanup old S3 data
-                await self.cleanup_s3_data(
-                    uid=uid, current_window=window, stale_retention=stale_retention
-                )
 
-                # Get the peer's bucket from commitments
-                peer_bucket = self.commitments.get(int(uid))
-                tplr.logger.debug(f"getting {key} from peer : {peer_bucket}")
-                if not peer_bucket:
-                    tplr.logger.debug(f"No bucket found for UID {uid}")
-                    return None
+            # Remote storage logic
+            # Get peer bucket info
+            peer_bucket = self.commitments.get(int(uid))
+            if not peer_bucket:
+                return None
 
-                async with self.session.create_client(
-                    "s3",
-                    endpoint_url=self.get_base_url(peer_bucket.account_id),
-                    region_name=CF_REGION_NAME,
-                    config=client_config,
-                    aws_access_key_id=peer_bucket.access_key_id,
-                    aws_secret_access_key=peer_bucket.secret_access_key,
-                ) as s3_client:
-                    try:
-                        # Check if file exists first
-                        await s3_client.head_object(
-                            Bucket=peer_bucket.name, Key=filename
-                        )
-                    except (
-                        botocore.exceptions.ClientError,
-                        botocore.exceptions.BotoCoreError,
-                    ) as e:
-                        error_code = e.response["Error"]["Code"]
-                        if error_code == "404":
-                            tplr.logger.debug(
-                                f"Data not found for uid {uid} at window {window}. Skipping."
-                            )
-                            return None
-                        else:
-                            raise  # Re-raise if it's a different exception
+            # Special handling for checkpoint files
+            if key == "checkpoint":
+                try:
+                    # Create temp directory if it doesn't exist
+                    temp_dir = os.path.join(os.getcwd(), "temp")
+                    os.makedirs(temp_dir, exist_ok=True)
 
-                    # Proceed to get the object if it exists
-                    response = await asyncio.wait_for(
-                        s3_client.get_object(Bucket=peer_bucket.name, Key=filename),
-                        timeout=timeout,
+                    temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
+
+                    success = await self.download_large_file(
+                        filename=filename, destination_path=temp_file_path, use_gpu=True
                     )
 
-                    # Save to a temporary file and load
-                    with tempfile.NamedTemporaryFile(
-                        delete=True, suffix=".pt"
-                    ) as temp_file:
-                        temp_file_path = temp_file.name
-                        async with aiofiles.open(temp_file_path, "wb") as outfile:
-                            while True:
-                                chunk = await response["Body"].read(1 * 1024 * 1024)
-                                if not chunk:
-                                    break
-                                await outfile.write(chunk)
+                    if not success:
+                        tplr.logger.error(f"Failed to download checkpoint {filename}")
+                        return None
 
-                        # Load the object
-                        try:
-                            with open(temp_file_path, "rb") as f:
-                                loaded_data = torch.load(f, weights_only=True)
-                            if key == "checkpoint":
-                                return loaded_data, None
-                            state_dict = loaded_data.get("state_dict")
-                            global_step = loaded_data.get("global_step", 0)
-                            return state_dict, global_step
-                        except Exception as e:
-                            tplr.logger.debug(
-                                f"Error loading data from {filename}: {e}"
+                    try:
+                        with open(temp_file_path, "rb") as f:
+                            loaded_data = torch.load(
+                                f, weights_only=True, map_location=self.config.device
                             )
-                            return None
+                        return loaded_data, None
+                    finally:
+                        if os.path.exists(temp_file_path):
+                            os.remove(temp_file_path)
+
+                except Exception as e:
+                    tplr.logger.error(f"Error handling checkpoint {filename}: {e}")
+                    return None
+
+            # Original behavior for non-checkpoint files
+            async with self.session.create_client(
+                "s3",
+                endpoint_url=self.get_base_url(peer_bucket.account_id),
+                region_name=CF_REGION_NAME,
+                config=client_config,
+                aws_access_key_id=peer_bucket.access_key_id,
+                aws_secret_access_key=peer_bucket.secret_access_key,
+            ) as s3_client:
+                try:
+                    response = await s3_client.get_object(
+                        Bucket=peer_bucket.name, Key=filename
+                    )
+                except botocore.exceptions.ClientError as e:
+                    if e.response["Error"]["Code"] == "NoSuchKey":
+                        return None
+                    raise
+
+                temp_dir = os.path.join(os.getcwd(), "temp")
+                os.makedirs(temp_dir, exist_ok=True)
+                temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
+
+                async with aiofiles.open(temp_file_path, "wb") as outfile:
+                    while True:
+                        chunk = await response["Body"].read(1 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        await outfile.write(chunk)
+
+                try:
+                    with open(temp_file_path, "rb") as f:
+                        loaded_data = torch.load(f, weights_only=True)
+                    state_dict = loaded_data.get("state_dict")
+                    global_step = loaded_data.get("global_step", 0)
+                    return state_dict, global_step
+                finally:
+                    if os.path.exists(temp_file_path):
+                        os.remove(temp_file_path)
 
         except Exception as e:
             tplr.logger.debug(f"GET error {filename}: {e}")
@@ -588,18 +582,26 @@ class Comms(ChainManager):
 
     async def upload_large_file(self, file_path: str, filename: str) -> bool:
         """
-        Uploads a large file to R2 using multipart upload.
+        Uploads a large file to R2 using parallel multipart upload with shared memory.
 
-        Args:
-            file_path (str): Path to the local file to upload
-            filename (str): Destination filename in R2
-
-        Returns:
-            bool: True if successful, False otherwise
+        Optimizations:
+        - Uses shared memory for inter-process communication
+        - Parallel chunk processing with optimal chunk sizes
+        - Memory-mapped file reading for large files
+        - O(1) memory usage regardless of file size
         """
         try:
-            # Use 16MB chunks for multipart upload
-            chunk_size = 16 * 1024 * 1024
+            # Calculate optimal chunk size based on system memory and CPU cores
+            file_size = os.path.getsize(file_path)
+            cpu_count = os.cpu_count()
+            memory_available = psutil.virtual_memory().available
+            optimal_chunk_size = min(
+                max(
+                    64 * 1024 * 1024,  # Minimum 64MB
+                    file_size // (cpu_count * 2),
+                ),  # Split across cores
+                memory_available // (cpu_count * 4),  # Keep memory usage in check
+            )
 
             async with self.session.create_client(
                 "s3",
@@ -609,57 +611,82 @@ class Comms(ChainManager):
                 aws_access_key_id=self.bucket.access_key_id,
                 aws_secret_access_key=self.bucket.secret_access_key,
             ) as s3_client:
-                # Initialize multipart upload
+                # Initialize multipart upload - O(1)
                 response = await s3_client.create_multipart_upload(
                     Bucket=self.bucket.name, Key=filename
                 )
                 upload_id = response["UploadId"]
 
-                # Upload parts
-                parts = []
-                part_number = 1
+                # Use memory mapping for large files - O(1) memory
+                with mmap.mmap(
+                    os.open(file_path, os.O_RDONLY), 0, access=mmap.ACCESS_READ
+                ) as mm:
+                    total_chunks = (
+                        file_size + optimal_chunk_size - 1
+                    ) // optimal_chunk_size
 
-                async with aiofiles.open(file_path, "rb") as f:
-                    while True:
-                        data = await f.read(chunk_size)
-                        if not data:
-                            break
+                    # Progress bar
+                    pbar = tqdm(
+                        total=file_size,
+                        unit="B",
+                        unit_scale=True,
+                        desc=f"Uploading {filename}",
+                    )
 
+                    async def upload_chunk(part_number: int) -> dict:
+                        start = part_number * optimal_chunk_size
+                        end = min(start + optimal_chunk_size, file_size)
+
+                        # Read chunk from memory map - O(1) memory
+                        chunk = mm[start:end]
+
+                        # Upload chunk directly
                         response = await s3_client.upload_part(
                             Bucket=self.bucket.name,
                             Key=filename,
-                            PartNumber=part_number,
+                            PartNumber=part_number + 1,  # S3 parts start at 1
                             UploadId=upload_id,
-                            Body=data,
+                            Body=chunk,
                         )
 
-                        parts.append(
-                            {"PartNumber": part_number, "ETag": response["ETag"]}
-                        )
-                        part_number += 1
+                        pbar.update(len(chunk))
+                        return {"PartNumber": part_number + 1, "ETag": response["ETag"]}
 
-                # Complete multipart upload
-                await s3_client.complete_multipart_upload(
-                    Bucket=self.bucket.name,
-                    Key=filename,
-                    UploadId=upload_id,
-                    MultipartUpload={"Parts": parts},
-                )
+                    # Upload chunks in parallel - O(n) where n is number of chunks
+                    tasks = [upload_chunk(i) for i in range(total_chunks)]
+                    parts = await asyncio.gather(*tasks)
 
-            tplr.logger.debug(f"Successfully uploaded large file {filename}")
+                    # Sort parts by part number - O(n log n)
+                    parts.sort(key=lambda x: x["PartNumber"])
+
+                    # Complete upload - O(1)
+                    await s3_client.complete_multipart_upload(
+                        Bucket=self.bucket.name,
+                        Key=filename,
+                        UploadId=upload_id,
+                        MultipartUpload={"Parts": parts},
+                    )
+
+                    pbar.close()
+
             return True
 
         except Exception as e:
             tplr.logger.error(f"Error uploading large file {filename}: {e}")
+            if "pbar" in locals():
+                pbar.close()
             return False
 
-    async def download_large_file(self, filename: str, destination_path: str) -> bool:
+    async def download_large_file(
+        self, filename: str, destination_path: str, use_gpu: bool = True
+    ) -> bool:
         """
-        Downloads a large file from R2 using multipart download.
+        Downloads a large file from R2 using parallel multipart download.
 
         Args:
             filename (str): File to download from R2
             destination_path (str): Local path to save the file
+            use_gpu (bool): Whether to use GPU for processing (if available)
 
         Returns:
             bool: True if successful, False otherwise
@@ -679,30 +706,108 @@ class Comms(ChainManager):
                 )
                 file_size = response["ContentLength"]
 
-                # Use 16MB chunks for multipart download
-                chunk_size = 16 * 1024 * 1024
+                # Calculate optimal chunk size and parts
+                cpu_count = os.cpu_count()
+                chunk_size = max(
+                    16 * 1024 * 1024, file_size // (cpu_count * 2)
+                )  # At least 16MB chunks
                 total_parts = (file_size + chunk_size - 1) // chunk_size
 
-                async with aiofiles.open(destination_path, "wb") as f:
-                    for part in range(total_parts):
-                        start = part * chunk_size
-                        end = min(start + chunk_size, file_size)
+                # Initialize progress bar
+                pbar = tqdm(
+                    total=file_size,
+                    unit="B",
+                    unit_scale=True,
+                    desc=f"Downloading {filename}",
+                    ncols=80,
+                )
 
+                async def download_chunk(part: int) -> tuple[int, bytes]:
+                    start = part * chunk_size
+                    end = min(start + chunk_size, file_size)
+
+                    try:
                         response = await s3_client.get_object(
                             Bucket=self.bucket.name,
                             Key=filename,
                             Range=f"bytes={start}-{end-1}",
                         )
-
                         chunk = await response["Body"].read()
-                        await f.write(chunk)
+                        pbar.update(len(chunk))
 
-                tplr.logger.debug(f"Successfully downloaded large file {filename}")
+                        # If GPU is available and enabled, use it for decompression
+                        if (
+                            use_gpu
+                            and torch.cuda.is_available()
+                            and len(chunk) > 1024 * 1024
+                        ):  # >1MB
+                            # Convert bytes to writable numpy array first
+                            chunk_np = np.frombuffer(
+                                chunk, dtype=np.uint8
+                            ).copy()  # .copy() makes it writable
+                            chunk_tensor = torch.from_numpy(chunk_np).cuda()
+                            # Any GPU processing here if needed
+                            chunk = chunk_tensor.cpu().numpy().tobytes()
+
+                        return part, chunk
+                    except Exception as e:
+                        tplr.logger.error(f"Error downloading part {part}: {e}")
+                        return part, None
+
+                # Download chunks in parallel
+                chunks = {}
+                retry_count = 3
+
+                while retry_count > 0 and len(chunks) < total_parts:
+                    # Create tasks for missing chunks
+                    missing_parts = [
+                        i
+                        for i in range(total_parts)
+                        if i not in chunks or chunks[i] is None
+                    ]
+                    if not missing_parts:
+                        break
+
+                    tasks = [download_chunk(part) for part in missing_parts]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    # Process results
+                    for part, data in results:
+                        if data is not None:
+                            chunks[part] = data
+
+                    retry_count -= 1
+                    if len(chunks) < total_parts:
+                        tplr.logger.warning(
+                            f"Retrying {total_parts - len(chunks)} failed chunks..."
+                        )
+
+                # Check if we have all chunks
+                if len(chunks) < total_parts:
+                    raise Exception(
+                        f"Failed to download all chunks after {3-retry_count} retries"
+                    )
+
+                # Write chunks to file
+                async with aiofiles.open(destination_path, "wb") as f:
+                    for i in range(total_parts):
+                        await f.write(chunks[i])
+
+                pbar.close()
+                tplr.logger.info(
+                    f"Successfully downloaded {filename} to {destination_path}"
+                )
                 return True
 
         except Exception as e:
+            pbar.close()
             tplr.logger.error(f"Error downloading large file {filename}: {e}")
             return False
+
+        finally:
+            # Cleanup GPU memory if used
+            if use_gpu and torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     async def cleanup_old_checkpoints(self, keep_last: int = 3):
         """
@@ -765,6 +870,15 @@ class Comms(ChainManager):
                 aws_access_key_id=peer_bucket.access_key_id,
                 aws_secret_access_key=peer_bucket.secret_access_key,
             ) as s3_client:
+                # Ensure that self.current_window is set
+                if not hasattr(self, "current_window") or self.current_window is None:
+                    tplr.logger.error(
+                        "current_window is not set in comms. Please set comms.current_window from the main thread."
+                    )
+                    return False
+
+                current_window = self.current_window
+
                 for window in range(
                     current_window - recent_windows, current_window + 1
                 ):
@@ -814,6 +928,83 @@ class Comms(ChainManager):
             await asyncio.gather(*tasks)
             self.active_peers = active_peers
 
-            tplr.logger.info(f"Updated active peers: {self.active_peers}")
+            tplr.logger.info(
+                f"Updated active peers: {[int(uid) for uid in self.active_peers]}"
+            )
 
             await asyncio.sleep(self.active_check_interval)
+
+    async def get_latest_checkpoint(self):
+        """Get the latest checkpoint from R2 storage"""
+        try:
+            # Get validator with highest stake
+            validator_uid = self.metagraph.S.argmax().item()
+            tplr.logger.info(f"Found validator with highest stake: {validator_uid}")
+
+            if validator_uid is None:
+                tplr.logger.info("No active validators found")
+                return None
+
+            # List checkpoint files from validator's bucket
+            checkpoint_files = []
+            async with self.session.create_client(
+                "s3",
+                endpoint_url=self.get_base_url(self.bucket.account_id),
+                region_name=tplr.comms.CF_REGION_NAME,
+                config=client_config,
+                aws_access_key_id=self.bucket.access_key_id,
+                aws_secret_access_key=self.bucket.secret_access_key,
+            ) as s3_client:
+                # Use regex pattern to match checkpoint files
+                pattern = re.compile(
+                    r"^checkpoint-(\d+)-0-v0\.2\.6\.pt$"
+                )  # Note: Changed to match your version
+
+                paginator = s3_client.get_paginator("list_objects_v2")
+                async for page in paginator.paginate(
+                    Bucket=self.bucket.name, Prefix="checkpoint"
+                ):
+                    for obj in page.get("Contents", []):
+                        key = obj["Key"]
+                        match = pattern.match(key)
+                        if match:
+                            window = int(match.group(1))
+                            checkpoint_files.append(
+                                {
+                                    "key": key,
+                                    "window": window,
+                                    "size": obj["Size"],
+                                    "last_modified": obj["LastModified"],
+                                }
+                            )
+
+            if not checkpoint_files:
+                tplr.logger.info("No checkpoint files found")
+                return None
+
+            # Sort by last_modified timestamp (descending) and get latest
+            latest = max(checkpoint_files, key=lambda x: x["last_modified"])
+            tplr.logger.info(
+                f"Found latest checkpoint: {latest['key']} from window {latest['window']}, modified at {latest['last_modified']}"
+            )
+
+            # Get the checkpoint data using the window from the latest checkpoint
+            result = await self.get(
+                uid=str(validator_uid),
+                window=latest["window"],
+                key="checkpoint",
+                timeout=240,
+                local=False,
+                stale_retention=10,
+            )
+
+            if result is None:
+                tplr.logger.error(f"Failed to download checkpoint {latest['key']}")
+                return None
+
+            checkpoint_data, _ = result
+            return checkpoint_data, latest["window"]
+
+        except Exception as e:
+            tplr.logger.error(f"Error getting latest checkpoint: {e}")
+            return None

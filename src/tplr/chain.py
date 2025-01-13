@@ -97,12 +97,15 @@ class ChainManager:
         """Background task to periodically fetch commitments."""
         while True:
             try:
-                # Refresh Metagraph
-                await asyncio.to_thread(self.metagraph.sync)
-                commitments = await  asyncio.to_thread(self.get_commitments_sync)
+                # Create new subtensor instance for metagraph sync
+                subtensor_sync = bt.subtensor(config=self.config)
+                await asyncio.to_thread(lambda: self.metagraph.sync(subtensor=subtensor_sync))
+                
+                # Create new subtensor instance for commitments
+                commitments = await self.get_commitments()
                 if commitments:
                     self.commitments = commitments
-                    await self.update_peers_with_buckets()
+                    self.update_peers_with_buckets()
                     logger.debug(f"Updated commitments: {self.commitments}")
             except Exception as e:
                 logger.error(f"Error fetching commitments: {e}")
@@ -422,9 +425,7 @@ class ChainManager:
         commitments = self.get_commitments_sync()
         if commitments:
             self.commitments = commitments
-            # Get the current event loop instead of using undefined loop
-            loop = asyncio.get_event_loop()
-            asyncio.run_coroutine_threadsafe(self.update_peers_with_buckets(), loop)
+            self.update_peers_with_buckets()
             logger.debug(f"Fetched commitments: {self.commitments}")
         else:
             logger.warning("No commitments fetched.")
@@ -449,24 +450,33 @@ class ChainManager:
         else:
             return None
 
-    async def update_peers_with_buckets(self):
+    def update_peers_with_buckets(self):
         """Updates both peers for gradient gathering and evaluation peers."""
         # Create mappings
         uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
         uid_to_incentive = dict(zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist()))
 
-        # Use active peers from background task
-        active_peers = self.active_peers if hasattr(self, 'active_peers') else set(self.commitments.keys())
+        active_peers = self.active_peers
+        active_peers = set(int(uid) for uid in active_peers)
 
-        # Filter active miners with buckets (stake <= 10000)
+        logger.debug(f"Active peers: {active_peers}")
+        logger.debug(f"Stakes: {uid_to_stake}")
+
+        if not active_peers:
+            logger.warning("No active peers found. Skipping update.")
+            return
+
+        # Filter active miners with buckets (stake <= 1000)
         self.eval_peers = [
             int(uid) for uid in active_peers
-            if uid_to_stake.get(int(uid), 0) <= 10000
+            if uid in uid_to_stake and uid_to_stake[uid] <= 1000
         ]
+        
+        logger.debug(f"Filtered eval peers: {self.eval_peers}")
 
         # If total miners is less than minimum_peers, use all miners for both lists
-        if len(self.eval_peers) <= self.hparams.minimum_peers:
-            self.peers = self.eval_peers
+        if len(self.eval_peers) < self.hparams.minimum_peers:
+            self.peers = list(self.eval_peers)
             logger.warning(
                 f"Total active miners ({len(self.eval_peers)}) below minimum_peers ({self.hparams.minimum_peers}). "
                 f"Using all available miners as peers."
@@ -490,7 +500,6 @@ class ChainManager:
             f"Updated gather peers (top {self.hparams.topk_peers}% or minimum {self.hparams.minimum_peers}): {self.peers}"
         )
         logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
-
 
 def get_own_bucket() -> Bucket:
     """Parses the credentials from .env.yaml to create a Bucket object."""

@@ -32,17 +32,26 @@ class Comms(ChainManager):
         wallet: "bt.wallet",
         save_location: str = "/tmp",
         key_prefix: str = "model",
+        config=None,
+        netuid=None,
+        metagraph=None,
+        hparams=None,
+        uid=None,
         **kwargs,
     ):
         self.wallet = wallet
+        self.uid = uid
+        # Create temp directory for this instance
+        self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
+        os.makedirs(self.temp_dir, exist_ok=True)
         # Get the bucket directly
         self.bucket = self.get_own_bucket()
         # Now initialize ChainManager with the bucket
         super().__init__(
-            config=kwargs.get("config"),
-            netuid=kwargs.get("netuid"),
-            metagraph=kwargs.get("metagraph"),
-            hparams=kwargs.get("hparams"),
+            config=config,
+            netuid=netuid,
+            metagraph=metagraph,
+            hparams=hparams,
             wallet=self.wallet,
             bucket=self.bucket,
         )
@@ -271,15 +280,15 @@ class Comms(ChainManager):
         # Create versioned filename
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
 
-        # Create a temporary file path
-        temp_file_path = tempfile.mktemp(suffix=".pt")
+        # Create a temporary file path in /tmp/{uid}/
+        temp_dir = os.path.join("/tmp", str(self.uid))
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
 
         try:
             # Prepare the data to be saved
             if key == "checkpoint":
-                save_data = (
-                    state_dict  # state_dict already contains all checkpoint data
-                )
+                save_data = state_dict
             else:
                 save_data = {
                     "state_dict": state_dict,
@@ -319,12 +328,15 @@ class Comms(ChainManager):
                         data = await f.read()
                         await self.s3_put_object(object_key, data)
 
-            # Remove temporary file after successful upload
+            # Remove temporary file after usage
             if os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
 
         except Exception as e:
             tplr.logger.debug(f"PUT error {uid}/{window}/{key}: {e}")
+
+        finally:
+            # Remove temporary file after usage
             if os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
 
@@ -344,6 +356,11 @@ class Comms(ChainManager):
         tplr.logger.debug(f"GET {filename} -->")
 
         try:
+            # Use /tmp/{uid}/ as the temporary directory
+            temp_dir = os.path.join("/tmp", str(self.uid))
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
+
             if local:
                 # Local storage logic remains unchanged
                 await self.cleanup_local_data(
@@ -371,11 +388,8 @@ class Comms(ChainManager):
             # Special handling for checkpoint files
             if key == "checkpoint":
                 try:
-                    # Create temp directory if it doesn't exist
-                    temp_dir = os.path.join(os.getcwd(), "temp")
-                    os.makedirs(temp_dir, exist_ok=True)
-
-                    temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
+                    # Use instance temp directory instead of getcwd
+                    temp_file_path = os.path.join(self.temp_dir, f"temp_{filename}")
 
                     success = await self.download_large_file(
                         filename=filename, destination_path=temp_file_path, use_gpu=True
@@ -417,9 +431,8 @@ class Comms(ChainManager):
                         return None
                     raise
 
-                temp_dir = os.path.join(os.getcwd(), "temp")
-                os.makedirs(temp_dir, exist_ok=True)
-                temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
+                # Use instance temp directory instead of getcwd
+                temp_file_path = os.path.join(self.temp_dir, f"temp_{filename}")
 
                 async with aiofiles.open(temp_file_path, "wb") as outfile:
                     while True:

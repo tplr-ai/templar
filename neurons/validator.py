@@ -203,6 +203,40 @@ class Validator:
         self.comms.commitments = self.comms.get_commitments_sync()
         self.comms.update_peers_with_buckets()
         tplr.logger.info(f"Loaded commitments: {self.comms.commitments.keys()}")
+
+        # Try to load latest checkpoint
+        result = await self.comms.get_latest_checkpoint()
+        if result:
+            checkpoint_data, window = result
+            try:
+                # Load state dicts from dictionary and move to device
+                self.model.load_state_dict({k: v.to(self.config.device) for k,v in checkpoint_data['model_state_dict'].items()})
+                self.model.to(self.config.device)
+                
+                # Move optimizer state to device
+                for state in self.optimizer.state.values():
+                    for k, v in state.items():
+                        if torch.is_tensor(v):
+                            state[k] = v.to(self.config.device)
+                            
+                self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+                self.scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
+                self.momentum = checkpoint_data['momentum']
+                self.global_step = checkpoint_data['global_step']
+                
+                # Update optimizer and scheduler steps to match
+                self.optimizer._step_count = self.global_step  
+                self.scheduler.last_epoch = self.global_step
+                
+                tplr.logger.info(f"Loaded checkpoint from window {window}, global_step={self.global_step}")
+            except KeyError as e:
+                tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
+            except Exception as e:
+                tplr.logger.error(f"Failed to load checkpoint: {e}")
+        else:
+            tplr.logger.info("No valid checkpoints found, starting from scratch")
+            self.global_step = 0
+            self.model.to(self.config.device)
     
 
         # Start block listener
@@ -534,10 +568,23 @@ class Validator:
                         else:
                             tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
 
-                    # Perform optimization step
+                    # **Adjust the learning rate based on the number of gather peers**
+                    num_peers = len(self.peers)
+                    current_lr = self.scheduler.get_last_lr()[0]
+                    adjusted_lr = current_lr * num_peers  # Increase learning rate proportionally
+                    for param_group in self.optimizer.param_groups:
+                        param_group['lr'] = adjusted_lr
+
+                    tplr.logger.info(f"Adjusted learning rate to {adjusted_lr} based on {num_peers} peers.")
+
+                    # **Perform optimization step**
                     self.optimizer.step()
                     self.scheduler.step()
                     torch.cuda.empty_cache()
+
+                    # **Reset the learning rate to original for the scheduler**
+                    for param_group in self.optimizer.param_groups:
+                        param_group['lr'] = current_lr
 
     def block_listener(self, loop):
         def handler(event, _u, _s):

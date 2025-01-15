@@ -16,10 +16,12 @@ from .schemas import Bucket
 
 import tplr as tplr
 import botocore
-from tqdm.asyncio import tqdm
+import tqdm
+import tqdm.asyncio
 import numpy as np
 import psutil
 import mmap
+import zstandard as zstd
 
 # Constants
 CF_REGION_NAME: str = "enam"
@@ -195,74 +197,256 @@ class Comms(ChainManager):
                 else:
                     break
 
-    async def s3_put_object(self, key: str, data: bytes):
-        """Upload object to S3."""
-        session = get_session()
-        async with session.create_client(
-            "s3",
-            endpoint_url=self.get_base_url(BUCKET_SECRETS["account_id"]),
-            region_name=CF_REGION_NAME,
-            config=client_config,
-            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
-        ) as s3_client:
-            await s3_client.put_object(
-                Bucket=BUCKET_SECRETS["bucket_name"], Key=key, Body=data
-            )
+    async def s3_put_object(self, key: str, data: bytes | str | os.PathLike):
+        """Upload object to S3 with automatic large file handling."""
+        try:
+            # Convert file path to bytes if needed
+            if isinstance(data, (str, os.PathLike)):
+                with open(data, "rb") as f:
+                    data = f.read()
 
-    async def s3_get_object(self, key: str, timeout: int) -> Optional[dict]:
-        """Download object from S3."""
-        session = get_session()
-        async with session.create_client(
-            "s3",
-            endpoint_url=self.get_base_url(BUCKET_SECRETS["account_id"]),
-            region_name=CF_REGION_NAME,
-            config=client_config,
-            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
-        ) as s3_client:
-            try:
-                # Check if file exists first
+            file_size = len(data) if isinstance(data, bytes) else os.path.getsize(data)
+
+            # Use regular upload for files under 5GB
+            if file_size <= 5 * 1024 * 1024 * 1024:
+                async with self.session.create_client(
+                    "s3",
+                    endpoint_url=self.get_base_url(BUCKET_SECRETS["account_id"]),
+                    region_name=CF_REGION_NAME,
+                    config=client_config,
+                    aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+                    aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+                ) as s3_client:
+                    await s3_client.put_object(
+                        Bucket=BUCKET_SECRETS["bucket_name"], Key=key, Body=data
+                    )
+                return
+
+            # For large files, use CPU-only parallel multipart upload with compression
+            async with self.session.create_client(
+                "s3",
+                endpoint_url=self.get_base_url(BUCKET_SECRETS["account_id"]),
+                region_name=CF_REGION_NAME,
+                config=client_config,
+                aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+                aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+            ) as s3_client:
+                # Calculate optimal chunk size
+                cpu_count = os.cpu_count()
+                memory_available = psutil.virtual_memory().available
+                optimal_chunk_size = min(
+                    max(
+                        64 * 1024 * 1024,  # Min 64MB
+                        file_size // (cpu_count * 2),
+                    ),  # Split across cores
+                    memory_available // (cpu_count * 4),  # Keep memory in check
+                )
+
+                # Initialize multipart upload
+                response = await s3_client.create_multipart_upload(
+                    Bucket=BUCKET_SECRETS["bucket_name"], Key=key
+                )
+                upload_id = response["UploadId"]
+
                 try:
-                    await s3_client.head_object(
+                    total_chunks = (
+                        file_size + optimal_chunk_size - 1
+                    ) // optimal_chunk_size
+
+                    async def upload_chunk(part_number: int, retries: int = 3) -> dict:
+                        start = part_number * optimal_chunk_size
+                        end = min(start + optimal_chunk_size, file_size)
+                        chunk = data[start:end]
+
+                        compressor = zstd.ZstdCompressor(
+                            level=3
+                        )  # Balance between speed and compression
+                        compressed_chunk = compressor.compress(chunk)
+
+                        for attempt in range(retries):
+                            try:
+                                response = await s3_client.upload_part(
+                                    Bucket=BUCKET_SECRETS["bucket_name"],
+                                    Key=key,
+                                    PartNumber=part_number + 1,
+                                    UploadId=upload_id,
+                                    Body=compressed_chunk,
+                                )
+                                return {
+                                    "PartNumber": part_number + 1,
+                                    "ETag": response["ETag"],
+                                }
+                            except Exception as e:
+                                if attempt == retries - 1:
+                                    raise
+                                await asyncio.sleep(2**attempt)  # Exponential backoff
+
+                    # Upload chunks in parallel with progress bar
+                    tasks = []
+                    pbar = tqdm.tqdm(
+                        total=total_chunks, desc=f"Uploading {key}", unit="chunks"
+                    )
+
+                    for i in range(total_chunks):
+                        task = asyncio.create_task(upload_chunk(i))
+                        task.add_done_callback(lambda _: pbar.update(1))
+                        tasks.append(task)
+
+                    parts = await asyncio.gather(*tasks)
+                    pbar.close()
+
+                    # Complete upload
+                    parts.sort(key=lambda x: x["PartNumber"])
+                    await s3_client.complete_multipart_upload(
+                        Bucket=BUCKET_SECRETS["bucket_name"],
+                        Key=key,
+                        UploadId=upload_id,
+                        MultipartUpload={"Parts": parts},
+                    )
+
+                except Exception as e:
+                    # Abort multipart upload on failure
+                    await s3_client.abort_multipart_upload(
+                        Bucket=BUCKET_SECRETS["bucket_name"],
+                        Key=key,
+                        UploadId=upload_id,
+                    )
+                    raise e
+
+        except Exception as e:
+            tplr.logger.error(f"Error in s3_put_object for {key}: {e}")
+            raise
+
+    async def s3_get_object(
+        self, key: str, timeout: int = 30, bucket_secrets: Optional[dict] = None
+    ) -> Optional[dict]:
+        """Download object from S3 with automatic large file handling."""
+        try:
+            if bucket_secrets is None:
+                raise ValueError("bucket_secrets is required")
+
+            async with self.session.create_client(
+                "s3",
+                endpoint_url=self.get_base_url(bucket_secrets["account_id"]),
+                region_name=CF_REGION_NAME,
+                config=client_config,
+                aws_access_key_id=bucket_secrets["write"]["access_key_id"],
+                aws_secret_access_key=bucket_secrets["write"]["secret_access_key"],
+            ) as s3_client:
+                # Check if file exists and get size
+                try:
+                    head = await s3_client.head_object(
                         Bucket=BUCKET_SECRETS["bucket_name"], Key=key
                     )
-                except (
-                    botocore.exceptions.ClientError,
-                    botocore.exceptions.BotoCoreError,
-                ) as e:
-                    tplr.logger.debug(f"Object not found or access denied: {e}")
+                    file_size = head["ContentLength"]
+                except botocore.exceptions.ClientError:
                     return None
 
-                response = await asyncio.wait_for(
-                    s3_client.get_object(Bucket=BUCKET_SECRETS["bucket_name"], Key=key),
-                    timeout=timeout,
+                # For small files (< 5GB), use direct download
+                if file_size <= 5 * 1024 * 1024 * 1024:
+                    response = await asyncio.wait_for(
+                        s3_client.get_object(
+                            Bucket=BUCKET_SECRETS["bucket_name"], Key=key
+                        ),
+                        timeout=timeout,
+                    )
+                    data = await response["Body"].read()
+
+                    # Load state dict
+                    with tempfile.NamedTemporaryFile(
+                        delete=True, suffix=".pt"
+                    ) as temp_file:
+                        temp_file.write(data)
+                        temp_file.flush()
+                        return torch.load(temp_file.name, weights_only=True)
+
+                # For large files, use parallel multipart download with compression
+                cpu_count = os.cpu_count()
+                memory_available = psutil.virtual_memory().available
+                optimal_chunk_size = min(
+                    max(
+                        16 * 1024 * 1024,  # Min 16MB chunks
+                        file_size // (cpu_count * 2),
+                    ),
+                    memory_available // (cpu_count * 4),
                 )
-            except asyncio.TimeoutError:
-                tplr.logger.debug(f"Timeout occurred while downloading {key}.")
-                return None
-            except Exception as e:
-                tplr.logger.debug(f"An error occurred during GET {key}: {e}")
-                return None
 
-            # Save to a temporary file and load
-            with tempfile.NamedTemporaryFile(delete=True, suffix=".pt") as temp_file:
-                temp_file_path = temp_file.name
-                async with aiofiles.open(temp_file_path, "wb") as outfile:
-                    while True:
-                        chunk = await response["Body"].read(1 * 1024 * 1024)
-                        if not chunk:
-                            break
-                        await outfile.write(chunk)
+                total_parts = (file_size + optimal_chunk_size - 1) // optimal_chunk_size
+                shared_buffer = bytearray(file_size)
 
-                # Load the object
+                async def download_chunk(part: int, retries: int = 3) -> None:
+                    start = part * optimal_chunk_size
+                    end = min(start + optimal_chunk_size, file_size)
+                    for attempt in range(retries):
+                        try:
+                            response = await s3_client.get_object(
+                                Bucket=BUCKET_SECRETS["bucket_name"],
+                                Key=key,
+                                Range=f"bytes={start}-{end - 1}",
+                            )
+                            chunk = await response["Body"].read()
+
+                            # Decompress chunk if using GPU
+                            if torch.cuda.is_available():
+                                decompressor = zstd.ZstdDecompressor()
+                                decompressed_chunk = decompressor.decompress(chunk)
+                                chunk_tensor = torch.frombuffer(
+                                    decompressed_chunk, dtype=torch.uint8
+                                ).cuda()
+                                shared_buffer[start : start + len(chunk_tensor)].copy_(
+                                    chunk_tensor
+                                )
+                            else:
+                                # For CPU buffer
+                                decompressor = zstd.ZstdDecompressor()
+                                decompressed_chunk = decompressor.decompress(chunk)
+                                shared_buffer[
+                                    start : start + len(decompressed_chunk)
+                                ] = decompressed_chunk
+                            return
+                        except Exception as e:
+                            if attempt == retries - 1:
+                                raise
+                            await asyncio.sleep(2**attempt)  # Exponential backoff
+
+                # Download chunks in parallel with semaphore and progress bar
+                semaphore = asyncio.Semaphore(min(32, cpu_count * 4))
+
+                async def bounded_download(part: int):
+                    async with semaphore:
+                        await download_chunk(part)
+
                 try:
-                    with open(temp_file_path, "rb") as f:
-                        state_dict = torch.load(f, weights_only=True)
-                    return state_dict
+                    tasks = []
+                    pbar = tqdm.tqdm(
+                        total=total_parts, desc=f"Downloading {key}", unit="chunks"
+                    )
+
+                    for i in range(total_parts):
+                        task = asyncio.create_task(bounded_download(i))
+                        task.add_done_callback(lambda _: pbar.update(1))
+                        tasks.append(task)
+
+                    await asyncio.gather(*tasks)
+                    pbar.close()
+
+                    # Convert buffer to bytes and load state dict
+                    with tempfile.NamedTemporaryFile(
+                        delete=True, suffix=".pt"
+                    ) as temp_file:
+                        temp_file.write(bytes(shared_buffer))
+                        temp_file.flush()
+                        return torch.load(temp_file.name, weights_only=True)
+
                 except Exception as e:
-                    tplr.logger.debug(f"Error loading state_dict from {key}: {e}")
-                    return None
+                    raise e
+
+        except asyncio.TimeoutError:
+            tplr.logger.debug(f"Timeout occurred while downloading {key}")
+            return None
+        except Exception as e:
+            tplr.logger.debug(f"Error in s3_get_object for {key}: {e}")
+            return None
 
     async def put(
         self,
@@ -275,12 +459,10 @@ class Comms(ChainManager):
         stale_retention: int = 10,
     ):
         """PUT operation: Store the state_dict and global_step."""
-        tplr.logger.debug(f"PUT {uid}/{window}/{key} -->")
-
-        # Create versioned filename
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        tplr.logger.debug(f"PUT {filename} -->")
 
-        # Create a temporary file path in /tmp/{uid}/
+        # Create per-uid temp directory
         temp_dir = os.path.join("/tmp", str(self.uid))
         os.makedirs(temp_dir, exist_ok=True)
         temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
@@ -295,11 +477,11 @@ class Comms(ChainManager):
                     "global_step": global_step,
                 }
 
-            # Save the combined data
+            # Save to temp file
             torch.save(save_data, temp_file_path)
 
             if local:
-                # Local storage logic remains unchanged
+                # Local storage with per-uid directories
                 await self.cleanup_local_data(
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
@@ -308,39 +490,17 @@ class Comms(ChainManager):
                 final_path = os.path.join(local_dir, filename)
                 os.replace(temp_file_path, final_path)
             else:
-                # Cleanup old S3 data
+                # Remote storage with automatic handling of large files
                 await self.cleanup_s3_data(
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
-
-                # Check file size
-                file_size = os.path.getsize(temp_file_path)
-                object_key = filename
-
-                if file_size > 5 * 1024 * 1024 * 1024:  # 5GB
-                    # Use multipart upload for large files
-                    success = await self.upload_large_file(temp_file_path, object_key)
-                    if not success:
-                        raise Exception("Large file upload failed")
-                else:
-                    # Use regular upload for smaller files
-                    async with aiofiles.open(temp_file_path, "rb") as f:
-                        data = await f.read()
-                        await self.s3_put_object(object_key, data)
-
-            # Remove temporary file after usage
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-
-        except Exception as e:
-            tplr.logger.debug(f"PUT error {uid}/{window}/{key}: {e}")
+                await self.s3_put_object(filename, temp_file_path)
 
         finally:
-            # Remove temporary file after usage
             if os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
 
-        tplr.logger.debug(f"PUT {uid}/{window}/{key} <--")
+        tplr.logger.debug(f"PUT {filename} <--")
 
     async def get(
         self,
@@ -351,18 +511,18 @@ class Comms(ChainManager):
         local: bool = True,
         stale_retention: int = 10,
     ) -> Optional[dict]:
-        """GET operation."""
+        """GET operation with automatic large file handling."""
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         tplr.logger.debug(f"GET {filename} -->")
 
         try:
-            # Use /tmp/{uid}/ as the temporary directory
+            # Use self.uid for temp directory
             temp_dir = os.path.join("/tmp", str(self.uid))
             os.makedirs(temp_dir, exist_ok=True)
             temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
 
             if local:
-                # Local storage logic remains unchanged
+                # Local storage with per-uid directories
                 await self.cleanup_local_data(
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
@@ -370,93 +530,47 @@ class Comms(ChainManager):
                     LOCAL_TMP_DIR, str(uid), str(window), filename
                 )
                 if not os.path.exists(local_path):
-                    tplr.logger.debug(f"Local file not found: {local_path}")
                     return None
                 loaded_data = torch.load(local_path, weights_only=True)
-                if key == "checkpoint":
-                    return loaded_data, None
-                state_dict = loaded_data.get("state_dict")
-                global_step = loaded_data.get("global_step", 0)
-                return state_dict, global_step
-
-            # Remote storage logic
-            # Get peer bucket info
-            peer_bucket = self.commitments.get(int(uid))
-            if not peer_bucket:
-                return None
-
-            # Special handling for checkpoint files
-            if key == "checkpoint":
-                try:
-                    # Use instance temp directory instead of getcwd
-                    temp_file_path = os.path.join(self.temp_dir, f"temp_{filename}")
-
-                    success = await self.download_large_file(
-                        filename=filename, destination_path=temp_file_path, use_gpu=True
-                    )
-
-                    if not success:
-                        tplr.logger.error(f"Failed to download checkpoint {filename}")
-                        return None
-
-                    try:
-                        with open(temp_file_path, "rb") as f:
-                            loaded_data = torch.load(
-                                f, weights_only=True, map_location=self.config.device
-                            )
-                        return loaded_data, None
-                    finally:
-                        if os.path.exists(temp_file_path):
-                            os.remove(temp_file_path)
-
-                except Exception as e:
-                    tplr.logger.error(f"Error handling checkpoint {filename}: {e}")
+            else:
+                # Get peer bucket info for remote storage
+                peer_bucket = self.commitments.get(int(uid))
+                if not peer_bucket:
+                    tplr.logger.debug(f"No bucket commitment found for UID {uid}")
                     return None
 
-            # Original behavior for non-checkpoint files
-            async with self.session.create_client(
-                "s3",
-                endpoint_url=self.get_base_url(peer_bucket.account_id),
-                region_name=CF_REGION_NAME,
-                config=client_config,
-                aws_access_key_id=peer_bucket.access_key_id,
-                aws_secret_access_key=peer_bucket.secret_access_key,
-            ) as s3_client:
-                try:
-                    response = await s3_client.get_object(
-                        Bucket=peer_bucket.name, Key=filename
-                    )
-                except botocore.exceptions.ClientError as e:
-                    if e.response["Error"]["Code"] == "NoSuchKey":
-                        return None
-                    raise
+                # Remote storage with automatic handling of large files
+                loaded_data = await self.s3_get_object(
+                    filename,
+                    timeout=timeout,
+                    bucket_secrets={
+                        "account_id": peer_bucket.account_id,
+                        "bucket_name": peer_bucket.name,
+                        "write": {
+                            "access_key_id": peer_bucket.access_key_id,
+                            "secret_access_key": peer_bucket.secret_access_key,
+                        },
+                    },
+                )
+                if loaded_data is None:
+                    return None
 
-                # Use instance temp directory instead of getcwd
-                temp_file_path = os.path.join(self.temp_dir, f"temp_{filename}")
+                # For checkpoints, save to temp file first
+                if key == "checkpoint":
+                    torch.save(loaded_data, temp_file_path)
+                    loaded_data = torch.load(temp_file_path, weights_only=True)
 
-                async with aiofiles.open(temp_file_path, "wb") as outfile:
-                    while True:
-                        chunk = await response["Body"].read(1 * 1024 * 1024)
-                        if not chunk:
-                            break
-                        await outfile.write(chunk)
-
-                try:
-                    with open(temp_file_path, "rb") as f:
-                        loaded_data = torch.load(f, weights_only=True)
-                    state_dict = loaded_data.get("state_dict")
-                    global_step = loaded_data.get("global_step", 0)
-                    return state_dict, global_step
-                finally:
-                    if os.path.exists(temp_file_path):
-                        os.remove(temp_file_path)
+            # Handle checkpoint vs regular data
+            if key == "checkpoint":
+                return loaded_data, None
+            return loaded_data.get("state_dict"), loaded_data.get("global_step", 0)
 
         except Exception as e:
             tplr.logger.debug(f"GET error {filename}: {e}")
             return None
-
         finally:
-            tplr.logger.debug(f"GET {filename} <--")
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
 
     async def get_with_retry(
         self,

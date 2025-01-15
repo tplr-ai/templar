@@ -21,6 +21,7 @@ dependencies = [
     "pip",
     "wandb",
     "python-dotenv",
+    "zstandard"
 ]
 
 [tool.pytest.ini_options]

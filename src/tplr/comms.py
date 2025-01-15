@@ -1,3 +1,5 @@
+# src/tplr/comms.py
+
 import os
 import re
 import time
@@ -8,25 +10,32 @@ import tempfile
 import bittensor as bt
 from typing import List, Dict, Optional
 from types import SimpleNamespace
-from aiobotocore.session import get_session
-from . import __version__
-from .config import client_config, BUCKET_SECRETS
-from .chain import ChainManager
-from .schemas import Bucket
 
-import tplr as tplr
-import botocore
+# Import huggingface_hub for file upload/download
+from huggingface_hub import upload_file, hf_hub_download, HfApi
+
+import tplr
+from tplr import __version__
+from tplr.config import BUCKET_SECRETS  # If you still want chain-based “commitment” data
+from tplr.chain import ChainManager
+from tplr.schemas import Bucket
+
 from tqdm.asyncio import tqdm
 import numpy as np
 import psutil
 import mmap
 
-# Constants
-CF_REGION_NAME: str = "enam"
+
 LOCAL_TMP_DIR = "/tmp/local_store"
 
 
 class Comms(ChainManager):
+    """
+    This class was originally S3-based. Now, we switch to using the huggingface_hub library
+    for uploading/downloading artifact files. The rest of the chain-based logic, local file
+    handling, and “active peers” remain.
+    """
+
     def __init__(
         self,
         wallet: "bt.wallet",
@@ -39,14 +48,16 @@ class Comms(ChainManager):
         uid=None,
         **kwargs,
     ):
+        # Bittensor wallet, chain, etc.
         self.wallet = wallet
         self.uid = uid
-        # Create temp directory for this instance
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
         os.makedirs(self.temp_dir, exist_ok=True)
-        # Get the bucket directly
-        self.bucket = self.get_own_bucket()
-        # Now initialize ChainManager with the bucket
+
+        # If you stored old R2 credentials in BUCKET_SECRETS, you can repurpose 
+        # them or store new HF config. For demonstration, we'll keep it around:
+        self.bucket = self.get_own_bucket()  # now might be “mocked” or unused
+
         super().__init__(
             config=config,
             netuid=netuid,
@@ -56,52 +67,44 @@ class Comms(ChainManager):
             bucket=self.bucket,
         )
 
-        # Use the hotkey directly in the save_location
+        # Instead of S3, we’ll keep track of HF repo info.
+        # You might store these in environment variables or on-chain:
+        self.huggingface_token = os.environ.get("HUGGINGFACE_TOKEN", "")
+        self.huggingface_repo_id = os.environ.get("HUGGINGFACE_REPO", "my-user/templar-checkpoints")
+
+        # Local directory for ephemeral caching
         hotkey = self.wallet.hotkey.ss58_address
         self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
         os.makedirs(self.save_location, exist_ok=True)
         self.key_prefix = key_prefix
-        self.session = get_session()
-        self.lock = asyncio.Lock()
-        self.active_peers = set()  # Set to store active peers
-        self.active_check_interval = (
-            self.hparams.active_check_interval
-        )  # Interval in seconds
-        self.recent_windows = (
-            self.hparams.recent_windows
-        )  # Number of recent windows to check
 
-    def start_background_tasks(self):
-        self.loop = asyncio.get_running_loop()
-        # Start background tasks
-        self.loop.create_task(self.track_active_peers())
+        # We keep a generic lock and set of background tasks
+        self.lock = asyncio.Lock()
+        self.active_peers = set()  
+        self.active_check_interval = self.hparams.active_check_interval
+        self.recent_windows = self.hparams.recent_windows
 
     def get_own_bucket(self) -> Bucket:
-        """Gets bucket configuration from environment variables via config.BUCKET_SECRETS."""
-        try:
-            # Create a Bucket object using write credentials from BUCKET_SECRETS
-            bucket = Bucket(
-                name=BUCKET_SECRETS["account_id"],
-                account_id=BUCKET_SECRETS["account_id"],
-                access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-                secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
-            )
-            tplr.logger.debug(f"Created bucket from environment: {bucket}")
-            return bucket
+        """
+        If you still want to parse a chain-based "commitment" for the HF token or repo,
+        do so here. Otherwise, just return a dummy bucket or remove this method entirely.
+        """
+        return Bucket(
+            name="HF_REPO_UNUSED",
+            account_id="HF_ACCOUNT_UNUSED",
+            access_key_id="dummy_access_key",
+            secret_access_key="dummy_secret_key",
+        )
 
-        except KeyError as e:
-            tplr.logger.error(f"Missing required R2 configuration: {e}")
-            raise
-        except Exception as e:
-            tplr.logger.error(f"Error creating bucket: {e}")
-            raise
+    def start_background_tasks(self):
+        """Attach background tasks like track_active_peers if you still want them."""
+        self.loop = asyncio.get_running_loop()
+        self.loop.create_task(self.track_active_peers())
 
-    def get_base_url(self, account_id):
-        """Constructs the base URL for the R2 storage endpoint."""
-        return f"https://{account_id}.r2.cloudflarestorage.com"
-
+    # ------------------------------------------------------------------------
+    # Local File Management (unchanged)
+    # ------------------------------------------------------------------------
     def delete_local_directory(self, path: str):
-        """Safely remove a local directory and all its contents."""
         if not os.path.exists(path):
             return
         for root, dirs, files in os.walk(path, topdown=False):
@@ -111,11 +114,8 @@ class Comms(ChainManager):
                 os.rmdir(os.path.join(root, name))
         os.rmdir(path)
 
-    # Convert all the existing functions to methods
-    async def cleanup_local_data(
-        self, uid: str, current_window: int, stale_retention: int
-    ):
-        """Clean up stale local data for a given uid."""
+    async def cleanup_local_data(self, uid: str, current_window: int, stale_retention: int):
+        """Clean up stale local data for a given uid (unchanged)."""
         user_dir = os.path.join(LOCAL_TMP_DIR, str(uid))
         if not os.path.exists(user_dir):
             return
@@ -130,140 +130,57 @@ class Comms(ChainManager):
                     try:
                         self.delete_local_directory(old_path)
                     except Exception as e:
-                        tplr.logger.debug(
-                            f"Error removing stale directory {old_path}: {e}"
-                        )
+                        tplr.logger.debug(f"Error removing stale directory {old_path}: {e}")
 
-    async def cleanup_s3_data(
-        self, uid: str, current_window: int, stale_retention: int
-    ):
-        """Clean up stale S3 data for a given uid."""
-        min_allowed_window = current_window - stale_retention
-        prefix = f"{uid}/"
-
-        session = get_session()
-        async with session.create_client(
-            "s3",
-            endpoint_url=self.get_base_url(BUCKET_SECRETS["account_id"]),
-            region_name=CF_REGION_NAME,
-            config=client_config,
-            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
-        ) as s3_client:
-            continuation_token = None
-
-            while True:
-                list_args = {
-                    "Bucket": BUCKET_SECRETS["bucket_name"],
-                    "Prefix": prefix,
-                    "MaxKeys": 1000,
-                }
-                if continuation_token:
-                    list_args["ContinuationToken"] = continuation_token
-
-                response = await s3_client.list_objects_v2(**list_args)
-                contents = response.get("Contents", [])
-
-                # Identify stale objects to delete
-                stale_objects = []
-                for obj in contents:
-                    key = obj["Key"]
-                    # Key format: uid/window/key
-                    parts = key.split("/")
-                    if len(parts) < 2:
-                        continue
-                    try:
-                        w = int(parts[1])
-                    except ValueError:
-                        continue
-
-                    if w < min_allowed_window:
-                        stale_objects.append({"Key": key})
-
-                # Batch delete stale objects
-                if stale_objects:
-                    tplr.logger.debug(
-                        f"Removing stale S3 objects for {uid}: {stale_objects}"
-                    )
-                    await s3_client.delete_objects(
-                        Bucket=BUCKET_SECRETS["bucket_name"],
-                        Delete={"Objects": stale_objects},
-                    )
-
-                if response.get("IsTruncated"):
-                    continuation_token = response.get("NextContinuationToken")
-                else:
-                    break
-
-    async def s3_put_object(self, key: str, data: bytes):
-        """Upload object to S3."""
-        session = get_session()
-        async with session.create_client(
-            "s3",
-            endpoint_url=self.get_base_url(BUCKET_SECRETS["account_id"]),
-            region_name=CF_REGION_NAME,
-            config=client_config,
-            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
-        ) as s3_client:
-            await s3_client.put_object(
-                Bucket=BUCKET_SECRETS["bucket_name"], Key=key, Body=data
+    # ------------------------------------------------------------------------
+    # Hugging Face Upload / Download
+    # ------------------------------------------------------------------------
+    async def hf_upload_file(self, local_path: str, target_path: str):
+        """
+        Use huggingface_hub.upload_file to push a local file to the repository.
+        """
+        try:
+            upload_file(
+                path_or_fileobj=local_path,
+                path_in_repo=target_path,
+                repo_id=self.huggingface_repo_id,
+                token=self.huggingface_token,
+                repo_type="model",  # or 'dataset' if you prefer
             )
+            tplr.logger.debug(f"Uploaded {local_path} to HF repo {target_path}.")
+        except Exception as e:
+            tplr.logger.error(f"HF Upload error for {local_path}: {e}")
+            raise
 
-    async def s3_get_object(self, key: str, timeout: int) -> Optional[dict]:
-        """Download object from S3."""
-        session = get_session()
-        async with session.create_client(
-            "s3",
-            endpoint_url=self.get_base_url(BUCKET_SECRETS["account_id"]),
-            region_name=CF_REGION_NAME,
-            config=client_config,
-            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
-        ) as s3_client:
-            try:
-                # Check if file exists first
-                try:
-                    await s3_client.head_object(
-                        Bucket=BUCKET_SECRETS["bucket_name"], Key=key
-                    )
-                except (
-                    botocore.exceptions.ClientError,
-                    botocore.exceptions.BotoCoreError,
-                ) as e:
-                    tplr.logger.debug(f"Object not found or access denied: {e}")
-                    return None
+    async def hf_download_file(self, target_path: str, local_path: str):
+        """
+        Use huggingface_hub.hf_hub_download to pull a file from the repository.
+        """
+        try:
+            downloaded = hf_hub_download(
+                repo_id=self.huggingface_repo_id,
+                filename=target_path,
+                repo_type="model",
+                token=self.huggingface_token,
+            )
+            # Move or copy from downloaded to local_path
+            os.replace(downloaded, local_path)
+            tplr.logger.debug(f"Downloaded {target_path} from HF to {local_path}.")
+            return True
+        except Exception as e:
+            tplr.logger.debug(f"HF Download error for {target_path}: {e}")
+            return False
 
-                response = await asyncio.wait_for(
-                    s3_client.get_object(Bucket=BUCKET_SECRETS["bucket_name"], Key=key),
-                    timeout=timeout,
-                )
-            except asyncio.TimeoutError:
-                tplr.logger.debug(f"Timeout occurred while downloading {key}.")
-                return None
-            except Exception as e:
-                tplr.logger.debug(f"An error occurred during GET {key}: {e}")
-                return None
+    async def cleanup_hf_data(self, uid: str, current_window: int, stale_retention: int):
+        """
+        If you want to remove older artifacts from the HF repo, implement some listing
+        logic (e.g. HfApi().list_repo_files()) and delete older files. We skip this for now.
+        """
+        pass
 
-            # Save to a temporary file and load
-            with tempfile.NamedTemporaryFile(delete=True, suffix=".pt") as temp_file:
-                temp_file_path = temp_file.name
-                async with aiofiles.open(temp_file_path, "wb") as outfile:
-                    while True:
-                        chunk = await response["Body"].read(1 * 1024 * 1024)
-                        if not chunk:
-                            break
-                        await outfile.write(chunk)
-
-                # Load the object
-                try:
-                    with open(temp_file_path, "rb") as f:
-                        state_dict = torch.load(f, weights_only=True)
-                    return state_dict
-                except Exception as e:
-                    tplr.logger.debug(f"Error loading state_dict from {key}: {e}")
-                    return None
-
+    # ------------------------------------------------------------------------
+    # PUT / GET methods for gradient or checkpoint files
+    # ------------------------------------------------------------------------
     async def put(
         self,
         state_dict: dict,
@@ -274,19 +191,20 @@ class Comms(ChainManager):
         local: bool = True,
         stale_retention: int = 10,
     ):
-        """PUT operation: Store the state_dict and global_step."""
+        """
+        Save `state_dict` either locally or on the Hugging Face Hub. 
+        Replaces old R2 logic with HF calls.
+        """
         tplr.logger.debug(f"PUT {uid}/{window}/{key} -->")
 
-        # Create versioned filename
+        # Construct a filename (similar to the old R2 naming)
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
-
-        # Create a temporary file path in /tmp/{uid}/
         temp_dir = os.path.join("/tmp", str(self.uid))
         os.makedirs(temp_dir, exist_ok=True)
         temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
 
         try:
-            # Prepare the data to be saved
+            # Prepare data: if 'checkpoint', store full checkpoint; else store {state_dict, global_step}
             if key == "checkpoint":
                 save_data = state_dict
             else:
@@ -294,49 +212,25 @@ class Comms(ChainManager):
                     "state_dict": state_dict,
                     "global_step": global_step,
                 }
-
-            # Save the combined data
+            # Save to local temp
             torch.save(save_data, temp_file_path)
 
             if local:
-                # Local storage logic remains unchanged
-                await self.cleanup_local_data(
-                    uid=uid, current_window=window, stale_retention=stale_retention
-                )
+                # Keep local (unchanged from R2 code):
+                await self.cleanup_local_data(uid=uid, current_window=window, stale_retention=stale_retention)
                 local_dir = os.path.join(LOCAL_TMP_DIR, str(uid), str(window))
                 os.makedirs(local_dir, exist_ok=True)
                 final_path = os.path.join(local_dir, filename)
                 os.replace(temp_file_path, final_path)
             else:
-                # Cleanup old S3 data
-                await self.cleanup_s3_data(
-                    uid=uid, current_window=window, stale_retention=stale_retention
-                )
-
-                # Check file size
-                file_size = os.path.getsize(temp_file_path)
-                object_key = filename
-
-                if file_size > 5 * 1024 * 1024 * 1024:  # 5GB
-                    # Use multipart upload for large files
-                    success = await self.upload_large_file(temp_file_path, object_key)
-                    if not success:
-                        raise Exception("Large file upload failed")
-                else:
-                    # Use regular upload for smaller files
-                    async with aiofiles.open(temp_file_path, "rb") as f:
-                        data = await f.read()
-                        await self.s3_put_object(object_key, data)
-
-            # Remove temporary file after usage
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
+                # Instead of S3, call Hugging Face upload
+                await self.cleanup_hf_data(uid=uid, current_window=window, stale_retention=stale_retention)
+                target_path = f"{uid}/{window}/{filename}"  # path in HF repo
+                await self.hf_upload_file(temp_file_path, target_path)
 
         except Exception as e:
             tplr.logger.debug(f"PUT error {uid}/{window}/{key}: {e}")
-
         finally:
-            # Remove temporary file after usage
             if os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
 
@@ -351,110 +245,46 @@ class Comms(ChainManager):
         local: bool = True,
         stale_retention: int = 10,
     ) -> Optional[dict]:
-        """GET operation."""
+        """
+        Retrieve a gradient or checkpoint file. 
+        Local or from Hugging Face if `local=False`.
+        """
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         tplr.logger.debug(f"GET {filename} -->")
 
         try:
-            # Use /tmp/{uid}/ as the temporary directory
+            # Temporary path
             temp_dir = os.path.join("/tmp", str(self.uid))
             os.makedirs(temp_dir, exist_ok=True)
             temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
 
             if local:
-                # Local storage logic remains unchanged
-                await self.cleanup_local_data(
-                    uid=uid, current_window=window, stale_retention=stale_retention
-                )
-                local_path = os.path.join(
-                    LOCAL_TMP_DIR, str(uid), str(window), filename
-                )
+                await self.cleanup_local_data(uid, window, stale_retention)
+                local_path = os.path.join(LOCAL_TMP_DIR, str(uid), str(window), filename)
                 if not os.path.exists(local_path):
                     tplr.logger.debug(f"Local file not found: {local_path}")
                     return None
+
                 loaded_data = torch.load(local_path, weights_only=True)
                 if key == "checkpoint":
                     return loaded_data, None
-                state_dict = loaded_data.get("state_dict")
-                global_step = loaded_data.get("global_step", 0)
-                return state_dict, global_step
+                return loaded_data.get("state_dict"), loaded_data.get("global_step", 0)
 
-            # Remote storage logic
-            # Get peer bucket info
-            peer_bucket = self.commitments.get(int(uid))
-            if not peer_bucket:
-                return None
-
-            # Special handling for checkpoint files
-            if key == "checkpoint":
-                try:
-                    # Use instance temp directory instead of getcwd
-                    temp_file_path = os.path.join(self.temp_dir, f"temp_{filename}")
-
-                    success = await self.download_large_file(
-                        filename=filename, destination_path=temp_file_path, use_gpu=True
-                    )
-
-                    if not success:
-                        tplr.logger.error(f"Failed to download checkpoint {filename}")
-                        return None
-
-                    try:
-                        with open(temp_file_path, "rb") as f:
-                            loaded_data = torch.load(
-                                f, weights_only=True, map_location=self.config.device
-                            )
-                        return loaded_data, None
-                    finally:
-                        if os.path.exists(temp_file_path):
-                            os.remove(temp_file_path)
-
-                except Exception as e:
-                    tplr.logger.error(f"Error handling checkpoint {filename}: {e}")
+            else:
+                # Use HF
+                target_path = f"{uid}/{window}/{filename}"
+                success = await self.hf_download_file(target_path, temp_file_path)
+                if not success:
                     return None
 
-            # Original behavior for non-checkpoint files
-            async with self.session.create_client(
-                "s3",
-                endpoint_url=self.get_base_url(peer_bucket.account_id),
-                region_name=CF_REGION_NAME,
-                config=client_config,
-                aws_access_key_id=peer_bucket.access_key_id,
-                aws_secret_access_key=peer_bucket.secret_access_key,
-            ) as s3_client:
-                try:
-                    response = await s3_client.get_object(
-                        Bucket=peer_bucket.name, Key=filename
-                    )
-                except botocore.exceptions.ClientError as e:
-                    if e.response["Error"]["Code"] == "NoSuchKey":
-                        return None
-                    raise
-
-                # Use instance temp directory instead of getcwd
-                temp_file_path = os.path.join(self.temp_dir, f"temp_{filename}")
-
-                async with aiofiles.open(temp_file_path, "wb") as outfile:
-                    while True:
-                        chunk = await response["Body"].read(1 * 1024 * 1024)
-                        if not chunk:
-                            break
-                        await outfile.write(chunk)
-
-                try:
-                    with open(temp_file_path, "rb") as f:
-                        loaded_data = torch.load(f, weights_only=True)
-                    state_dict = loaded_data.get("state_dict")
-                    global_step = loaded_data.get("global_step", 0)
-                    return state_dict, global_step
-                finally:
-                    if os.path.exists(temp_file_path):
-                        os.remove(temp_file_path)
+                loaded_data = torch.load(temp_file_path, weights_only=True)
+                if key == "checkpoint":
+                    return loaded_data, None
+                return loaded_data.get("state_dict"), loaded_data.get("global_step", 0)
 
         except Exception as e:
             tplr.logger.debug(f"GET error {filename}: {e}")
             return None
-
         finally:
             tplr.logger.debug(f"GET {filename} <--")
 
@@ -467,7 +297,10 @@ class Comms(ChainManager):
         local: bool = True,
         stale_retention: int = 10,
     ) -> Optional[dict]:
-        """GET with retry operation."""
+        """
+        GET with a time-based retry. 
+        If the file is not found, it attempts again until `timeout`.
+        """
         start_time = time.time()
         end_time = start_time + timeout
 
@@ -476,17 +309,16 @@ class Comms(ChainManager):
                 tplr.logger.debug(f"GET {uid}/{window}/{key} timed out.")
                 return None
 
-            state_dict = await self.get(
+            result = await self.get(
                 uid=uid,
                 window=window,
                 key=key,
                 local=local,
                 stale_retention=stale_retention,
             )
-            if state_dict is not None:
-                return state_dict
+            if result is not None:
+                return result
 
-            # Retry after a short delay
             await asyncio.sleep(0.1)
 
     async def gather(
@@ -502,11 +334,16 @@ class Comms(ChainManager):
         local: bool = True,
         stale_retention: int = 10,
     ) -> Optional[SimpleNamespace]:
-        """Gather operation."""
+        """
+        Orchestrates the process of:
+          - Uploading our local state (if provided).
+          - Downloading others' states.
+          - Aggregating them into a single structure.
+        """
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
-        # Put own state if provided
+        # Put own state
         if my_uid is not None and state_dict is not None:
             await self.put(
                 state_dict=state_dict,
@@ -517,15 +354,12 @@ class Comms(ChainManager):
                 local=local,
                 stale_retention=stale_retention,
             )
-            metrics["upload_bytes"] += sum(
-                tensor.element_size() * tensor.nelement()
-                for tensor in state_dict.values()
-            )
+            # Approx. upload size
+            metrics["upload_bytes"] += sum(t.nelement() * t.element_size() for t in state_dict.values())
 
-        # Small delay to ensure data propagation
         await asyncio.sleep(0.1)
 
-        # Prepare gather tasks
+        # Gather from peers
         gather_tasks = [
             self.get_with_retry(
                 uid=uid,
@@ -538,48 +372,41 @@ class Comms(ChainManager):
             for uid in uids
         ]
 
-        # Initialize variables
         aggregated_state_dict = {}
         valid_uids = []
         global_steps = []
 
-        # Process responses
         responses = await asyncio.gather(*gather_tasks)
         for idx, response in enumerate(responses):
-            uid = uids[idx]
-
-            # Skip if no response
+            uid_i = uids[idx]
             if response is None:
-                tplr.logger.debug(f"No data received from UID {uid}")
+                tplr.logger.debug(f"No data from UID {uid_i}")
                 continue
 
             try:
                 state_dict_resp, global_step_resp = response
-            except (TypeError, ValueError) as e:
-                tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
+            except (TypeError, ValueError):
+                # Possibly not a 2-tuple
+                tplr.logger.debug(f"Invalid response format from UID {uid_i}")
                 continue
 
-            # Skip if no state dict
             if state_dict_resp is None:
-                tplr.logger.debug(f"Empty state dict from UID {uid}")
+                tplr.logger.debug(f"Empty state dict from UID {uid_i}")
                 continue
 
-            valid_uids.append(uid)
+            valid_uids.append(uid_i)
             global_steps.append(global_step_resp)
 
-            # Add tensors to aggregated_state_dict
             for param_name, tensor in state_dict_resp.items():
                 if param_name not in aggregated_state_dict:
                     aggregated_state_dict[param_name] = []
                 aggregated_state_dict[param_name].append(tensor.to(device))
-                metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
+                metrics["download_bytes"] += tensor.nelement() * tensor.element_size()
 
-        # If no valid responses, return None
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")
             return None
 
-        # Create result namespace
         result = SimpleNamespace(
             time=time.time() - start_time,
             upload_bytes=metrics["upload_bytes"],
@@ -589,349 +416,54 @@ class Comms(ChainManager):
             uids=valid_uids,
             global_steps=global_steps,
         )
-
-        tplr.logger.debug(f"Successfully gathered from UIDs: {valid_uids}")
+        tplr.logger.debug(f"Gathered from UIDs: {valid_uids}")
         return result
 
-    async def upload_large_file(self, file_path: str, filename: str) -> bool:
-        """
-        Uploads a large file to R2 using parallel multipart upload with shared memory.
-
-        Optimizations:
-        - Uses shared memory for inter-process communication
-        - Parallel chunk processing with optimal chunk sizes
-        - Memory-mapped file reading for large files
-        - O(1) memory usage regardless of file size
-        """
-        try:
-            # Calculate optimal chunk size based on system memory and CPU cores
-            file_size = os.path.getsize(file_path)
-            cpu_count = os.cpu_count()
-            memory_available = psutil.virtual_memory().available
-            optimal_chunk_size = min(
-                max(
-                    64 * 1024 * 1024,  # Minimum 64MB
-                    file_size // (cpu_count * 2),
-                ),  # Split across cores
-                memory_available // (cpu_count * 4),  # Keep memory usage in check
-            )
-
-            async with self.session.create_client(
-                "s3",
-                endpoint_url=self.get_base_url(self.bucket.account_id),
-                region_name=CF_REGION_NAME,
-                config=client_config,
-                aws_access_key_id=self.bucket.access_key_id,
-                aws_secret_access_key=self.bucket.secret_access_key,
-            ) as s3_client:
-                # Initialize multipart upload - O(1)
-                response = await s3_client.create_multipart_upload(
-                    Bucket=self.bucket.name, Key=filename
-                )
-                upload_id = response["UploadId"]
-
-                # Use memory mapping for large files - O(1) memory
-                with mmap.mmap(
-                    os.open(file_path, os.O_RDONLY), 0, access=mmap.ACCESS_READ
-                ) as mm:
-                    total_chunks = (
-                        file_size + optimal_chunk_size - 1
-                    ) // optimal_chunk_size
-
-                    # Progress bar
-                    pbar = tqdm(
-                        total=file_size,
-                        unit="B",
-                        unit_scale=True,
-                        desc=f"Uploading {filename}",
-                    )
-
-                    async def upload_chunk(part_number: int) -> dict:
-                        start = part_number * optimal_chunk_size
-                        end = min(start + optimal_chunk_size, file_size)
-
-                        # Read chunk from memory map - O(1) memory
-                        chunk = mm[start:end]
-
-                        # Upload chunk directly
-                        response = await s3_client.upload_part(
-                            Bucket=self.bucket.name,
-                            Key=filename,
-                            PartNumber=part_number + 1,  # S3 parts start at 1
-                            UploadId=upload_id,
-                            Body=chunk,
-                        )
-
-                        pbar.update(len(chunk))
-                        return {"PartNumber": part_number + 1, "ETag": response["ETag"]}
-
-                    # Upload chunks in parallel - O(n) where n is number of chunks
-                    tasks = [upload_chunk(i) for i in range(total_chunks)]
-                    parts = await asyncio.gather(*tasks)
-
-                    # Sort parts by part number - O(n log n)
-                    parts.sort(key=lambda x: x["PartNumber"])
-
-                    # Complete upload - O(1)
-                    await s3_client.complete_multipart_upload(
-                        Bucket=self.bucket.name,
-                        Key=filename,
-                        UploadId=upload_id,
-                        MultipartUpload={"Parts": parts},
-                    )
-
-                    pbar.close()
-
-            return True
-
-        except Exception as e:
-            tplr.logger.error(f"Error uploading large file {filename}: {e}")
-            if "pbar" in locals():
-                pbar.close()
-            return False
-
-    async def download_large_file(
-        self, filename: str, destination_path: str, use_gpu: bool = True
-    ) -> bool:
-        """
-        Downloads a large file from R2 using parallel multipart download.
-
-        Args:
-            filename (str): File to download from R2
-            destination_path (str): Local path to save the file
-            use_gpu (bool): Whether to use GPU for processing (if available)
-
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        try:
-            async with self.session.create_client(
-                "s3",
-                endpoint_url=self.get_base_url(self.bucket.account_id),
-                region_name=CF_REGION_NAME,
-                config=client_config,
-                aws_access_key_id=self.bucket.access_key_id,
-                aws_secret_access_key=self.bucket.secret_access_key,
-            ) as s3_client:
-                # Get file size
-                response = await s3_client.head_object(
-                    Bucket=self.bucket.name, Key=filename
-                )
-                file_size = response["ContentLength"]
-
-                # Calculate optimal chunk size and parts
-                cpu_count = os.cpu_count()
-                chunk_size = max(
-                    16 * 1024 * 1024, file_size // (cpu_count * 2)
-                )  # At least 16MB chunks
-                total_parts = (file_size + chunk_size - 1) // chunk_size
-
-                # Initialize progress bar
-                pbar = tqdm(
-                    total=file_size,
-                    unit="B",
-                    unit_scale=True,
-                    desc=f"Downloading {filename}",
-                    ncols=80,
-                )
-
-                async def download_chunk(part: int) -> tuple[int, bytes]:
-                    start = part * chunk_size
-                    end = min(start + chunk_size, file_size)
-
-                    try:
-                        response = await s3_client.get_object(
-                            Bucket=self.bucket.name,
-                            Key=filename,
-                            Range=f"bytes={start}-{end-1}",
-                        )
-                        chunk = await response["Body"].read()
-                        pbar.update(len(chunk))
-
-                        # If GPU is available and enabled, use it for decompression
-                        if (
-                            use_gpu
-                            and torch.cuda.is_available()
-                            and len(chunk) > 1024 * 1024
-                        ):  # >1MB
-                            # Convert bytes to writable numpy array first
-                            chunk_np = np.frombuffer(
-                                chunk, dtype=np.uint8
-                            ).copy()  # .copy() makes it writable
-                            chunk_tensor = torch.from_numpy(chunk_np).cuda()
-                            # Any GPU processing here if needed
-                            chunk = chunk_tensor.cpu().numpy().tobytes()
-
-                        return part, chunk
-                    except Exception as e:
-                        tplr.logger.error(f"Error downloading part {part}: {e}")
-                        return part, None
-
-                # Download chunks in parallel
-                chunks = {}
-                retry_count = 3
-
-                while retry_count > 0 and len(chunks) < total_parts:
-                    # Create tasks for missing chunks
-                    missing_parts = [
-                        i
-                        for i in range(total_parts)
-                        if i not in chunks or chunks[i] is None
-                    ]
-                    if not missing_parts:
-                        break
-
-                    tasks = [download_chunk(part) for part in missing_parts]
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                    # Process results
-                    for part, data in results:
-                        if data is not None:
-                            chunks[part] = data
-
-                    retry_count -= 1
-                    if len(chunks) < total_parts:
-                        tplr.logger.warning(
-                            f"Retrying {total_parts - len(chunks)} failed chunks..."
-                        )
-
-                # Check if we have all chunks
-                if len(chunks) < total_parts:
-                    raise Exception(
-                        f"Failed to download all chunks after {3-retry_count} retries"
-                    )
-
-                # Write chunks to file
-                async with aiofiles.open(destination_path, "wb") as f:
-                    for i in range(total_parts):
-                        await f.write(chunks[i])
-
-                pbar.close()
-                tplr.logger.info(
-                    f"Successfully downloaded {filename} to {destination_path}"
-                )
-                return True
-
-        except Exception as e:
-            pbar.close()
-            tplr.logger.error(f"Error downloading large file {filename}: {e}")
-            return False
-
-        finally:
-            # Cleanup GPU memory if used
-            if use_gpu and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-    async def cleanup_old_checkpoints(self, keep_last: int = 3):
-        """
-        Removes old checkpoints from storage, keeping only the most recent ones.
-
-        Args:
-            keep_last (int): Number of most recent checkpoints to keep
-        """
-        try:
-            async with self.session.create_client(
-                "s3",
-                endpoint_url=self.get_base_url(self.bucket.account_id),
-                region_name=CF_REGION_NAME,
-                config=client_config,
-                aws_access_key_id=self.bucket.access_key_id,
-                aws_secret_access_key=self.bucket.secret_access_key,
-            ) as s3_client:
-                # List all checkpoint files
-                paginator = s3_client.get_paginator("list_objects_v2")
-                checkpoint_files = []
-
-                async for page in paginator.paginate(
-                    Bucket=self.bucket.name, Prefix="checkpoint"
-                ):
-                    for obj in page.get("Contents", []):
-                        if obj["Key"].startswith("checkpoint"):
-                            checkpoint_files.append(obj)
-
-                # Sort by last modified time
-                checkpoint_files.sort(key=lambda x: x["LastModified"], reverse=True)
-
-                # Delete older checkpoints
-                if len(checkpoint_files) > keep_last:
-                    to_delete = checkpoint_files[keep_last:]
-                    await s3_client.delete_objects(
-                        Bucket=self.bucket.name,
-                        Delete={"Objects": [{"Key": obj["Key"]} for obj in to_delete]},
-                    )
-                    tplr.logger.info(f"Deleted {len(to_delete)} old checkpoints")
-
-        except Exception as e:
-            tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
-
+    # ------------------------------------------------------------------------
+    # Active Miner Checking
+    # ------------------------------------------------------------------------
     async def is_miner_active(self, uid: int, recent_windows: int = 3) -> bool:
-        """Check if the miner has uploaded gradients in the last few windows."""
+        """
+        Check if a miner has uploaded gradient files in the last `recent_windows`.
+        We can do a HEAD check in Hugging Face or see if it’s found locally.
+
+        For demonstration, we do a naive approach with `hf_hub_download`:
+        If any gradient file in [current_window - recent_windows, ..., current_window]
+        exists, we consider them active.
+        """
         tplr.logger.debug(f"Checking if UID {uid} is active")
+
+        if not hasattr(self, "current_window") or self.current_window is None:
+            tplr.logger.error("current_window is not set in comms. Please set comms.current_window.")
+            return False
+
+        hf_api = HfApi(token=self.huggingface_token)
         current_window = self.current_window
-
-        peer_bucket = self.commitments.get(uid)
-        if not peer_bucket:
-            tplr.logger.debug(f"No bucket committed for UID {uid}")
-            return False
-
-        try:
-            async with self.session.create_client(
-                "s3",
-                endpoint_url=self.get_base_url(peer_bucket.account_id),
-                region_name=CF_REGION_NAME,
-                config=client_config,
-                aws_access_key_id=peer_bucket.access_key_id,
-                aws_secret_access_key=peer_bucket.secret_access_key,
-            ) as s3_client:
-                # Ensure that self.current_window is set
-                if not hasattr(self, "current_window") or self.current_window is None:
-                    tplr.logger.error(
-                        "current_window is not set in comms. Please set comms.current_window from the main thread."
-                    )
-                    return False
-
-                current_window = self.current_window
-
-                for window in range(
-                    current_window - recent_windows, current_window + 1
-                ):
-                    filename = f"gradient-{window}-{uid}-v{__version__}.pt"
-                    tplr.logger.debug(
-                        f"Checking for {filename} in bucket {peer_bucket.name}"
-                    )
-                    try:
-                        await s3_client.head_object(
-                            Bucket=peer_bucket.name, Key=filename
-                        )
-                        tplr.logger.debug(f"Found {filename} for UID {uid}")
-                        return True
-                    except botocore.exceptions.ClientError as e:
-                        if e.response["Error"]["Code"] != "404":
-                            tplr.logger.error(
-                                f"Error checking activity for UID {uid}: {e}"
-                            )
-                            return False
-                        tplr.logger.debug(f"{filename} not found for UID {uid}")
-        except Exception as e:
-            tplr.logger.error(f"Error accessing bucket for UID {uid}: {e}")
-            return False
+        for w in range(current_window - recent_windows, current_window + 1):
+            target_path = f"{uid}/{w}/gradient-{w}-{uid}-v{__version__}.pt"
+            # See if file is in the HF repo
+            try:
+                files = hf_api.list_repo_files(repo_id=self.huggingface_repo_id, repo_type="model")
+                if target_path in files:
+                    tplr.logger.debug(f"Found gradient for UID {uid} window {w}")
+                    return True
+            except Exception as e:
+                tplr.logger.error(f"Error checking HF repo for UID {uid}, window {w}: {e}")
+                return False
 
         return False
 
     async def track_active_peers(self):
-        """Background task to keep track of active peers."""
         while True:
             active_peers = set()
             tasks = []
-            semaphore = asyncio.Semaphore(10)  # Limit concurrent S3 requests
+            semaphore = asyncio.Semaphore(10)
 
             tplr.logger.debug(f"Commitments: {self.commitments}")
 
             async def check_peer(uid):
                 async with semaphore:
-                    is_active = await self.is_miner_active(
-                        uid, recent_windows=self.recent_windows
-                    )
+                    is_active = await self.is_miner_active(uid, recent_windows=self.recent_windows)
                     if is_active:
                         active_peers.add(uid)
 
@@ -940,17 +472,17 @@ class Comms(ChainManager):
 
             await asyncio.gather(*tasks)
             self.active_peers = active_peers
-
-            tplr.logger.info(
-                f"Updated active peers: {[int(uid) for uid in self.active_peers]}"
-            )
-
+            tplr.logger.info(f"Updated active peers: {[int(u) for u in self.active_peers]}")
             await asyncio.sleep(self.active_check_interval)
 
     async def get_latest_checkpoint(self):
-        """Get the latest checkpoint from R2 storage"""
+        """
+        Example placeholder: If you want to find the “highest stake validator’s
+        checkpoint” on HF. This logic is up to you. We do a naive approach:
+        1. Get the highest stake UID
+        2. Look for the latest checkpoint file in their subfolder
+        """
         try:
-            # Get validator with highest stake
             validator_uid = self.metagraph.S.argmax().item()
             tplr.logger.info(f"Found validator with highest stake: {validator_uid}")
 
@@ -958,66 +490,38 @@ class Comms(ChainManager):
                 tplr.logger.info("No active validators found")
                 return None
 
-            # List checkpoint files from validator's bucket
-            checkpoint_files = []
-            async with self.session.create_client(
-                "s3",
-                endpoint_url=self.get_base_url(self.bucket.account_id),
-                region_name=tplr.comms.CF_REGION_NAME,
-                config=client_config,
-                aws_access_key_id=self.bucket.access_key_id,
-                aws_secret_access_key=self.bucket.secret_access_key,
-            ) as s3_client:
-                # Use regex pattern to match checkpoint files
-                pattern = re.compile(
-                    r"^checkpoint-(\d+)-0-v0\.2\.6\.pt$"
-                )  # Note: Changed to match your version
+            # This is naive: we might list all checkpoint-* files in that UID’s subfolders.
+            # For example, you can parse them by last modified or a naming scheme. 
+            hf_api = HfApi(token=self.huggingface_token)
+            files = hf_api.list_repo_files(repo_id=self.huggingface_repo_id, repo_type="model")
 
-                paginator = s3_client.get_paginator("list_objects_v2")
-                async for page in paginator.paginate(
-                    Bucket=self.bucket.name, Prefix="checkpoint"
-                ):
-                    for obj in page.get("Contents", []):
-                        key = obj["Key"]
-                        match = pattern.match(key)
-                        if match:
-                            window = int(match.group(1))
-                            checkpoint_files.append(
-                                {
-                                    "key": key,
-                                    "window": window,
-                                    "size": obj["Size"],
-                                    "last_modified": obj["LastModified"],
-                                }
-                            )
+            # Filter for “checkpoint-*” files under folder = f"{validator_uid}/..."
+            pattern = re.compile(rf"^{validator_uid}/(\d+)/checkpoint-\1-{validator_uid}-v.*\.pt$")
+            checkpoint_files = []
+            for f in files:
+                match = pattern.match(f)
+                if match:
+                    # parse out the window from match.group(1)
+                    w = int(match.group(1))
+                    checkpoint_files.append((f, w))
 
             if not checkpoint_files:
                 tplr.logger.info("No checkpoint files found")
                 return None
 
-            # Sort by last_modified timestamp (descending) and get latest
-            latest = max(checkpoint_files, key=lambda x: x["last_modified"])
-            tplr.logger.info(
-                f"Found latest checkpoint: {latest['key']} from window {latest['window']}, modified at {latest['last_modified']}"
-            )
+            # Sort by window descending
+            checkpoint_files.sort(key=lambda x: x[1], reverse=True)
+            latest = checkpoint_files[0]
+            latest_key = latest[0]
+            latest_window = latest[1]
 
-            # Get the checkpoint data using the window from the latest checkpoint
-            result = await self.get(
-                uid=str(validator_uid),
-                window=latest["window"],
-                key="checkpoint",
-                timeout=240,
-                local=False,
-                stale_retention=10,
-            )
+            tplr.logger.info(f"Latest checkpoint: {latest_key} from window {latest_window}")
 
-            if result is None:
-                tplr.logger.error(f"Failed to download checkpoint {latest['key']}")
-                return None
-
-            checkpoint_data, _ = result
-            return checkpoint_data, latest["window"]
+            # Download and return 
+            # Our “get” method expects (checkpoint_data, None) for a checkpoint
+            checkpoint_data, _ = await self.get(str(validator_uid), latest_window, "checkpoint", local=False)
+            return checkpoint_data, latest_window
 
         except Exception as e:
-            tplr.logger.error(f"Error getting latest checkpoint: {e}")
+            tplr.logger.error(f"Error getting latest checkpoint from HF: {e}")
             return None

@@ -743,7 +743,7 @@ class Comms(ChainManager):
                         response = await s3_client.get_object(
                             Bucket=self.bucket.name,
                             Key=filename,
-                            Range=f"bytes={start}-{end-1}",
+                            Range=f"bytes={start}-{end - 1}",
                         )
                         chunk = await response["Body"].read()
                         pbar.update(len(chunk))
@@ -798,7 +798,7 @@ class Comms(ChainManager):
                 # Check if we have all chunks
                 if len(chunks) < total_parts:
                     raise Exception(
-                        f"Failed to download all chunks after {3-retry_count} retries"
+                        f"Failed to download all chunks after {3 - retry_count} retries"
                     )
 
                 # Write chunks to file
@@ -963,15 +963,13 @@ class Comms(ChainManager):
             async with self.session.create_client(
                 "s3",
                 endpoint_url=self.get_base_url(self.bucket.account_id),
-                region_name=tplr.comms.CF_REGION_NAME,
+                region_name=CF_REGION_NAME,
                 config=client_config,
                 aws_access_key_id=self.bucket.access_key_id,
                 aws_secret_access_key=self.bucket.secret_access_key,
             ) as s3_client:
                 # Use regex pattern to match checkpoint files
-                pattern = re.compile(
-                    r"^checkpoint-(\d+)-0-v0\.2\.6\.pt$"
-                )  # Note: Changed to match your version
+                pattern = re.compile(f"^checkpoint-(\\d+)-0-v{__version__}\\.pt$")
 
                 paginator = s3_client.get_paginator("list_objects_v2")
                 async for page in paginator.paginate(

@@ -169,48 +169,52 @@ class Miner:
     # Main training loop.
     async def run(self):
         # Try to load latest checkpoint
-        result = await self.comms.get_latest_checkpoint()
-        if result:
-            checkpoint_data, window = result
-            try:
-                # Load state dicts from checkpoint data
-                self.model.load_state_dict({k: v.to(self.config.device) for k,v in checkpoint_data['model_state_dict'].items()})
-                self.model.to(self.config.device)
+        # Try to load latest checkpoint
+        # result = await self.comms.get_latest_checkpoint()
+        # if result:
+        #     checkpoint_data, window = result
+        #     try:
+        #         # Load state dicts from checkpoint data
+        #         self.model.load_state_dict({k: v.to(self.config.device) for k,v in checkpoint_data['model_state_dict'].items()})
+        #         self.model.to(self.config.device)
                 
-                # Load optimizer state
-                for state in self.optimizer.state.values():
-                    for k, v in state.items():
-                        if torch.is_tensor(v):
-                            state[k] = v.to(self.config.device)
-                self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+        #         # Load optimizer state
+        #         for state in self.optimizer.state.values():
+        #             for k, v in state.items():
+        #                 if torch.is_tensor(v):
+        #                     state[k] = v.to(self.config.device)
+        #         self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
                 
-                # Load scheduler state
-                self.scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
+        #         # Load scheduler state
+        #         self.scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
                 
-                # Load momentum and global_step
-                self.momentum = checkpoint_data['momentum']
-                self.global_step = checkpoint_data['global_step']
+        #         # Load momentum and global_step
+        #         self.momentum = checkpoint_data['momentum']
+        #         self.global_step = checkpoint_data['global_step']
                 
-                # Adjust scheduler to catch up with current window
-                checkpoint_window = checkpoint_data.get('checkpoint_window', None)
-                if checkpoint_window is not None:
-                    window_difference = self.current_window - checkpoint_window
-                    if window_difference > 0:
-                        for _ in range(window_difference):
-                            self.scheduler.step()
-                        tplr.logger.info(f"Stepped scheduler {window_difference} times to catch up with current window {self.current_window}")
-                else:
-                    tplr.logger.warning("Checkpoint does not contain 'checkpoint_window'; cannot adjust scheduler")
+        #         # Adjust scheduler to catch up with current window
+        #         checkpoint_window = checkpoint_data.get('checkpoint_window', None)
+        #         if checkpoint_window is not None:
+        #             window_difference = self.current_window - checkpoint_window
+        #             if window_difference > 0:
+        #                 for _ in range(window_difference):
+        #                     self.scheduler.step()
+        #                 tplr.logger.info(f"Stepped scheduler {window_difference} times to catch up with current window {self.current_window}")
+        #         else:
+        #             tplr.logger.warning("Checkpoint does not contain 'checkpoint_window'; cannot adjust scheduler")
                 
-                tplr.logger.info(f"Loaded checkpoint from window {window}, global_step={self.global_step}")
-            except KeyError as e:
-                tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
-            except Exception as e:
-                tplr.logger.error(f"Failed to load checkpoint: {e}")
-        else:
-            tplr.logger.info("No valid checkpoints found, starting from scratch")
-            self.global_step = 0
-            self.model.to(self.config.device)
+        #         tplr.logger.info(f"Loaded checkpoint from window {window}, global_step={self.global_step}")
+        #     except KeyError as e:
+        #         tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
+        #     except Exception as e:
+        #         tplr.logger.error(f"Failed to load checkpoint: {e}")
+        # else:
+        #     tplr.logger.info("No valid checkpoints found, starting from scratch")
+        #     self.global_step = 0
+        #     self.model.to(self.config.device)
+
+        self.global_step = 0
+        self.model.to(self.config.device)
 
         # Load Peers
         if not self.config.peers:

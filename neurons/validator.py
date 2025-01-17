@@ -23,7 +23,6 @@ import random
 import asyncio
 import argparse
 import threading
-import os
 from contextlib import contextmanager
 from time import perf_counter
 
@@ -212,24 +211,34 @@ class Validator:
         if result:
             checkpoint_data, window = result
             try:
-                # Load state dicts from dictionary and move to device
+                # Load state dicts from checkpoint data
                 self.model.load_state_dict({k: v.to(self.config.device) for k,v in checkpoint_data['model_state_dict'].items()})
                 self.model.to(self.config.device)
                 
-                # Move optimizer state to device
+                # Load optimizer state
                 for state in self.optimizer.state.values():
                     for k, v in state.items():
                         if torch.is_tensor(v):
                             state[k] = v.to(self.config.device)
-                            
                 self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
+                
+                # Load scheduler state
                 self.scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
+                
+                # Load momentum and global_step
                 self.momentum = checkpoint_data['momentum']
                 self.global_step = checkpoint_data['global_step']
                 
-                # Update optimizer and scheduler steps to match
-                self.optimizer._step_count = self.global_step  
-                self.scheduler.last_epoch = self.global_step
+                # Adjust scheduler to catch up with current window
+                checkpoint_window = checkpoint_data.get('checkpoint_window', None)
+                if checkpoint_window is not None:
+                    window_difference = self.current_window - checkpoint_window
+                    if window_difference > 0:
+                        for _ in range(window_difference):
+                            self.scheduler.step()
+                        tplr.logger.info(f"Stepped scheduler {window_difference} times to catch up with current window {self.current_window}")
+                else:
+                    tplr.logger.warning("Checkpoint does not contain 'checkpoint_window'; cannot adjust scheduler")
                 
                 tplr.logger.info(f"Loaded checkpoint from window {window}, global_step={self.global_step}")
             except KeyError as e:
@@ -254,17 +263,14 @@ class Validator:
         # self.comms.track_active_peers()
 
         while True:
-            step_window = self.current_window
 
-            tplr.logger.info(f'Step window: {step_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
             # 1. Wait for validator offset - single wait loop
             while self.sync_window >= (self.current_window - self.hparams.validator_offset):
                 tplr.logger.info(f'Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}')
                 await asyncio.sleep(12)
-            tplr.logger.info(f'Step window: {step_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
+            tplr.logger.info(f'Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
             # 2. Process one window at a time
             self.sync_window += 1
-            step_window = self.sync_window + 1
             tplr.logger.info(f'Processing window: {self.sync_window} current: {self.current_window}')
 
             self.comms.update_peers_with_buckets()
@@ -281,7 +287,7 @@ class Validator:
                     state_dict=None,
                     my_uid=self.uid,
                     uids=self.peers,
-                    window=step_window,
+                    window=self.sync_window,
                     key='gradient',
                     timeout=5,
                     device=self.config.device,
@@ -300,7 +306,7 @@ class Validator:
             # Get individual miner's gradient
             eval_result = await self.comms.get(
                 uid=str(eval_uid),
-                window=step_window,
+                window=self.sync_window,
                 key='gradient',
                 timeout=30,
                 local=False,
@@ -370,7 +376,6 @@ class Validator:
                             vals,
                             self.xshapes[n],
                             self.totalks[n],
-                            # median=False
                         )
                     ).to(self.config.device)  # Ensure final gradient is on correct device
 
@@ -420,18 +425,25 @@ class Validator:
             self.scores[eval_uid] = score
             self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
 
-            # Calculate weights - only positive moving averages get weights
+            # Calculate weights using temperature-based softmax
             weights = torch.zeros_like(self.moving_avg_scores)
             evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
             evaluated_mask[list(self.evaluated_uids)] = True
 
-            # Only consider positive moving averages for weight calculation
+            # Create mask for positive scores
             positive_mask = (self.moving_avg_scores > 0) & evaluated_mask
-            evaluated_scores = self.moving_avg_scores * positive_mask
-
-            total_score = evaluated_scores.sum()
-            if total_score > 0:
-                weights[positive_mask] = evaluated_scores[positive_mask] / total_score
+            
+            if positive_mask.any():
+                # Only apply softmax to positive scores
+                positive_scores = self.moving_avg_scores[positive_mask]
+                temperature = 0.1  # Lower temperature = sharper distribution
+                positive_weights = torch.softmax(positive_scores / temperature, dim=0)
+                
+                # Assign weights back to the original tensor
+                weights[positive_mask] = positive_weights
+            else:
+                # If no positive scores, all weights remain 0
+                tplr.logger.info("No positive scores found, all weights set to 0")
 
             # Log only evaluated UIDs
             tplr.logger.info('Updated scores for evaluated UIDs:')
@@ -486,47 +498,28 @@ class Validator:
             if self.global_step % self.hparams.checkpoint_frequency == 0:
                 tplr.logger.info(f"Creating checkpoint at global_step {self.global_step}")
 
-                # Create CPU copy of the checkpoint data to avoid GPU memory competition
+                # Create CPU copy of the checkpoint data
                 checkpoint_data = {
                     'model_state_dict': {k: v.cpu().clone() for k, v in self.model.state_dict().items()},
                     'optimizer_state_dict': {k: v.cpu().clone() if torch.is_tensor(v) else v 
                                            for k, v in self.optimizer.state_dict().items()},
                     'scheduler_state_dict': self.scheduler.state_dict(),
                     'momentum': {k: v.cpu().clone() for k, v in self.momentum.items()},
-                    'global_step': self.global_step
+                    'global_step': self.global_step,
+                    'checkpoint_window': self.current_window
                 }
 
-                async def _save():
-                    start_time = time.time()
-                    try:
-                        # Use a separate thread for CPU-intensive serialization
-                        loop = asyncio.get_event_loop()
-                        await loop.run_in_executor(None, lambda: torch.save(checkpoint_data, '/tmp/temp_checkpoint.pt'))
-                        
-                        await self.comms.put(
-                            state_dict=checkpoint_data,
-                            uid=str(self.uid),
-                            window=self.current_window,
-                            key='checkpoint',
-                            global_step=self.global_step,
-                            local=False
-                        )
-                        elapsed_time = time.time() - start_time
-                        tplr.logger.info(f"Successfully saved checkpoint at global_step {self.global_step} (took {elapsed_time:.2f}s)")
-                        
-                        self.wandb.log({
-                            "validator/save_time": elapsed_time,
-                            "validator/global_step": self.global_step,
-                        }, step=self.global_step)
-                        
-                    except Exception as e:
-                        tplr.logger.error(f"Failed to save checkpoint: {e}")
-                    finally:
-                        # Cleanup temp file
-                        if os.path.exists('/tmp/temp_checkpoint.pt'):
-                            os.remove('/tmp/temp_checkpoint.pt')
-
-                asyncio.create_task(_save())
+                # Launch checkpoint saving as a background task
+                asyncio.create_task(
+                    self.comms.put(
+                        state_dict=checkpoint_data,
+                        uid=str(self.uid),
+                        window=self.current_window,
+                        key='checkpoint',
+                        global_step=self.global_step,
+                        local=False
+                    )
+                )
 
             # Now apply the gathered gradients
             if gather_result is not None:
@@ -535,8 +528,7 @@ class Validator:
                 if max_global_step > self.global_step:
                     tplr.logger.info(f"Updating global_step from {self.global_step} to {max_global_step}")
                     self.global_step = max_global_step
-                    self.optimizer._step_count = self.global_step
-                    self.scheduler.last_epoch = self.global_step
+
 
                 with timer("update_model_with_gathered", self.wandb, self.global_step):
                     self.optimizer.zero_grad()
@@ -581,12 +573,11 @@ class Validator:
 
                     # Increment global_step
                     self.global_step += 1
-                    self.optimizer._step_count = self.global_step  # Ensure optimizer's step count matches
 
                     # Log steps to wandb
                     self.wandb.log({
                         "validator/global_step": self.global_step,
-                        "validator/optimizer_step_count": self.optimizer._step_count,
+                        # "validator/optimizer_step_count": self.optimizer._step_count,
                         "validator/scheduler_last_epoch": self.scheduler.last_epoch,
                     }, step=self.global_step)
 

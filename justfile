@@ -9,3 +9,6 @@ lint:
 
 # Run both check and format in a single command
 fix: lint
+
+test-run:
+    ./scripts/start.sh && pm2 log TV1

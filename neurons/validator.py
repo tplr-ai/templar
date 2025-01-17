@@ -25,6 +25,7 @@ import argparse
 import threading
 from contextlib import contextmanager
 from time import perf_counter
+import copy
 
 # Third party
 import torch
@@ -172,6 +173,22 @@ class Validator:
         self.moving_avg_scores = torch.zeros(self.metagraph.n, dtype=torch.float32) 
         self.ma_alpha = 0.95  # Moving average decay factor
         self.evaluated_uids = set()  # Track which UIDs we've seen
+        
+        # Add tracking for loss improvements
+        self.loss_improvement_moving_avg = {}  # For tracking binary indicators
+        self.ma_alpha = 0.05  # Lower alpha for more stable moving averages
+        
+        # Add batch tracking
+        self.total_tokens_processed = 0
+        self.batch_times = []
+        self.batch_tokens = 0  # Initialize batch_tokens
+        
+        # Initialize loss tracking dictionaries
+        self.loss_improvement = {}
+        self.loss_improvement_other = {}
+        
+        # Create model copy for evaluation
+        self.model_copy = copy.deepcopy(self.model)
 
         # Add step tracking
         self.global_step = 0
@@ -190,10 +207,6 @@ class Validator:
         # Initialize peers
         self.peers = []
         self.eval_peers = []
-
-        # Add tracking for loss improvements
-        self.loss_improvement_moving_avg = {}  # For tracking binary indicators
-        self.ma_alpha = 0.05  # Lower alpha for more stable moving averages
 
     async def run(self):
         # Load Peers
@@ -271,16 +284,20 @@ class Validator:
 
         while True:
             step_window = self.current_window
+            
+            # Check window sync
+            # if self.current_window != self.sync_window:
+            #     tplr.logger.info('<Exhausted window>')
+            #     continue
 
-            tplr.logger.info(f'Step window: {step_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
-            # 1. Wait for validator offset - single wait loop
+            # Wait for validator offset
             while self.sync_window >= (self.current_window - self.hparams.validator_offset):
                 tplr.logger.info(f'Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}')
                 await asyncio.sleep(12)
-            tplr.logger.info(f'Step window: {step_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
-            # 2. Process one window at a time
+            
             self.sync_window += 1
             step_window = self.sync_window + 1
+
             tplr.logger.info(f'Processing window: {self.sync_window} current: {self.current_window}')
 
             self.comms.update_peers_with_buckets()
@@ -290,6 +307,7 @@ class Validator:
 
             tplr.logger.info(f'Current gather peers: {self.peers}')
             tplr.logger.info(f'Current evaluation peers: {self.eval_peers}')
+
 
             # 3. Gather gradients from peers, but do not apply them yet
             with timer("gather_gradients", self.wandb, self.global_step):
@@ -306,32 +324,21 @@ class Validator:
                     global_step=self.global_step,
                 )
 
-            # # Save original model parameters
+
+            # Initialize per-loop variables
+            loss_improvement = {}
+            loss_improvement_other = {}
+            temp_grad = {}  # Initialize temp_grad for all parameters
+
+            # Save original model parameters
             original_params = {n: p.clone() for n, p in self.model.named_parameters()}
 
-            # Remove self from peers before gathering
-            if self.uid in self.peers:
-                self.peers.remove(self.uid)
-
-            # All-gather share state from peers
-            tplr.logger.info(f"Start gather: {self.peers}")
-            gather_result = await self.comms.gather(
-                state_dict=None,
-                my_uid=self.uid,
-                uids=self.peers,
-                window=step_window,
-                key='gradient',
-                timeout=5,
-                device=self.config.device,
-                local=False,
-                stale_retention=10,
-                global_step=self.global_step
-            )
-
-            # Get individual gradients for evaluation
-            eval_result = {}
+            # Evaluate each miner's gradient
             for eval_uid in self.peers:
-                eval_result[eval_uid] = await self.comms.get(
+                tplr.logger.info(f'Evaluating uid: {eval_uid}')
+                
+                # Get individual gradient
+                state_dict = await self.comms.get(
                     uid=str(eval_uid),
                     window=step_window,
                     key='gradient',
@@ -339,24 +346,20 @@ class Validator:
                     local=False,
                     stale_retention=10
                 )
-
-            # Evaluate each miner's gradient
-            loss_improvement = {}
-            loss_improvement_other = {}
-            
-            for eval_uid in self.peers:
-                tplr.logger.info(f'Evaluating uid: {eval_uid}')
-
-                if eval_result[eval_uid] is None:
-                    tplr.logger.info(f"No gradient received from UID {eval_uid}. Skipping evaluation.")
+                
+                if state_dict is None:
                     continue
 
+                # Initialize temp_grad for this evaluation
+                temp_grad = {}
+                
                 # First evaluation on miner's data
                 pages = await tplr.dataset.DatasetLoader.next_pages(
                     offset=self.sync_window,
                     n_pages=self.hparams.pages_per_window,
                     seed=eval_uid
                 )
+                
                 loader = await tplr.dataset.DatasetLoader.create(
                     batch_size=self.hparams.batch_size,
                     sequence_length=self.hparams.sequence_length,
@@ -364,17 +367,12 @@ class Validator:
                     tokenizer=self.tokenizer
                 )
 
-                state_dict = eval_result[eval_uid]
-
                 # Compute initial loss
-                self.model.train()
-                self.model.zero_grad()
                 loss_before = 0.0
                 n_batches = 0
-
                 with torch.no_grad():
                     for i, batch in enumerate(loader):
-                        if i > 3: break  # Limit evaluation batches
+                        if i > 3: break
                         input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                         labels = input_ids.clone()
                         labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
@@ -386,16 +384,14 @@ class Validator:
 
                 loss_before_per_batch = loss_before / n_batches if n_batches > 0 else 0
 
-                # Apply gradient
+                # Apply gradient and store temp gradients
                 for n, p in self.model.named_parameters():
                     idxs_key = n + 'idxs'
                     vals_key = n + 'vals'
-                    idxs = getattr(state_dict, idxs_key, None) 
-                    vals = getattr(state_dict, vals_key, None) 
+                    idxs = getattr(state_dict, idxs_key, None)
+                    vals = getattr(state_dict, vals_key, None)
 
                     if idxs is not None and vals is not None:
-                        idxs = idxs.to(self.config.device)
-                        vals = vals.to(self.config.device)
                         grad = self.transformer.decode(
                             self.compressor.decompress(
                                 p.to(self.config.device),
@@ -405,6 +401,7 @@ class Validator:
                                 self.totalks[n],
                             )
                         ).to(self.config.device)
+                        temp_grad[n] = grad
                         p.data.sub_(grad.sign(), alpha=self.scheduler.get_last_lr()[0] * 0.25)
 
                 # Compute loss after
@@ -425,7 +422,12 @@ class Validator:
                 loss_after_per_batch = loss_after / n_batches if n_batches > 0 else 0
                 loss_improvement[eval_uid] = 100*(1.-loss_after_per_batch/loss_before_per_batch)
 
-                # Second evaluation on random data
+                # Restore weights before second evaluation
+                for n, p in self.model.named_parameters():
+                    if n in temp_grad and temp_grad[n] is not None:
+                        p.data.add_(temp_grad[n].sign(), alpha=self.scheduler.get_last_lr()[0] * 0.25)
+
+                # Now do second evaluation on random data
                 pages = await tplr.dataset.DatasetLoader.next_pages(
                     offset=self.sync_window,
                     n_pages=self.hparams.pages_per_window,
@@ -438,13 +440,149 @@ class Validator:
                     tokenizer=self.tokenizer
                 )
 
-                # Repeat loss computation and gradient application for random data
-                # (Same code as above for brevity)
-                loss_improvement_other[eval_uid] = 100*(1.-loss_after_per_batch/loss_before_per_batch)
+                # Compute initial loss on random data
+                loss_before = 0.0
+                n_batches = 0
+                with torch.no_grad():
+                    for i, batch in enumerate(loader):
+                        if i > 3: break  # Limit batches for speed
+                        input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
+                        labels = input_ids.clone()
+                        labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                        outputs = self.model(input_ids=input_ids, labels=labels)
+                        loss_before += outputs.loss.item()
+                        n_batches += 1
+                        del input_ids, labels, outputs
+                        torch.cuda.empty_cache()
 
-                # Restore original parameters
+                loss_before_per_batch = loss_before / n_batches if n_batches > 0 else 0
+
+                tplr.logger.info(f"Random data - Initial loss: {loss_before_per_batch:.4f}")
+
+                # Apply the same gradient (make sure we're using the stored gradient)
+                for n, p in self.model.named_parameters():
+                    if n in temp_grad and temp_grad[n] is not None:
+                        # Apply gradient step directly
+                        p.data.sub_(temp_grad[n].sign(), alpha=self.scheduler.get_last_lr()[0] * 0.25)
+                        tplr.logger.debug(f"Applied gradient for {n}")  # Debug log
+
+                # Compute loss after on random data with SAME model state
+                loss_after = 0.0
+                n_batches = 0
+                with torch.no_grad():
+                    for i, batch in enumerate(loader):
+                        if i > 3: break  # Keep same number of batches
+                        input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
+                        labels = input_ids.clone()
+                        labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                        outputs = self.model(input_ids=input_ids, labels=labels)
+                        loss_after += outputs.loss.item()
+                        n_batches += 1
+                        del input_ids, labels, outputs
+                        torch.cuda.empty_cache()
+
+                loss_after_per_batch = loss_after / n_batches if n_batches > 0 else 0
+
+                tplr.logger.info(f"Random data - After applying gradient loss: {loss_after_per_batch:.4f}")
+
+                # Calculate improvement percentage on random data
+                if loss_before_per_batch > 0:
+                    improvement_random = (loss_before_per_batch - loss_after_per_batch) / loss_before_per_batch * 100
+                else:
+                    improvement_random = 0.0
+
+                loss_improvement_other[eval_uid] = improvement_random
+
+                tplr.logger.info(f"Random data - Loss before: {loss_before_per_batch:.4f}")
+                tplr.logger.info(f"Random data - Loss after: {loss_after_per_batch:.4f}")
+                tplr.logger.info(f"Random data - Improvement: {improvement_random:.4f}%")
+
+                # Verify gradient application
+                param_diff = 0
+                for n, p in self.model.named_parameters():
+                    if n in temp_grad and temp_grad[n] is not None:
+                        param_diff += (p.data - original_params[n]).abs().mean().item()
+                tplr.logger.info(f"Parameter difference after gradient: {param_diff:.4f}")
+
+                # Restore original parameters after evaluation
                 for n, p in self.model.named_parameters():
                     p.data.copy_(original_params[n])
+
+                # Calculate relative improvements for both evaluations
+                relative_improvement = loss_improvement[eval_uid] / loss_before_per_batch if loss_before_per_batch > 0 else 0.0
+                relative_improvement_other = loss_improvement_other[eval_uid] / loss_before_per_batch if loss_before_per_batch > 0 else 0.0
+
+                tplr.logger.info(f"Relative improvement on miner data: {relative_improvement:.4f}")
+                tplr.logger.info(f"Relative improvement on random data: {relative_improvement_other:.4f}")
+
+                # Calculate binary indicator (1 if better on own data, -1 if better on random data)
+                binary_value = 1 if loss_improvement_other[eval_uid] < loss_improvement[eval_uid] else -1
+                prev_avg = self.loss_improvement_moving_avg.get(eval_uid, 0)
+                self.loss_improvement_moving_avg[eval_uid] = (1 - self.ma_alpha) * prev_avg + self.ma_alpha * binary_value
+
+                # Combine scores: weight the relative improvement by the binary moving average
+                # This rewards consistent good performance on own data vs random data
+                combined_score = relative_improvement * (1 + self.loss_improvement_moving_avg[eval_uid]) / 2
+
+                # Update scores and moving averages
+                self.scores[eval_uid] = combined_score
+                self.moving_avg_scores[eval_uid] = (
+                    self.ma_alpha * self.moving_avg_scores[eval_uid] + 
+                    (1 - self.ma_alpha) * combined_score
+                )
+
+                # Add the evaluated UID to the set
+                self.evaluated_uids.add(eval_uid)
+
+                # Calculate weights - only positive moving averages get weights
+                weights = torch.zeros_like(self.moving_avg_scores)
+                evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
+                evaluated_mask[list(self.evaluated_uids)] = True
+
+                # Only consider positive moving averages for weight calculation
+                positive_mask = (self.moving_avg_scores > 0) & evaluated_mask
+                evaluated_scores = self.moving_avg_scores * positive_mask
+
+                total_score = evaluated_scores.sum()
+                if total_score > 0:
+                    weights[positive_mask] = evaluated_scores[positive_mask] / total_score
+
+                # logging for each miner
+                tplr.logger.info(f'Updated scores for UID {eval_uid}:')
+                tplr.logger.info(f'  - Relative improvement: {relative_improvement:.4f}')
+                tplr.logger.info(f'  - Binary indicator MA: {self.loss_improvement_moving_avg[eval_uid]:.4f}')
+                tplr.logger.info(f'  - Combined score: {combined_score:.4f}')
+                tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[eval_uid]:.4f}')
+                tplr.logger.info(f'  - Weight: {weights[eval_uid]:.4f}')
+
+                # Only set weights periodically
+                if self.sync_window % self.hparams.windows_per_weights == 0:
+                    with timer("set_weights", self.wandb, self.global_step):
+                        self.subtensor.set_weights(
+                            wallet=self.wallet,
+                            netuid=self.config.netuid,
+                            uids=self.metagraph.uids,
+                            weights=weights,
+                            wait_for_inclusion=False,
+                            wait_for_finalization=False,
+                        )
+
+                        
+
+                # wandb logging
+                self.wandb.log({
+                    f"validator/scores/relative_improvement/{eval_uid}": relative_improvement,
+                    f"validator/scores/relative_improvement_other/{eval_uid}": relative_improvement_other,
+                    f"validator/scores/binary_ma/{eval_uid}": self.loss_improvement_moving_avg[eval_uid],
+                    f"validator/scores/combined/{eval_uid}": combined_score,
+                    f"validator/scores/moving_avg/{eval_uid}": self.moving_avg_scores[eval_uid].item(),
+                    f"validator/weights/{eval_uid}": weights[eval_uid].item(),
+                    "validator/weights/mean": weights.mean().item(),
+                    "validator/weights/std": weights.std().item(),
+                    "validator/weights/max": weights.max().item(),
+                    "validator/total_score": total_score.item(),
+                    "validator/num_evaluated": len(self.evaluated_uids),
+                }, step=self.global_step)
 
             # Update moving averages with binary indicators
             for uid in loss_improvement.keys():
@@ -453,26 +591,8 @@ class Validator:
                     prev_avg = self.loss_improvement_moving_avg.get(uid, 0)
                     self.loss_improvement_moving_avg[uid] = (1 - self.ma_alpha) * prev_avg + self.ma_alpha * binary_value
 
-            # Enhanced wandb logging
-            self.wandb.log({
-                "validator/loss/before": loss_before_per_batch,
-                "validator/loss/after": loss_after_per_batch,
-                "validator/loss/improvement": loss_improvement[eval_uid],
-                "validator/network/block": self.current_block,
-                "validator/network/window": self.sync_window,
-                "validator/network/step": self.global_step,
-                "validator/network/evaluated_uids": len(self.evaluated_uids),
-                "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
-                "validator/network/active_miners": len(loss_improvement),
-                "validator/scores/mean": self.scores[eval_uid].item(),
-                "validator/moving_avg_scores/mean": self.moving_avg_scores[eval_uid].item(),
-                **{f"validator/loss_improvement_{key}": value for key, value in loss_improvement.items()},
-                **{f"validator/loss_improvement_other_{key}": value for key, value in loss_improvement_other.items()},
-                **{f"validator/loss_improvement_moving_avg_{key}": value for key, value in self.loss_improvement_moving_avg.items()},
-            }, step=self.global_step)
-
             # Checkpoints
-            if self.global_step % self.hparams.checkpoint_frequency == 0:
+            if self.global_step % self.hparams.checkpoint_frequency == 0 and self.global_step != 0:
                 tplr.logger.info(f"Creating checkpoint at global_step {self.global_step}")
 
                 # Create CPU copy of the checkpoint data
@@ -549,12 +669,90 @@ class Validator:
 
                     # Increment global_step
                     self.global_step += 1
+                       
+                # Unified wandb logging at the end
+                wandb_metrics = {
+                    # Training metrics
+                    "validator/loss/before": loss_before_per_batch,
+                    "validator/loss/after": loss_after_per_batch,
+                    "validator/total_tokens": self.total_tokens_processed,
+                    "validator/batch_tokens": self.batch_tokens,
+                    "validator/global_step": self.global_step,
+                    
+                    # Resource metrics
+                    "validator/gpu_memory_allocated": torch.cuda.memory_allocated() / 1024**2,  # MB
+                    "validator/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,  # MB
+                    
+                    # Network metrics
+                    "validator/network/block": self.current_block,
+                    "validator/network/window": self.sync_window,
+                    "validator/network/step": self.global_step,
+                    "validator/network/evaluated_uids": len(self.evaluated_uids),
+                    "validator/network/active_miners": len(loss_improvement),
+                    "validator/active_peers": len(self.peers),
+                    
+                    # Optimization metrics
+                    "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
+                    "validator/scheduler_last_epoch": self.scheduler.last_epoch,
+                    
+                    # Score metrics
+                    "validator/scores/mean": self.scores.mean().item(),
+                    "validator/scores/std": self.scores.std().item(),
+                    "validator/moving_avg_scores/mean": self.moving_avg_scores.mean().item(),
+                    "validator/moving_avg_scores/std": self.moving_avg_scores.std().item(),
+                }
 
-                    # Log steps to wandb
-                    self.wandb.log({
-                        "validator/global_step": self.global_step,
-                        "validator/scheduler_last_epoch": self.scheduler.last_epoch,
-                    }, step=self.global_step)
+                # Add dynamic metrics
+                wandb_metrics.update({
+                    f"validator/loss_improvement_{key}": value 
+                    for key, value in loss_improvement.items()
+                })
+                wandb_metrics.update({
+                    f"validator/loss_improvement_other_{key}": value 
+                    for key, value in loss_improvement_other.items()
+                })
+                wandb_metrics.update({
+                    f"validator/loss_improvement_moving_avg_{key}": value 
+                    for key, value in self.loss_improvement_moving_avg.items()
+                })
+                wandb_metrics.update({
+                    f"validator/scores/{uid}": score.item() 
+                    for uid, score in enumerate(self.scores)
+                })
+                wandb_metrics.update({
+                    f"validator/moving_avg_scores/{uid}": score.item() 
+                    for uid, score in enumerate(self.moving_avg_scores)
+                })
+
+                # Single wandb log call at the end
+                self.wandb.log(wandb_metrics, step=self.global_step)
+
+                # Initialize variables for next loop
+                loss_improvement = {}
+                loss_improvement_other = {}
+                loss_improvement_moving_avg = {}
+                batch_tokens = 0
+                start_time = time.time()
+
+            # Calculate processing metrics
+            duration = time.time() - start_time
+            self.batch_times.append(duration)
+            self.total_tokens_processed += batch_tokens
+
+            # Update scores
+            for uid in loss_improvement.keys():
+                if uid in loss_improvement_other:
+                    # Update current scores
+                    self.scores[uid] = loss_improvement[uid]
+                    
+                    # Update moving average scores
+                    self.moving_avg_scores[uid] = (
+                        self.ma_alpha * self.moving_avg_scores[uid] + 
+                        (1 - self.ma_alpha) * self.scores[uid]
+                    )
+                    
+                    # Add to evaluated UIDs
+                    self.evaluated_uids.add(uid)
 
     def block_listener(self, loop):
         def handler(event, _u, _s):

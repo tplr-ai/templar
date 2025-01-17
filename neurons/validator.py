@@ -263,17 +263,14 @@ class Validator:
         # self.comms.track_active_peers()
 
         while True:
-            step_window = self.current_window
 
-            tplr.logger.info(f'Step window: {step_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
             # 1. Wait for validator offset - single wait loop
             while self.sync_window >= (self.current_window - self.hparams.validator_offset):
                 tplr.logger.info(f'Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}')
                 await asyncio.sleep(12)
-            tplr.logger.info(f'Step window: {step_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
+            tplr.logger.info(f'Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
             # 2. Process one window at a time
             self.sync_window += 1
-            step_window = self.sync_window + 1
             tplr.logger.info(f'Processing window: {self.sync_window} current: {self.current_window}')
 
             self.comms.update_peers_with_buckets()
@@ -290,7 +287,7 @@ class Validator:
                     state_dict=None,
                     my_uid=self.uid,
                     uids=self.peers,
-                    window=step_window,
+                    window=self.sync_window,
                     key='gradient',
                     timeout=5,
                     device=self.config.device,
@@ -309,7 +306,7 @@ class Validator:
             # Get individual miner's gradient
             eval_result = await self.comms.get(
                 uid=str(eval_uid),
-                window=step_window,
+                window=self.sync_window,
                 key='gradient',
                 timeout=30,
                 local=False,
@@ -379,7 +376,6 @@ class Validator:
                             vals,
                             self.xshapes[n],
                             self.totalks[n],
-                            # median=False
                         )
                     ).to(self.config.device)  # Ensure final gradient is on correct device
 
@@ -429,18 +425,25 @@ class Validator:
             self.scores[eval_uid] = score
             self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
 
-            # Calculate weights - only positive moving averages get weights
+            # Calculate weights using temperature-based softmax
             weights = torch.zeros_like(self.moving_avg_scores)
             evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
             evaluated_mask[list(self.evaluated_uids)] = True
 
-            # Only consider positive moving averages for weight calculation
+            # Create mask for positive scores
             positive_mask = (self.moving_avg_scores > 0) & evaluated_mask
-            evaluated_scores = self.moving_avg_scores * positive_mask
-
-            total_score = evaluated_scores.sum()
-            if total_score > 0:
-                weights[positive_mask] = evaluated_scores[positive_mask] / total_score
+            
+            if positive_mask.any():
+                # Only apply softmax to positive scores
+                positive_scores = self.moving_avg_scores[positive_mask]
+                temperature = 0.1  # Lower temperature = sharper distribution
+                positive_weights = torch.softmax(positive_scores / temperature, dim=0)
+                
+                # Assign weights back to the original tensor
+                weights[positive_mask] = positive_weights
+            else:
+                # If no positive scores, all weights remain 0
+                tplr.logger.info("No positive scores found, all weights set to 0")
 
             # Log only evaluated UIDs
             tplr.logger.info('Updated scores for evaluated UIDs:')

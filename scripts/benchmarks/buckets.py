@@ -187,7 +187,7 @@ async def main():
     results = {"AWS": [], "CF": []}
     for _ in trange(10):
         for platform in ("AWS", "CF"):
-            logger.info(f"{'-'*10} Starting benchmarks for {platform} {'-'*10}")
+            logger.info(f"{'-' * 10} Starting benchmarks for {platform} {'-' * 10}")
             bucket, client = await get_bucket_and_client(platform)
             durations = await benchmark(client, bucket)
             results[platform].append(durations)

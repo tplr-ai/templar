@@ -25,7 +25,7 @@ def initialize_wandb(
             run_id = f.read().strip()
 
         try:
-            api = wandb.Api()
+            api = wandb.Api(timeout=60)
             api.run(f"tplr/{config.project}/{run_id}")
             logger.info(f"Found existing run ID: {run_id}")
         except Exception:
@@ -67,7 +67,7 @@ def initialize_wandb(
     # Get the current global step from WandB if resuming
     if run_id:
         try:
-            api = wandb.Api()
+            api = wandb.Api(timeout=60)
             run_data = api.run(f"tplr/{config.project}/{run_id}")
             history = run_data.scan_history()
             global_step = max((row.get("_step", 0) for row in history), default=0)

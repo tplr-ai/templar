@@ -235,7 +235,7 @@ class Miner:
         while True:
             step_window = self.current_window
             tplr.logger.info(f"\n{'-' * 40} Window: {step_window} {'-' * 40}")
-            # self.comms.update_peers_with_buckets()
+            self.comms.update_peers_with_buckets()
             # Update local references
             self.peers = self.comms.peers
 

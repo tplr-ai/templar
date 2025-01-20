@@ -973,3 +973,148 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.error(f"Error getting latest checkpoint: {e}")
             return None
+
+    async def load_checkpoint(
+        self,
+        model,
+        optimizer,
+        scheduler,
+        transformer,
+        compressor,
+        current_window: int,
+        device: str,
+        peers: list,
+        uid: str,
+    ) -> tuple[bool, dict, int]:
+        """
+        Load latest checkpoint and catch up through missed windows.
+
+        Returns:
+            tuple: (success: bool, momentum: dict, global_step: int)
+        """
+        result = await self.get_latest_checkpoint()
+        if not result:
+            tplr.logger.info("No valid checkpoints found")
+            return False, {}, 0
+
+        checkpoint_data, window = result
+        try:
+            # Load model state
+            model.load_state_dict(
+                {
+                    k: v.to(device)
+                    for k, v in checkpoint_data["model_state_dict"].items()
+                }
+            )
+            model.to(device)
+
+            # Load optimizer state
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if torch.is_tensor(v):
+                        state[k] = v.to(device)
+            optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
+
+            # Load scheduler state
+            scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
+
+            # Get checkpoint metadata
+            momentum = checkpoint_data["momentum"]
+            global_step = checkpoint_data["global_step"]
+            checkpoint_window = checkpoint_data.get("checkpoint_window")
+
+            if not checkpoint_window:
+                tplr.logger.warning(
+                    "Checkpoint missing window info, cannot catch up properly"
+                )
+                return False, {}, 0
+
+            window_difference = current_window - checkpoint_window
+            tplr.logger.info(
+                f"Current window: {current_window}, Checkpoint window: {checkpoint_window}, Difference: {window_difference}"
+            )
+
+            if window_difference < 0:
+                tplr.logger.warning(
+                    f"Current window ({current_window}) is behind checkpoint window ({checkpoint_window})"
+                )
+                return True, momentum, global_step
+            elif window_difference == 0:
+                tplr.logger.info("No catch up needed - at same window")
+                return True, momentum, global_step
+
+            tplr.logger.info(f"Need to catch up through {window_difference} windows...")
+
+            # Catch up through missed windows
+            for catch_up_window in range(checkpoint_window + 1, current_window + 1):
+                tplr.logger.info(
+                    f"Catching up window {catch_up_window} (Progress: {catch_up_window - checkpoint_window}/{window_difference})"
+                )
+                # Gather gradients from peers for this historical window
+                gather_result = await self.gather(
+                    state_dict={},  # Empty dict since we're just catching up
+                    my_uid=uid,
+                    uids=peers,
+                    window=catch_up_window,
+                    key="gradient",
+                    timeout=30,
+                    device=device,
+                    local=False,
+                    stale_retention=100,
+                    global_step=global_step,
+                )
+
+                if gather_result:
+                    # Apply gathered gradients
+                    for n, p in model.named_parameters():
+                        idxs_key = n + "idxs"
+                        vals_key = n + "vals"
+                        idxs = getattr(gather_result.state_dict, idxs_key, None)
+                        vals = getattr(gather_result.state_dict, vals_key, None)
+
+                        if idxs is not None and vals is not None:
+                            if not isinstance(idxs, (list, tuple)):
+                                idxs = [idxs]
+                            if not isinstance(vals, (list, tuple)):
+                                vals = [vals]
+
+                            new_grad = transformer.decode(
+                                compressor.batch_decompress(
+                                    p.to(device),
+                                    idxs,
+                                    vals,
+                                    transformer.shapes[n],
+                                    transformer.totalks[n],
+                                )
+                            )
+
+                            if p.grad is None:
+                                p.grad = new_grad
+                            else:
+                                p.grad.copy_(new_grad)
+                            p.grad.sign_()
+
+                    # Step optimizer and scheduler
+                    optimizer.step()
+                    scheduler.step()
+                    global_step += 1
+
+                    tplr.logger.info(
+                        f"Caught up window {catch_up_window}, global_step={global_step}"
+                    )
+                else:
+                    tplr.logger.warning(
+                        f"No gradients found for window {catch_up_window}"
+                    )
+
+            tplr.logger.info(
+                f"Successfully loaded checkpoint and caught up {window_difference} windows"
+            )
+            return True, momentum, global_step
+
+        except KeyError as e:
+            tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
+            return False, {}, 0
+        except Exception as e:
+            tplr.logger.error(f"Failed to load checkpoint: {e}")
+            return False, {}, 0

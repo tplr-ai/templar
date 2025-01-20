@@ -607,6 +607,7 @@ class Comms(ChainManager):
 
             # Remote storage logic
             peer_bucket = self.commitments.get(int(uid))
+            tplr.logger.info(f"Peer bucket : {peer_bucket}")
             if not peer_bucket:
                 return None
 
@@ -850,7 +851,7 @@ class Comms(ChainManager):
                         tplr.logger.debug(f"Found {filename} for UID {uid}")
                         return True
                     except botocore.exceptions.ClientError as e:
-                        if e.response["Error"]["Code"] != "404":
+                        if e.response["Error"]["Code"] not in ["404", "403"]:
                             tplr.logger.error(
                                 f"Error checking activity for UID {uid}: {e}"
                             )
@@ -902,8 +903,11 @@ class Comms(ChainManager):
                 tplr.logger.info("No active validators found")
                 return None
             validator_bucket = self.commitments.get(int(validator_uid))
+
             if not validator_bucket:
                 return None
+
+            tplr.logger.info(f"Validator Bucket: {validator_bucket}")
             # List checkpoint files from validator's bucket
             checkpoint_files = []
             async with self.session.create_client(

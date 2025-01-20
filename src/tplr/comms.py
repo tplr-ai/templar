@@ -901,16 +901,18 @@ class Comms(ChainManager):
             if validator_uid is None:
                 tplr.logger.info("No active validators found")
                 return None
-
+            validator_bucket = self.commitments.get(int(validator_uid))
+            if not validator_bucket:
+                return None
             # List checkpoint files from validator's bucket
             checkpoint_files = []
             async with self.session.create_client(
                 "s3",
-                endpoint_url=self.get_base_url(self.bucket.account_id),
+                endpoint_url=self.get_base_url(validator_bucket.account_id),
                 region_name=CF_REGION_NAME,
                 config=client_config,
-                aws_access_key_id=self.bucket.access_key_id,
-                aws_secret_access_key=self.bucket.secret_access_key,
+                aws_access_key_id=validator_bucket.access_key_id,
+                aws_secret_access_key=validator_bucket.secret_access_key,
             ) as s3_client:
                 # Use regex pattern to match checkpoint files
                 pattern = re.compile(

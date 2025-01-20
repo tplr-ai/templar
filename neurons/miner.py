@@ -168,50 +168,6 @@ class Miner:
 
     # Main training loop.
     async def run(self):
-        # Try to load latest checkpoint
-        result = await self.comms.get_latest_checkpoint()
-        if result:
-            checkpoint_data, window = result
-            try:
-                # Load state dicts from checkpoint data
-                self.model.load_state_dict({k: v.to(self.config.device) for k,v in checkpoint_data['model_state_dict'].items()})
-                self.model.to(self.config.device)
-                
-                # Load optimizer state
-                for state in self.optimizer.state.values():
-                    for k, v in state.items():
-                        if torch.is_tensor(v):
-                            state[k] = v.to(self.config.device)
-                self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict'])
-                
-                # Load scheduler state
-                self.scheduler.load_state_dict(checkpoint_data['scheduler_state_dict'])
-                
-                # Load momentum and global_step
-                self.momentum = checkpoint_data['momentum']
-                self.global_step = checkpoint_data['global_step']
-                
-                # Adjust scheduler to catch up with current window
-                checkpoint_window = checkpoint_data.get('checkpoint_window', None)
-                if checkpoint_window is not None:
-                    window_difference = self.current_window - checkpoint_window
-                    if window_difference > 0:
-                        for _ in range(window_difference):
-                            self.scheduler.step()
-                        tplr.logger.info(f"Stepped scheduler {window_difference} times to catch up with current window {self.current_window}")
-                else:
-                    tplr.logger.warning("Checkpoint does not contain 'checkpoint_window'; cannot adjust scheduler")
-                
-                tplr.logger.info(f"Loaded checkpoint from window {window}, global_step={self.global_step}")
-            except KeyError as e:
-                tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
-            except Exception as e:
-                tplr.logger.error(f"Failed to load checkpoint: {e}")
-        else:
-            tplr.logger.info("No valid checkpoints found, starting from scratch")
-            self.global_step = 0
-            self.model.to(self.config.device)
-
         # Load Peers
         if not self.config.peers:
             self.peers = self.comms.peers
@@ -220,6 +176,31 @@ class Miner:
             self.peers = self.config.peers
         if self.uid not in self.peers:
             self.peers.append(self.uid)
+
+        self.comms.commitments = self.comms.get_commitments_sync()
+        self.comms.update_peers_with_buckets()
+        tplr.logger.info(f"Loaded commitments: {self.comms.commitments.keys()}")
+
+        success, loaded_momentum, loaded_global_step = await self.comms.load_checkpoint(
+            model=self.model,
+            optimizer=self.optimizer, 
+            scheduler=self.scheduler,
+            transformer=self.transformer,
+            compressor=self.compressor,
+            current_window=self.current_window,
+            device=self.config.device,
+            peers=self.peers,
+            uid=self.uid
+        )
+        if success:
+            self.momentum = loaded_momentum
+            self.global_step = loaded_global_step
+            tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
+        else:
+            tplr.logger.info("Starting from scratch")
+            self.global_step = 0
+            self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
+            self.model.to(self.config.device)
 
         # Start background block listener
         self.loop = asyncio.get_running_loop()
@@ -233,13 +214,13 @@ class Miner:
         self.comms.start_background_tasks()
 
         while True:
+            # 1. Initialize window and update peers
             step_window = self.current_window
             tplr.logger.info(f"\n{'-' * 40} Window: {step_window} {'-' * 40}")
             self.comms.update_peers_with_buckets()
-            # Update local references
             self.peers = self.comms.peers
 
-            # Get the pages for this window.
+            # 2. Load training data for this window
             pages = await tplr.dataset.DatasetLoader.next_pages(
                 offset = step_window,
                 n_pages = self.hparams.pages_per_window,
@@ -253,7 +234,7 @@ class Miner:
             )   
             tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}")
             
-            # Accumulate gradient
+            # 3. Accumulate gradients over batches
             start_time = time.time()
             tplr.logger.info("Start accumulating...")
             self.optimizer.zero_grad()
@@ -272,21 +253,24 @@ class Miner:
                 total_loss += outputs.loss.item()
                 outputs.loss.backward()
                 
-                # Track tokens
                 batch_tokens += (labels != -100).sum().item()
-                
+                #  TODO: INCREASE LENGHT OF THE WINDOW
                 tplr.logger.info(f'loss: {outputs.loss.item()}')
                 if self.current_window != step_window:
                     tplr.logger.info('<Exhausted window>')
                     break
+
+            # 4. Wait for next window
+            tplr.logger.info("Wait for next window...")
+            while self.current_window == step_window:
+                await asyncio.sleep(0.1)
             tplr.logger.info(f"Stopped accumulating: {i+1} batches with {(i+1) * self.hparams.batch_size * self.hparams.sequence_length} tokens")
 
-            # Calculate processing metrics
+            # 5. Calculate and log metrics
             duration = time.time() - start_time
             self.batch_times.append(duration)
             self.total_tokens_processed += batch_tokens
 
-            # Log gradient metrics
             grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
             weight_norms = [p.norm().item() for p in self.model.parameters()]
             momentum_norms = [m.norm().item() for m in self.momentum.values()]
@@ -319,7 +303,7 @@ class Miner:
                 "miner/mean_momentum_norm": sum(momentum_norms) / len(momentum_norms),
             }, step=self.global_step)
 
-            # Reduce gradient using DeMo.
+            # 6. Prepare gradients for sharing using DeMo compression
             gradient = {}
             xshapes = {}
             totalks = {}
@@ -349,7 +333,7 @@ class Miner:
                 xshapes[n] = xshape
                 totalks[n] = totalk
 
-            # Gather gradients from peers
+            # 7. Gather and process peer gradients
             tplr.logger.info(f"Start gather: {self.peers}")
             gather_result = await self.comms.gather(
                 state_dict=gradient,
@@ -360,25 +344,24 @@ class Miner:
                 timeout=30,
                 device=self.config.device,
                 local=False,
-                stale_retention=10,
+                stale_retention=100,
                 global_step=self.global_step,
             )
 
             if gather_result is None:
                 tplr.logger.error("Failed to gather gradients from peers. Waiting for next window.")
-                # Wait for next window
                 while self.current_window == step_window:
                     await asyncio.sleep(0.1)
-                continue  # Proceed to the next window
+                continue
 
-            # Update self.global_step based on the maximum global_step received
+            # 8. Update global step based on peer information
             max_global_step = max(gather_result.global_steps + [self.global_step])
             tplr.logger.info(f"Gather global steps : {gather_result.global_steps}")
             if max_global_step > self.global_step:
                 tplr.logger.info(f"Updating global_step from {self.global_step} to {max_global_step}")
                 self.global_step = max_global_step
     
-            # Decompress state and apply to grad.
+            # 9. Apply gathered gradients
             for n, p in self.model.named_parameters():
                 idxs_key = n + 'idxs'
                 vals_key = n + 'vals'
@@ -405,25 +388,18 @@ class Miner:
                         p.grad = new_grad
                     else:
                         p.grad.copy_(new_grad)
-                    # Sign-SGD
+                    # Sign-SGD 
                     p.grad.sign_()
                 else:
                     tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
 
-                
-            # Apply optimizer step
+            # 10. Optimization step
             tplr.logger.info("Finish and step.")
             self.optimizer.step()
             self.scheduler.step()
             self.global_step += 1
             self.window_step += 1
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
-
-            # Wait for next window
-            tplr.logger.info("Wait for next window...")
-            while self.current_window == step_window:
-                await asyncio.sleep(0.1)
-            self.window_step = 0
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

@@ -25,7 +25,7 @@ def initialize_wandb(
             run_id = f.read().strip()
 
         try:
-            api = wandb.Api()
+            api = wandb.Api(timeout=60)
             api.run(f"tplr/{config.project}/{run_id}")
             logger.info(f"Found existing run ID: {run_id}")
         except Exception:
@@ -67,7 +67,7 @@ def initialize_wandb(
     # Get the current global step from WandB if resuming
     if run_id:
         try:
-            api = wandb.Api()
+            api = wandb.Api(timeout=60)
             run_data = api.run(f"tplr/{config.project}/{run_id}")
             history = run_data.scan_history()
             global_step = max((row.get("_step", 0) for row in history), default=0)
@@ -81,9 +81,15 @@ def initialize_wandb(
     original_log = run.log
 
     def log_with_version(metrics, **kwargs):
-        # Increment global step
-        version_steps["global"] += 1
-        current_step = version_steps["global"]
+        # Only increment if step not provided
+        if "step" not in kwargs:
+            version_steps["global"] += 1
+            current_step = version_steps["global"]
+        else:
+            current_step = kwargs["step"]
+            # Update global step if provided step is higher
+            if current_step > version_steps["global"]:
+                version_steps["global"] = current_step
 
         # Initialize version step if needed
         if __version__ not in version_steps:
@@ -92,18 +98,12 @@ def initialize_wandb(
         # Use version-specific step counter
         versioned_metrics = {}
         for k, v in metrics.items():
-            # Add metric under current version
             versioned_metrics[f"v{__version__}/{k}"] = v
-            # Also log under "latest/{k}" with version-specific step
             versioned_metrics[f"latest/{k}"] = v
 
         # Add version-specific step counter
         versioned_metrics[f"v{__version__}/step"] = current_step
 
-        # Always use the global step for logging
-        kwargs["step"] = current_step
-
-        # Log metrics
         original_log(versioned_metrics, **kwargs)
 
     run.log = log_with_version

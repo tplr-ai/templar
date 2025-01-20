@@ -951,11 +951,11 @@ class Comms(ChainManager):
             loaded_data = await self.s3_get_object(
                 key=latest["key"],
                 bucket_secrets={
-                    "account_id": self.bucket.account_id,
-                    "bucket_name": self.bucket.name,
+                    "account_id": validator_bucket.account_id,
+                    "bucket_name": validator_bucket.name,
                     "write": {
-                        "access_key_id": self.bucket.access_key_id,
-                        "secret_access_key": self.bucket.secret_access_key,
+                        "access_key_id": validator_bucket.access_key_id,
+                        "secret_access_key": validator_bucket.secret_access_key,
                     },
                 },
             )

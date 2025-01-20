@@ -104,7 +104,6 @@ def initialize_wandb(
         # Add version-specific step counter
         versioned_metrics[f"v{__version__}/step"] = current_step
 
-        # Keep the provided step if it exists
         original_log(versioned_metrics, **kwargs)
 
     run.log = log_with_version

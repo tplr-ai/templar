@@ -290,8 +290,6 @@ class Miner:
             grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
             weight_norms = [p.norm().item() for p in self.model.parameters()]
             momentum_norms = [m.norm().item() for m in self.momentum.values()]
-
-            # Enhanced wandb logging with all metrics
             self.wandb.log({
                 # Training metrics
                 "miner/loss": total_loss/(i+1),
@@ -359,7 +357,7 @@ class Miner:
                 uids=self.peers,
                 window=step_window,
                 key='gradient',
-                timeout=5,
+                timeout=30,
                 device=self.config.device,
                 local=False,
                 stale_retention=10,
@@ -375,6 +373,7 @@ class Miner:
 
             # Update self.global_step based on the maximum global_step received
             max_global_step = max(gather_result.global_steps + [self.global_step])
+            tplr.logger.info(f"Gather global steps : {gather_result.global_steps}")
             if max_global_step > self.global_step:
                 tplr.logger.info(f"Updating global_step from {self.global_step} to {max_global_step}")
                 self.global_step = max_global_step
@@ -412,7 +411,6 @@ class Miner:
                     tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
 
                 
-
             # Apply optimizer step
             tplr.logger.info("Finish and step.")
             self.optimizer.step()

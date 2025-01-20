@@ -81,9 +81,15 @@ def initialize_wandb(
     original_log = run.log
 
     def log_with_version(metrics, **kwargs):
-        # Increment global step
-        version_steps["global"] += 1
-        current_step = version_steps["global"]
+        # Only increment if step not provided
+        if "step" not in kwargs:
+            version_steps["global"] += 1
+            current_step = version_steps["global"]
+        else:
+            current_step = kwargs["step"]
+            # Update global step if provided step is higher
+            if current_step > version_steps["global"]:
+                version_steps["global"] = current_step
 
         # Initialize version step if needed
         if __version__ not in version_steps:
@@ -92,18 +98,13 @@ def initialize_wandb(
         # Use version-specific step counter
         versioned_metrics = {}
         for k, v in metrics.items():
-            # Add metric under current version
             versioned_metrics[f"v{__version__}/{k}"] = v
-            # Also log under "latest/{k}" with version-specific step
             versioned_metrics[f"latest/{k}"] = v
 
         # Add version-specific step counter
         versioned_metrics[f"v{__version__}/step"] = current_step
 
-        # Always use the global step for logging
-        kwargs["step"] = current_step
-
-        # Log metrics
+        # Keep the provided step if it exists
         original_log(versioned_metrics, **kwargs)
 
     run.log = log_with_version

@@ -174,12 +174,12 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
 1. **Install System Dependencies**:
 
    ```bash
-   # Add Python 3.12 repository
+   # Add Python 3.11 repository
    sudo add-apt-repository ppa:deadsnakes/ppa
    sudo apt-get update
 
    # Install required packages
-   sudo apt-get install python3.12 python3.12-venv git
+   sudo apt-get install python3.11 python3.11-venv git
    ```
   *PM2 Support Installation
   ```bash
@@ -202,7 +202,7 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
 
    ```bash
    # Create virtual environment
-   python3.12 -m venv .venv
+   python3.11 -m venv .venv
    source .venv/bin/activate
 
    # Upgrade pip
@@ -219,7 +219,7 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
   *PM2 Support Installation
   ```bash
    # Install uv and configure venv
-   pip install uv && uv python install 3.12 && uv python pin 3.12 && uv venv .venv
+   pip install uv && uv python install 3.11 && uv python pin 3.11 && uv venv .venv
    source .venv/bin/activate
 
    # Install PyTorch with CUDA support

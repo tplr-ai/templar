@@ -30,5 +30,7 @@
     "minimum_peers": 5,
     "active_check_interval": 60,
     "recent_windows": 3,
-    "power_normalisation": 2.0
+    "power_normalisation": 2.0,
+    "gradient_norm_threshold": 5,
+    "bad_peer_threshold": 3
 }

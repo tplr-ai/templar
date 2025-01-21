@@ -85,6 +85,32 @@ class ChainManager:
         self.wallet = wallet
         self.bucket = bucket
 
+        # Initialize state
+        self._bad_peers = {}  # Initialize private attribute
+
+    @property
+    def bad_peers(self) -> Dict[str, int]:
+        """Get current bad peers mapping."""
+        return self._bad_peers
+
+    @bad_peers.setter
+    def bad_peers(self, value: Dict[str, int]):
+        """Set bad peers mapping."""
+        self._bad_peers = value
+
+    def update_bad_peers(self, uid: str, norm: float):
+        """Update bad peers based on gradient norm."""
+        if norm > self.hparams.gradient_norm_threshold:
+            self._bad_peers[uid] = self._bad_peers.get(uid, 0) + 1
+            logger.warning(f"UID {uid} sent high-norm gradient: {norm:.4f}")
+        else:
+            # Reset count if gradient norm is acceptable
+            if uid in self._bad_peers:
+                self._bad_peers[uid] = 0
+
+    def is_bad_peer(self, uid: str) -> bool:
+        """Check if a peer is considered bad."""
+        return self._bad_peers.get(uid, 0) >= self.hparams.bad_peer_threshold
 
     def start_commitment_fetcher(self):
         """Attach to the already-running event loop."""
@@ -465,6 +491,10 @@ class ChainManager:
         if not active_peers:
             logger.warning("No active peers found. Skipping update.")
             return
+
+        # Filter out bad peers
+        active_peers = {uid for uid in active_peers if not self.is_bad_peer(str(uid))}
+        logger.debug(f"Active peers after bad peer filtering: {active_peers}")
 
         # Filter active miners with buckets (stake <= 1000)
         self.eval_peers = [

@@ -68,6 +68,7 @@ class Comms(ChainManager):
         self.recent_windows = (
             self.hparams.recent_windows
         )  # Number of recent windows to check
+        self._bad_peers = {}  # Initialize directly using private attribute
 
     def start_background_tasks(self):
         self.loop = asyncio.get_running_loop()
@@ -81,8 +82,8 @@ class Comms(ChainManager):
             bucket = Bucket(
                 name=BUCKET_SECRETS["account_id"],
                 account_id=BUCKET_SECRETS["account_id"],
-                access_key_id=BUCKET_SECRETS["read"]["access_key_id"],
-                secret_access_key=BUCKET_SECRETS["read"]["secret_access_key"],
+                access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+                secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
             )
             tplr.logger.debug(f"Created bucket from environment: {bucket}")
             return bucket
@@ -723,9 +724,11 @@ class Comms(ChainManager):
         for idx, response in enumerate(responses):
             uid = uids[idx]
 
-            # Skip if no response
-            if response is None:
-                tplr.logger.debug(f"No data received from UID {uid}")
+            # Skip if no response or already known bad peer
+            if response is None or self.is_bad_peer(uid):
+                tplr.logger.debug(
+                    f"Skipping UID {uid}: {'No response' if response is None else 'Bad peer'}"
+                )
                 continue
 
             try:
@@ -739,23 +742,52 @@ class Comms(ChainManager):
                 tplr.logger.debug(f"Empty state dict from UID {uid}")
                 continue
 
-            valid_uids.append(uid)
-            global_steps.append(global_step_resp)
+            # Calculate gradient norm and update bad peers tracking
+            total_norm = 0.0
+            try:
+                for tensor in state_dict_resp.values():
+                    # Convert tensor to float if needed
+                    if not tensor.is_floating_point():
+                        tensor = tensor.to(torch.float32)
+                    param_norm = tensor.norm(p=2)
+                    total_norm += param_norm.item() ** 2
+                total_norm = total_norm**0.5
 
-            # Normalize tensors and add to aggregated_state_dict
-            for param_name, tensor in state_dict_resp.items():
-                # Normalize the tensor
-                tensor = tensor.to(device)
-                tensor_norm = tensor.norm(p=2)
-                if tensor_norm > 0:
-                    tensor = tensor / tensor_norm
-                else:
-                    tplr.logger.debug(f"Tensor {param_name} from UID {uid} has zero norm and cannot be normalized.")
+                # Update bad peers tracking
+                self.update_bad_peers(uid, total_norm)
 
-                if param_name not in aggregated_state_dict:
-                    aggregated_state_dict[param_name] = []
-                aggregated_state_dict[param_name].append(tensor.to(device))
-                metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
+                # Skip if peer is now considered bad
+                if self.is_bad_peer(uid):
+                    tplr.logger.warning(f"UID {uid} exceeded bad peer threshold")
+                    continue
+
+                valid_uids.append(uid)
+                global_steps.append(global_step_resp)
+
+                # Normalize tensors and add to aggregated_state_dict
+                for param_name, tensor in state_dict_resp.items():
+                    # Ensure tensor is float
+                    if not tensor.is_floating_point():
+                        tensor = tensor.to(torch.float32)
+                    tensor = tensor.to(device)
+                    tensor_norm = tensor.norm(p=2)
+                    if tensor_norm > 0:
+                        tensor = tensor / tensor_norm
+                    else:
+                        tplr.logger.debug(
+                            f"Tensor {param_name} from UID {uid} has zero norm and cannot be normalized."
+                        )
+
+                    if param_name not in aggregated_state_dict:
+                        aggregated_state_dict[param_name] = []
+                    aggregated_state_dict[param_name].append(tensor)
+                    metrics["download_bytes"] += (
+                        tensor.element_size() * tensor.nelement()
+                    )
+
+            except Exception as e:
+                tplr.logger.error(f"Error processing tensors from UID {uid}: {str(e)}")
+                continue
 
         # If no valid responses, return None
         if not valid_uids:

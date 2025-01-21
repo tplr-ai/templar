@@ -29,5 +29,6 @@
     "topk_peers": 20,
     "minimum_peers": 5,
     "active_check_interval": 60,
-    "recent_windows": 3
+    "recent_windows": 3,
+    "power_normalisation": 2.0
 }

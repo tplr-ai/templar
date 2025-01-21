@@ -181,26 +181,26 @@ class Miner:
         self.comms.update_peers_with_buckets()
         tplr.logger.info(f"Loaded commitments: {self.comms.commitments.keys()}")
 
-        success, loaded_momentum, loaded_global_step = await self.comms.load_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer, 
-            scheduler=self.scheduler,
-            transformer=self.transformer,
-            compressor=self.compressor,
-            current_window=self.current_window,
-            device=self.config.device,
-            peers=self.peers,
-            uid=self.uid
-        )
-        if success:
-            self.momentum = loaded_momentum
-            self.global_step = loaded_global_step
-            tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
-        else:
-            tplr.logger.info("Starting from scratch")
-            self.global_step = 0
-            self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
-            self.model.to(self.config.device)
+        # success, loaded_momentum, loaded_global_step = await self.comms.load_checkpoint(
+        #     model=self.model,
+        #     optimizer=self.optimizer, 
+        #     scheduler=self.scheduler,
+        #     transformer=self.transformer,
+        #     compressor=self.compressor,
+        #     current_window=self.current_window,
+        #     device=self.config.device,
+        #     peers=self.peers,
+        #     uid=self.uid
+        # )
+        # if success:
+        #     self.momentum = loaded_momentum
+        #     self.global_step = loaded_global_step
+        #     tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
+        # else:
+        #     tplr.logger.info("Starting from scratch")
+        #     self.global_step = 0
+        #     self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
+        #     self.model.to(self.config.device)
 
         # Start background block listener
         self.loop = asyncio.get_running_loop()
@@ -254,7 +254,6 @@ class Miner:
                 outputs.loss.backward()
                 
                 batch_tokens += (labels != -100).sum().item()
-                #  TODO: INCREASE LENGHT OF THE WINDOW
                 tplr.logger.info(f'loss: {outputs.loss.item()}')
                 if self.current_window != step_window:
                     tplr.logger.info('<Exhausted window>')

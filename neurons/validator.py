@@ -405,7 +405,7 @@ class Validator:
                 
                 if positive_mask.any():
                     positive_scores = self.moving_avg_scores[positive_mask]
-                    weights[positive_mask] = positive_scores / positive_scores.sum()
+                    weights[positive_mask] =  min_power_normalization(positive_scores, power=self.hparams.power_normalisation)
                 else:
                     tplr.logger.info("No positive scores found, all weights set to 0")
 
@@ -461,7 +461,7 @@ class Validator:
 
                 if positive_mask.any():
                     positive_scores = self.moving_avg_scores[positive_mask]
-                    weights[positive_mask] = positive_scores / positive_scores.sum()
+                    weights[positive_mask] =  min_power_normalization(positive_scores, power=self.hparams.power_normalisation)
                 else:
                     tplr.logger.info("No positive scores found, all weights set to 0")
 
@@ -569,6 +569,13 @@ class Validator:
                 break
             except Exception:
                 time.sleep(1)
+
+def min_power_normalization(logits, power=2.0, epsilon=1e-8):
+    adjusted_logits = logits - torch.min(logits)
+    powered_logits = adjusted_logits ** power
+    sum_powered = torch.sum(powered_logits)
+    probabilities = powered_logits / (sum_powered + epsilon)
+    return probabilities
 
 if __name__ == "__main__":
     asyncio.run(Validator().run())

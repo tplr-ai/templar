@@ -81,8 +81,8 @@ class Comms(ChainManager):
             bucket = Bucket(
                 name=BUCKET_SECRETS["account_id"],
                 account_id=BUCKET_SECRETS["account_id"],
-                access_key_id=BUCKET_SECRETS["read"]["access_key_id"],
-                secret_access_key=BUCKET_SECRETS["read"]["secret_access_key"],
+                access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
+                secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
             )
             tplr.logger.debug(f"Created bucket from environment: {bucket}")
             return bucket
@@ -676,12 +676,12 @@ class Comms(ChainManager):
         local: bool = True,
         stale_retention: int = 10,
     ) -> Optional[SimpleNamespace]:
-        """Gather operation."""
+        """Gather operation with individual gradient normalization."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
         # Put own state if provided
-        if my_uid is not None and state_dict is not None:
+        if state_dict is not None:
             await self.put(
                 state_dict=state_dict,
                 uid=str(my_uid),
@@ -696,7 +696,6 @@ class Comms(ChainManager):
                 for tensor in state_dict.values()
             )
 
-        # Small delay to ensure data propagation
         await asyncio.sleep(0.1)
 
         # Prepare gather tasks
@@ -719,11 +718,9 @@ class Comms(ChainManager):
 
         # Process responses
         responses = await asyncio.gather(*gather_tasks)
-
         for idx, response in enumerate(responses):
             uid = uids[idx]
 
-            # Skip if no response
             if response is None:
                 tplr.logger.debug(f"No data received from UID {uid}")
                 continue
@@ -734,33 +731,47 @@ class Comms(ChainManager):
                 tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
                 continue
 
-            # Skip if no state dict
             if state_dict_resp is None:
                 tplr.logger.debug(f"Empty state dict from UID {uid}")
                 continue
 
+            # Normalize each gradient individually
+            normalized_dict = {}
+            for param_name, tensor in state_dict_resp.items():
+                tensor = tensor.to(device)
+                orig_dtype = tensor.dtype
+                # Convert to float32 for normalization
+                tensor_f = tensor.to(torch.float32)
+                # Compute norm
+                norm = torch.norm(tensor_f)
+                # Normalize and keep as float32 for now
+                normalized = tensor_f / (norm + 1e-8)
+                normalized_dict[param_name] = normalized  # Keep as float32
+                metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
+
             valid_uids.append(uid)
             global_steps.append(global_step_resp)
 
-            # Normalize tensors and add to aggregated_state_dict
-            for param_name, tensor in state_dict_resp.items():
-                # Normalize the tensor
-                tensor = tensor.to(device)
-                tensor_norm = tensor.norm(p=2)
-                if tensor_norm > 0:
-                    tensor = tensor / tensor_norm
-                else:
-                    tplr.logger.debug(f"Tensor {param_name} from UID {uid} has zero norm and cannot be normalized.")
-
+            # Add normalized tensors to aggregated_state_dict
+            for param_name, tensor in normalized_dict.items():
                 if param_name not in aggregated_state_dict:
                     aggregated_state_dict[param_name] = []
-                aggregated_state_dict[param_name].append(tensor.to(device))
-                metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
+                aggregated_state_dict[param_name].append(tensor)
 
         # If no valid responses, return None
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")
             return None
+
+        # Convert normalized gradients back to original dtype
+        final_state_dict = {}
+        for param_name, tensors in aggregated_state_dict.items():
+            # Get original dtype
+            orig_dtype = (
+                state_dict_resp[param_name].dtype if state_dict_resp else torch.float32
+            )
+            # Convert back to original dtype
+            final_state_dict[param_name] = tensors[0].to(orig_dtype)
 
         # Create result namespace
         result = SimpleNamespace(
@@ -768,13 +779,29 @@ class Comms(ChainManager):
             upload_bytes=metrics["upload_bytes"],
             download_bytes=metrics["download_bytes"],
             success_rate=len(valid_uids) / len(uids),
-            state_dict=SimpleNamespace(**aggregated_state_dict),
+            state_dict=SimpleNamespace(**final_state_dict),
             uids=valid_uids,
             global_steps=global_steps,
         )
 
-        tplr.logger.debug(f"Successfully gathered from UIDs: {valid_uids}")
         return result
+
+    def safe_norm(self, tensor):
+        """Safely compute norm by converting to float32 temporarily"""
+        if tensor is None:
+            return 0.0
+
+        original_dtype = tensor.dtype
+        if not torch.is_floating_point(tensor) and not torch.is_complex(tensor):
+            tensor = tensor.to(torch.float32)
+
+        norm_val = tensor.norm(p=2)
+
+        # Convert norm back to original dtype if needed
+        if original_dtype != norm_val.dtype:
+            norm_val = norm_val.to(original_dtype)
+
+        return norm_val
 
     async def cleanup_old_checkpoints(self, keep_last: int = 3):
         """

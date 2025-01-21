@@ -720,6 +720,7 @@ class Comms(ChainManager):
 
         # Process responses
         responses = await asyncio.gather(*gather_tasks)
+
         for idx, response in enumerate(responses):
             uid = uids[idx]
 
@@ -742,8 +743,16 @@ class Comms(ChainManager):
             valid_uids.append(uid)
             global_steps.append(global_step_resp)
 
-            # Add tensors to aggregated_state_dict
+            # Normalize tensors and add to aggregated_state_dict
             for param_name, tensor in state_dict_resp.items():
+                # Normalize the tensor
+                tensor = tensor.to(device)
+                tensor_norm = tensor.norm(p=2)
+                if tensor_norm > 0:
+                    tensor = tensor / tensor_norm
+                else:
+                    tplr.logger.debug(f"Tensor {param_name} from UID {uid} has zero norm and cannot be normalized.")
+
                 if param_name not in aggregated_state_dict:
                     aggregated_state_dict[param_name] = []
                 aggregated_state_dict[param_name].append(tensor.to(device))

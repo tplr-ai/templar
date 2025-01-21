@@ -81,8 +81,8 @@ class Comms(ChainManager):
             bucket = Bucket(
                 name=BUCKET_SECRETS["account_id"],
                 account_id=BUCKET_SECRETS["account_id"],
-                access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-                secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+                access_key_id=BUCKET_SECRETS["read"]["access_key_id"],
+                secret_access_key=BUCKET_SECRETS["read"]["secret_access_key"],
             )
             tplr.logger.debug(f"Created bucket from environment: {bucket}")
             return bucket

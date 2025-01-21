@@ -443,7 +443,39 @@ class Validator:
                     "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item()
                 }, step=self.global_step)
             else:
-                tplr.logger.info(f"No gradient received from UID {eval_uid}. Skipping evaluation.")
+                tplr.logger.info(f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%.")
+                # Reduce the moving average score by 50%
+                old_score = self.moving_avg_scores[eval_uid]
+                self.moving_avg_scores[eval_uid] = old_score * 0.5
+                tplr.logger.info(f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {self.moving_avg_scores[eval_uid]:.4f} due to missing gradient.")
+
+                # Ensure the UID is included in evaluated_uids
+                self.evaluated_uids.add(eval_uid)
+
+                # Recalculate weights
+                weights = torch.zeros_like(self.moving_avg_scores)
+                evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
+                evaluated_mask[list(self.evaluated_uids)] = True
+
+                positive_mask = (self.moving_avg_scores > 0) & evaluated_mask
+
+                if positive_mask.any():
+                    positive_scores = self.moving_avg_scores[positive_mask]
+                    weights[positive_mask] = positive_scores / positive_scores.sum()
+                else:
+                    tplr.logger.info("No positive scores found, all weights set to 0")
+
+                # Log updated scores
+                tplr.logger.info('Updated scores for evaluated UIDs after slashing:')
+                for uid in self.evaluated_uids:
+                    tplr.logger.info(f'UID {uid}:')
+                    tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')
+
+                # Optionally, log to WandB
+                self.wandb.log({
+                    f"validator/moving_avg_scores/{eval_uid}": self.moving_avg_scores[eval_uid].item(),
+                    f"validator/weights/{eval_uid}": weights[eval_uid].item(),
+                }, step=self.global_step)
             
             # 15. Create checkpoints periodically
             if self.global_step % self.hparams.checkpoint_frequency == 0:
@@ -475,6 +507,7 @@ class Validator:
             with timer("update_model_with_gathered", self.wandb, self.global_step):
                 self.optimizer.zero_grad()
                 self.model.zero_grad()
+                # TODO: consider slashing here too
                 if gather_result is not None and gather_result.state_dict is not None:
                     for n, p in self.model.named_parameters():
                         idxs_key = n + 'idxs'

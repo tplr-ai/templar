@@ -2,10 +2,10 @@
     "spec_version": 5,
     "project": "dough",
     "sequence_length": 2048,
-    "pages_per_window": 10,
+    "pages_per_window": 5,
     "batch_size": 6,
     "learning_rate": 4e-4,
-    "blocks_per_window": 6,
+    "blocks_per_window": 8,
     "windows_per_sync": 100,
     "windows_per_weights": 100,
     "momentum_decay": 0.999,
@@ -30,5 +30,6 @@
     "minimum_peers": 5,
     "active_check_interval": 60,
     "recent_windows": 3,
-    "power_normalisation": 2.0
+    "power_normalisation": 2.0,
+    "validator_sample_rate": 0.5
 }

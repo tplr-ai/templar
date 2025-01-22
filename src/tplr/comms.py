@@ -736,20 +736,25 @@ class Comms(ChainManager):
                 tplr.logger.debug(f"Empty state dict from UID {uid}")
                 continue
 
-            # Normalize each gradient individually
+            # Normalize each gradient value individually
             normalized_dict = {}
             for param_name, tensor in state_dict_resp.items():
-                tensor = tensor.to(device)
-                orig_dtype = tensor.dtype
-                # Convert to float32 for normalization
-                tensor_f = tensor.to(torch.float32)
-                # Compute norm
-                norm = torch.norm(tensor_f)
-                # Normalize and keep as float32 for now
-                normalized = tensor_f / (norm + 1e-8)
-                normalized_dict[param_name] = normalized  # Keep as float32
+                if param_name.endswith("vals"):
+                    tensor = tensor.to(device)
+                    orig_dtype = tensor.dtype
+                    # Convert to float32 for normalization
+                    tensor_f = tensor.to(torch.float32)
+                    # Compute norm
+                    norm = torch.norm(tensor_f)
+                    # Normalize and keep as float32
+                    normalized = tensor_f / (norm + 1e-8)
+                    normalized_dict[param_name] = normalized
+                else:
+                    # Keep indices unchanged
+                    normalized_dict[param_name] = tensor.to(device)
                 metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
 
+            # Move these outside the parameter loop to ensure they are executed once per UID
             valid_uids.append(uid)
             global_steps.append(global_step_resp)
 
@@ -786,23 +791,6 @@ class Comms(ChainManager):
         )
 
         return result
-
-    def safe_norm(self, tensor):
-        """Safely compute norm by converting to float32 temporarily"""
-        if tensor is None:
-            return 0.0
-
-        original_dtype = tensor.dtype
-        if not torch.is_floating_point(tensor) and not torch.is_complex(tensor):
-            tensor = tensor.to(torch.float32)
-
-        norm_val = tensor.norm(p=2)
-
-        # Convert norm back to original dtype if needed
-        if original_dtype != norm_val.dtype:
-            norm_val = norm_val.to(original_dtype)
-
-        return norm_val
 
     async def cleanup_old_checkpoints(self, keep_last: int = 3):
         """

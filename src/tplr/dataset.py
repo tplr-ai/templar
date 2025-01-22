@@ -184,7 +184,7 @@ class SubsetLoader(IterableDataset):
 
 
 class DatasetLoader(SubsetLoader):
-    name: str = "airtrain-ai/fineweb-edu-fortified"
+    name: str = "HuggingFaceFW/fineweb-edu-score-2"
     rows_base_url: str = "https://datasets-server.huggingface.co/rows"
     size_base_url: str = "https://datasets-server.huggingface.co/size"
 

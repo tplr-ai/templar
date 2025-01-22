@@ -215,12 +215,17 @@ class Miner:
 
         while True:
             # 1. Initialize window and update peers
+            window_start = tplr.T()
             step_window = self.current_window
             tplr.logger.info(f"\n{'-' * 40} Window: {step_window} {'-' * 40}")
+            
+            peer_start = tplr.T()
             self.comms.update_peers_with_buckets()
             self.peers = self.comms.peers
+            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}')
 
             # 2. Load training data for this window
+            data_start = tplr.T()
             pages = await tplr.dataset.DatasetLoader.next_pages(
                 offset = step_window,
                 n_pages = self.hparams.pages_per_window,
@@ -232,10 +237,11 @@ class Miner:
                 pages_info = pages,
                 tokenizer = self.tokenizer
             )   
+            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - data_start)} Loaded training data')
             tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}")
             
             # 3. Accumulate gradients over batches
-            start_time = time.time()
+            train_start = tplr.T()
             tplr.logger.info("Start accumulating...")
             self.optimizer.zero_grad()
             self.model.zero_grad()
@@ -258,6 +264,7 @@ class Miner:
                 if self.current_window != step_window:
                     tplr.logger.info('<Exhausted window>')
                     break
+            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - train_start)} Completed training')
 
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
@@ -266,7 +273,7 @@ class Miner:
             tplr.logger.info(f"Stopped accumulating: {i+1} batches with {(i+1) * self.hparams.batch_size * self.hparams.sequence_length} tokens")
 
             # 5. Calculate and log metrics
-            duration = time.time() - start_time
+            duration = time.time() - train_start
             self.batch_times.append(duration)
             self.total_tokens_processed += batch_tokens
 
@@ -303,6 +310,7 @@ class Miner:
             }, step=self.global_step)
 
             # 6. Prepare gradients for sharing using DeMo compression
+            compress_start = tplr.T()
             gradient = {}
             xshapes = {}
             totalks = {}
@@ -331,8 +339,10 @@ class Miner:
                 gradient[n + 'vals'] = vals
                 xshapes[n] = xshape
                 totalks[n] = totalk
+            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - compress_start)} Compressed gradients')
 
             # 7. Gather and process peer gradients
+            gather_start = tplr.T()
             tplr.logger.info(f"Start gather: {self.peers}")
             gather_result = await self.comms.gather(
                 state_dict=gradient,
@@ -346,6 +356,7 @@ class Miner:
                 stale_retention=100,
                 global_step=self.global_step,
             )
+            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - gather_start)} Gathered peer gradients')
 
             if gather_result is None:
                 tplr.logger.error("Failed to gather gradients from peers. Waiting for next window.")
@@ -361,6 +372,7 @@ class Miner:
                 self.global_step = max_global_step
     
             # 9. Apply gathered gradients
+            update_start = tplr.T()
             for n, p in self.model.named_parameters():
                 idxs_key = n + 'idxs'
                 vals_key = n + 'vals'
@@ -391,11 +403,44 @@ class Miner:
                     p.grad.sign_()
                 else:
                     tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
+            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - update_start)} Updated model')
 
             # 10. Optimization step
             tplr.logger.info("Finish and step.")
             self.optimizer.step()
             self.scheduler.step()
+            
+            # Log total window time and add timing metrics to existing wandb logging
+            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - window_start)} Completed window iteration')
+            
+            self.wandb.log({
+                # Add timing metrics
+                "miner/timing/window_total": tplr.T() - window_start,
+                "miner/timing/peer_update": tplr.T() - peer_start,
+                "miner/timing/data_loading": tplr.T() - data_start,
+                "miner/timing/training": tplr.T() - train_start,
+                "miner/timing/compression": tplr.T() - compress_start,
+                "miner/timing/gather": tplr.T() - gather_start,
+                "miner/timing/model_update": tplr.T() - update_start,
+                # Existing metrics
+                "miner/loss": total_loss/(i+1),
+                "miner/tokens_per_sec": ((i+1) * self.hparams.batch_size * self.hparams.sequence_length)/duration,
+                "miner/total_tokens": self.total_tokens_processed,
+                "miner/batch_tokens": batch_tokens,
+                "miner/global_step": self.global_step,
+                "miner/gpu_memory_allocated": torch.cuda.memory_allocated() / 1024**2,  # MB
+                "miner/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,  # MB
+                "miner/active_peers": len(self.peers),
+                "miner/effective_batch_size": len(self.peers) * self.hparams.batch_size,
+                "miner/learning_rate": self.scheduler.get_last_lr()[0],
+                "miner/mean_grad_norm": sum(grad_norms) / len(grad_norms) if grad_norms else 0,
+                "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
+                "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
+                "miner/grad_norm_std": torch.tensor(grad_norms).std().item() if grad_norms else 0,
+                "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
+                "miner/mean_momentum_norm": sum(momentum_norms) / len(momentum_norms),
+            }, step=self.global_step)
+
             self.global_step += 1
             self.window_step += 1
             tplr.logger.info(f"Total optimization steps: {self.global_step}")

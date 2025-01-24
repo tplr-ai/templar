@@ -38,12 +38,8 @@ async def get_bucket_and_client(platform: PLATFORM) -> tuple[str, Any]:
     access_key_id = os.getenv(f"{platform}_ACCESS_KEY_ID")
     secret_access_key = os.getenv(f"{platform}_SECRET_ACCESS_KEY")
     bucket = os.getenv(f"{platform}_BUCKET_NAME")
-    if platform == "CF":
-        account_id = os.getenv(f"{platform}_ACCOUNT_ID")
-        base_url = f"https://{account_id}.r2.cloudflarestorage.com"
-    else:
-        base_url = "https://s3.us-east-2.amazonaws.com/"
-
+    account_id = os.getenv(f"{platform}_ACCOUNT_ID")
+    base_url = f"https://{account_id}.r2.cloudflarestorage.com"
     session = aioboto3.Session()
     client = await session.client(
         service_name="s3",

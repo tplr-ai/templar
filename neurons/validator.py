@@ -155,7 +155,7 @@ class Validator:
         )
 
 
-        self.bucket = self.comms.get_own_bucket()
+        self.bucket = self.comms.get_own_bucket('gradients', 'read')
         self.comms.try_commit(self.wallet, self.bucket)
         self.comms.fetch_commitments()
         
@@ -164,6 +164,8 @@ class Validator:
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+        self.start_window = self.current_window  # Record the start window
+        self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window 
         self.sync_window = self.current_window
 
@@ -174,7 +176,6 @@ class Validator:
         self.evaluated_uids = set()  # Track which UIDs we've seen
 
         # Add step tracking
-        self.global_step = 0
         self.window_step = 0
         self.eval_count = 0  # Track number of evaluations
         
@@ -206,7 +207,20 @@ class Validator:
         self.comms.update_peers_with_buckets()
         tplr.logger.info(f"Loaded commitments: {self.comms.commitments.keys()}")
 
-        success, loaded_momentum, loaded_global_step = await self.comms.load_checkpoint(
+        # Only post start window if you are the highest stake validator
+        if (self.uid == self.metagraph.S.argmax().item()):
+            # Post start_window to R2
+            await self.comms.post_start_window(self.start_window)
+            tplr.logger.info(f"This validator is the highest staked. Posted start_window: {self.start_window}")
+        else:
+            tplr.logger.info("This validator is not the highest staked. Waiting to fetch start_window.")
+            # Fetch start_window from highest stake validator
+            self.start_window = await self.comms.get_start_window()
+            self.global_step = self.current_window - self.start_window
+            tplr.logger.info(f"Using start_window: {self.start_window}, global_step: {self.global_step}")
+
+        # Proceed to load checkpoint
+        success, loaded_momentum, loaded_global_step, loaded_optimizer, loaded_scheduler = await self.comms.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer, 
             scheduler=self.scheduler,
@@ -217,14 +231,18 @@ class Validator:
             peers=self.peers,
             uid=self.uid
         )
-
         if success:
             self.momentum = loaded_momentum
             self.global_step = loaded_global_step
-            tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
+            self.optimizer = loaded_optimizer
+            self.scheduler = loaded_scheduler
+            tplr.logger.info(
+                f"Loaded checkpoint with global_step={self.global_step}, "
+                f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
+                f"scheduler_step={self.scheduler.last_epoch}"
+            )
         else:
             tplr.logger.info("Starting from scratch")
-            self.global_step = 0
             self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
             self.model.to(self.config.device)
         # Start block listener
@@ -236,7 +254,6 @@ class Validator:
         ).start()
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
-        # self.comms.track_active_peers()
 
         while True:       
             # 1. Wait for validator offset - single wait loop
@@ -246,39 +263,37 @@ class Validator:
             tplr.logger.info(f'Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
             
             # 2. Increment sync window and update peer lists
+            window_start = tplr.T()
             self.sync_window += 1
             tplr.logger.info(f'Processing window: {self.sync_window} current: {self.current_window}')
 
+            peer_start = tplr.T()
             self.comms.update_peers_with_buckets()
             self.peers = self.comms.peers
             self.eval_peers = self.comms.eval_peers
+            tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}, eval:{len(self.eval_peers)}')
 
             tplr.logger.info(f'Current gather peers: {self.peers}')
             tplr.logger.info(f'Current evaluation peers: {self.eval_peers}')
 
             # 3. Gather gradients from peers
-            with timer("gather_gradients", self.wandb, self.global_step):
-                gather_result = await self.comms.gather(
-                    state_dict=None,
-                    my_uid=self.uid,
-                    uids=self.peers,
-                    window=self.sync_window,
-                    key='gradient',
-                    timeout=5,
-                    device=self.config.device,
-                    local=False,
-                    stale_retention=100,
-                    global_step=self.global_step,
-                )
-
-            # 4. Update global step based on gathered results
-            if gather_result is not None:
-                max_global_step = max(gather_result.global_steps + [self.global_step])
-                if max_global_step > self.global_step:
-                    tplr.logger.info(f"Updating global_step from {self.global_step} to {max_global_step}")
-                    self.global_step = max_global_step
+            gather_start = tplr.T()
+            gather_result = await self.comms.gather(
+                state_dict=None,
+                my_uid=self.uid,
+                uids=self.peers,
+                window=self.sync_window,
+                key='gradient',
+                timeout=30,
+                device=self.config.device,
+                local=False,
+                stale_retention=100,
+                global_step=self.global_step,
+            )
+            tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers')
 
             # 5. Save original model state for evaluation
+            eval_start = tplr.T()
             original_params = {n: p.clone() for n, p in self.model.named_parameters()}
 
             # 6. Select and evaluate random miner
@@ -296,21 +311,23 @@ class Validator:
 
             if eval_result is not None and eval_result[0] is not None:
                 # 7. Load evaluation data
-                pages = await tplr.dataset.DatasetLoader.next_pages(
+                data_start = tplr.T()
+                pages = await tplr.local_parquet_dataset.DatasetLoader.next_pages(
                     offset=self.sync_window,
                     n_pages=self.hparams.pages_per_window,
                     seed=eval_uid
                 )
-                loader = await tplr.dataset.DatasetLoader.create(
+                loader = await tplr.local_parquet_dataset.DatasetLoader.create(
                     batch_size=self.hparams.batch_size,
                     sequence_length=self.hparams.sequence_length,
                     pages_info=pages,
                     tokenizer=self.tokenizer
                 )
-
+                tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data')
                 state_dict, _ = eval_result
 
                 # 8. Compute initial loss
+                scoring_start = tplr.T()
                 self.optimizer.zero_grad()
                 self.model.zero_grad()
                 loss_before = 0.0
@@ -318,7 +335,22 @@ class Validator:
 
                 with torch.no_grad():
                     self.model.eval()
-                    for i, batch in enumerate(loader):
+                    # First pass to count batches and store them
+                    batches = []
+                    for batch in loader:
+                        batches.append(batch)
+                    
+                    total_batches = len(batches)
+                    sample_size = max(1, int(total_batches * self.hparams.validator_sample_rate))
+                    sampled_indices = random.sample(range(total_batches), sample_size)
+                    sampled_indices = sorted(sampled_indices)  # Sort for sequential access
+                    
+                    tplr.logger.info(f"Evaluating {sample_size}/{total_batches} batches ({self.hparams.validator_sample_rate*100:.1f}%)")
+                    
+                    for i, batch in enumerate(batches):
+                        if i not in sampled_indices:
+                            continue
+                            
                         input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                         labels = input_ids.clone()
                         labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
@@ -368,7 +400,11 @@ class Validator:
                 n_batches = 0
                 with torch.no_grad():
                     self.model.eval()
-                    for i, batch in enumerate(loader):
+                    # Reuse same batches and indices for consistent comparison
+                    for i, batch in enumerate(batches):
+                        if i not in sampled_indices:
+                            continue
+                            
                         input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                         labels = input_ids.clone()
                         labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
@@ -377,6 +413,10 @@ class Validator:
                         n_batches += 1
                         del input_ids, labels, outputs
                         torch.cuda.empty_cache()
+                
+                # Clean up stored batches
+                del batches
+                torch.cuda.empty_cache()
 
                 loss_after_per_batch = loss_after / n_batches if n_batches > 0 else 0
                 tplr.logger.info(f'Loss after: {loss_after_per_batch}')
@@ -404,8 +444,17 @@ class Validator:
                 positive_mask = (self.moving_avg_scores > 0) & evaluated_mask
                 
                 if positive_mask.any():
-                    positive_scores = self.moving_avg_scores[positive_mask]
-                    weights[positive_mask] = positive_scores / positive_scores.sum()
+                    # Apply normalization to all positive scores at once
+                    weights[positive_mask] = min_power_normalization(
+                        self.moving_avg_scores[positive_mask], 
+                        power=self.hparams.power_normalisation
+                    )
+                    
+                    # Log warning if weights don't sum to 1
+                    weight_sum = weights.sum().item()
+                    tplr.logger.debug(f"Weight sum: {weight_sum}")
+                    if abs(weight_sum - 1.0) > 1e-6:
+                        tplr.logger.warning(f"Weights sum to {weight_sum}, expected close to 1.0")
                 else:
                     tplr.logger.info("No positive scores found, all weights set to 0")
 
@@ -442,9 +491,53 @@ class Validator:
                     "validator/scores/mean": self.scores[valid_score_indices].mean().item(),
                     "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item()
                 }, step=self.global_step)
+                tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights')
             else:
-                tplr.logger.info(f"No gradient received from UID {eval_uid}. Skipping evaluation.")
+                tplr.logger.info(f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%.")
+                # Reduce the moving average score by 50%
+                old_score = self.moving_avg_scores[eval_uid]
+                self.moving_avg_scores[eval_uid] = old_score * 0.5
+                tplr.logger.info(f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {self.moving_avg_scores[eval_uid]:.4f} due to missing gradient.")
+
+                # Ensure the UID is included in evaluated_uids
+                self.evaluated_uids.add(eval_uid)
+
+                # Recalculate weights
+                weights = torch.zeros_like(self.moving_avg_scores)
+                evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
+                evaluated_mask[list(self.evaluated_uids)] = True
+
+                positive_mask = (self.moving_avg_scores > 0) & evaluated_mask
+
+                if positive_mask.any():
+                    # Apply normalization to all positive scores at once
+                    weights[positive_mask] = min_power_normalization(
+                        self.moving_avg_scores[positive_mask], 
+                        power=self.hparams.power_normalisation
+                    )
+                    
+                    # Log warning if weights don't sum to 1
+                    weight_sum = weights.sum().item()
+                    tplr.logger.debug(f"Weight sum: {weight_sum}")
+                    if abs(weight_sum - 1.0) > 1e-6:
+                        tplr.logger.warning(f"Weights sum to {weight_sum}, expected close to 1.0")
+                else:
+                    tplr.logger.info("No positive scores found, all weights set to 0")
+
+                # Log updated scores
+                tplr.logger.info('Updated scores for evaluated UIDs after slashing:')
+                for uid in self.evaluated_uids:
+                    tplr.logger.info(f'UID {uid}:')
+                    tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')
+
+                # Optionally, log to WandB
+                self.wandb.log({
+                    f"validator/moving_avg_scores/{eval_uid}": self.moving_avg_scores[eval_uid].item(),
+                    f"validator/weights/{eval_uid}": weights[eval_uid].item(),
+                }, step=self.global_step)
+                tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights')
             
+            tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation')
             # 15. Create checkpoints periodically
             if self.global_step % self.hparams.checkpoint_frequency == 0:
                 tplr.logger.info(f"Creating checkpoint at global_step {self.global_step}")
@@ -455,8 +548,8 @@ class Validator:
                                            for k, v in self.optimizer.state_dict().items()},
                     'scheduler_state_dict': self.scheduler.state_dict(),
                     'momentum': {k: v.cpu().clone() for k, v in self.momentum.items()},
-                    'global_step': self.global_step,
-                    'checkpoint_window': self.current_window
+                    'start_window': self.start_window,
+                    'current_window': self.current_window,
                 }
 
                 asyncio.create_task(
@@ -472,54 +565,65 @@ class Validator:
 
             # 16. Update model with gathered gradients
             self.model.train()
-            with timer("update_model_with_gathered", self.wandb, self.global_step):
-                self.optimizer.zero_grad()
-                self.model.zero_grad()
-                if gather_result is not None and gather_result.state_dict is not None:
-                    for n, p in self.model.named_parameters():
-                        idxs_key = n + 'idxs'
-                        vals_key = n + 'vals'
-                        idxs = getattr(gather_result.state_dict, idxs_key, None)
-                        vals = getattr(gather_result.state_dict, vals_key, None)
-                        if idxs is not None and vals is not None:
-                            if not isinstance(idxs, (list, tuple)):
-                                idxs = [idxs]
-                            if not isinstance(vals, (list, tuple)):
-                                vals = [vals]
-                            
-                            new_grad = self.transformer.decode(
-                                self.compressor.batch_decompress(
-                                    p.to(self.config.device),
-                                    idxs,
-                                    vals,
-                                    self.xshapes[n],
-                                    self.totalks[n],
-                                )
+            update_start = tplr.T()
+            self.optimizer.zero_grad()
+            self.model.zero_grad()
+            # TODO: consider slashing here too
+            if gather_result is not None and gather_result.state_dict is not None:
+                for n, p in self.model.named_parameters():
+                    idxs_key = n + 'idxs'
+                    vals_key = n + 'vals'
+                    idxs = getattr(gather_result.state_dict, idxs_key, None)
+                    vals = getattr(gather_result.state_dict, vals_key, None)
+                    if idxs is not None and vals is not None:
+                        if not isinstance(idxs, (list, tuple)):
+                            idxs = [idxs]
+                        if not isinstance(vals, (list, tuple)):
+                            vals = [vals]
+                        
+                        new_grad = self.transformer.decode(
+                            self.compressor.batch_decompress(
+                                p.to(self.config.device),
+                                idxs,
+                                vals,
+                                self.xshapes[n],
+                                self.totalks[n],
                             )
-                            if p.grad is None:
-                                p.grad = new_grad
-                            else:
-                                p.grad.copy_(new_grad)
-                            p.grad.sign_()
+                        )
+                        if p.grad is None:
+                            p.grad = new_grad
                         else:
-                            tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
+                            p.grad.copy_(new_grad)
+                        p.grad.sign_()
+                    else:
+                        tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
+            tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - update_start)} Updated model')
 
-                    self.optimizer.step()
-                    self.scheduler.step()
-                    torch.cuda.empty_cache()
+            self.optimizer.step()
+            self.scheduler.step()
+            torch.cuda.empty_cache()
 
             # 17. Set weights periodically
             if self.sync_window % self.hparams.windows_per_weights == 0:
-                with timer("set_weights", self.wandb, self.global_step):
-                    self.subtensor.set_weights(
-                        wallet=self.wallet,
-                        netuid=self.config.netuid,
-                        uids=self.metagraph.uids,
-                        weights=weights,
-                        wait_for_inclusion=False,
-                        wait_for_finalization=False,
-                    )
-
+                self.subtensor.set_weights(
+                    wallet=self.wallet,
+                    netuid=self.config.netuid,
+                    uids=self.metagraph.uids,
+                    weights=weights,
+                    wait_for_inclusion=False,
+                    wait_for_finalization=False,
+                )
+            # Log total window time and metrics
+            tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration')
+            
+            self.wandb.log({
+                "validator/timing/window_total": tplr.T() - window_start,
+                "validator/timing/peer_update": tplr.T() - peer_start,
+                "validator/timing/gather": tplr.T() - gather_start,
+                "validator/timing/evaluation": tplr.T() - eval_start,
+                "validator/timing/model_update": tplr.T() - update_start,
+            }, step=self.global_step)
+            
             # 18. Increment global step
             self.global_step += 1
 
@@ -536,6 +640,24 @@ class Validator:
                 break
             except Exception:
                 time.sleep(1)
+
+def min_power_normalization(logits, power=2.0, epsilon=1e-8):
+    # Ensure logits is at least 1D
+    if logits.dim() == 0:
+        logits = logits.unsqueeze(0)
+    
+    # Shift by minimum and apply power
+    adjusted_logits = logits - torch.min(logits)
+    powered_logits = adjusted_logits ** power
+    
+    # Normalize to sum to 1
+    sum_powered = torch.sum(powered_logits)
+    if sum_powered > epsilon:  # Avoid division by zero
+        probabilities = powered_logits / sum_powered
+    else:
+        probabilities = torch.zeros_like(powered_logits)
+    
+    return probabilities
 
 if __name__ == "__main__":
     asyncio.run(Validator().run())

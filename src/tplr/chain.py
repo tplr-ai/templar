@@ -17,15 +17,13 @@
 # fmt: off
 
 # Global imports
-import os
 import time
-import yaml
 import torch
 import asyncio
 import numpy as np
 import bittensor as bt
-from typing import Dict, Optional
 from bittensor import Wallet
+from typing import Dict, Optional
 from pydantic import ValidationError
 
 # Local imports
@@ -500,35 +498,3 @@ class ChainManager:
             f"Updated gather peers (top {self.hparams.topk_peers}% or minimum {self.hparams.minimum_peers}): {self.peers}"
         )
         logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
-
-def get_own_bucket() -> Bucket:
-    """Parses the credentials from .env.yaml to create a Bucket object."""
-    env_file = ".env.yaml"
-    if not os.path.isfile(env_file):
-        logger.error(f"The {env_file} file was not found.")
-        raise FileNotFoundError(f"The {env_file} file was not found.")
-
-    try:
-        with open(env_file, "r") as file:
-            credentials = yaml.safe_load(file)
-    except yaml.YAMLError as e:
-        logger.error(f"Error parsing {env_file}: {e}")
-        raise e
-
-    try:
-        account_id = credentials["account_id"]
-        read_access_key_id = credentials["read"]["access_key_id"]
-        read_secret_access_key = credentials["read"]["secret_access_key"]
-
-        # Create a Bucket object
-        bucket = Bucket(
-            name=account_id,
-            account_id=account_id,
-            access_key_id=read_access_key_id,
-            secret_access_key=read_secret_access_key,
-        )
-        logger.debug(f"Parsed bucket from {env_file}: {bucket}")
-        return bucket
-    except KeyError as e:
-        logger.error(f"Missing key in {env_file}: {e}")
-        raise e

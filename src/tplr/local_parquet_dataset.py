@@ -170,7 +170,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
         fs = LocalParquetDatasetLoader._get_fs()
 
         # Build the full path including dataset subfolder
-        dataset_path = f"{BUCKET_SECRETS['bucket_name']}/{LocalParquetDatasetLoader.DATASET_SUBFOLDER}"
+        dataset_path = f"{BUCKET_SECRETS['dataset']['name']}/{LocalParquetDatasetLoader.DATASET_SUBFOLDER}"
 
         try:
             print(f"Listing dataset path: {dataset_path}")
@@ -310,7 +310,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Define R2 and local paths
-        r2_base = f"{BUCKET_SECRETS['bucket_name']}/{LocalParquetDatasetLoader.DATASET_SUBFOLDER}"
+        r2_base = f"{BUCKET_SECRETS['dataset']['name']}/{LocalParquetDatasetLoader.DATASET_SUBFOLDER}"
         r2_paths = {
             "shard_sizes": f"{r2_base}/_shard_sizes.json",
             "metadata": f"{r2_base}/_metadata.yaml",
@@ -347,11 +347,14 @@ class LocalParquetDatasetLoader(DatasetLoader):
     @staticmethod
     def _get_fs():
         if not LocalParquetDatasetLoader._fs:
+            dataset_config = BUCKET_SECRETS["dataset"]
+            read_credentials = dataset_config["credentials"]["read"]
+            
             LocalParquetDatasetLoader._fs = s3fs.S3FileSystem(
-                key=BUCKET_SECRETS["read"]["access_key_id"],
-                secret=BUCKET_SECRETS["read"]["secret_access_key"],
+                key=read_credentials["access_key_id"],
+                secret=read_credentials["secret_access_key"],
                 client_kwargs={
-                    "endpoint_url": f"https://{BUCKET_SECRETS['account_id']}.r2.cloudflarestorage.com",
+                    "endpoint_url": f"https://{dataset_config['account_id']}.r2.cloudflarestorage.com",
                     "region_name": LocalParquetDatasetLoader.CF_REGION_NAME,
                 },
                 config_kwargs={

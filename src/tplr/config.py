@@ -25,24 +25,49 @@ from .logging import logger
 
 def load_bucket_secrets():
     secrets = {
-        "account_id": os.environ.get("R2_ACCOUNT_ID"),
-        "bucket_name": os.environ.get("R2_ACCOUNT_ID"),
-        "read": {
-            "access_key_id": os.environ.get("R2_READ_ACCESS_KEY_ID"),
-            "secret_access_key": os.environ.get("R2_READ_SECRET_ACCESS_KEY")
+        "gradients": {
+            "account_id": os.environ.get("R2_GRADIENTS_ACCOUNT_ID"),
+            "name": os.environ.get("R2_GRADIENTS_BUCKET_NAME"),
+            "credentials": {
+                "read": {
+                    "access_key_id": os.environ.get("R2_GRADIENTS_READ_ACCESS_KEY_ID"),
+                    "secret_access_key": os.environ.get("R2_GRADIENTS_READ_SECRET_ACCESS_KEY")
+                },
+                "write": {
+                    "access_key_id": os.environ.get("R2_GRADIENTS_WRITE_ACCESS_KEY_ID"),
+                    "secret_access_key": os.environ.get("R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY")
+                }
+            }
         },
-        "write": {
-            "access_key_id": os.environ.get("R2_WRITE_ACCESS_KEY_ID"),
-            "secret_access_key": os.environ.get("R2_WRITE_SECRET_ACCESS_KEY")
+        "dataset": {
+            "account_id": os.environ.get("R2_DATASET_ACCOUNT_ID"), 
+            "name": os.environ.get("R2_DATASET_BUCKET_NAME"),
+            "credentials": {
+                "read": {
+                    "access_key_id": os.environ.get("R2_DATASET_READ_ACCESS_KEY_ID"),
+                    "secret_access_key": os.environ.get("R2_DATASET_READ_SECRET_ACCESS_KEY")
+                },
+                "write": {
+                    "access_key_id": os.environ.get("R2_DATASET_WRITE_ACCESS_KEY_ID"),
+                    "secret_access_key": os.environ.get("R2_DATASET_WRITE_SECRET_ACCESS_KEY")
+                }
+            }
         }
     }
 
     required_vars = [
-        "R2_ACCOUNT_ID",
-        "R2_READ_ACCESS_KEY_ID",
-        "R2_READ_SECRET_ACCESS_KEY",
-        "R2_WRITE_ACCESS_KEY_ID",
-        "R2_WRITE_SECRET_ACCESS_KEY"
+        "R2_GRADIENTS_ACCOUNT_ID",
+        "R2_GRADIENTS_BUCKET_NAME",
+        "R2_GRADIENTS_READ_ACCESS_KEY_ID",
+        "R2_GRADIENTS_READ_SECRET_ACCESS_KEY", 
+        "R2_GRADIENTS_WRITE_ACCESS_KEY_ID",
+        "R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY",
+        "R2_DATASET_ACCOUNT_ID",
+        "R2_DATASET_BUCKET_NAME",
+        "R2_DATASET_READ_ACCESS_KEY_ID",
+        "R2_DATASET_READ_SECRET_ACCESS_KEY",
+        "R2_DATASET_WRITE_ACCESS_KEY_ID",
+        "R2_DATASET_WRITE_SECRET_ACCESS_KEY"
     ]
 
     missing_vars = [var for var in required_vars if not os.environ.get(var)]

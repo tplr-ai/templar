@@ -1,0 +1,10 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.9, pytest-8.3.4, pluggy-1.5.0 -- /Users/samueldare/code/templar/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /Users/samueldare/code/templar
+configfile: pyproject.toml
+plugins: asyncio-0.25.2, anyio-4.8.0
+asyncio: mode=Mode.AUTO, asyncio_default_fixture_loop_scope=None
+collecting ... collected 1 item
+
+tests/test_local_parquet_loader.py::test_local_parquet_loader 

@@ -155,7 +155,7 @@ class Validator:
         )
 
 
-        self.bucket = self.comms.get_own_bucket()
+        self.bucket = self.comms.get_own_bucket('read')
         self.comms.try_commit(self.wallet, self.bucket)
         self.comms.fetch_commitments()
         
@@ -164,6 +164,8 @@ class Validator:
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+        self.start_window = self.current_window  # Record the start window
+        self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window 
         self.sync_window = self.current_window
 
@@ -174,7 +176,6 @@ class Validator:
         self.evaluated_uids = set()  # Track which UIDs we've seen
 
         # Add step tracking
-        self.global_step = 0
         self.window_step = 0
         self.eval_count = 0  # Track number of evaluations
         
@@ -206,27 +207,44 @@ class Validator:
         self.comms.update_peers_with_buckets()
         tplr.logger.info(f"Loaded commitments: {self.comms.commitments.keys()}")
 
-        # success, loaded_momentum, loaded_global_step = await self.comms.load_checkpoint(
-        #     model=self.model,
-        #     optimizer=self.optimizer, 
-        #     scheduler=self.scheduler,
-        #     transformer=self.transformer,
-        #     compressor=self.compressor,
-        #     current_window=self.current_window,
-        #     device=self.config.device,
-        #     peers=self.peers,
-        #     uid=self.uid
-        # )
+        # Only post start window if you are the highest stake validator
+        if (self.uid == self.metagraph.S.argmax().item()):
+            # Post start_window to R2
+            await self.comms.post_start_window(self.start_window)
+            tplr.logger.info(f"This validator is the highest staked. Posted start_window: {self.start_window}")
+        else:
+            tplr.logger.info("This validator is not the highest staked. Waiting to fetch start_window.")
+            # Fetch start_window from highest stake validator
+            self.start_window = await self.comms.get_start_window()
+            self.global_step = self.current_window - self.start_window
+            tplr.logger.info(f"Using start_window: {self.start_window}, global_step: {self.global_step}")
 
-        # if success:
-        #     self.momentum = loaded_momentum
-        #     self.global_step = loaded_global_step
-        #     tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
-        # else:
-        #     tplr.logger.info("Starting from scratch")
-        #     self.global_step = 0
-        #     self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
-        #     self.model.to(self.config.device)
+        # Proceed to load checkpoint
+        success, loaded_momentum, loaded_global_step, loaded_optimizer, loaded_scheduler = await self.comms.load_checkpoint(
+            model=self.model,
+            optimizer=self.optimizer, 
+            scheduler=self.scheduler,
+            transformer=self.transformer,
+            compressor=self.compressor,
+            current_window=self.current_window,
+            device=self.config.device,
+            peers=self.peers,
+            uid=self.uid
+        )
+        if success:
+            self.momentum = loaded_momentum
+            self.global_step = loaded_global_step
+            self.optimizer = loaded_optimizer
+            self.scheduler = loaded_scheduler
+            tplr.logger.info(
+                f"Loaded checkpoint with global_step={self.global_step}, "
+                f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
+                f"scheduler_step={self.scheduler.last_epoch}"
+            )
+        else:
+            tplr.logger.info("Starting from scratch")
+            self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
+            self.model.to(self.config.device)
         # Start block listener
         self.loop = asyncio.get_running_loop()
         self.listener = threading.Thread(
@@ -236,7 +254,6 @@ class Validator:
         ).start()
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
-        # self.comms.track_active_peers()
 
         while True:       
             # 1. Wait for validator offset - single wait loop
@@ -274,13 +291,6 @@ class Validator:
                 global_step=self.global_step,
             )
             tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers')
-
-            # 4. Update global step based on gathered results
-            if gather_result is not None:
-                max_global_step = max(gather_result.global_steps + [self.global_step])
-                if max_global_step > self.global_step:
-                    tplr.logger.info(f"Updating global_step from {self.global_step} to {max_global_step}")
-                    self.global_step = max_global_step
 
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
@@ -538,8 +548,8 @@ class Validator:
                                            for k, v in self.optimizer.state_dict().items()},
                     'scheduler_state_dict': self.scheduler.state_dict(),
                     'momentum': {k: v.cpu().clone() for k, v in self.momentum.items()},
-                    'global_step': self.global_step,
-                    'checkpoint_window': self.current_window
+                    'start_window': self.start_window,
+                    'current_window': self.current_window,
                 }
 
                 asyncio.create_task(

@@ -155,7 +155,7 @@ class Validator:
         )
 
 
-        self.bucket = self.comms.get_own_bucket('read')
+        self.bucket = self.comms.get_own_bucket('gradients', 'read')
         self.comms.try_commit(self.wallet, self.bucket)
         self.comms.fetch_commitments()
         

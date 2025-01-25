@@ -77,25 +77,38 @@ class Comms(ChainManager):
         # Start background tasks
         self.loop.create_task(self.track_active_peers())
 
-    def get_own_bucket(self, access_type) -> Bucket:
+    def get_own_bucket(self, bucket_type, access_type=None) -> Bucket:
         """Gets bucket configuration from environment variables via config.BUCKET_SECRETS.
 
         Args:
-            access_type: Either "read" or "write" to determine which credentials to use
+            bucket_type: Either "gradients" or "dataset" to determine which bucket to use
+            access_type: For gradients bucket, either "read" or "write" to determine access level
         """
         try:
-            if access_type not in ["read", "write"]:
-                raise ValueError("access_type must be either 'read' or 'write'")
+            if bucket_type not in ["gradients", "dataset"]:
+                raise ValueError("bucket_type must be either 'gradients' or 'dataset'")
 
-            # Create a Bucket object using specified credentials from BUCKET_SECRETS
+            if bucket_type == "gradients":
+                if access_type not in ["read", "write"]:
+                    raise ValueError("For gradients bucket, access_type must be either 'read' or 'write'")
+            
+                bucket_config = BUCKET_SECRETS["gradients"]
+                credentials = bucket_config["credentials"][access_type]
+            else:  # dataset bucket
+                bucket_config = BUCKET_SECRETS["dataset"]
+                # For dataset, we'll use read credentials by default
+                credentials = bucket_config["credentials"]["read"]
+
+            # Create a Bucket object using specified credentials
             bucket = Bucket(
-                name=BUCKET_SECRETS["account_id"],
-                account_id=BUCKET_SECRETS["account_id"],
-                access_key_id=BUCKET_SECRETS[access_type]["access_key_id"],
-                secret_access_key=BUCKET_SECRETS[access_type]["secret_access_key"],
+                name=bucket_config["name"],
+                account_id=bucket_config["account_id"],
+                access_key_id=credentials["access_key_id"],
+                secret_access_key=credentials["secret_access_key"]
             )
+
             tplr.logger.debug(
-                f"Created bucket from environment with {access_type} access: {bucket}"
+                f"Created {bucket_type} bucket with {'read/write' if bucket_type == 'dataset' else access_type} access: {bucket}"
             )
             return bucket
 
@@ -105,6 +118,7 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.error(f"Error creating bucket: {e}")
             raise
+
 
     def get_base_url(self, account_id):
         """Constructs the base URL for the R2 storage endpoint."""

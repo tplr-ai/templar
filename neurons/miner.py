@@ -138,7 +138,7 @@ class Miner:
             uid=self.uid,  
         )
 
-        self.bucket = self.comms.get_own_bucket()
+        self.bucket = self.comms.get_own_bucket('read')
         self.comms.try_commit(self.wallet, self.bucket)
         self.comms.fetch_commitments()
 
@@ -146,11 +146,12 @@ class Miner:
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+        self.start_window = self.current_window  # Record the start window
+        self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window 
         self.step_counter = 0
 
         # Add step tracking
-        self.global_step = 0
         self.window_step = 0
         
         # Track additional metrics
@@ -181,7 +182,15 @@ class Miner:
         self.comms.update_peers_with_buckets()
         tplr.logger.info(f"Loaded commitments: {self.comms.commitments.keys()}")
 
-        # success, loaded_momentum, loaded_global_step = await self.comms.load_checkpoint(
+        # Fetch start_window from highest stake validator
+        self.start_window = await self.comms.get_start_window()
+        tplr.logger.info(f"Using start_window: {self.start_window}")
+
+        self.global_step = self.current_window - self.start_window
+        tplr.logger.info(f"starting at Global Step : {self.global_step}")
+
+        # # Proceed to load checkpoint
+        # success, loaded_momentum, loaded_global_step, loaded_optimizer, loaded_scheduler = await self.comms.load_checkpoint(
         #     model=self.model,
         #     optimizer=self.optimizer, 
         #     scheduler=self.scheduler,
@@ -195,10 +204,15 @@ class Miner:
         # if success:
         #     self.momentum = loaded_momentum
         #     self.global_step = loaded_global_step
-        #     tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
+        #     self.optimizer = loaded_optimizer
+        #     self.scheduler = loaded_scheduler
+        #     tplr.logger.info(
+        #         f"Loaded checkpoint with global_step={self.global_step}, "
+        #         f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
+        #         f"scheduler_step={self.scheduler.last_epoch}"
+        #     )
         # else:
         #     tplr.logger.info("Starting from scratch")
-        #     self.global_step = 0
         #     self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
         #     self.model.to(self.config.device)
 
@@ -217,7 +231,8 @@ class Miner:
             # 1. Initialize window and update peers
             window_start = tplr.T()
             step_window = self.current_window
-            tplr.logger.info(f"\n{'-' * 40} Window: {step_window} {'-' * 40}")
+            self.global_step = self.current_window - self.start_window  # Update global_step
+            tplr.logger.info(f"\n{'-' * 40} Window: {step_window} (Global Step: {self.global_step}) {'-' * 40}")
             
             peer_start = tplr.T()
             self.comms.update_peers_with_buckets()
@@ -226,12 +241,12 @@ class Miner:
 
             # 2. Load training data for this window
             data_start = tplr.T()
-            pages = await tplr.dataset.DatasetLoader.next_pages(
+            pages = await tplr.dataset_2.DatasetLoader.next_pages(
                 offset = step_window,
                 n_pages = self.hparams.pages_per_window,
                 seed = self.metagraph.hotkeys[self.uid]
             )            
-            loader = await tplr.dataset.DatasetLoader.create(
+            loader = await tplr.dataset_2.DatasetLoader.create(
                 batch_size = self.hparams.batch_size,
                 sequence_length = self.hparams.sequence_length,
                 pages_info = pages,
@@ -364,14 +379,7 @@ class Miner:
                     await asyncio.sleep(0.1)
                 continue
 
-            # 8. Update global step based on peer information
-            max_global_step = max(gather_result.global_steps + [self.global_step])
-            tplr.logger.info(f"Gather global steps : {gather_result.global_steps}")
-            if max_global_step > self.global_step:
-                tplr.logger.info(f"Updating global_step from {self.global_step} to {max_global_step}")
-                self.global_step = max_global_step
-    
-            # 9. Apply gathered gradients
+            # 8. Apply gathered gradients
             update_start = tplr.T()
             for n, p in self.model.named_parameters():
                 idxs_key = n + 'idxs'

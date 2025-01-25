@@ -1,0 +1,452 @@
+license: odc-by
+task_categories:
+- text-generation
+language:
+- en
+pretty_name: FineWeb-Edu (score >= 2)
+size_categories:
+- n>1T
+configs:
+- config_name: default
+  features:
+  - name: text
+    dtype: string
+  - name: id
+    dtype: string
+  - name: dump
+    dtype: string
+  - name: url
+    dtype: string
+  - name: date
+    dtype: string
+  - name: file_path
+    dtype: string
+  - name: language
+    dtype: string
+  - name: language_score
+    dtype: float64
+  - name: token_count
+    dtype: int64
+  - name: score
+    dtype: float64
+  - name: int_score
+    dtype: int64
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/default/*.parquet
+- config_name: CC-MAIN-2024-51
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2024-51/*.parquet
+- config_name: CC-MAIN-2024-46
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2024-46/*.parquet
+- config_name: CC-MAIN-2024-42
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2024-42/*.parquet
+- config_name: CC-MAIN-2024-38
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2024-38/*.parquet
+- config_name: CC-MAIN-2024-33
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2024-33/*.parquet
+- config_name: CC-MAIN-2024-30
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2024-30/*.parquet
+- config_name: CC-MAIN-2024-26
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2024-26/*.parquet
+- config_name: CC-MAIN-2024-22
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2024-22/*.parquet
+- config_name: CC-MAIN-2024-18
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2024-18/*.parquet
+- config_name: CC-MAIN-2024-10
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2024-10/train-*.parquet
+- config_name: CC-MAIN-2023-50
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2023-50/train-*.parquet
+- config_name: CC-MAIN-2023-40
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2023-40/train-*.parquet
+- config_name: CC-MAIN-2023-23
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2023-23/train-*.parquet
+- config_name: CC-MAIN-2023-14
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2023-14/train-*.parquet
+- config_name: CC-MAIN-2023-06
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2023-06/train-*.parquet
+- config_name: CC-MAIN-2022-49
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2022-49/train-*.parquet
+- config_name: CC-MAIN-2022-40
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2022-40/train-*.parquet
+- config_name: CC-MAIN-2022-33
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2022-33/train-*.parquet
+- config_name: CC-MAIN-2022-27
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2022-27/train-*.parquet
+- config_name: CC-MAIN-2022-21
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2022-21/train-*.parquet
+- config_name: CC-MAIN-2022-05
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2022-05/train-*.parquet
+- config_name: CC-MAIN-2021-49
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2021-49/train-*.parquet
+- config_name: CC-MAIN-2021-43
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2021-43/train-*.parquet
+- config_name: CC-MAIN-2021-39
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2021-39/train-*.parquet
+- config_name: CC-MAIN-2021-31
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2021-31/train-*.parquet
+- config_name: CC-MAIN-2021-25
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2021-25/train-*.parquet
+- config_name: CC-MAIN-2021-21
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2021-21/train-*.parquet
+- config_name: CC-MAIN-2021-17
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2021-17/train-*.parquet
+- config_name: CC-MAIN-2021-10
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2021-10/train-*.parquet
+- config_name: CC-MAIN-2021-04
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2021-04/train-*.parquet
+- config_name: CC-MAIN-2020-50
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2020-50/train-*.parquet
+- config_name: CC-MAIN-2020-45
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2020-45/train-*.parquet
+- config_name: CC-MAIN-2020-40
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2020-40/train-*.parquet
+- config_name: CC-MAIN-2020-34
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2020-34/train-*.parquet
+- config_name: CC-MAIN-2020-29
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2020-29/train-*.parquet
+- config_name: CC-MAIN-2020-24
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2020-24/train-*.parquet
+- config_name: CC-MAIN-2020-16
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2020-16/train-*.parquet
+- config_name: CC-MAIN-2020-10
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2020-10/train-*.parquet
+- config_name: CC-MAIN-2020-05
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2020-05/train-*.parquet
+- config_name: CC-MAIN-2019-51
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-51/train-*.parquet
+- config_name: CC-MAIN-2019-47
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-47/train-*.parquet
+- config_name: CC-MAIN-2019-43
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-43/train-*.parquet
+- config_name: CC-MAIN-2019-39
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-39/train-*.parquet
+- config_name: CC-MAIN-2019-35
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-35/train-*.parquet
+- config_name: CC-MAIN-2019-30
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-30/train-*.parquet
+- config_name: CC-MAIN-2019-26
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-26/train-*.parquet
+- config_name: CC-MAIN-2019-22
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-22/train-*.parquet
+- config_name: CC-MAIN-2019-18
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-18/train-*.parquet
+- config_name: CC-MAIN-2019-13
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-13/train-*.parquet
+- config_name: CC-MAIN-2019-09
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-09/train-*.parquet
+- config_name: CC-MAIN-2019-04
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2019-04/train-*.parquet
+- config_name: CC-MAIN-2018-51
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-51/train-*.parquet
+- config_name: CC-MAIN-2018-47
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-47/train-*.parquet
+- config_name: CC-MAIN-2018-43
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-43/train-*.parquet
+- config_name: CC-MAIN-2018-39
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-39/train-*.parquet
+- config_name: CC-MAIN-2018-34
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-34/train-*.parquet
+- config_name: CC-MAIN-2018-30
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-30/train-*.parquet
+- config_name: CC-MAIN-2018-26
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-26/train-*.parquet
+- config_name: CC-MAIN-2018-22
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-22/train-*.parquet
+- config_name: CC-MAIN-2018-17
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-17/train-*.parquet
+- config_name: CC-MAIN-2018-13
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-13/train-*.parquet
+- config_name: CC-MAIN-2018-09
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-09/train-*.parquet
+- config_name: CC-MAIN-2018-05
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2018-05/train-*.parquet
+- config_name: CC-MAIN-2017-51
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-51/train-*.parquet
+- config_name: CC-MAIN-2017-47
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-47/train-*.parquet
+- config_name: CC-MAIN-2017-43
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-43/train-*.parquet
+- config_name: CC-MAIN-2017-39
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-39/train-*.parquet
+- config_name: CC-MAIN-2017-34
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-34/train-*.parquet
+- config_name: CC-MAIN-2017-30
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-30/train-*.parquet
+- config_name: CC-MAIN-2017-26
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-26/train-*.parquet
+- config_name: CC-MAIN-2017-22
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-22/train-*.parquet
+- config_name: CC-MAIN-2017-17
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-17/train-*.parquet
+- config_name: CC-MAIN-2017-13
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-13/train-*.parquet
+- config_name: CC-MAIN-2017-09
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-09/train-*.parquet
+- config_name: CC-MAIN-2017-04
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2017-04/train-*.parquet
+- config_name: CC-MAIN-2016-50
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2016-50/train-*.parquet
+- config_name: CC-MAIN-2016-44
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2016-44/train-*.parquet
+- config_name: CC-MAIN-2016-40
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2016-40/train-*.parquet
+- config_name: CC-MAIN-2016-36
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2016-36/train-*.parquet
+- config_name: CC-MAIN-2016-30
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2016-30/train-*.parquet
+- config_name: CC-MAIN-2016-26
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2016-26/train-*.parquet
+- config_name: CC-MAIN-2016-22
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2016-22/train-*.parquet
+- config_name: CC-MAIN-2016-18
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2016-18/train-*.parquet
+- config_name: CC-MAIN-2016-07
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2016-07/train-*.parquet
+- config_name: CC-MAIN-2015-48
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2015-48/train-*.parquet
+- config_name: CC-MAIN-2015-40
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2015-40/train-*.parquet
+- config_name: CC-MAIN-2015-35
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2015-35/train-*.parquet
+- config_name: CC-MAIN-2015-32
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2015-32/train-*.parquet
+- config_name: CC-MAIN-2015-27
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2015-27/train-*.parquet
+- config_name: CC-MAIN-2015-22
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2015-22/train-*.parquet
+- config_name: CC-MAIN-2015-18
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2015-18/train-*.parquet
+- config_name: CC-MAIN-2015-14
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2015-14/train-*.parquet
+- config_name: CC-MAIN-2015-11
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2015-11/train-*.parquet
+- config_name: CC-MAIN-2015-06
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2015-06/train-*.parquet
+- config_name: CC-MAIN-2014-52
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2014-52/train-*.parquet
+- config_name: CC-MAIN-2014-49
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2014-49/train-*.parquet
+- config_name: CC-MAIN-2014-42
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2014-42/train-*.parquet
+- config_name: CC-MAIN-2014-41
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2014-41/train-*.parquet
+- config_name: CC-MAIN-2014-35
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2014-35/train-*.parquet
+- config_name: CC-MAIN-2014-23
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2014-23/train-*.parquet
+- config_name: CC-MAIN-2014-15
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2014-15/train-*.parquet
+- config_name: CC-MAIN-2014-10
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2014-10/train-*.parquet
+- config_name: CC-MAIN-2013-48
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2013-48/train-*.parquet
+- config_name: CC-MAIN-2013-20
+  data_files:
+  - split: train
+    path: HuggingFaceFW_fineweb-edu-score-2/CC-MAIN-2013-20/train-*.parquet

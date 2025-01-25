@@ -1,4 +1,11 @@
 # benchmark_pages.py
+# ruff: noqa
+import os
+from dotenv import load_dotenv
+
+# Load .env file before any other imports
+load_dotenv(override=True)
+
 import asyncio
 import time
 import torch

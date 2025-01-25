@@ -1,22 +1,3 @@
-"""
-shard_scanner.py - Parallel Parquet Row Counter
-
-Features:
-- Reads local YAML metadata
-- Processes R2 Parquet files with read-only access
-- Uses parallel threading for faster processing
-- Detailed progress tracking with tqdm
-- Writes results to local JSON
-"""
-
-import asyncio
-import json
-import s3fs
-import pyarrow.parquet as pq
-from pathlib import Path
-from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor
-
 async def precompute_shard_counts(
     r2_bucket: str,
     r2_endpoint: str,
@@ -25,106 +6,113 @@ async def precompute_shard_counts(
     local_metadata_path: str,
     local_output_path: str,
 ):
-    # Initialize S3 connection
+    """
+    Parallel row counting across all configs and files simultaneously,
+    using Parquet metadata (no full column read).
+    """
+
+    import asyncio
+    import json
+    import s3fs
+    import pyarrow.parquet as pq
+    from pathlib import Path
+    from tqdm import tqdm
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import yaml
+
+    # 1. Initialize S3 connection
     fs = s3fs.S3FileSystem(
         key=r2_access_key,
         secret=r2_secret_key,
         client_kwargs={"endpoint_url": r2_endpoint},
     )
 
-    # Load metadata with progress
+    # 2. Load metadata
     def _load_metadata():
         with open(local_metadata_path, "r") as f:
             return yaml.safe_load(f)
-    
-    import yaml
+
     metadata = await asyncio.to_thread(_load_metadata)
-
-    # Process configurations with parallel file discovery
-    config_dict = {}
     configs = metadata.get("configs", [])
-    
-    with tqdm(configs, desc="Scanning configs", unit="config") as config_pbar:
-        for c in config_pbar:
-            cfg_name = c["config_name"]
-            config_pbar.set_postfix({"config": cfg_name})
-            
-            data_files = c.get("data_files", [])
-            for df in data_files:
-                path_pattern = f"{r2_bucket}/{df['path']}"
-                try:
-                    files = fs.glob(path_pattern)
-                    if not files:
-                        tqdm.write(f"\n⚠️  No files found: {path_pattern}")
-                        
-                    config_dict[cfg_name] = {
-                        "split": df["split"],
-                        "files": sorted(files),
-                    }
-                except Exception as e:
-                    tqdm.write(f"\n❌ Error scanning {cfg_name}: {str(e)}")
 
-    # Process files with parallel row counting
+    # 3. Create a single global list of tasks across all configs
+    #    We'll store (cfg_name, split, file_path) so we can group results later
+    all_tasks = []
+
+    for c in configs:
+        cfg_name = c["config_name"]
+        split = None
+        data_files = c.get("data_files", [])
+        for df in data_files:
+            path_pattern = f"{r2_bucket}/{df['path']}"
+            files = fs.glob(path_pattern)
+            split = df["split"]
+            for fp in sorted(files):
+                all_tasks.append((cfg_name, split, fp))
+
+    # 4. Prepare data structures for storing results
     shard_sizes = {}
-    MAX_WORKERS = 8  # Adjust based on your network capacity
-    
-    with tqdm(config_dict.items(), desc="Processing configs", unit="config") as main_pbar:
-        for cfg_name, info in main_pbar:
-            main_pbar.set_postfix({"config": cfg_name})
-            split = info["split"]
-            files = info["files"]
-            
-            total_rows = 0
-            shards_list = []
-            
-            # Process files in parallel batches
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                futures = []
-                for fp in files:
-                    futures.append(executor.submit(
-                        lambda f: (f, len(pq.read_table(f, filesystem=fs, columns=["text"]))),
-                        fp
-                    ))
-                
-                # Collect results with progress
-                with tqdm(futures, desc=f"Files in {cfg_name}", unit="file", leave=False) as file_pbar:
-                    for future in file_pbar:
-                        try:
-                            fp, rowcount = future.result()
-                            shards_list.append({"path": fp, "num_rows": rowcount})
-                            total_rows += rowcount
-                        except Exception as e:
-                            tqdm.write(f"\n❌ Error counting {fp}: {str(e)}")
-                            shards_list.append({"path": fp, "num_rows": 0, "error": str(e)})
+    for c in configs:
+        cfg_name = c["config_name"]
+        shard_sizes[cfg_name] = {
+            "split": None,
+            "shards": [],
+            "total_rows": 0,
+        }
 
-            shard_sizes[cfg_name] = {
-                "split": split,
-                "shards": shards_list,
-                "total_rows": total_rows,
-            }
+    # 5. Define a function to count rows via file metadata
+    def count_rows_via_metadata(fp):
+        parquet_file = pq.ParquetFile(fp, filesystem=fs)
+        return parquet_file.metadata.num_rows
 
-    # Write output
+    # 6. Spawn parallel tasks for the entire list
+    MAX_WORKERS = 64  # Increase if your system can handle it
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures_map = {
+            executor.submit(count_rows_via_metadata, task[2]): task
+            for task in all_tasks
+        }
+
+        with tqdm(total=len(futures_map), desc="All files", unit="file") as pbar:
+            for future in as_completed(futures_map):
+                cfg_name, split, fp = futures_map[future]
+                pbar.update(1)
+                try:
+                    rowcount = future.result()
+                    shard_sizes[cfg_name]["shards"].append(
+                        {"path": fp, "num_rows": rowcount}
+                    )
+                    shard_sizes[cfg_name]["total_rows"] += rowcount
+                    shard_sizes[cfg_name]["split"] = split
+                except Exception as e:
+                    shard_sizes[cfg_name]["shards"].append(
+                        {"path": fp, "num_rows": 0, "error": str(e)}
+                    )
+
+    # 7. Save results to JSON
     def _save_output():
         output_path = Path(local_output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
             json.dump(shard_sizes, f, indent=2)
-    
+
     await asyncio.to_thread(_save_output)
     print(f"\n✅ Results saved to: {local_output_path}")
 
+
 async def main():
-    # Configuration - fill in your details
     R2_CREDS = {
-        "r2_bucket": "80f15715bb0b882c9e967c13e677ed7d",
-        "r2_endpoint": "https://80f15715bb0b882c9e967c13e677ed7d.r2.cloudflarestorage.com",
-        "r2_access_key": "de1b777bd4e13cd61bb8aeb6ae431865",
-        "r2_secret_key": "947906d741cc12eeab5c0c225161c4833bbc932bb3ed61038847f645bbff6eb3",
-        "local_metadata_path": "./metadata_updated.yaml",
-        "local_output_path": "./new_r2_shard_sizes.json"
+        "r2_bucket": "",
+        "r2_endpoint": "https://.r2.cloudflarestorage.com",
+        "r2_access_key": "",
+        "r2_secret_key": "",
+        "local_metadata_path": "./metadata.yaml",
+        "local_output_path": "./shard_sizes.json",
     }
-    
     await precompute_shard_counts(**R2_CREDS)
 
+
 if __name__ == "__main__":
+    import asyncio
+
     asyncio.run(main())

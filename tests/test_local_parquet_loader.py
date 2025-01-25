@@ -1,3 +1,4 @@
+# ruff: noqa
 import os
 from dotenv import load_dotenv
 
@@ -77,9 +78,9 @@ async def test_local_parquet_loader():
                 # Convert to tokens, skip padding tokens
                 tokens = sequence[sequence != tokenizer.pad_token_id].tolist()
                 text = tokenizer.decode(tokens)
-                logger.info(f"[green]Sequence {i}:[/green]")
-                logger.info(f"[dim]First 50 tokens: {tokens[:50]}...[/dim]")
-                logger.info(f"[yellow]Text: {text[:200]}...[/yellow]")
+                logger.info(f"Sequence {i}:")
+                logger.info(f"First 50 tokens: {tokens[:50]}...")
+                logger.info(f"Text: {text[:200]}...")
                 logger.info("[dim]" + "-" * 80 + "[/dim]")
 
             batch_count += 1

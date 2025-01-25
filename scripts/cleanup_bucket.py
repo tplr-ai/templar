@@ -42,7 +42,9 @@ async def cleanup_bucket():
 
     missing_vars = [var for var in required_vars if not os.environ.get(var)]
     if missing_vars:
-        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+        logger.error(
+            f"Missing required environment variables: {', '.join(missing_vars)}"
+        )
         sys.exit(1)
 
     # Get credentials from environment
@@ -73,12 +75,16 @@ async def cleanup_bucket():
                     filtered_objects = [
                         {"Key": obj["Key"]}
                         for obj in page["Contents"]
-                        if obj["Key"].startswith(("checkpoint", "gradient", "start_window"))
+                        if obj["Key"].startswith(
+                            ("checkpoint", "gradient", "start_window")
+                        )
                     ]
                     objects_to_delete.extend(filtered_objects)
 
             if not objects_to_delete:
-                logger.info("No checkpoint, gradient, or start_window files found to delete")
+                logger.info(
+                    "No checkpoint, gradient, or start_window files found to delete"
+                )
                 return
 
             # Delete objects in batches of 1000 (S3 limit)
@@ -94,7 +100,9 @@ async def cleanup_bucket():
                 # Log any errors
                 if "Errors" in response:
                     for error in response["Errors"]:
-                        logger.error(f"Error deleting {error['Key']}: {error['Message']}")
+                        logger.error(
+                            f"Error deleting {error['Key']}: {error['Message']}"
+                        )
 
             logger.success(
                 f"Successfully deleted {len(objects_to_delete)} checkpoint, gradient, and start_window files from bucket"

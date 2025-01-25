@@ -2,6 +2,7 @@
 # Load .env file before any other imports
 import os
 from dotenv import load_dotenv
+
 load_dotenv(override=True)
 
 import asyncio
@@ -49,10 +50,15 @@ class ParquetLoaderBenchmark:
         self.tokenizer = self.hparams.tokenizer
         self.results = []
 
-    async def benchmark_loader(self, n_pages, batch_size, sequence_length, n_iterations=3):
+    async def benchmark_loader(
+        self, n_pages, batch_size, sequence_length, n_iterations=3
+    ):
         metrics = []
 
-        for i in tqdm(range(n_iterations), desc=f"Testing {n_pages} pages, batch={batch_size}, seq={sequence_length}"):
+        for i in tqdm(
+            range(n_iterations),
+            desc=f"Testing {n_pages} pages, batch={batch_size}, seq={sequence_length}",
+        ):
             start_time = T()
             memory_before = psutil.Process().memory_info().rss / 1024 / 1024  # MB
 
@@ -96,21 +102,25 @@ class ParquetLoaderBenchmark:
                 memory_after = psutil.Process().memory_info().rss / 1024 / 1024
                 memory_used = memory_after - memory_before
 
-                metrics.append({
-                    "n_pages": n_pages,
-                    "batch_size": batch_size,
-                    "sequence_length": sequence_length,
-                    "iteration": i,
-                    "total_duration": T() - start_time,
-                    "pages_fetch_time": pages_duration,
-                    "loader_creation_time": loader_duration,
-                    "processing_time": process_duration,
-                    "total_tokens": total_tokens,
-                    "tokens_per_second": total_tokens / process_duration if process_duration > 0 else 0,
-                    "avg_batch_time": np.mean(batch_times),
-                    "memory_used_mb": memory_used,
-                    "num_batches": n_batches,
-                })
+                metrics.append(
+                    {
+                        "n_pages": n_pages,
+                        "batch_size": batch_size,
+                        "sequence_length": sequence_length,
+                        "iteration": i,
+                        "total_duration": T() - start_time,
+                        "pages_fetch_time": pages_duration,
+                        "loader_creation_time": loader_duration,
+                        "processing_time": process_duration,
+                        "total_tokens": total_tokens,
+                        "tokens_per_second": total_tokens / process_duration
+                        if process_duration > 0
+                        else 0,
+                        "avg_batch_time": np.mean(batch_times),
+                        "memory_used_mb": memory_used,
+                        "num_batches": n_batches,
+                    }
+                )
 
                 logger.info(f"Iteration {i} complete: {metrics[-1]}")
 
@@ -122,23 +132,18 @@ class ParquetLoaderBenchmark:
 
     def plot_results(self, results_df, output_dir="benchmark_results"):
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
+
         # Create plots for different metrics
         metrics_to_plot = [
             ("tokens_per_second", "Tokens/Second"),
             ("memory_used_mb", "Memory Usage (MB)"),
             ("total_duration", "Total Duration (s)"),
-            ("avg_batch_time", "Avg Batch Time (s)")
+            ("avg_batch_time", "Avg Batch Time (s)"),
         ]
 
         for metric, title in metrics_to_plot:
             plt.figure(figsize=(12, 6))
-            sns.boxplot(
-                data=results_df,
-                x="n_pages",
-                y=metric,
-                hue="batch_size"
-            )
+            sns.boxplot(data=results_df, x="n_pages", y=metric, hue="batch_size")
             plt.title(f"{title} by Pages and Batch Size")
             plt.savefig(Path(output_dir) / f"{metric}_analysis.png")
             plt.close()
@@ -148,9 +153,9 @@ class ParquetLoaderBenchmark:
             values="tokens_per_second",
             index="sequence_length",
             columns="batch_size",
-            aggfunc="mean"
+            aggfunc="mean",
         )
-        
+
         plt.figure(figsize=(10, 8))
         sns.heatmap(pivot_data, annot=True, fmt=".0f", cmap="YlOrRd")
         plt.title("Tokens/Second by Sequence Length and Batch Size")
@@ -162,7 +167,7 @@ async def main():
     # Create benchmark results directory in scripts/benchmarks
     output_dir = Path(__file__).parent / "benchmark_results"
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     benchmark = ParquetLoaderBenchmark()
     all_metrics = []
 
@@ -178,11 +183,11 @@ async def main():
     ]
 
     for n_pages, batch_size, sequence_length in configs:
-        logger.info(f"\nTesting configuration: pages={n_pages}, batch={batch_size}, seq={sequence_length}")
+        logger.info(
+            f"\nTesting configuration: pages={n_pages}, batch={batch_size}, seq={sequence_length}"
+        )
         metrics = await benchmark.benchmark_loader(
-            n_pages=n_pages,
-            batch_size=batch_size,
-            sequence_length=sequence_length
+            n_pages=n_pages, batch_size=batch_size, sequence_length=sequence_length
         )
         all_metrics.extend(metrics)
 
@@ -194,12 +199,18 @@ async def main():
 
     # Print summary statistics
     print("\nSummary Statistics:")
-    summary = results_df.groupby(["n_pages", "batch_size", "sequence_length"]).agg({
-        "total_duration": ["mean", "std"],
-        "tokens_per_second": ["mean", "std"],
-        "memory_used_mb": ["mean", "std"],
-        "num_batches": "mean",
-    }).round(2)
+    summary = (
+        results_df.groupby(["n_pages", "batch_size", "sequence_length"])
+        .agg(
+            {
+                "total_duration": ["mean", "std"],
+                "tokens_per_second": ["mean", "std"],
+                "memory_used_mb": ["mean", "std"],
+                "num_batches": "mean",
+            }
+        )
+        .round(2)
+    )
     print(summary)
 
     # Plot results

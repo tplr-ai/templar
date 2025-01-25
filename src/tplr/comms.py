@@ -21,7 +21,6 @@ from .schemas import Bucket
 import tplr as tplr
 
 
-
 # Constants
 CF_REGION_NAME: str = "enam"
 LOCAL_TMP_DIR = "/tmp/local_store"
@@ -90,8 +89,10 @@ class Comms(ChainManager):
 
             if bucket_type == "gradients":
                 if access_type not in ["read", "write"]:
-                    raise ValueError("For gradients bucket, access_type must be either 'read' or 'write'")
-            
+                    raise ValueError(
+                        "For gradients bucket, access_type must be either 'read' or 'write'"
+                    )
+
                 bucket_config = BUCKET_SECRETS["gradients"]
                 credentials = bucket_config["credentials"][access_type]
             else:  # dataset bucket
@@ -104,7 +105,7 @@ class Comms(ChainManager):
                 name=bucket_config["name"],
                 account_id=bucket_config["account_id"],
                 access_key_id=credentials["access_key_id"],
-                secret_access_key=credentials["secret_access_key"]
+                secret_access_key=credentials["secret_access_key"],
             )
 
             tplr.logger.debug(
@@ -118,7 +119,6 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.error(f"Error creating bucket: {e}")
             raise
-
 
     def get_base_url(self, account_id):
         """Constructs the base URL for the R2 storage endpoint."""

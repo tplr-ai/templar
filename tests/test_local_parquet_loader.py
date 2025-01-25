@@ -6,9 +6,10 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 import pytest
-from transformers import AutoTokenizer
+import tplr
 from tplr.local_parquet_dataset import LocalParquetDatasetLoader
 from tplr.logging import logger, debug, T
+
 
 # Enable debug logging for tests
 debug()
@@ -28,11 +29,12 @@ async def test_local_parquet_loader():
     # Make sure the required R2 environment variables are set
     missing_vars = []
     for var in [
-        "R2_ACCOUNT_ID",
-        "R2_READ_ACCESS_KEY_ID",
-        "R2_READ_SECRET_ACCESS_KEY",
-        "R2_WRITE_ACCESS_KEY_ID",
-        "R2_WRITE_SECRET_ACCESS_KEY",
+        "R2_DATASET_ACCOUNT_ID",
+        "R2_DATASET_BUCKET_NAME",
+        "R2_DATASET_READ_ACCESS_KEY_ID",
+        "R2_DATASET_READ_SECRET_ACCESS_KEY",
+        "R2_DATASET_WRITE_ACCESS_KEY_ID",
+        "R2_DATASET_WRITE_SECRET_ACCESS_KEY",
     ]:
         if not os.environ.get(var):
             missing_vars.append(var)
@@ -40,8 +42,9 @@ async def test_local_parquet_loader():
     if missing_vars:
         pytest.skip(f"Missing environment variables: {', '.join(missing_vars)}")
 
-    # Instantiate a tokenizer (replace with any HF checkpoint you like)
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    # Instantiate a tokenizer 
+    hparams = tplr.load_hparams()
+    tokenizer = hparams.tokenizer
     logger.info(f"Tokenizer loaded ({T() - start_time:.2f}s)")
 
     # Prepare test parameters
@@ -63,7 +66,7 @@ async def test_local_parquet_loader():
         sequence_length=sequence_length,
         pages_info=pages,
         tokenizer=tokenizer,
-        pack_samples=False,  # Or True if you want to test sample packing
+        pack_samples=False, 
     )
     logger.info(f"Loader created ({T() - start_time:.2f}s)")
 

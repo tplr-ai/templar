@@ -312,12 +312,12 @@ class Validator:
             if eval_result is not None and eval_result[0] is not None:
                 # 7. Load evaluation data
                 data_start = tplr.T()
-                pages = await tplr.dataset.DatasetLoader.next_pages(
+                pages = await tplr.local_parquet_dataset.DatasetLoader.next_pages(
                     offset=self.sync_window,
                     n_pages=self.hparams.pages_per_window,
                     seed=eval_uid
                 )
-                loader = await tplr.dataset.DatasetLoader.create(
+                loader = await tplr.local_parquet_dataset.DatasetLoader.create(
                     batch_size=self.hparams.batch_size,
                     sequence_length=self.hparams.sequence_length,
                     pages_info=pages,

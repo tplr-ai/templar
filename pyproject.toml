@@ -28,7 +28,8 @@ dependencies = [
     "ipython",
     "pandas",
     "matplotlib",
-    "seaborn"
+    "seaborn",
+    "pytest-asyncio"
 ]
 
 [project.optional-dependencies]

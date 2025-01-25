@@ -1,14 +1,42 @@
 # ruff: noqa
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env file before any other imports
-load_dotenv(override=True)
+# Find and load the correct .env file
+env_path = Path(__file__).parent.parent / '.env'
+if not env_path.exists():
+    raise FileNotFoundError(f"Required .env file not found at {env_path}")
 
+# Load environment variables before any other imports
+load_dotenv(env_path, override=True)
+
+# Verify environment variables are loaded
+required_vars = [
+    "R2_GRADIENTS_ACCOUNT_ID",
+    "R2_GRADIENTS_BUCKET_NAME",
+    "R2_GRADIENTS_READ_ACCESS_KEY_ID",
+    "R2_GRADIENTS_READ_SECRET_ACCESS_KEY",
+    "R2_GRADIENTS_WRITE_ACCESS_KEY_ID",
+    "R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY",
+    "R2_DATASET_ACCOUNT_ID",
+    "R2_DATASET_BUCKET_NAME",
+    "R2_DATASET_READ_ACCESS_KEY_ID",
+    "R2_DATASET_READ_SECRET_ACCESS_KEY",
+    "R2_DATASET_WRITE_ACCESS_KEY_ID",
+    "R2_DATASET_WRITE_SECRET_ACCESS_KEY",
+]
+
+missing_vars = [var for var in required_vars if not os.environ.get(var)]
+if missing_vars:
+    raise EnvironmentError(f"Missing required environment variables in .env file: {', '.join(missing_vars)}")
+
+# Only import after environment variables are loaded and verified
 import pytest
-import tplr
-from tplr.local_parquet_dataset import LocalParquetDatasetLoader
+from transformers import AutoTokenizer
 from tplr.logging import logger, debug, T
+from tplr.local_parquet_dataset import LocalParquetDatasetLoader
+from tplr.hparams import load_hparams
 
 
 # Enable debug logging for tests
@@ -43,7 +71,7 @@ async def test_local_parquet_loader():
         pytest.skip(f"Missing environment variables: {', '.join(missing_vars)}")
 
     # Instantiate a tokenizer 
-    hparams = tplr.load_hparams()
+    hparams = load_hparams()
     tokenizer = hparams.tokenizer
     logger.info(f"Tokenizer loaded ({T() - start_time:.2f}s)")
 

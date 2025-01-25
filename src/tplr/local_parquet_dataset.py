@@ -63,7 +63,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
     MAX_CONCURRENT_REQUESTS = 8  # Increased from 4
     BATCH_SIZE = 128  # Increased batch size for tokenization
     READ_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB read buffer
-    
+
     # Class-level caches with size limits
     _metadata_cache = {}
     _parquet_cache = {}  # Cache for ParquetFile objects
@@ -71,8 +71,14 @@ class LocalParquetDatasetLoader(DatasetLoader):
     _fs = None
     _prefetch_queue = None
 
-    def __init__(self, batch_size=None, sequence_length=None, num_pages=None, 
-                 tokenizer=None, pack_samples=True):
+    def __init__(
+        self,
+        batch_size=None,
+        sequence_length=None,
+        num_pages=None,
+        tokenizer=None,
+        pack_samples=True,
+    ):
         """
         Initialize the dataset loader.
 
@@ -94,7 +100,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
         # Additional buffers from parent class
         self.used_buffer = []
         self.padded_buffer = []
-        
+
         # Prefetch setup
         self._prefetch_task = None
         self._current_batch = None
@@ -125,9 +131,12 @@ class LocalParquetDatasetLoader(DatasetLoader):
             return
 
         # Process entire buffer at once
-        eos_positions = [i for i, token in enumerate(self.buffer) 
-                        if token == self.tokenizer.eos_token_id]
-        
+        eos_positions = [
+            i
+            for i, token in enumerate(self.buffer)
+            if token == self.tokenizer.eos_token_id
+        ]
+
         if not eos_positions:
             self.padded_buffer.extend(self.buffer)
             self.buffer = []
@@ -137,7 +146,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
         last_eos = eos_positions[-1]
         sequences = []
         start = 0
-        
+
         for pos in eos_positions:
             seq = self.buffer[start:pos]
             if not self.pack_samples:
@@ -149,7 +158,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
 
         # Update buffers
         self.padded_buffer.extend(sequences)
-        self.buffer = self.buffer[last_eos + 1:]
+        self.buffer = self.buffer[last_eos + 1 :]
 
     @staticmethod
     async def fetch_dataset_configs() -> dict:
@@ -261,13 +270,15 @@ class LocalParquetDatasetLoader(DatasetLoader):
         return pages
 
     @staticmethod
-    async def create(batch_size, sequence_length, pages_info, tokenizer, pack_samples=True):
+    async def create(
+        batch_size, sequence_length, pages_info, tokenizer, pack_samples=True
+    ):
         """Optimized loader creation with prefetching"""
         loader = LocalParquetDatasetLoader(
             batch_size=batch_size,
             sequence_length=sequence_length,
             tokenizer=tokenizer,
-            pack_samples=pack_samples
+            pack_samples=pack_samples,
         )
         loader.buffer = []
         loader.pages = pages_info.copy()
@@ -275,8 +286,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
         # Process pages in parallel with increased concurrency
         sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
         tasks = [
-            asyncio.create_task(loader._process_page(page, sem))
-            for page in pages_info
+            asyncio.create_task(loader._process_page(page, sem)) for page in pages_info
         ]
 
         # Wait for all pages and process results
@@ -349,7 +359,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
         if not LocalParquetDatasetLoader._fs:
             dataset_config = BUCKET_SECRETS["dataset"]
             read_credentials = dataset_config["credentials"]["read"]
-            
+
             LocalParquetDatasetLoader._fs = s3fs.S3FileSystem(
                 key=read_credentials["access_key_id"],
                 secret=read_credentials["secret_access_key"],
@@ -394,7 +404,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
         async with sem:
             config_name, page_number, split = page
             cache_key = f"{config_name}:{page_number}"
-            
+
             try:
                 # Try to get from cache first
                 if cache_key in self._token_cache:
@@ -416,33 +426,35 @@ class LocalParquetDatasetLoader(DatasetLoader):
                     fs = self._get_fs()
                     f = fs.open(shard_path, "rb", buffer_size=self.READ_BUFFER_SIZE)
                     pf = pq.ParquetFile(f, memory_map=True)
-                    pf_data = {'file': f, 'parquet': pf}
+                    pf_data = {"file": f, "parquet": pf}
                     self._parquet_cache[shard_path] = pf_data
 
                 # Read data efficiently
-                selected_group = random.randint(0, pf_data['parquet'].num_row_groups - 1)
+                selected_group = random.randint(
+                    0, pf_data["parquet"].num_row_groups - 1
+                )
                 table = await asyncio.to_thread(
-                    pf_data['parquet'].read_row_group,
+                    pf_data["parquet"].read_row_group,
                     selected_group,
                     columns=["text"],
-                    use_threads=True
+                    use_threads=True,
                 )
 
                 # Process in large batches
                 texts = table["text"].to_pylist()
                 all_tokens = []
-                
+
                 for i in range(0, len(texts), self.BATCH_SIZE):
-                    batch = texts[i:i + self.BATCH_SIZE]
+                    batch = texts[i : i + self.BATCH_SIZE]
                     tokens = await asyncio.to_thread(
                         self.tokenizer,
                         batch,
                         padding=False,
                         truncation=True,
                         max_length=self.sequence_length,
-                        return_tensors=None
+                        return_tensors=None,
                     )
-                    
+
                     for input_ids in tokens["input_ids"]:
                         all_tokens.extend(input_ids)
                         all_tokens.append(self.tokenizer.eos_token_id)
@@ -460,11 +472,11 @@ class LocalParquetDatasetLoader(DatasetLoader):
         self.buffer = self.used_buffer + self.buffer
         self.padded_buffer = []
         self._refill_padded_buffer()
-        
+
         # Start prefetching next batch
         if self._next_batch is None:
             self._prefetch_next_batch()
-        
+
         return self
 
     def _prefetch_next_batch(self):
@@ -472,8 +484,8 @@ class LocalParquetDatasetLoader(DatasetLoader):
         if len(self.padded_buffer) >= self.sequence_length * self.batch_size:
             batch = []
             for _ in range(self.batch_size):
-                batch.append(self.padded_buffer[:self.sequence_length])
-                self.padded_buffer = self.padded_buffer[self.sequence_length:]
+                batch.append(self.padded_buffer[: self.sequence_length])
+                self.padded_buffer = self.padded_buffer[self.sequence_length :]
             self._next_batch = torch.tensor(np.stack(batch))
 
     def __next__(self):
@@ -511,13 +523,13 @@ class LocalParquetDatasetLoader(DatasetLoader):
         """Cleanup resources"""
         if self._prefetch_task:
             self._prefetch_task.cancel()
-        
+
         for pf_data in self._parquet_cache.values():
             try:
-                pf_data['file'].close()
-            except:
-                pass
-        
+                pf_data["file"].close()
+            except Exception as e:
+                logger.debug(f"Error closing parquet file: {e}")
+
         self._parquet_cache.clear()
         self._token_cache.clear()
 
@@ -526,8 +538,10 @@ class LocalParquetDatasetLoader(DatasetLoader):
     def _get_parquet_file(shard_path: str):
         """Cached parquet file access"""
         fs = LocalParquetDatasetLoader._get_fs()
-        f = fs.open(shard_path, "rb", buffer_size=LocalParquetDatasetLoader.READ_BUFFER_SIZE)
-        return {'file': f, 'parquet': pq.ParquetFile(f, memory_map=True)}
+        f = fs.open(
+            shard_path, "rb", buffer_size=LocalParquetDatasetLoader.READ_BUFFER_SIZE
+        )
+        return {"file": f, "parquet": pq.ParquetFile(f, memory_map=True)}
 
     @staticmethod
     @lru_cache(maxsize=1024)

@@ -4,7 +4,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Find and load the correct .env file
-env_path = Path(__file__).parent.parent / '.env'
+env_path = Path(__file__).parent.parent / ".env"
 if not env_path.exists():
     raise FileNotFoundError(f"Required .env file not found at {env_path}")
 
@@ -29,7 +29,9 @@ required_vars = [
 
 missing_vars = [var for var in required_vars if not os.environ.get(var)]
 if missing_vars:
-    raise EnvironmentError(f"Missing required environment variables in .env file: {', '.join(missing_vars)}")
+    raise EnvironmentError(
+        f"Missing required environment variables in .env file: {', '.join(missing_vars)}"
+    )
 
 # Only import after environment variables are loaded and verified
 import pytest
@@ -70,7 +72,7 @@ async def test_local_parquet_loader():
     if missing_vars:
         pytest.skip(f"Missing environment variables: {', '.join(missing_vars)}")
 
-    # Instantiate a tokenizer 
+    # Instantiate a tokenizer
     hparams = load_hparams()
     tokenizer = hparams.tokenizer
     logger.info(f"Tokenizer loaded ({T() - start_time:.2f}s)")
@@ -94,7 +96,7 @@ async def test_local_parquet_loader():
         sequence_length=sequence_length,
         pages_info=pages,
         tokenizer=tokenizer,
-        pack_samples=False, 
+        pack_samples=False,
     )
     logger.info(f"Loader created ({T() - start_time:.2f}s)")
 

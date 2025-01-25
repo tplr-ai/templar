@@ -12,3 +12,6 @@ fix: lint
 
 test-run:
     ./scripts/start.sh && pm2 log TV1
+
+dev:
+    uv pip install -e ".[dev]"

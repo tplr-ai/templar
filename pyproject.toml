@@ -21,8 +21,32 @@ dependencies = [
     "pip",
     "wandb",
     "python-dotenv",
-    "zstandard"
+    "zstandard",
+    "s3fs",
+    "pyarrow",
+
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio",
+    "ipykernel",
+    "ipython",
+    "pandas",
+    "matplotlib",
+    "seaborn",
+    "pytest-asyncio",
+    "ruff"
 ]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v -s --capture=no --log-cli-level=INFO"
 asyncio_mode = "auto"
+markers = [
+    "asyncio: mark test as async",
+]

@@ -1,3 +1,4 @@
+# ruff: noqa
 # Load .env file before any other imports
 import os
 from dotenv import load_dotenv

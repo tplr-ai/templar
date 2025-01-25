@@ -11,7 +11,7 @@ from tplr.dataset import DatasetLoader
 from tplr.comms import CF_REGION_NAME
 from tplr.logging import logger
 
-
+# Note: 24 parquet files have a different naming pattern . this should catch that
 class LocalParquetDatasetLoader(DatasetLoader):
     """
     Drop-in replacement for DatasetLoader, but reads Parquet from R2

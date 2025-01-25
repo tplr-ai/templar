@@ -46,7 +46,7 @@ class Comms(ChainManager):
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
         os.makedirs(self.temp_dir, exist_ok=True)
         # Get the bucket directly
-        self.bucket = self.get_own_bucket("write")
+        self.bucket = self.get_own_bucket("gradients", "write")
         # Now initialize ChainManager with the bucket
         super().__init__(
             config=config,
@@ -169,17 +169,21 @@ class Comms(ChainManager):
         session = get_session()
         async with session.create_client(
             "s3",
-            endpoint_url=self.get_base_url(BUCKET_SECRETS["account_id"]),
+            endpoint_url=self.get_base_url(BUCKET_SECRETS["gradients"]["account_id"]),
             region_name=CF_REGION_NAME,
             config=client_config,
-            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+            aws_access_key_id=BUCKET_SECRETS["gradients"]["credentials"]["write"][
+                "access_key_id"
+            ],
+            aws_secret_access_key=BUCKET_SECRETS["gradients"]["credentials"]["write"][
+                "secret_access_key"
+            ],
         ) as s3_client:
             continuation_token = None
 
             while True:
                 list_args = {
-                    "Bucket": BUCKET_SECRETS["bucket_name"],
+                    "Bucket": BUCKET_SECRETS["gradients"]["name"],
                     "Prefix": prefix,
                     "MaxKeys": 1000,
                 }
@@ -211,7 +215,7 @@ class Comms(ChainManager):
                         f"Removing stale S3 objects for {uid}: {stale_objects}"
                     )
                     await s3_client.delete_objects(
-                        Bucket=BUCKET_SECRETS["bucket_name"],
+                        Bucket=BUCKET_SECRETS["gradients"]["name"],
                         Delete={"Objects": stale_objects},
                     )
 
@@ -1118,8 +1122,8 @@ class Comms(ChainManager):
         bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
     ]:
         """
-        Load latest checkpoint and catch up through missed windows.
-        Global step is derived from: current_window - start_window
+        Loads the latest checkpoint and catches up across missed windows.
+        In this version, we parallelize gathers but still apply updates strictly in ascending window order.
 
         Returns:
             tuple: (success: bool, momentum: dict, global_step: int, optimizer: Optimizer, scheduler: LRScheduler)
@@ -1129,9 +1133,9 @@ class Comms(ChainManager):
             tplr.logger.info("No valid checkpoints found")
             return False, {}, 0, optimizer, scheduler
 
-        checkpoint_data, window = result
+        checkpoint_data, checkpoint_window = result
         try:
-            # Load model state
+            # 1) Load checkpoint data
             model.load_state_dict(
                 {
                     k: v.to(device)
@@ -1140,73 +1144,69 @@ class Comms(ChainManager):
             )
             model.to(device)
 
-            # Load optimizer state
             for state in optimizer.state.values():
                 for k, v in state.items():
                     if torch.is_tensor(v):
                         state[k] = v.to(device)
             optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
 
-            # Load scheduler state
             scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
-
-            # Get checkpoint metadata
             momentum = checkpoint_data["momentum"]
+
             checkpoint_start_window = checkpoint_data.get("start_window")
             checkpoint_current_window = checkpoint_data.get("current_window")
-
             if checkpoint_start_window is None or checkpoint_current_window is None:
                 tplr.logger.warning(
-                    "Checkpoint missing start_window or current_window info, cannot catch up properly"
+                    "Checkpoint missing start_window or current_window info"
                 )
                 return False, {}, 0, optimizer, scheduler
 
-            # Calculate window difference for catch-up
             window_difference = current_window - checkpoint_current_window
-
-            # Calculate global_step based on current_window and checkpoint_start_window
             global_step = current_window - checkpoint_start_window
 
             tplr.logger.info(
-                f"Checkpoint windows - start: {checkpoint_start_window}, current: {checkpoint_current_window}\n"
-                f"Current window: {current_window}\n"
-                f"Window difference: {window_difference}\n"
-                f"Global step (current_window - checkpoint_start_window): {global_step}"
+                f"Checkpoint windows (start={checkpoint_start_window}, checkpoint_current={checkpoint_current_window}), "
+                f"local_current={current_window}, window_diff={window_difference}, global_step={global_step}"
             )
 
-            # Step optimizer and scheduler to match checkpoint state
-            current_scheduler_step = scheduler.last_epoch
-            steps_needed = global_step - current_scheduler_step
-
+            # 2) Sync scheduler with global_step if needed
+            steps_needed = global_step - scheduler.last_epoch
             if steps_needed > 0:
                 tplr.logger.info(
-                    f"Stepping optimizer/scheduler {steps_needed} times to match checkpoint state"
+                    f"Syncing optimizer/scheduler by stepping {steps_needed} times…"
                 )
                 for _ in range(steps_needed):
                     optimizer.step()
                     scheduler.step()
 
+            # 3) Return early if no catch-up or behind
             if window_difference < 0:
                 tplr.logger.warning(
-                    f"Current window ({current_window}) is behind checkpoint window ({checkpoint_current_window}). "
-                    f"Using checkpoint state without catch-up."
+                    "Local current_window is behind checkpoint; using checkpoint without catch-up."
                 )
                 return True, momentum, global_step, optimizer, scheduler
-            elif window_difference == 0:
-                tplr.logger.info("No catch up needed - at same window")
+            if window_difference == 0:
+                tplr.logger.info("No catch-up needed — aligned with checkpoint.")
                 return True, momentum, global_step, optimizer, scheduler
 
-            tplr.logger.info(f"Need to catch up through {window_difference} windows...")
+            tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
 
-            # Catch up process
-            if window_difference > 0:
+            # 4) Option: Parallel gather in batches, but apply in ascending order
+            BATCH_SIZE = 5  # tweak based on memory/time constraints
+            windows_to_catch_up = range(
+                checkpoint_current_window + 1, current_window + 1
+            )
 
-                async def process_window(catch_up_window):
-                    gather_result = await self.gather(
+            for i in range(0, len(windows_to_catch_up), BATCH_SIZE):
+                batch_windows = list(windows_to_catch_up)[i : i + BATCH_SIZE]
+
+                # Launch gathers in parallel
+                tasks = [
+                    self.gather(
                         state_dict={},
                         my_uid=uid,
                         uids=peers,
-                        window=catch_up_window,
+                        window=w,
                         key="gradient",
                         timeout=30,
                         device=device,
@@ -1214,77 +1214,63 @@ class Comms(ChainManager):
                         stale_retention=100,
                         global_step=global_step,
                     )
-                    return catch_up_window, gather_result
+                    for w in batch_windows
+                ]
+                batch_results = await asyncio.gather(*tasks)
 
-                # Process windows in parallel batches
-                BATCH_SIZE = 10  # Tune based on memory/network capacity
-                for batch_start in range(
-                    checkpoint_current_window + 1, current_window + 1, BATCH_SIZE
-                ):
-                    batch_end = min(batch_start + BATCH_SIZE, current_window + 1)
+                # Store results in dict so we can apply them in correct ascending order
+                gathered_data = dict(zip(batch_windows, batch_results))
 
-                    # Gather gradients for batch of windows in parallel
-                    window_tasks = [
-                        process_window(w) for w in range(batch_start, batch_end)
-                    ]
-                    window_results = await asyncio.gather(*window_tasks)
+                # 5) Apply each window's updates in ascending order
+                for w in sorted(gathered_data.keys()):
+                    gather_result = gathered_data[w]
+                    if not gather_result:
+                        tplr.logger.info(
+                            f"No valid gather data for window {w}, skipping."
+                        )
+                        continue
 
-                    # Process results in order
-                    for window, gather_result in sorted(window_results):
-                        if gather_result:
-                            # Batch process parameters using torch operations
-                            param_updates = {}
-                            for n, p in model.named_parameters():
-                                idxs = getattr(
-                                    gather_result.state_dict, f"{n}idxs", None
+                    # Build param updates
+                    param_updates = {}
+                    for n, p in model.named_parameters():
+                        idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
+                        vals = getattr(gather_result.state_dict, f"{n}vals", None)
+                        if idxs is not None and vals is not None:
+                            # Convert to lists if necessary
+                            if not isinstance(idxs, (list, tuple)):
+                                idxs = [idxs]
+                            if not isinstance(vals, (list, tuple)):
+                                vals = [vals]
+
+                            # Decode + decompress + sign
+                            new_grad = transformer.decode(
+                                compressor.batch_decompress(
+                                    p.to(device),
+                                    idxs,
+                                    vals,
+                                    transformer.shapes[n],
+                                    transformer.totalks[n],
                                 )
-                                vals = getattr(
-                                    gather_result.state_dict, f"{n}vals", None
-                                )
+                            )
+                            param_updates[n] = new_grad.sign_()
 
-                                if idxs is not None and vals is not None:
-                                    # Convert to lists if needed
-                                    idxs = (
-                                        [idxs]
-                                        if not isinstance(idxs, (list, tuple))
-                                        else idxs
-                                    )
-                                    vals = (
-                                        [vals]
-                                        if not isinstance(vals, (list, tuple))
-                                        else vals
-                                    )
+                    # Apply updates, step optimizer/scheduler
+                    with torch.no_grad():
+                        for n, p in model.named_parameters():
+                            if n in param_updates:
+                                p.grad = param_updates[n]
 
-                                    # Batch decompress and decode
-                                    new_grad = transformer.decode(
-                                        compressor.batch_decompress(
-                                            p.to(device),
-                                            idxs,
-                                            vals,
-                                            transformer.shapes[n],
-                                            transformer.totalks[n],
-                                        )
-                                    )
-                                    param_updates[n] = new_grad.sign_()
-
-                            # Apply all updates at once
-                            with torch.no_grad():
-                                for n, p in model.named_parameters():
-                                    if n in param_updates:
-                                        p.grad = param_updates[n]
-
-                                optimizer.step()
-                                scheduler.step()
-                                global_step += 1
-                                tplr.logger.info(
-                                    f"Caught up window {window}, global_step now: {global_step}"
-                                )
+                    optimizer.step()
+                    scheduler.step()
+                    global_step += 1
+                    tplr.logger.info(
+                        f"Caught up window {w}, global_step => {global_step}"
+                    )
 
             tplr.logger.info(
-                f"Successfully loaded checkpoint. "
-                f"Final global_step: {global_step}, "
-                f"Optimizer step: {optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
-                f"Scheduler step: {scheduler.last_epoch}"
+                f"Finished catch-up. Final global_step={global_step}, "
+                f"optimizer steps={optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
+                f"scheduler last_epoch={scheduler.last_epoch}"
             )
             return True, momentum, global_step, optimizer, scheduler
 
@@ -1297,6 +1283,7 @@ class Comms(ChainManager):
             return False, {}, 0
 =======
             return False, {}, 0, optimizer, scheduler
+        # TODO: Add more robust error handling for large window_difference or gather failures.
 
     # Start Window Operations
 
@@ -1311,7 +1298,7 @@ class Comms(ChainManager):
             async with aiofiles.open(temp_file, "w") as f:
                 await f.write(json.dumps(start_window_data))
 
-            validator_bucket = self.get_own_bucket("write")
+            validator_bucket = self.get_own_bucket("gradients", "write")
             print(f"Validator Access Key : {validator_bucket.access_key_id}")
             await self.s3_put_object(
                 key=key, file_path=temp_file, bucket=validator_bucket

@@ -65,9 +65,7 @@ def load_bucket_secrets():
         "R2_DATASET_ACCOUNT_ID",
         "R2_DATASET_BUCKET_NAME",
         "R2_DATASET_READ_ACCESS_KEY_ID",
-        "R2_DATASET_READ_SECRET_ACCESS_KEY",
-        "R2_DATASET_WRITE_ACCESS_KEY_ID",
-        "R2_DATASET_WRITE_SECRET_ACCESS_KEY"
+        "R2_DATASET_READ_SECRET_ACCESS_KEY"
     ]
 
     missing_vars = [var for var in required_vars if not os.environ.get(var)]

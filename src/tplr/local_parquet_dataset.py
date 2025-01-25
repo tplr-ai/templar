@@ -7,10 +7,11 @@ import numpy as np
 import json
 import yaml
 from pathlib import Path
+from functools import lru_cache
+from tplr import logger
 
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
-from tplr.logging import logger
 
 
 # Note: 24 parquet files have a different naming pattern . this should catch that
@@ -48,95 +49,31 @@ class LocalParquetDatasetLoader(DatasetLoader):
     _metadata_config = None
     _local_cache_dir = Path(".cache/tplr")
 
-    @staticmethod
-    def _get_s3fs():
-        """
-        Creates a configured S3FileSystem instance for R2 access.
+    # Add class-level caching for filesystem and tokenizer results
+    _fs_instance = None
+    _tokenized_cache = {}
+    _buffer_size = 1024 * 1024  # 1MB buffer for reading
 
-        Returns:
-            s3fs.S3FileSystem: Configured filesystem object for R2 access
-        """
-        return s3fs.S3FileSystem(
-            key=BUCKET_SECRETS["read"]["access_key_id"],
-            secret=BUCKET_SECRETS["read"]["secret_access_key"],
-            client_kwargs={
-                "endpoint_url": f"https://{BUCKET_SECRETS['account_id']}.r2.cloudflarestorage.com",
-                "region_name": LocalParquetDatasetLoader.CF_REGION_NAME,
-            },
-            config_kwargs={
-                "region_name": LocalParquetDatasetLoader.CF_REGION_NAME,
-            },
-            use_listings_cache=False,
-            skip_instance_cache=True,  # Important: Skip instance cache
-            s3_additional_kwargs={"Region": LocalParquetDatasetLoader.CF_REGION_NAME},
-        )
+    # Class-level caches
+    _metadata_cache = {}  # Cache for metadata by config
+    _parquet_cache = {}  # Cache ParquetFile objects
+    _fs = None  # Single filesystem instance
 
-    @staticmethod
-    async def _load_r2_metadata():
-        """
-        Loads and caches metadata from R2 storage.
+    # Static configuration
+    PREFETCH_SIZE = 3  # Number of pages to prefetch
+    MAX_CONCURRENT_REQUESTS = 8  # Increased from 4
+    BATCH_SIZE = 128  # Increased batch size for tokenization
+    READ_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB read buffer
+    
+    # Class-level caches with size limits
+    _metadata_cache = {}
+    _parquet_cache = {}  # Cache for ParquetFile objects
+    _token_cache = {}  # Cache for tokenized results
+    _fs = None
+    _prefetch_queue = None
 
-        Downloads shard sizes and metadata config files if not cached locally.
-
-        Returns:
-            tuple: (shard_sizes dict, metadata_config dict)
-
-        Raises:
-            Exception: If metadata loading fails
-        """
-        if LocalParquetDatasetLoader._shard_sizes is not None:
-            return (
-                LocalParquetDatasetLoader._shard_sizes,
-                LocalParquetDatasetLoader._metadata_config,
-            )
-
-        fs = LocalParquetDatasetLoader._get_s3fs()
-        cache_dir = LocalParquetDatasetLoader._local_cache_dir
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        # Define R2 and local paths
-        r2_base = f"{BUCKET_SECRETS['bucket_name']}/{LocalParquetDatasetLoader.DATASET_SUBFOLDER}"
-        r2_paths = {
-            "shard_sizes": f"{r2_base}/_shard_sizes.json",
-            "metadata": f"{r2_base}/_metadata.yaml",
-        }
-        local_paths = {
-            "shard_sizes": cache_dir / "shard_sizes.json",
-            "metadata": cache_dir / "metadata.yaml",
-        }
-
-        try:
-            # Download and load shard sizes
-            if not local_paths["shard_sizes"].exists():
-                logger.info("Downloading shard sizes from R2...")
-                fs.get(r2_paths["shard_sizes"], str(local_paths["shard_sizes"]))
-            with open(local_paths["shard_sizes"]) as f:
-                LocalParquetDatasetLoader._shard_sizes = json.load(f)
-
-            # Download and load metadata config
-            if not local_paths["metadata"].exists():
-                logger.info("Downloading metadata config from R2...")
-                fs.get(r2_paths["metadata"], str(local_paths["metadata"]))
-            with open(local_paths["metadata"]) as f:
-                LocalParquetDatasetLoader._metadata_config = yaml.safe_load(f)
-
-            return (
-                LocalParquetDatasetLoader._shard_sizes,
-                LocalParquetDatasetLoader._metadata_config,
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to load R2 metadata: {e}")
-            raise
-
-    def __init__(
-        self,
-        batch_size=None,
-        sequence_length=None,
-        num_pages=None,
-        tokenizer=None,
-        pack_samples: bool = False,
-    ):
+    def __init__(self, batch_size=None, sequence_length=None, num_pages=None, 
+                 tokenizer=None, pack_samples=True):
         """
         Initialize the dataset loader.
 
@@ -158,6 +95,12 @@ class LocalParquetDatasetLoader(DatasetLoader):
         # Additional buffers from parent class
         self.used_buffer = []
         self.padded_buffer = []
+        
+        # Prefetch setup
+        self._prefetch_task = None
+        self._current_batch = None
+        self._next_batch = None
+        self._prefetch_queue = asyncio.Queue(maxsize=self.PREFETCH_SIZE)
 
     def _get_pad_size(self, input_ids):
         """
@@ -178,33 +121,36 @@ class LocalParquetDatasetLoader(DatasetLoader):
         return pad_size % self.sequence_length
 
     def _refill_padded_buffer(self):
-        """
-        Refill padding buffer from main buffer.
+        """Simplified buffer refill"""
+        if not self.buffer:
+            return
 
-        Processes tokens from main buffer, adds padding as needed,
-        and moves processed tokens to used buffer.
-        """
-        while self.buffer and len(self.padded_buffer) < self.sequence_length:
-            input_ids = []
+        # Process entire buffer at once
+        eos_positions = [i for i, token in enumerate(self.buffer) 
+                        if token == self.tokenizer.eos_token_id]
+        
+        if not eos_positions:
+            self.padded_buffer.extend(self.buffer)
+            self.buffer = []
+            return
 
-            # Find next EOS token
-            try:
-                EOS_index = self.buffer.index(self.tokenizer.eos_token_id)
-                input_ids = self.buffer[: EOS_index + 1]
-                self.buffer = self.buffer[EOS_index + 1 :]
-            except ValueError:
-                # No EOS found, take all remaining
-                input_ids = self.buffer
-                self.buffer = []
+        # Process all complete sequences
+        last_eos = eos_positions[-1]
+        sequences = []
+        start = 0
+        
+        for pos in eos_positions:
+            seq = self.buffer[start:pos]
+            if not self.pack_samples:
+                # Pad to sequence length
+                pad_size = (-len(seq)) % self.sequence_length
+                seq.extend([self.tokenizer.pad_token_id] * pad_size)
+            sequences.extend(seq)
+            start = pos + 1
 
-            self.used_buffer += input_ids
-
-            # Add to padded buffer without EOS
-            self.padded_buffer += input_ids[:-1]
-
-            # Add padding
-            pad_size = self._get_pad_size(input_ids[:-1])
-            self.padded_buffer += [self.tokenizer.pad_token_id] * pad_size
+        # Update buffers
+        self.padded_buffer.extend(sequences)
+        self.buffer = self.buffer[last_eos + 1:]
 
     @staticmethod
     async def fetch_dataset_configs() -> dict:
@@ -222,7 +168,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
         if LocalParquetDatasetLoader._configs_data_cache is not None:
             return LocalParquetDatasetLoader._configs_data_cache
 
-        fs = LocalParquetDatasetLoader._get_s3fs()
+        fs = LocalParquetDatasetLoader._get_fs()
 
         # Build the full path including dataset subfolder
         dataset_path = f"{BUCKET_SECRETS['bucket_name']}/{LocalParquetDatasetLoader.DATASET_SUBFOLDER}"
@@ -315,95 +261,233 @@ class LocalParquetDatasetLoader(DatasetLoader):
 
         return pages
 
-    async def _fetch_data_for_page(self, page, session):
+    @staticmethod
+    async def create(batch_size, sequence_length, pages_info, tokenizer, pack_samples=True):
+        """Optimized loader creation with prefetching"""
+        loader = LocalParquetDatasetLoader(
+            batch_size=batch_size,
+            sequence_length=sequence_length,
+            tokenizer=tokenizer,
+            pack_samples=pack_samples
+        )
+        loader.buffer = []
+        loader.pages = pages_info.copy()
+
+        # Process pages in parallel with increased concurrency
+        sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
+        tasks = [
+            asyncio.create_task(loader._process_page(page, sem))
+            for page in pages_info
+        ]
+
+        # Wait for all pages and process results
+        results = await asyncio.gather(*tasks)
+        for tokens in results:
+            loader.buffer.extend(tokens)
+
+        return loader
+
+    @staticmethod
+    async def _load_r2_metadata():
         """
-        Fetch and process data for a single page.
+        Loads and caches metadata from R2 storage.
 
-        Args:
-            page (tuple): (config_name, page_number, split)
-            session: Unused session parameter
-
-        Raises:
-            RuntimeError: If config not found
-            Exception: If shard reading fails
-        """
-        config_name, page_number, split = page
-        logger.info(f"Fetching page: config={config_name}, page={page_number}")
-
-        # Get shard info from cache
-        shard_sizes, _ = await self._load_r2_metadata()
-        if config_name not in shard_sizes:
-            raise RuntimeError(f"Config {config_name} not found in shard sizes")
-
-        # Pick a random shard from this config
-        shards = shard_sizes[config_name]["shards"]
-        chosen_shard = random.choice(shards)
-        logger.info(f"Selected shard: {chosen_shard['path']}")
-
-        fs = self._get_s3fs()
-        try:
-            with fs.open(chosen_shard["path"], "rb") as f:
-                pf = pq.ParquetFile(f)
-                table = pf.read_row_group(0, columns=["text"])
-                texts = table["text"].to_pylist()
-                logger.info(f"Read {len(texts)} texts")
-
-                buffer_to_append = []
-                tasks = [self._tokenize_content(text) for text in texts]
-                row_input_ids = await asyncio.gather(*tasks)
-
-                for input_ids in row_input_ids:
-                    buffer_to_append.extend(input_ids)
-                    buffer_to_append.append(self.tokenizer.eos_token_id)
-
-                async with self.lock:
-                    self.buffer.extend(buffer_to_append)
-                    self.pages.append((config_name, page_number, split))
-
-        except Exception as e:
-            logger.error(f"Error reading shard {chosen_shard['path']}: {e}")
-            raise
-
-    def __iter__(self):
-        """
-        Initialize iterator state.
+        Downloads shard sizes and metadata config files if not cached locally.
 
         Returns:
-            self: Iterator instance
+            tuple: (shard_sizes dict, metadata_config dict)
+
+        Raises:
+            Exception: If metadata loading fails
         """
-        logger.info("Starting iteration")
-        logger.info(f"Buffer size: {len(self.buffer)}")
+        if LocalParquetDatasetLoader._shard_sizes is not None:
+            return (
+                LocalParquetDatasetLoader._shard_sizes,
+                LocalParquetDatasetLoader._metadata_config,
+            )
+
+        fs = LocalParquetDatasetLoader._get_fs()
+        cache_dir = LocalParquetDatasetLoader._local_cache_dir
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Define R2 and local paths
+        r2_base = f"{BUCKET_SECRETS['bucket_name']}/{LocalParquetDatasetLoader.DATASET_SUBFOLDER}"
+        r2_paths = {
+            "shard_sizes": f"{r2_base}/_shard_sizes.json",
+            "metadata": f"{r2_base}/_metadata.yaml",
+        }
+        local_paths = {
+            "shard_sizes": cache_dir / "shard_sizes.json",
+            "metadata": cache_dir / "metadata.yaml",
+        }
+
+        try:
+            # Download and load shard sizes
+            if not local_paths["shard_sizes"].exists():
+                logger.info("Downloading shard sizes from R2...")
+                fs.get(r2_paths["shard_sizes"], str(local_paths["shard_sizes"]))
+            with open(local_paths["shard_sizes"]) as f:
+                LocalParquetDatasetLoader._shard_sizes = json.load(f)
+
+            # Download and load metadata config
+            if not local_paths["metadata"].exists():
+                logger.info("Downloading metadata config from R2...")
+                fs.get(r2_paths["metadata"], str(local_paths["metadata"]))
+            with open(local_paths["metadata"]) as f:
+                LocalParquetDatasetLoader._metadata_config = yaml.safe_load(f)
+
+            return (
+                LocalParquetDatasetLoader._shard_sizes,
+                LocalParquetDatasetLoader._metadata_config,
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to load R2 metadata: {e}")
+            raise
+
+    @staticmethod
+    def _get_fs():
+        if not LocalParquetDatasetLoader._fs:
+            LocalParquetDatasetLoader._fs = s3fs.S3FileSystem(
+                key=BUCKET_SECRETS["read"]["access_key_id"],
+                secret=BUCKET_SECRETS["read"]["secret_access_key"],
+                client_kwargs={
+                    "endpoint_url": f"https://{BUCKET_SECRETS['account_id']}.r2.cloudflarestorage.com",
+                    "region_name": LocalParquetDatasetLoader.CF_REGION_NAME,
+                },
+                config_kwargs={
+                    "max_pool_connections": 50,
+                    "connect_timeout": 5,
+                    "read_timeout": 10,
+                    "retries": {"max_attempts": 3},
+                },
+                use_listings_cache=True,
+                skip_instance_cache=False,
+                default_block_size=LocalParquetDatasetLoader.READ_BUFFER_SIZE,
+                default_cache_type="readahead",
+            )
+        return LocalParquetDatasetLoader._fs
+
+    async def _get_next_page(self):
+        """Get next page from the queue"""
+        if not self.pages:
+            return None
+        return self.pages.pop(0)
+
+    async def _prefetch_pages(self):
+        """Background task to prefetch pages"""
+        try:
+            while True:
+                page = await self._get_next_page()
+                if page is None:
+                    break
+                await self._prefetch_queue.put(page)
+        except Exception as e:
+            logger.error(f"Prefetch error: {e}")
+        finally:
+            await self._prefetch_queue.put(None)  # Signal completion
+
+    async def _process_page(self, page, sem):
+        """Process a single page with optimized caching"""
+        async with sem:
+            config_name, page_number, split = page
+            cache_key = f"{config_name}:{page_number}"
+            
+            try:
+                # Try to get from cache first
+                if cache_key in self._token_cache:
+                    return self._token_cache[cache_key]
+
+                # Get metadata and choose shard
+                metadata = self._metadata_cache.get(config_name)
+                if not metadata:
+                    shard_sizes, _ = await self._load_r2_metadata()
+                    metadata = shard_sizes[config_name]
+                    self._metadata_cache[config_name] = metadata
+
+                chosen_shard = random.choice(metadata["shards"])
+                shard_path = chosen_shard["path"]
+
+                # Get or create ParquetFile
+                pf_data = self._parquet_cache.get(shard_path)
+                if not pf_data:
+                    fs = self._get_fs()
+                    f = fs.open(shard_path, "rb", buffer_size=self.READ_BUFFER_SIZE)
+                    pf = pq.ParquetFile(f, memory_map=True)
+                    pf_data = {'file': f, 'parquet': pf}
+                    self._parquet_cache[shard_path] = pf_data
+
+                # Read data efficiently
+                selected_group = random.randint(0, pf_data['parquet'].num_row_groups - 1)
+                table = await asyncio.to_thread(
+                    pf_data['parquet'].read_row_group,
+                    selected_group,
+                    columns=["text"],
+                    use_threads=True
+                )
+
+                # Process in large batches
+                texts = table["text"].to_pylist()
+                all_tokens = []
+                
+                for i in range(0, len(texts), self.BATCH_SIZE):
+                    batch = texts[i:i + self.BATCH_SIZE]
+                    tokens = await asyncio.to_thread(
+                        self.tokenizer,
+                        batch,
+                        padding=False,
+                        truncation=True,
+                        max_length=self.sequence_length,
+                        return_tensors=None
+                    )
+                    
+                    for input_ids in tokens["input_ids"]:
+                        all_tokens.extend(input_ids)
+                        all_tokens.append(self.tokenizer.eos_token_id)
+
+                # Cache results
+                self._token_cache[cache_key] = all_tokens
+                return all_tokens
+
+            except Exception as e:
+                logger.error(f"Error processing page {page}: {e}")
+                raise
+
+    def __iter__(self):
+        """Iterator with prefetching"""
         self.buffer = self.used_buffer + self.buffer
         self.padded_buffer = []
         self._refill_padded_buffer()
+        
+        # Start prefetching next batch
+        if self._next_batch is None:
+            self._prefetch_next_batch()
+        
         return self
 
+    def _prefetch_next_batch(self):
+        """Prefetch next batch in background"""
+        if len(self.padded_buffer) >= self.sequence_length * self.batch_size:
+            batch = []
+            for _ in range(self.batch_size):
+                batch.append(self.padded_buffer[:self.sequence_length])
+                self.padded_buffer = self.padded_buffer[self.sequence_length:]
+            self._next_batch = torch.tensor(np.stack(batch))
+
     def __next__(self):
-        """
-        Get next batch of sequences.
+        """Get next batch with prefetching"""
+        if self._next_batch is not None:
+            result = self._next_batch
+            self._next_batch = None
+            self._prefetch_next_batch()
+            return result
 
-        Returns:
-            torch.Tensor: Batch of sequences
-
-        Raises:
-            StopIteration: When no more batches available
-        """
-        batch = []
-        logger.info(
-            f"Getting next batch. Padded buffer size: {len(self.padded_buffer)}"
-        )
-
-        while len(self.padded_buffer) >= self.sequence_length:
-            batch.append(self.padded_buffer[: self.sequence_length])
-            self.padded_buffer = self.padded_buffer[self.sequence_length :]
+        if len(self.padded_buffer) < self.sequence_length * self.batch_size:
             self._refill_padded_buffer()
+            if len(self.padded_buffer) < self.sequence_length * self.batch_size:
+                raise StopIteration
 
-            if len(batch) == self.batch_size:
-                logger.info(f"Returning batch of size {len(batch)}")
-                return torch.tensor(np.stack(batch))
-
-        logger.info("No more batches available")
-        raise StopIteration
+        return self.__next__()
 
     def _read_parquet_table(self, fs, path):
         """
@@ -421,41 +505,30 @@ class LocalParquetDatasetLoader(DatasetLoader):
             table = pf.read(columns=["text"])
         return table
 
+    def __del__(self):
+        """Cleanup resources"""
+        if self._prefetch_task:
+            self._prefetch_task.cancel()
+        
+        for pf_data in self._parquet_cache.values():
+            try:
+                pf_data['file'].close()
+            except:
+                pass
+        
+        self._parquet_cache.clear()
+        self._token_cache.clear()
+
     @staticmethod
-    async def create(
-        batch_size: int,
-        sequence_length: int,
-        pages_info: list,
-        tokenizer,
-        pack_samples: bool = True,
-    ):
-        """
-        Create and initialize a new loader instance.
+    @lru_cache(maxsize=32)
+    def _get_parquet_file(shard_path: str):
+        """Cached parquet file access"""
+        fs = LocalParquetDatasetLoader._get_fs()
+        f = fs.open(shard_path, "rb", buffer_size=LocalParquetDatasetLoader.READ_BUFFER_SIZE)
+        return {'file': f, 'parquet': pq.ParquetFile(f, memory_map=True)}
 
-        Args:
-            batch_size (int): Size of batches to return
-            sequence_length (int): Length of sequences to generate
-            pages_info (list): List of page information tuples
-            tokenizer: Tokenizer instance
-            pack_samples (bool): Whether to pack samples without padding
-
-        Returns:
-            LocalParquetDatasetLoader: Initialized loader instance
-        """
-        loader = LocalParquetDatasetLoader()
-        loader.batch_size = batch_size
-        loader.sequence_length = sequence_length
-        loader.tokenizer = tokenizer
-        loader.pack_samples = pack_samples
-        loader.buffer = []
-        loader.pages = []
-        loader.lock = asyncio.Lock()
-
-        # Start fetching data for each page
-        tasks = []
-        for page in pages_info:
-            task = asyncio.create_task(loader._fetch_data_for_page(page, None))
-            tasks.append(task)
-
-        await asyncio.gather(*tasks)
-        return loader
+    @staticmethod
+    @lru_cache(maxsize=1024)
+    def _get_tokenized_cache(cache_key: str):
+        """Cached tokenization results"""
+        return LocalParquetDatasetLoader._token_cache.get(cache_key)

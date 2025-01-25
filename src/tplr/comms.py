@@ -1,24 +1,26 @@
 import os
 import re
+import math
 import json
 import time
 import torch
 import asyncio
 import aiofiles
+import botocore
 import bittensor as bt
-from typing import List, Dict, Optional
+from tqdm import tqdm as std_tqdm
 from types import SimpleNamespace
+from typing import List, Dict, Optional
 from aiobotocore.session import get_session
+
 from . import __version__
 from .config import client_config, BUCKET_SECRETS
 from .chain import ChainManager
 from .schemas import Bucket
 
 import tplr as tplr
-import botocore
-from tqdm import tqdm as std_tqdm
 
-import math
+
 
 # Constants
 CF_REGION_NAME: str = "enam"

@@ -25,7 +25,9 @@ import numpy as np
 from transformers import AutoTokenizer
 from torch.utils.data import IterableDataset
 
-class SubsetLoader(IterableDataset):
+from streaming import StreamingDataset
+
+class SubsetLoader(StreamingDataset):
     """
     Base class for data-specific subset loader classes.
 

@@ -1,20 +1,19 @@
-import asyncio
-import s3fs
-import pyarrow.parquet as pq
-import random
-import torch
-import numpy as np
 import json
 import yaml
+import s3fs
+import torch
+import random
+import asyncio
+import numpy as np
 from pathlib import Path
+import pyarrow.parquet as pq
 from functools import lru_cache
-from tplr import logger
 
+from tplr import logger
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
 
 
-# Note: 24 parquet files have a different naming pattern . this should catch that
 class LocalParquetDatasetLoader(DatasetLoader):
     """
     A drop-in replacement for DatasetLoader that reads Parquet files from Cloudflare R2 storage.

@@ -173,7 +173,7 @@ async def main():
         (2, 4, 512),
         (2, 8, 512),
         (4, 4, 512),
-        (5, 8, 2048),
+        (5, 6, 2048),
     ]
 
     for n_pages, batch_size, sequence_length in configs:

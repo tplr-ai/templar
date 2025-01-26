@@ -15,6 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 # fmt: off
+#type: ignore
 
 # Standard library
 import sys
@@ -71,6 +72,7 @@ class Validator:
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
         parser.add_argument('--use_wandb', action='store_true', help='Use Weights and Biases for logging')
         parser.add_argument('--peers', type=int, nargs='+', default=[], help='List of UIDs to peer with')
+        parser.add_argument('--store-gathers', action='store_true', help='Store gathered gradients in R2')
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -284,13 +286,20 @@ class Validator:
                 uids=self.peers,
                 window=self.sync_window,
                 key='gradient',
-                timeout=30,
+                timeout=5,
                 device=self.config.device,
                 local=False,
                 stale_retention=100,
                 global_step=self.global_step,
+                store_gathers=self.config.store_gathers
             )
             tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers')
+
+            # Add check for empty eval_peers
+            if not self.eval_peers:
+                tplr.logger.warning(f"No peers available for evaluation in window {self.sync_window}. Waiting for next window.")
+                self.global_step += 1
+                continue
 
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
@@ -309,15 +318,16 @@ class Validator:
                 stale_retention=10
             )
 
+            scoring_start = tplr.T()
             if eval_result is not None and eval_result[0] is not None:
                 # 7. Load evaluation data
                 data_start = tplr.T()
-                pages = await tplr.local_parquet_dataset.DatasetLoader.next_pages(
+                pages = await tplr.r2_dataset.DatasetLoader.next_pages(
                     offset=self.sync_window,
                     n_pages=self.hparams.pages_per_window,
                     seed=eval_uid
                 )
-                loader = await tplr.local_parquet_dataset.DatasetLoader.create(
+                loader = await tplr.r2_dataset.DatasetLoader.create(
                     batch_size=self.hparams.batch_size,
                     sequence_length=self.hparams.sequence_length,
                     pages_info=pages,
@@ -327,7 +337,6 @@ class Validator:
                 state_dict, _ = eval_result
 
                 # 8. Compute initial loss
-                scoring_start = tplr.T()
                 self.optimizer.zero_grad()
                 self.model.zero_grad()
                 loss_before = 0.0
@@ -495,9 +504,10 @@ class Validator:
             else:
                 tplr.logger.info(f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%.")
                 # Reduce the moving average score by 50%
-                old_score = self.moving_avg_scores[eval_uid]
-                self.moving_avg_scores[eval_uid] = old_score * 0.5
-                tplr.logger.info(f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {self.moving_avg_scores[eval_uid]:.4f} due to missing gradient.")
+                old_score = self.moving_avg_scores[eval_uid].item()  # Get the actual value
+                self.moving_avg_scores[eval_uid] *= 0.5  # Apply 50% reduction
+                new_score = self.moving_avg_scores[eval_uid].item()  # Get new value for logging
+                tplr.logger.info(f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient.")
 
                 # Ensure the UID is included in evaluated_uids
                 self.evaluated_uids.add(eval_uid)
@@ -629,7 +639,7 @@ class Validator:
 
     def block_listener(self, loop):
         def handler(event, _u, _s):
-            self.current_block = int(event['header']['number'])
+            self.current_block = int(event['header']['number']) #type : ignore
             new_window = int(self.current_block / self.hparams.blocks_per_window)
             if new_window != self.current_window:
                 self.current_window = new_window

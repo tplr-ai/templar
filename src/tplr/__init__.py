@@ -20,14 +20,14 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "0.2.12"
+__version__ = "0.2.13"
 
 # Import package.
 from .chain import *
 from .comms import *
 from .compress import *
 from .dataset import *
-from .local_parquet_dataset import *
+from .r2_dataset import *
 from .hparams import *
 from .logging import *
 from .schemas import *

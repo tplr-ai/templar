@@ -63,6 +63,7 @@ class Miner:
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
         parser.add_argument('--peers', type=int, nargs='+', default=[], help='List of UIDs to peer with')
+        parser.add_argument('--store-gathers', action='store_true', help='Store gathered gradients in R2')
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -189,32 +190,32 @@ class Miner:
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
 
-        # # Proceed to load checkpoint
-        # success, loaded_momentum, loaded_global_step, loaded_optimizer, loaded_scheduler = await self.comms.load_checkpoint(
-        #     model=self.model,
-        #     optimizer=self.optimizer, 
-        #     scheduler=self.scheduler,
-        #     transformer=self.transformer,
-        #     compressor=self.compressor,
-        #     current_window=self.current_window,
-        #     device=self.config.device,
-        #     peers=self.peers,
-        #     uid=self.uid
-        # )
-        # if success:
-        #     self.momentum = loaded_momentum
-        #     self.global_step = loaded_global_step
-        #     self.optimizer = loaded_optimizer
-        #     self.scheduler = loaded_scheduler
-        #     tplr.logger.info(
-        #         f"Loaded checkpoint with global_step={self.global_step}, "
-        #         f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
-        #         f"scheduler_step={self.scheduler.last_epoch}"
-        #     )
-        # else:
-        #     tplr.logger.info("Starting from scratch")
-        #     self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
-        #     self.model.to(self.config.device)
+        # Proceed to load checkpoint
+        success, loaded_momentum, loaded_global_step, loaded_optimizer, loaded_scheduler = await self.comms.load_checkpoint(
+            model=self.model,
+            optimizer=self.optimizer, 
+            scheduler=self.scheduler,
+            transformer=self.transformer,
+            compressor=self.compressor,
+            current_window=self.current_window,
+            device=self.config.device,
+            peers=self.peers,
+            uid=self.uid
+        )
+        if success:
+            self.momentum = loaded_momentum
+            self.global_step = loaded_global_step
+            self.optimizer = loaded_optimizer
+            self.scheduler = loaded_scheduler
+            tplr.logger.info(
+                f"Loaded checkpoint with global_step={self.global_step}, "
+                f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
+                f"scheduler_step={self.scheduler.last_epoch}"
+            )
+        else:
+            tplr.logger.info("Starting from scratch")
+            self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
+            self.model.to(self.config.device)
 
         # Start background block listener
         self.loop = asyncio.get_running_loop()
@@ -241,19 +242,19 @@ class Miner:
 
             # 2. Load training data for this window
             data_start = tplr.T()
-            pages = await tplr.local_parquet_dataset.DatasetLoader.next_pages(
+            pages = await tplr.r2_dataset.DatasetLoader.next_pages(
                 offset = step_window,
                 n_pages = self.hparams.pages_per_window,
-                seed = self.metagraph.hotkeys[self.uid]
+                seed = self.metagraph.hotkeys[self.uid] #type: ignore
             )            
-            loader = await tplr.local_parquet_dataset.DatasetLoader.create(
+            loader = await tplr.r2_dataset.DatasetLoader.create(
                 batch_size = self.hparams.batch_size,
                 sequence_length = self.hparams.sequence_length,
                 pages_info = pages,
                 tokenizer = self.tokenizer
             )   
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - data_start)} Loaded training data')
-            tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}")
+            tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}") #type: ignore
             
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
@@ -370,6 +371,7 @@ class Miner:
                 local=False,
                 stale_retention=100,
                 global_step=self.global_step,
+                store_gathers=self.config.store_gathers
             )
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - gather_start)} Gathered peer gradients')
 
@@ -456,7 +458,7 @@ class Miner:
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
         def handler(event, _u, _s):
-            self.current_block = int(event['header']['number'])
+            self.current_block = int(event['header']['number']) #type: ignore
             new_window = int(self.current_block / self.hparams.blocks_per_window)
             if new_window != self.current_window:
                 self.current_window = new_window

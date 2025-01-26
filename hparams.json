@@ -31,5 +31,5 @@
     "active_check_interval": 60,
     "recent_windows": 3,
     "power_normalisation": 2.0,
-    "validator_sample_rate": 0.5
+    "validator_sample_rate": 0.4
 }

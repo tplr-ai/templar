@@ -321,12 +321,12 @@ class Validator:
             if eval_result is not None and eval_result[0] is not None:
                 # 7. Load evaluation data
                 data_start = tplr.T()
-                pages = await tplr.local_parquet_dataset.DatasetLoader.next_pages(
+                pages = await tplr.r2_dataset.DatasetLoader.next_pages(
                     offset=self.sync_window,
                     n_pages=self.hparams.pages_per_window,
                     seed=eval_uid
                 )
-                loader = await tplr.local_parquet_dataset.DatasetLoader.create(
+                loader = await tplr.r2_dataset.DatasetLoader.create(
                     batch_size=self.hparams.batch_size,
                     sequence_length=self.hparams.sequence_length,
                     pages_info=pages,
@@ -637,7 +637,7 @@ class Validator:
 
     def block_listener(self, loop):
         def handler(event, _u, _s):
-            self.current_block = int(event['header']['number'])
+            self.current_block = int(event['header']['number']) #type : ignore
             new_window = int(self.current_block / self.hparams.blocks_per_window)
             if new_window != self.current_window:
                 self.current_window = new_window

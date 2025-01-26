@@ -190,32 +190,32 @@ class Miner:
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
 
-        # # Proceed to load checkpoint
-        # success, loaded_momentum, loaded_global_step, loaded_optimizer, loaded_scheduler = await self.comms.load_checkpoint(
-        #     model=self.model,
-        #     optimizer=self.optimizer, 
-        #     scheduler=self.scheduler,
-        #     transformer=self.transformer,
-        #     compressor=self.compressor,
-        #     current_window=self.current_window,
-        #     device=self.config.device,
-        #     peers=self.peers,
-        #     uid=self.uid
-        # )
-        # if success:
-        #     self.momentum = loaded_momentum
-        #     self.global_step = loaded_global_step
-        #     self.optimizer = loaded_optimizer
-        #     self.scheduler = loaded_scheduler
-        #     tplr.logger.info(
-        #         f"Loaded checkpoint with global_step={self.global_step}, "
-        #         f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
-        #         f"scheduler_step={self.scheduler.last_epoch}"
-        #     )
-        # else:
-        #     tplr.logger.info("Starting from scratch")
-        #     self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
-        #     self.model.to(self.config.device)
+        # Proceed to load checkpoint
+        success, loaded_momentum, loaded_global_step, loaded_optimizer, loaded_scheduler = await self.comms.load_checkpoint(
+            model=self.model,
+            optimizer=self.optimizer, 
+            scheduler=self.scheduler,
+            transformer=self.transformer,
+            compressor=self.compressor,
+            current_window=self.current_window,
+            device=self.config.device,
+            peers=self.peers,
+            uid=self.uid
+        )
+        if success:
+            self.momentum = loaded_momentum
+            self.global_step = loaded_global_step
+            self.optimizer = loaded_optimizer
+            self.scheduler = loaded_scheduler
+            tplr.logger.info(
+                f"Loaded checkpoint with global_step={self.global_step}, "
+                f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
+                f"scheduler_step={self.scheduler.last_epoch}"
+            )
+        else:
+            tplr.logger.info("Starting from scratch")
+            self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
+            self.model.to(self.config.device)
 
         # Start background block listener
         self.loop = asyncio.get_running_loop()
@@ -242,12 +242,12 @@ class Miner:
 
             # 2. Load training data for this window
             data_start = tplr.T()
-            pages = await tplr.local_parquet_dataset.DatasetLoader.next_pages(
+            pages = await tplr.r2_dataset.DatasetLoader.next_pages(
                 offset = step_window,
                 n_pages = self.hparams.pages_per_window,
-                seed = self.metagraph.hotkeys[self.uid]
+                seed = self.metagraph.hotkeys[self.uid] #type: ignore
             )            
-            loader = await tplr.local_parquet_dataset.DatasetLoader.create(
+            loader = await tplr.r2_dataset.DatasetLoader.create(
                 batch_size = self.hparams.batch_size,
                 sequence_length = self.hparams.sequence_length,
                 pages_info = pages,

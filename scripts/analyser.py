@@ -1,4 +1,4 @@
-# neurons/analyzer.py
+#type: ignore
 
 # Standard library imports
 import os

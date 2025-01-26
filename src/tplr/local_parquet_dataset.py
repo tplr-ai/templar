@@ -1,3 +1,4 @@
+#type: ignore
 import json
 import yaml
 import s3fs
@@ -179,9 +180,7 @@ class R2DatasetLoader(DatasetLoader):
         fs = R2DatasetLoader._get_fs()
 
         # Build the full path including dataset subfolder
-        dataset_path = (
-            f"{BUCKET_SECRETS['dataset']['name']}/{R2DatasetLoader.DATASET_SUBFOLDER}"
-        )
+        dataset_path = f"{BUCKET_SECRETS['dataset']['name']}/{R2DatasetLoader.DATASET_SUBFOLDER}"
 
         try:
             print(f"Listing dataset path: {dataset_path}")
@@ -192,7 +191,7 @@ class R2DatasetLoader(DatasetLoader):
 
             configs_data = {}
             for path in all_paths:
-                config_name = path.split("/")[-1]  # This will be CC-MAIN-2017-04 etc. #type: ignore
+                config_name = path.split("/")[-1]  # This will be CC-MAIN-2017-04 etc.
 
                 # List all parquet files in this config
                 parquet_files = [f for f in fs.ls(path) if f.endswith(".parquet")]
@@ -322,9 +321,7 @@ class R2DatasetLoader(DatasetLoader):
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Define R2 and local paths
-        r2_base = (
-            f"{BUCKET_SECRETS['dataset']['name']}/{R2DatasetLoader.DATASET_SUBFOLDER}"
-        )
+        r2_base = f"{BUCKET_SECRETS['dataset']['name']}/{R2DatasetLoader.DATASET_SUBFOLDER}"
         r2_paths = {
             "shard_sizes": f"{r2_base}/_shard_sizes.json",
             "metadata": f"{r2_base}/_metadata.yaml",
@@ -362,7 +359,7 @@ class R2DatasetLoader(DatasetLoader):
     def _get_fs():
         if not R2DatasetLoader._fs:
             dataset_config = BUCKET_SECRETS["dataset"]
-            read_credentials = dataset_config["credentials"]["read"] #type: ignore
+            read_credentials = dataset_config["credentials"]["read"]
 
             R2DatasetLoader._fs = s3fs.S3FileSystem(
                 key=read_credentials["access_key_id"],
@@ -445,7 +442,7 @@ class R2DatasetLoader(DatasetLoader):
                 )
 
                 # Process in large batches
-                texts = table["text"].to_pylist() #type: ignore
+                texts = table["text"].to_pylist()
                 all_tokens = []
 
                 for i in range(0, len(texts), self.BATCH_SIZE):
@@ -459,7 +456,7 @@ class R2DatasetLoader(DatasetLoader):
                         return_tensors=None,
                     )
 
-                    for input_ids in tokens["input_ids"]: #type: ignore
+                    for input_ids in tokens["input_ids"]:
                         all_tokens.extend(input_ids)
                         all_tokens.append(self.tokenizer.eos_token_id)
 
@@ -530,7 +527,7 @@ class R2DatasetLoader(DatasetLoader):
 
         for pf_data in self._parquet_cache.values():
             try:
-                pf_data["file"].close() #type: ignore
+                pf_data["file"].close()
             except Exception as e:
                 logger.debug(f"Error closing parquet file: {e}")
 
@@ -542,7 +539,9 @@ class R2DatasetLoader(DatasetLoader):
     def _get_parquet_file(shard_path: str):
         """Cached parquet file access"""
         fs = R2DatasetLoader._get_fs()
-        f = fs.open(shard_path, "rb", buffer_size=R2DatasetLoader.READ_BUFFER_SIZE)
+        f = fs.open(
+            shard_path, "rb", buffer_size=R2DatasetLoader.READ_BUFFER_SIZE
+        )
         return {"file": f, "parquet": pq.ParquetFile(f, memory_map=True)}
 
     @staticmethod

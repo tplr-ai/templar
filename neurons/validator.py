@@ -504,9 +504,10 @@ class Validator:
             else:
                 tplr.logger.info(f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%.")
                 # Reduce the moving average score by 50%
-                old_score = self.moving_avg_scores[eval_uid]
-                self.moving_avg_scores[eval_uid] = old_score * 0.5
-                tplr.logger.info(f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {self.moving_avg_scores[eval_uid]:.4f} due to missing gradient.")
+                old_score = self.moving_avg_scores[eval_uid].item()  # Get the actual value
+                self.moving_avg_scores[eval_uid] *= 0.5  # Apply 50% reduction
+                new_score = self.moving_avg_scores[eval_uid].item()  # Get new value for logging
+                tplr.logger.info(f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient.")
 
                 # Ensure the UID is included in evaluated_uids
                 self.evaluated_uids.add(eval_uid)

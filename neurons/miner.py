@@ -63,6 +63,7 @@ class Miner:
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
         parser.add_argument('--peers', type=int, nargs='+', default=[], help='List of UIDs to peer with')
+        parser.add_argument('--store-gathers', action='store_true', help='Store gathered gradients in R2')
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -253,7 +254,7 @@ class Miner:
                 tokenizer = self.tokenizer
             )   
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - data_start)} Loaded training data')
-            tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}")
+            tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}") #type: ignore
             
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
@@ -370,6 +371,7 @@ class Miner:
                 local=False,
                 stale_retention=100,
                 global_step=self.global_step,
+                store_gathers=self.config.store_gathers
             )
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - gather_start)} Gathered peer gradients')
 
@@ -456,7 +458,7 @@ class Miner:
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
         def handler(event, _u, _s):
-            self.current_block = int(event['header']['number'])
+            self.current_block = int(event['header']['number']) #type: ignore
             new_window = int(self.current_block / self.hparams.blocks_per_window)
             if new_window != self.current_window:
                 self.current_window = new_window

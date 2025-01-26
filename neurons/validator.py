@@ -71,6 +71,7 @@ class Validator:
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
         parser.add_argument('--use_wandb', action='store_true', help='Use Weights and Biases for logging')
         parser.add_argument('--peers', type=int, nargs='+', default=[], help='List of UIDs to peer with')
+        parser.add_argument('--store-gathers', action='store_true', help='Store gathered gradients in R2')
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -284,11 +285,12 @@ class Validator:
                 uids=self.peers,
                 window=self.sync_window,
                 key='gradient',
-                timeout=30,
+                timeout=5,
                 device=self.config.device,
                 local=False,
                 stale_retention=100,
                 global_step=self.global_step,
+                store_gathers=self.config.store_gathers
             )
             tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers')
 

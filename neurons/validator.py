@@ -292,6 +292,12 @@ class Validator:
             )
             tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers')
 
+            # Add check for empty eval_peers
+            if not self.eval_peers:
+                tplr.logger.warning(f"No peers available for evaluation in window {self.sync_window}. Waiting for next window.")
+                self.global_step += 1
+                continue
+
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
             original_params = {n: p.clone() for n, p in self.model.named_parameters()}
@@ -309,6 +315,7 @@ class Validator:
                 stale_retention=10
             )
 
+            scoring_start = tplr.T()
             if eval_result is not None and eval_result[0] is not None:
                 # 7. Load evaluation data
                 data_start = tplr.T()
@@ -327,7 +334,6 @@ class Validator:
                 state_dict, _ = eval_result
 
                 # 8. Compute initial loss
-                scoring_start = tplr.T()
                 self.optimizer.zero_grad()
                 self.model.zero_grad()
                 loss_before = 0.0

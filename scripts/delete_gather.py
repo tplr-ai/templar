@@ -72,10 +72,7 @@ async def cleanup_bucket():
         try:
             async for page in paginator.paginate(Bucket=account_id, Prefix="gathers/"):
                 if "Contents" in page:
-                    filtered_objects = [
-                        {"Key": obj["Key"]}
-                        for obj in page["Contents"]
-                    ]
+                    filtered_objects = [{"Key": obj["Key"]} for obj in page["Contents"]]
                     objects_to_delete.extend(filtered_objects)
 
             if not objects_to_delete:

@@ -50,10 +50,10 @@ class Analyzer:
             help="Interval between analyses in seconds",
         )
         parser.add_argument(
-            "--device", 
-            type=str, 
-            default="cuda", 
-            help="Device to use for computation (cuda/cpu)"
+            "--device",
+            type=str,
+            default="cuda",
+            help="Device to use for computation (cuda/cpu)",
         )
         config = parser.parse_args()
         if config.debug:
@@ -63,60 +63,73 @@ class Analyzer:
         return config
 
     def __init__(self):
-        self.config = Analyzer.config()
-        self.temp_dir = "/tmp/analyzer"
-        self.processed_files_path = Path(self.temp_dir) / "processed_files.json"
-        os.makedirs(self.temp_dir, exist_ok=True)
+        try:
+            self.config = Analyzer.config()
+            self.temp_dir = "/tmp/analyzer"
+            self.processed_files_path = Path(self.temp_dir) / "processed_files.json"
+            os.makedirs(self.temp_dir, exist_ok=True)
 
-        # Load previously processed files
-        self.processed_files: Set[str] = self.load_processed_files()
+            # Load previously processed files
+            self.processed_files: Set[str] = self.load_processed_files()
 
-        self.hparams = tplr.load_hparams()
-        
-        tplr.logger.info(f"Initializing model on device: {self.config.device}")
-        # Initialize model for transformer shapes
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)
+            self.hparams = tplr.load_hparams()
 
-        # Initialize compression components
-        self.transformer = tplr.compress.TransformDCT(
-            self.model,
-            target_chunk=self.hparams.target_chunk,
-        )
-        self.compressor = tplr.compress.CompressDCT()
+            tplr.logger.info(f"Initializing model on device: {self.config.device}")
+            # Initialize model for transformer shapes
+            self.model = LlamaForCausalLM(self.hparams.model_config)
+            self.model.to(self.config.device)
 
-        # Initialize WandB
-        self.wandb = tplr.initialize_wandb(
-            run_prefix='A',  # 'A' for Analyzer
-            uid=0,
-            config=self.config,
-            group='analyzer',
-            job_type='analysis'
-        )
+            # Initialize compression components
+            self.transformer = tplr.compress.TransformDCT(
+                self.model,
+                target_chunk=self.hparams.target_chunk,
+            )
+            self.compressor = tplr.compress.CompressDCT()
 
-        # Initialize R2 client
-        self.bucket_info = BUCKET_SECRETS["gradients"]
-        self.r2_endpoint = (
-            f"https://{self.bucket_info['account_id']}.r2.cloudflarestorage.com"
-        )
-        self.bucket_name = self.bucket_info["name"]
-        self.access_key_id = self.bucket_info["credentials"]["read"]["access_key_id"]
-        self.secret_access_key = self.bucket_info["credentials"]["read"][
-            "secret_access_key"
-        ]
+            # Initialize shapes for each parameter (like in miner/validator)
+            self.xshapes = {}
+            self.totalks = {}
+            for n, p in self.model.named_parameters():
+                transformed = self.transformer.encode(p)
+                self.xshapes[n] = transformed.shape
+                self.totalks[n] = transformed.numel()
 
-        self.s3_client = boto3.client(
-            "s3",
-            endpoint_url=self.r2_endpoint,
-            aws_access_key_id=self.access_key_id,
-            aws_secret_access_key=self.secret_access_key,
-            config=Config(signature_version="s3v4", max_pool_connections=256),
-        )
+            # Initialize WandB
+            self.wandb = tplr.initialize_wandb(
+                run_prefix="A",  # 'A' for Analyzer
+                uid=0,
+                config=self.config,
+                group="analyzer",
+                job_type="analysis",
+            )
 
-        # Initialize peer gradients storage
-        self.peer_gradients = {}
-        self.current_step = 0
+            # Initialize R2 client
+            self.bucket_info = BUCKET_SECRETS["gradients"]
+            self.r2_endpoint = (
+                f"https://{self.bucket_info['account_id']}.r2.cloudflarestorage.com"
+            )
+            self.bucket_name = self.bucket_info["name"]
+            self.access_key_id = self.bucket_info["credentials"]["read"][
+                "access_key_id"
+            ]
+            self.secret_access_key = self.bucket_info["credentials"]["read"][
+                "secret_access_key"
+            ]
 
+            self.s3_client = boto3.client(
+                "s3",
+                endpoint_url=self.r2_endpoint,
+                aws_access_key_id=self.access_key_id,
+                aws_secret_access_key=self.secret_access_key,
+                config=Config(signature_version="s3v4", max_pool_connections=256),
+            )
+
+            # Initialize peer gradients storage
+            self.peer_gradients = {}
+            self.current_step = 0
+
+        except Exception as e:
+            tplr.logger.error(f"Error initializing Analyzer: {e}")
 
     def load_processed_files(self) -> Set[str]:
         """Load the set of processed files from disk."""
@@ -195,34 +208,34 @@ class Analyzer:
             state_dict = data["state_dict"].item()
             metadata = data["metadata"].item()
 
-            global_step = int(metadata.get("global_step", -1))
+            # global_step = int(metadata.get("global_step", -1))
             timestamp = metadata.get("timestamp", time.time())
 
             # Store gradients for comparison
             self.peer_gradients[uid] = {
-                'state_dict': state_dict,
-                'window': window,
-                'timestamp': timestamp
+                "state_dict": state_dict,
+                "window": window,
+                "timestamp": timestamp,
             }
 
             # Get all peers from same window for comparison
             window_peers = {
-                peer_uid: data 
-                for peer_uid, data in self.peer_gradients.items() 
-                if data['window'] == window
+                peer_uid: data
+                for peer_uid, data in self.peer_gradients.items()
+                if data["window"] == window
             }
 
             if len(window_peers) > 1:
                 # Compute cosine similarity matrix
                 uids = sorted(window_peers.keys())
                 sim_matrix = torch.zeros((len(uids), len(uids)))
-                
+
                 for i, uid1 in enumerate(uids):
-                    grad1 = self.decode_gradient(window_peers[uid1]['state_dict'])
+                    grad1 = self.decode_gradient(window_peers[uid1]["state_dict"])
                     for j, uid2 in enumerate(uids[i:], i):
-                        grad2 = self.decode_gradient(window_peers[uid2]['state_dict'])
+                        grad2 = self.decode_gradient(window_peers[uid2]["state_dict"])
                         cos_sim = F.cosine_similarity(grad1, grad2, dim=0)
-                        sim_matrix[i,j] = sim_matrix[j,i] = cos_sim
+                        sim_matrix[i, j] = sim_matrix[j, i] = cos_sim
 
                 # Calculate average similarity excluding self
                 avg_similarities = {}
@@ -232,24 +245,42 @@ class Analyzer:
                     avg_similarities[uid1] = similarities.sum() / (len(uids) - 1)
 
                 # Log similarity metrics
-                self.wandb.log({
-                    f"analyzer/similarity/{uid}/avg_peer_similarity": avg_similarities[uid],
-                    f"analyzer/similarity/{uid}/max_peer_similarity": sim_matrix[uids.index(uid)].max(),
-                    f"analyzer/similarity/{uid}/min_peer_similarity": sim_matrix[uids.index(uid)].min(),
-                }, step=self.current_step)
+                self.wandb.log(
+                    {
+                        f"analyzer/similarity/{uid}/avg_peer_similarity": avg_similarities[
+                            uid
+                        ],
+                        f"analyzer/similarity/{uid}/max_peer_similarity": sim_matrix[
+                            uids.index(uid)
+                        ].max(),
+                        f"analyzer/similarity/{uid}/min_peer_similarity": sim_matrix[
+                            uids.index(uid)
+                        ].min(),
+                    },
+                    step=self.current_step,
+                )
 
             # Analyze this peer's gradients
-            metrics = self.analyze_state_dict(state_dict, self.transformer, self.compressor)
+            metrics = self.analyze_state_dict(
+                state_dict, self.transformer, self.compressor
+            )
 
             # Log metrics
-            self.wandb.log({
-                f"analyzer/gradients/{uid}/norm": metrics["gradient_norm"],
-                f"analyzer/indices/{uid}/reuse_ratio": metrics["index_reuse_ratio"],
-                f"analyzer/indices/{uid}/unique_count": metrics["unique_indices_count"],
-                f"analyzer/indices/{uid}/total_count": metrics["total_indices_count"],
-                f"analyzer/metadata/{uid}/window": window,
-                f"analyzer/metadata/{uid}/timestamp": timestamp,
-            }, step=self.current_step)
+            self.wandb.log(
+                {
+                    f"analyzer/gradients/{uid}/norm": metrics["gradient_norm"],
+                    f"analyzer/indices/{uid}/reuse_ratio": metrics["index_reuse_ratio"],
+                    f"analyzer/indices/{uid}/unique_count": metrics[
+                        "unique_indices_count"
+                    ],
+                    f"analyzer/indices/{uid}/total_count": metrics[
+                        "total_indices_count"
+                    ],
+                    f"analyzer/metadata/{uid}/window": window,
+                    f"analyzer/metadata/{uid}/timestamp": timestamp,
+                },
+                step=self.current_step,
+            )
 
             # Cleanup old window data
             self.cleanup_old_windows()
@@ -275,26 +306,36 @@ class Analyzer:
         """Analyze gradient statistics from state dict with peer comparisons."""
         peer_grads = {}
         peer_indices = {}
-        
+
         # Process each parameter's gradients
         for n, param_data in state_dict.items():
-            if n.endswith('vals'):
+            if n.endswith("vals"):
                 param_name = n[:-4]  # Remove 'vals' suffix
                 idxs = state_dict.get(f"{param_name}idxs")
                 vals = state_dict.get(f"{param_name}vals")
-                
+
                 if idxs is not None and vals is not None:
+                    # Convert numpy arrays to torch tensors
+                    if isinstance(idxs, np.ndarray):
+                        idxs = torch.from_numpy(idxs).to(self.config.device)
+                    if isinstance(vals, np.ndarray):
+                        vals = torch.from_numpy(vals).to(self.config.device)
+
                     # Store indices for analysis
-                    peer_indices[param_name] = set(idxs.flatten())
-                    
+                    peer_indices[param_name] = set(idxs.flatten().cpu().numpy())
+
                     # Decode the gradient using transformer/compressor
                     decoded_grad = transformer.decode(
                         compressor.decompress(
-                            torch.zeros_like(transformer.shapes[param_name]),
+                            torch.zeros_like(
+                                transformer.encode(
+                                    dict(self.model.named_parameters())[param_name]
+                                )
+                            ),
                             idxs,
                             vals,
-                            transformer.shapes[param_name],
-                            transformer.totalks[param_name]
+                            self.xshapes[param_name],
+                            self.totalks[param_name],
                         )
                     )
                     peer_grads[param_name] = decoded_grad.flatten()
@@ -304,15 +345,15 @@ class Analyzer:
 
         # Concatenate all parameter gradients
         all_grads = torch.cat([grad for grad in peer_grads.values()])
-        
+
         # Calculate gradient norm
         grad_norm = float(torch.norm(all_grads).item())
-        
+
         # Analyze index patterns
         total_indices = sum(len(indices) for indices in peer_indices.values())
         unique_indices = sum(len(set(indices)) for indices in peer_indices.values())
         index_reuse_ratio = unique_indices / total_indices if total_indices > 0 else 0
-        
+
         return {
             "gradient_norm": grad_norm,
             "index_reuse_ratio": index_reuse_ratio,
@@ -321,21 +362,31 @@ class Analyzer:
         }
 
     def decode_gradient(self, state_dict):
-        """Helper to decode and flatten full gradient."""
+        """Decode gradient from state dict."""
         decoded_grads = []
         for n, param_data in state_dict.items():
-            if n.endswith('vals'):
+            if n.endswith("vals"):
                 param_name = n[:-4]
                 idxs = state_dict.get(f"{param_name}idxs")
                 vals = state_dict.get(f"{param_name}vals")
                 if idxs is not None and vals is not None:
+                    # Convert numpy arrays to torch tensors
+                    if isinstance(idxs, np.ndarray):
+                        idxs = torch.from_numpy(idxs).to(self.config.device)
+                    if isinstance(vals, np.ndarray):
+                        vals = torch.from_numpy(vals).to(self.config.device)
+
                     decoded = self.transformer.decode(
                         self.compressor.decompress(
-                            torch.zeros_like(self.transformer.shapes[param_name]),
+                            torch.zeros_like(
+                                self.transformer.encode(
+                                    dict(self.model.named_parameters())[param_name]
+                                )
+                            ),
                             idxs,
                             vals,
-                            self.transformer.shapes[param_name],
-                            self.transformer.totalks[param_name]
+                            self.xshapes[param_name],
+                            self.totalks[param_name],
                         )
                     )
                     decoded_grads.append(decoded.flatten())
@@ -343,14 +394,14 @@ class Analyzer:
 
     def cleanup_old_windows(self, window_retention=5):
         """Cleanup gradient data from old windows."""
-        if hasattr(self, 'peer_gradients'):
-            current_windows = {data['window'] for data in self.peer_gradients.values()}
+        if hasattr(self, "peer_gradients"):
+            current_windows = {data["window"] for data in self.peer_gradients.values()}
             if len(current_windows) > window_retention:
                 min_window_to_keep = sorted(current_windows)[-window_retention]
                 self.peer_gradients = {
-                    uid: data 
-                    for uid, data in self.peer_gradients.items() 
-                    if data['window'] >= min_window_to_keep
+                    uid: data
+                    for uid, data in self.peer_gradients.items()
+                    if data["window"] >= min_window_to_keep
                 }
 
 
@@ -360,6 +411,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import scipy.stats
-
     main()

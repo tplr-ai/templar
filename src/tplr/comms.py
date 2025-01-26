@@ -270,7 +270,7 @@ class Comms(ChainManager):
 
             # Handle PyTorch files
             file_size = os.path.getsize(file_path)
-            multipart_threshold = 64 * 1024 * 1024  # 64MB
+            multipart_threshold = 100 * 1024 * 1024  # 100MB
 
             async with self.session.create_client(
                 "s3",

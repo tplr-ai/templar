@@ -39,7 +39,7 @@ if missing_vars:
 
 # Now safe to import tplr
 import tplr
-from tplr.local_parquet_dataset import LocalParquetDatasetLoader
+from tplr.r2_dataset import R2DatasetLoader
 from tplr.logging import logger, debug, T
 
 
@@ -65,7 +65,7 @@ class ParquetLoaderBenchmark:
             try:
                 # Get pages
                 pages_start = T()
-                pages = await LocalParquetDatasetLoader.next_pages(
+                pages = await R2DatasetLoader.next_pages(
                     offset=i, n_pages=n_pages, seed=f"benchmark_{i}"
                 )
                 pages_duration = T() - pages_start
@@ -73,7 +73,7 @@ class ParquetLoaderBenchmark:
 
                 # Create loader
                 loader_start = T()
-                loader = await LocalParquetDatasetLoader.create(
+                loader = await R2DatasetLoader.create(
                     batch_size=batch_size,
                     sequence_length=sequence_length,
                     pages_info=pages,

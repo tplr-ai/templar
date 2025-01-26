@@ -242,12 +242,12 @@ class Miner:
 
             # 2. Load training data for this window
             data_start = tplr.T()
-            pages = await tplr.r2_dataset.DatasetLoader.next_pages(
+            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
                 offset = step_window,
                 n_pages = self.hparams.pages_per_window,
                 seed = self.metagraph.hotkeys[self.uid] #type: ignore
             )            
-            loader = await tplr.r2_dataset.DatasetLoader.create(
+            loader = await tplr.r2_dataset.R2DatasetLoader.create(
                 batch_size = self.hparams.batch_size,
                 sequence_length = self.hparams.sequence_length,
                 pages_info = pages,

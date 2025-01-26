@@ -37,7 +37,7 @@ if missing_vars:
 import pytest
 from transformers import AutoTokenizer
 from tplr.logging import logger, debug, T
-from tplr.local_parquet_dataset import LocalParquetDatasetLoader
+from tplr.r2_dataset import R2DatasetLoader
 from tplr.hparams import load_hparams
 
 
@@ -48,7 +48,7 @@ debug()
 @pytest.mark.asyncio
 async def test_local_parquet_loader():
     """
-    Simple integration test to ensure LocalParquetDatasetLoader can fetch pages from your R2 parquet data.
+    Simple integration test to ensure R2DatasetLoader can fetch pages from your R2 parquet data.
     Adjust environment variables & the code below to point to your actual dataset, then run:
         pytest tests/test_local_parquet_loader.py
     """
@@ -85,13 +85,11 @@ async def test_local_parquet_loader():
     sequence_length = 128
 
     # 1. Generate random pages
-    pages = await LocalParquetDatasetLoader.next_pages(
-        offset=offset, n_pages=n_pages, seed=seed
-    )
+    pages = await R2DatasetLoader.next_pages(offset=offset, n_pages=n_pages, seed=seed)
     logger.info(f"Random pages selected: {pages} ({T() - start_time:.2f}s)")
 
     # 2. Create loader
-    loader = await LocalParquetDatasetLoader.create(
+    loader = await R2DatasetLoader.create(
         batch_size=batch_size,
         sequence_length=sequence_length,
         pages_info=pages,
@@ -123,7 +121,7 @@ async def test_local_parquet_loader():
         logger.error(f"[red]Error during iteration: {str(e)}[/red]", exc_info=True)
 
     # Basic assertion: We expect at least 1 batch if pages > 0
-    assert batch_count > 0, "No batches were produced by the LocalParquetDatasetLoader"
+    assert batch_count > 0, "No batches were produced by the R2DatasetLoader"
     logger.info(
         f"[green]Test completed successfully. Processed {batch_count} batches ({T() - start_time:.2f}s)[/green]"
     )

@@ -27,7 +27,7 @@ from .chain import *
 from .comms import *
 from .compress import *
 from .dataset import *
-from .local_parquet_dataset import *
+from .r2_dataset import *
 from .hparams import *
 from .logging import *
 from .schemas import *

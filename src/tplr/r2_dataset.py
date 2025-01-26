@@ -192,7 +192,9 @@ class R2DatasetLoader(DatasetLoader):
 
             configs_data = {}
             for path in all_paths:
-                config_name = path.split("/")[-1]  # This will be CC-MAIN-2017-04 etc. #type: ignore
+                config_name = path.split("/")[
+                    -1
+                ]  # This will be CC-MAIN-2017-04 etc. #type: ignore
 
                 # List all parquet files in this config
                 parquet_files = [f for f in fs.ls(path) if f.endswith(".parquet")]
@@ -362,7 +364,7 @@ class R2DatasetLoader(DatasetLoader):
     def _get_fs():
         if not R2DatasetLoader._fs:
             dataset_config = BUCKET_SECRETS["dataset"]
-            read_credentials = dataset_config["credentials"]["read"] #type: ignore
+            read_credentials = dataset_config["credentials"]["read"]  # type: ignore
 
             R2DatasetLoader._fs = s3fs.S3FileSystem(
                 key=read_credentials["access_key_id"],
@@ -445,7 +447,7 @@ class R2DatasetLoader(DatasetLoader):
                 )
 
                 # Process in large batches
-                texts = table["text"].to_pylist() #type: ignore
+                texts = table["text"].to_pylist()  # type: ignore
                 all_tokens = []
 
                 for i in range(0, len(texts), self.BATCH_SIZE):
@@ -459,7 +461,7 @@ class R2DatasetLoader(DatasetLoader):
                         return_tensors=None,
                     )
 
-                    for input_ids in tokens["input_ids"]: #type: ignore
+                    for input_ids in tokens["input_ids"]:  # type: ignore
                         all_tokens.extend(input_ids)
                         all_tokens.append(self.tokenizer.eos_token_id)
 
@@ -530,7 +532,7 @@ class R2DatasetLoader(DatasetLoader):
 
         for pf_data in self._parquet_cache.values():
             try:
-                pf_data["file"].close() #type: ignore
+                pf_data["file"].close()  # type: ignore
             except Exception as e:
                 logger.debug(f"Error closing parquet file: {e}")
 

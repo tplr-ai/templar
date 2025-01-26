@@ -4,36 +4,36 @@ const PROJECT_NAME = `test_${RANDOM_SUFFIX}`;
 
 module.exports = {
     apps: [
-        {
-            name: "TM1",
-            script: "neurons/miner.py",
-            interpreter: "python3",
-            env: {
-                ...process.env,
-                PROJECT_NAME: PROJECT_NAME
-            },
-            args: `--wallet.name Bistro --wallet.hotkey M1 --device cuda:3 --subtensor.network ws://127.0.0.1:9945 --netuid 1 --use_wandb --project "${PROJECT_NAME}"`
-        },
-        {
-            name: "TM2",
-            script: "neurons/miner.py",
-            interpreter: "python3",
-            env: {
-                ...process.env,
-                PROJECT_NAME: PROJECT_NAME
-            },
-            args: `--wallet.name Bistro --wallet.hotkey M2 --device cuda:1 --subtensor.network ws://127.0.0.1:9945 --netuid 1 --use_wandb --project "${PROJECT_NAME}"`
-        },
-        {
-            name: "TV1",
-            script: "neurons/validator.py",
-            interpreter: "python3",
-            env: {
-                ...process.env,
-                PROJECT_NAME: PROJECT_NAME
-            },
-            args: `--wallet.name Bistro --wallet.hotkey V1 --device cuda:2 --subtensor.network ws://127.0.0.1:9945 --netuid 1 --use_wandb --project "${PROJECT_NAME}" --store-gathers`
-        },
+        // {
+        //     name: "TM1",
+        //     script: "neurons/miner.py",
+        //     interpreter: "python3",
+        //     env: {
+        //         ...process.env,
+        //         PROJECT_NAME: PROJECT_NAME
+        //     },
+        //     args: `--wallet.name Bistro --wallet.hotkey M1 --device cuda:3 --subtensor.network ws://127.0.0.1:9945 --netuid 1 --use_wandb --project "${PROJECT_NAME}"`
+        // },
+        // {
+        //     name: "TM2",
+        //     script: "neurons/miner.py",
+        //     interpreter: "python3",
+        //     env: {
+        //         ...process.env,
+        //         PROJECT_NAME: PROJECT_NAME
+        //     },
+        //     args: `--wallet.name Bistro --wallet.hotkey M2 --device cuda:1 --subtensor.network ws://127.0.0.1:9945 --netuid 1 --use_wandb --project "${PROJECT_NAME}"`
+        // },
+        // {
+        //     name: "TV1",
+        //     script: "neurons/validator.py",
+        //     interpreter: "python3",
+        //     env: {
+        //         ...process.env,
+        //         PROJECT_NAME: PROJECT_NAME
+        //     },
+        //     args: `--wallet.name Bistro --wallet.hotkey V1 --device cuda:2 --subtensor.network ws://127.0.0.1:9945 --netuid 1 --use_wandb --project "${PROJECT_NAME}" --store-gathers`
+        // },
         {
             name: "TA1",
             script: "scripts/analyser.py",
@@ -42,7 +42,7 @@ module.exports = {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
-            args: `--project "${PROJECT_NAME}"  --device cuda:4`
+            args: `--device cuda:4`
         }
     ]
 } 

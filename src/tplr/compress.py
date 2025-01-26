@@ -1,5 +1,5 @@
 # ruff: noqa
-
+# type: ignore
 
 # The MIT License (MIT)
 # © 2024 templar.tech

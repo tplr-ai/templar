@@ -24,6 +24,7 @@ dependencies = [
     "zstandard",
     "s3fs",
     "pyarrow",
+    "scipy"
 
 ]
 
@@ -40,6 +41,7 @@ dev = [
     "seaborn",
     "pytest-asyncio",
     "ruff"
+
 ]
 
 [tool.pytest.ini_options]

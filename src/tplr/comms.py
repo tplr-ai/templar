@@ -1,3 +1,4 @@
+# type: ignore
 import os
 import re
 import math
@@ -7,10 +8,11 @@ import torch
 import asyncio
 import aiofiles
 import botocore
+import numpy as np
 import bittensor as bt
 from tqdm import tqdm as std_tqdm
 from types import SimpleNamespace
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, TypeVar, Any
 from aiobotocore.session import get_session
 
 from . import __version__
@@ -24,6 +26,9 @@ import tplr as tplr
 # Constants
 CF_REGION_NAME: str = "enam"
 LOCAL_TMP_DIR = "/tmp/local_store"
+
+T = TypeVar("T", bound=Any)
+FixtureFunction = TypeVar("FixtureFunction", bound=Any)
 
 
 class Comms(ChainManager):
@@ -94,11 +99,11 @@ class Comms(ChainManager):
                     )
 
                 bucket_config = BUCKET_SECRETS["gradients"]
-                credentials = bucket_config["credentials"][access_type]
+                credentials = bucket_config["credentials"][access_type]  # type: ignore
             else:  # dataset bucket
                 bucket_config = BUCKET_SECRETS["dataset"]
                 # For dataset, we'll use read credentials by default
-                credentials = bucket_config["credentials"]["read"]
+                credentials = bucket_config["credentials"]["read"]  # type: ignore
 
             # Create a Bucket object using specified credentials
             bucket = Bucket(
@@ -171,10 +176,10 @@ class Comms(ChainManager):
             endpoint_url=self.get_base_url(BUCKET_SECRETS["gradients"]["account_id"]),
             region_name=CF_REGION_NAME,
             config=client_config,
-            aws_access_key_id=BUCKET_SECRETS["gradients"]["credentials"]["write"][
+            aws_access_key_id=BUCKET_SECRETS["gradients"]["credentials"]["write"][  # type: ignore
                 "access_key_id"
             ],
-            aws_secret_access_key=BUCKET_SECRETS["gradients"]["credentials"]["write"][
+            aws_secret_access_key=BUCKET_SECRETS["gradients"]["credentials"]["write"][  # type: ignore
                 "secret_access_key"
             ],
         ) as s3_client:
@@ -195,7 +200,7 @@ class Comms(ChainManager):
                 # Identify stale objects to delete
                 stale_objects = []
                 for obj in contents:
-                    key = obj["Key"]
+                    key: str = obj["Key"]  # type: ignore
                     # Key format: uid/window/key
                     parts = key.split("/")
                     if len(parts) < 2:
@@ -264,7 +269,7 @@ class Comms(ChainManager):
 
             # Handle PyTorch files
             file_size = os.path.getsize(file_path)
-            multipart_threshold = 64 * 1024 * 1024  # 64MB
+            multipart_threshold = 100 * 1024 * 1024  # 100MB
 
             async with self.session.create_client(
                 "s3",
@@ -326,7 +331,7 @@ class Comms(ChainManager):
                         return None
                     raise
 
-                file_size = response["ContentLength"]
+                file_size = response["ContentLength"]  # type: ignore
 
                 try:
                     if (
@@ -337,7 +342,7 @@ class Comms(ChainManager):
                             timeout=timeout,
                         )
                         async with aiofiles.open(temp_file_path, "wb") as f:
-                            async with response["Body"] as stream:
+                            async with response["Body"] as stream:  # type: ignore
                                 data = await asyncio.wait_for(
                                     stream.read(), timeout=timeout
                                 )
@@ -388,7 +393,7 @@ class Comms(ChainManager):
             response = await s3_client.create_multipart_upload(
                 Bucket=self.bucket.name, Key=key
             )
-            upload_id = response["UploadId"]
+            upload_id = response["UploadId"]  # type: ignore
 
             # Define part size (e.g., 64MB)
             part_size = 64 * 1024 * 1024  # 64MB
@@ -424,7 +429,7 @@ class Comms(ChainManager):
                                 Body=data,
                             )
                             part_results.append(
-                                {"ETag": response["ETag"], "PartNumber": part_number}
+                                {"ETag": response["ETag"], "PartNumber": part_number}  # type: ignore
                             )
                     part_queue.task_done()
                 return part_results
@@ -435,7 +440,7 @@ class Comms(ChainManager):
 
             # Flatten the results
             parts = [item for sublist in results_nested for item in sublist]
-            parts.sort(key=lambda x: x["PartNumber"])
+            parts.sort(key=lambda x: x["PartNumber"])  # type: ignore
 
             # Complete multipart upload
             await s3_client.complete_multipart_upload(
@@ -515,7 +520,7 @@ class Comms(ChainManager):
                                 Range=f"bytes={start}-{end}",
                             )
 
-                            async with response["Body"] as stream:
+                            async with response["Body"] as stream:  # type: ignore
                                 chunk_data = await stream.read()
 
                             # Verify chunk size matches expected
@@ -562,7 +567,8 @@ class Comms(ChainManager):
                     raise Exception(f"Missing chunks: {missing_chunks}")
 
                 downloaded_size = sum(
-                    chunk["size"] for chunk in downloaded_chunks.values()
+                    chunk["size"]
+                    for chunk in downloaded_chunks.values()  # type: ignore
                 )
                 if downloaded_size != file_size:
                     raise Exception(
@@ -666,7 +672,7 @@ class Comms(ChainManager):
 
             # Remote storage logic
             peer_bucket = self.commitments.get(int(uid))
-            tplr.logger.info(f"Peer bucket : {peer_bucket}")
+            tplr.logger.debug(f"Peer bucket : {peer_bucket}")
             if not peer_bucket:
                 return None
 
@@ -734,6 +740,7 @@ class Comms(ChainManager):
         global_step: int,
         local: bool = True,
         stale_retention: int = 10,
+        store_gathers: bool = False,  # New parameter
     ) -> Optional[SimpleNamespace]:
         """Gather operation with individual gradient normalization."""
         start_time = time.time()
@@ -794,6 +801,42 @@ class Comms(ChainManager):
                 tplr.logger.debug(f"Empty state dict from UID {uid}")
                 continue
 
+            # Store raw gradients if enabled
+            if store_gathers:
+                try:
+                    gradient_data = {
+                        "state_dict": {
+                            k: v.cpu().numpy() for k, v in state_dict_resp.items()
+                        },
+                        "metadata": {
+                            "uid": uid,
+                            "window": window,
+                            "global_step": global_step_resp,
+                            "timestamp": time.time(),
+                            "version": __version__,
+                        },
+                    }
+
+                    # Create temporary file
+                    temp_file = os.path.join(
+                        self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
+                    )
+                    try:
+                        np.savez_compressed(temp_file, **gradient_data)
+                        key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
+
+                        await self.s3_put_object(
+                            key=key, file_path=temp_file, bucket=self.bucket
+                        )
+                    finally:
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+
+                except Exception as e:
+                    tplr.logger.error(
+                        f"Failed to store gradient from UID {uid}: {str(e)}"
+                    )
+
             # Normalize each gradient value individually
             normalized_dict = {}
             for param_name, tensor in state_dict_resp.items():
@@ -832,10 +875,10 @@ class Comms(ChainManager):
         for param_name, tensors in aggregated_state_dict.items():
             # Get original dtype
             orig_dtype = (
-                state_dict_resp[param_name].dtype if state_dict_resp else torch.float32
+                state_dict_resp[param_name].dtype if state_dict_resp else torch.float32  # type: ignore
             )
             # Convert back to original dtype
-            final_state_dict[param_name] = tensors[0].to(orig_dtype)
+            final_state_dict[param_name] = tensors[0].to(orig_dtype)  # type: ignore
 
         # Create result namespace
         result = SimpleNamespace(
@@ -874,18 +917,18 @@ class Comms(ChainManager):
                     Bucket=self.bucket.name, Prefix="checkpoint"
                 ):
                     for obj in page.get("Contents", []):
-                        if obj["Key"].startswith("checkpoint"):
+                        if obj["Key"].startswith("checkpoint"):  # type: ignore
                             checkpoint_files.append(obj)
 
                 # Sort by last modified time
-                checkpoint_files.sort(key=lambda x: x["LastModified"], reverse=True)
+                checkpoint_files.sort(key=lambda x: x["LastModified"], reverse=True)  # type: ignore
 
                 # Delete older checkpoints
                 if len(checkpoint_files) > keep_last:
                     to_delete = checkpoint_files[keep_last:]
                     await s3_client.delete_objects(
                         Bucket=self.bucket.name,
-                        Delete={"Objects": [{"Key": obj["Key"]} for obj in to_delete]},
+                        Delete={"Objects": [{"Key": obj["Key"]} for obj in to_delete]},  # type: ignore
                     )
                     tplr.logger.info(f"Deleted {len(to_delete)} old checkpoints")
 
@@ -936,7 +979,7 @@ class Comms(ChainManager):
                         tplr.logger.debug(f"Found {filename} for UID {uid}")
                         return True
                     except botocore.exceptions.ClientError as e:
-                        if e.response["Error"]["Code"] not in ["404", "403"]:
+                        if e.response["Error"]["Code"] not in ["404", "403"]:  # type: ignore
                             tplr.logger.error(
                                 f"Error checking activity for UID {uid}: {e}"
                             )
@@ -1035,40 +1078,41 @@ class Comms(ChainManager):
                 valid_checkpoints = []
 
                 for obj in response.get("Contents", []):
-                    key = obj["Key"]
+                    key: str = obj.get("Key", "")
                     match = pattern.match(key)
                     if match:
                         valid_checkpoints.append(
                             {
                                 "key": key,
                                 "window": int(match.group(1)),
-                                "size": obj["Size"],
-                                "last_modified": obj["LastModified"],
+                                "size": obj["Size"],  # type: ignore
+                                "last_modified": obj["LastModified"],  # type: ignore
                             }
                         )
 
                 if valid_checkpoints:
                     # Sort by LastModified timestamp (most recent first)
-                    latest = max(valid_checkpoints, key=lambda x: x["last_modified"])
+                    latest = max(valid_checkpoints, key=lambda x: x["last_modified"])  # type: ignore
                 else:
                     tplr.logger.info("No valid checkpoint files found")
                     return None
 
                 tplr.logger.info(
-                    f"Found latest checkpoint: {latest['key']} from window {latest['window']}, "
-                    f"modified at {latest['last_modified']}"
+                    f"Found latest checkpoint: {latest['key']} from window {latest['window']}, "  # type: ignore
+                    f"modified at {latest['last_modified']}"  # type: ignore
                 )
 
                 # Get the checkpoint data using the window from the latest checkpoint
                 loaded_data = await self.s3_get_object(
-                    key=latest["key"], bucket=validator_bucket
+                    key=latest["key"],
+                    bucket=validator_bucket,  # type: ignore
                 )
 
                 if loaded_data is None:
-                    tplr.logger.error(f"Failed to download checkpoint {latest['key']}")
+                    tplr.logger.error(f"Failed to download checkpoint {latest['key']}")  # type: ignore
                     return None
 
-                return loaded_data, latest["window"]
+                return loaded_data, latest["window"]  # type: ignore
 
         except Exception as e:
             tplr.logger.error(f"Error getting latest checkpoint: {e}")
@@ -1236,7 +1280,7 @@ class Comms(ChainManager):
 
             tplr.logger.info(
                 f"Finished catch-up. Final global_step={global_step}, "
-                f"optimizer steps={optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
+                f"optimizer steps={optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "  # type: ignore
                 f"scheduler last_epoch={scheduler.last_epoch}"
             )
             return True, momentum, global_step, optimizer, scheduler

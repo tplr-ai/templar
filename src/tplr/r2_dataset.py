@@ -14,7 +14,7 @@ from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
 
 
-class LocalParquetDatasetLoader(DatasetLoader):
+class R2DatasetLoader(DatasetLoader):
     """
     A drop-in replacement for DatasetLoader that reads Parquet files from Cloudflare R2 storage.
 
@@ -173,13 +173,15 @@ class LocalParquetDatasetLoader(DatasetLoader):
         Raises:
             Exception: If scanning fails
         """
-        if LocalParquetDatasetLoader._configs_data_cache is not None:
-            return LocalParquetDatasetLoader._configs_data_cache
+        if R2DatasetLoader._configs_data_cache is not None:
+            return R2DatasetLoader._configs_data_cache
 
-        fs = LocalParquetDatasetLoader._get_fs()
+        fs = R2DatasetLoader._get_fs()
 
         # Build the full path including dataset subfolder
-        dataset_path = f"{BUCKET_SECRETS['dataset']['name']}/{LocalParquetDatasetLoader.DATASET_SUBFOLDER}"
+        dataset_path = (
+            f"{BUCKET_SECRETS['dataset']['name']}/{R2DatasetLoader.DATASET_SUBFOLDER}"
+        )
 
         try:
             print(f"Listing dataset path: {dataset_path}")
@@ -190,7 +192,9 @@ class LocalParquetDatasetLoader(DatasetLoader):
 
             configs_data = {}
             for path in all_paths:
-                config_name = path.split("/")[-1]  # This will be CC-MAIN-2017-04 etc.
+                config_name = path.split("/")[
+                    -1
+                ]  # This will be CC-MAIN-2017-04 etc. #type: ignore
 
                 # List all parquet files in this config
                 parquet_files = [f for f in fs.ls(path) if f.endswith(".parquet")]
@@ -214,7 +218,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
                     f"Added config {config_name} with {total_rows} rows across {len(parquet_files)} shards"
                 )
 
-            LocalParquetDatasetLoader._configs_data_cache = configs_data
+            R2DatasetLoader._configs_data_cache = configs_data
             return configs_data
 
         except Exception as e:
@@ -243,7 +247,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
         rng = random.Random(seed)
 
         # Load cached metadata
-        shard_sizes, _ = await LocalParquetDatasetLoader._load_r2_metadata()
+        shard_sizes, _ = await R2DatasetLoader._load_r2_metadata()
 
         # Get configs with their total rows
         configs = [(name, data["total_rows"]) for name, data in shard_sizes.items()]
@@ -274,7 +278,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
         batch_size, sequence_length, pages_info, tokenizer, pack_samples=True
     ):
         """Optimized loader creation with prefetching"""
-        loader = LocalParquetDatasetLoader(
+        loader = R2DatasetLoader(
             batch_size=batch_size,
             sequence_length=sequence_length,
             tokenizer=tokenizer,
@@ -309,18 +313,20 @@ class LocalParquetDatasetLoader(DatasetLoader):
         Raises:
             Exception: If metadata loading fails
         """
-        if LocalParquetDatasetLoader._shard_sizes is not None:
+        if R2DatasetLoader._shard_sizes is not None:
             return (
-                LocalParquetDatasetLoader._shard_sizes,
-                LocalParquetDatasetLoader._metadata_config,
+                R2DatasetLoader._shard_sizes,
+                R2DatasetLoader._metadata_config,
             )
 
-        fs = LocalParquetDatasetLoader._get_fs()
-        cache_dir = LocalParquetDatasetLoader._local_cache_dir
+        fs = R2DatasetLoader._get_fs()
+        cache_dir = R2DatasetLoader._local_cache_dir
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Define R2 and local paths
-        r2_base = f"{BUCKET_SECRETS['dataset']['name']}/{LocalParquetDatasetLoader.DATASET_SUBFOLDER}"
+        r2_base = (
+            f"{BUCKET_SECRETS['dataset']['name']}/{R2DatasetLoader.DATASET_SUBFOLDER}"
+        )
         r2_paths = {
             "shard_sizes": f"{r2_base}/_shard_sizes.json",
             "metadata": f"{r2_base}/_metadata.yaml",
@@ -336,18 +342,18 @@ class LocalParquetDatasetLoader(DatasetLoader):
                 logger.info("Downloading shard sizes from R2...")
                 fs.get(r2_paths["shard_sizes"], str(local_paths["shard_sizes"]))
             with open(local_paths["shard_sizes"]) as f:
-                LocalParquetDatasetLoader._shard_sizes = json.load(f)
+                R2DatasetLoader._shard_sizes = json.load(f)
 
             # Download and load metadata config
             if not local_paths["metadata"].exists():
                 logger.info("Downloading metadata config from R2...")
                 fs.get(r2_paths["metadata"], str(local_paths["metadata"]))
             with open(local_paths["metadata"]) as f:
-                LocalParquetDatasetLoader._metadata_config = yaml.safe_load(f)
+                R2DatasetLoader._metadata_config = yaml.safe_load(f)
 
             return (
-                LocalParquetDatasetLoader._shard_sizes,
-                LocalParquetDatasetLoader._metadata_config,
+                R2DatasetLoader._shard_sizes,
+                R2DatasetLoader._metadata_config,
             )
 
         except Exception as e:
@@ -356,16 +362,16 @@ class LocalParquetDatasetLoader(DatasetLoader):
 
     @staticmethod
     def _get_fs():
-        if not LocalParquetDatasetLoader._fs:
+        if not R2DatasetLoader._fs:
             dataset_config = BUCKET_SECRETS["dataset"]
-            read_credentials = dataset_config["credentials"]["read"]
+            read_credentials = dataset_config["credentials"]["read"]  # type: ignore
 
-            LocalParquetDatasetLoader._fs = s3fs.S3FileSystem(
+            R2DatasetLoader._fs = s3fs.S3FileSystem(
                 key=read_credentials["access_key_id"],
                 secret=read_credentials["secret_access_key"],
                 client_kwargs={
                     "endpoint_url": f"https://{dataset_config['account_id']}.r2.cloudflarestorage.com",
-                    "region_name": LocalParquetDatasetLoader.CF_REGION_NAME,
+                    "region_name": R2DatasetLoader.CF_REGION_NAME,
                 },
                 config_kwargs={
                     "max_pool_connections": 50,
@@ -375,10 +381,10 @@ class LocalParquetDatasetLoader(DatasetLoader):
                 },
                 use_listings_cache=True,
                 skip_instance_cache=False,
-                default_block_size=LocalParquetDatasetLoader.READ_BUFFER_SIZE,
+                default_block_size=R2DatasetLoader.READ_BUFFER_SIZE,
                 default_cache_type="readahead",
             )
-        return LocalParquetDatasetLoader._fs
+        return R2DatasetLoader._fs
 
     async def _get_next_page(self):
         """Get next page from the queue"""
@@ -441,7 +447,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
                 )
 
                 # Process in large batches
-                texts = table["text"].to_pylist()
+                texts = table["text"].to_pylist()  # type: ignore
                 all_tokens = []
 
                 for i in range(0, len(texts), self.BATCH_SIZE):
@@ -455,7 +461,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
                         return_tensors=None,
                     )
 
-                    for input_ids in tokens["input_ids"]:
+                    for input_ids in tokens["input_ids"]:  # type: ignore
                         all_tokens.extend(input_ids)
                         all_tokens.append(self.tokenizer.eos_token_id)
 
@@ -526,7 +532,7 @@ class LocalParquetDatasetLoader(DatasetLoader):
 
         for pf_data in self._parquet_cache.values():
             try:
-                pf_data["file"].close()
+                pf_data["file"].close()  # type: ignore
             except Exception as e:
                 logger.debug(f"Error closing parquet file: {e}")
 
@@ -537,14 +543,12 @@ class LocalParquetDatasetLoader(DatasetLoader):
     @lru_cache(maxsize=32)
     def _get_parquet_file(shard_path: str):
         """Cached parquet file access"""
-        fs = LocalParquetDatasetLoader._get_fs()
-        f = fs.open(
-            shard_path, "rb", buffer_size=LocalParquetDatasetLoader.READ_BUFFER_SIZE
-        )
+        fs = R2DatasetLoader._get_fs()
+        f = fs.open(shard_path, "rb", buffer_size=R2DatasetLoader.READ_BUFFER_SIZE)
         return {"file": f, "parquet": pq.ParquetFile(f, memory_map=True)}
 
     @staticmethod
     @lru_cache(maxsize=1024)
     def _get_tokenized_cache(cache_key: str):
         """Cached tokenization results"""
-        return LocalParquetDatasetLoader._token_cache.get(cache_key)
+        return R2DatasetLoader._token_cache.get(cache_key)

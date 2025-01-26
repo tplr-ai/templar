@@ -6,11 +6,6 @@ All notable changes to this project will be documented in this file.
 
 ### 🚀 Features
 
-- Slash miner who dont submit gradients
-- R2 loader works, tests , benchmarks
-- Sub 7s
-- Add env vars for dataset bucket
-- Update env vars
 - Gradient analysis
 - Similarities
 

@@ -1,0 +1,22 @@
+## Installation
+
+Add these packages to pyproject.toml file
+
+    "Flask==2.2.2",
+    "Flask-SQLAlchemy==2.5.1",
+    "Flask-Migrate==3.1.0",
+    "asyncio==3.4.3",
+    "botocore==1.27.9",
+    "werkzeug==2.2.3"
+
+```bash
+# Install uv and configure venv
+pip install uv && uv python install 3.11 && uv python pin 3.11 && uv venv .venv
+source .venv/bin/activate
+
+# Install PyTorch with CUDA support
+uv pip install torch --index-url https://download.pytorch.org/whl/cu118\
+
+# uv sync to install required packages
+uv sync --extra all
+```

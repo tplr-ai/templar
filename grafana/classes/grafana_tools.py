@@ -248,34 +248,34 @@ class Grafana:
 
         return metagraph_info
 
-    async def run(self):
-        await self.initialize()
+    # async def run(self):
+    #     await self.initialize()
 
-        self.grad_dict = {}
-        step_window = self.current_window - WINDOW_OFFSET
+    #     self.grad_dict = {}
+    #     step_window = self.current_window - WINDOW_OFFSET
 
-        tplr.logger.info(f"\n{'-' * 20} Window: {step_window} {'-' * 20}")
+    #     tplr.logger.info(f"\n{'-' * 20} Window: {step_window} {'-' * 20}")
 
-        while True:
-            # Check and update the step_window if it has changed
-            if step_window != self.current_window - WINDOW_OFFSET:
-                print(f"window: {step_window}, Active list: {self.grad_dict.get(step_window, [])}")
-                print(f"window: {step_window}, Error list: {self.grad_error_dict.get(step_window, [])}")
+    #     while True:
+    #         # Check and update the step_window if it has changed
+    #         if step_window != self.current_window - WINDOW_OFFSET:
+    #             print(f"window: {step_window}, Active list: {self.grad_dict.get(step_window, [])}")
+    #             print(f"window: {step_window}, Error list: {self.grad_error_dict.get(step_window, [])}")
 
-                step_window = self.current_window - WINDOW_OFFSET
-                tplr.logger.info(f"\n{'-' * 20} Window: {step_window} {'-' * 20}")
-                self.comms.update_peers_with_buckets()
+    #             step_window = self.current_window - WINDOW_OFFSET
+    #             tplr.logger.info(f"\n{'-' * 20} Window: {step_window} {'-' * 20}")
+    #             self.comms.update_peers_with_buckets()
 
-            # Initialize the list for the current window if not already present
-            self.grad_dict.setdefault(step_window, [])
-            self.grad_error_dict.setdefault(step_window, [])
+    #         # Initialize the list for the current window if not already present
+    #         self.grad_dict.setdefault(step_window, [])
+    #         self.grad_error_dict.setdefault(step_window, [])
 
-            # Retrieve and update active miners for the current window
-            active_miners, error_miners = await self.get_active_miners(step_window)
-            self.grad_dict[step_window].extend(active_miners)
-            self.grad_error_dict[step_window].extend(error_miners)
+    #         # Retrieve and update active miners for the current window
+    #         active_miners, error_miners = await self.get_active_miners(step_window)
+    #         self.grad_dict[step_window].extend(active_miners)
+    #         self.grad_error_dict[step_window].extend(error_miners)
 
-            await asyncio.sleep(1)
+    #         await asyncio.sleep(1)
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
@@ -293,8 +293,3 @@ class Grafana:
                 break
             except Exception:
                 time.sleep(1)
-
-
-# Start miner/validator.
-if __name__ == "__main__":
-    asyncio.run(Grafana().run())

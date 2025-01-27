@@ -125,3 +125,73 @@ async def test_local_parquet_loader():
     logger.info(
         f"[green]Test completed successfully. Processed {batch_count} batches ({T() - start_time:.2f}s)[/green]"
     )
+
+@pytest.mark.asyncio
+async def test_large_page_offset_handling():
+    """
+    Test that the loader correctly handles large page offsets that might exceed row group bounds.
+    This specifically tests the fix for the row group index calculation.
+    """
+    start_time = T()
+    logger.info("Starting test_large_page_offset_handling")
+
+    # Load tokenizer
+    hparams = load_hparams()
+    tokenizer = hparams.tokenizer
+
+    # Get dataset configs to find maximum rows
+    configs_data = await R2DatasetLoader.fetch_dataset_configs()
+    
+    # Find a config with the most rows to test boundary conditions
+    max_rows_config = max(configs_data.items(), key=lambda x: x[1]['num_rows'])
+    config_name = max_rows_config[0]
+    num_rows = max_rows_config[1]['num_rows']
+    
+    # Test cases with different offsets
+    test_cases = [
+        (0, "start of dataset"),
+        (num_rows // 2, "middle of dataset"),
+        (num_rows - 200, "near end of dataset"),  # Leave room for page size
+    ]
+
+    for offset, description in test_cases:
+        logger.info(f"\nTesting {description} (offset: {offset})")
+        
+        # Create a single-page test with specific offset
+        pages = [(config_name, offset, "train")]
+        
+        try:
+            # Create loader with test page
+            loader = await R2DatasetLoader.create(
+                batch_size=2,
+                sequence_length=128,
+                pages_info=pages,
+                tokenizer=tokenizer,
+                pack_samples=False,
+            )
+
+            # Verify we can get at least one batch
+            batch = next(iter(loader))
+            
+            # Basic validation
+            assert batch is not None, f"Failed to get batch for offset {offset}"
+            assert batch.shape == (2, 128), f"Unexpected batch shape: {batch.shape}"
+            
+            # Verify the batch contains valid token IDs
+            for sequence in batch:
+                valid_tokens = sequence[sequence != tokenizer.pad_token_id]
+                assert len(valid_tokens) > 0, "Sequence contains no valid tokens"
+                
+                # Decode to verify we got meaningful text
+                text = tokenizer.decode(valid_tokens)
+                assert len(text.strip()) > 0, "Decoded text is empty"
+                
+            logger.info(f"[green]Successfully processed batch for offset {offset}[/green]")
+            
+        except Exception as e:
+            logger.error(f"[red]Error processing offset {offset}: {str(e)}[/red]", exc_info=True)
+            raise
+
+    logger.info(
+        f"[green]All offset tests completed successfully ({T() - start_time:.2f}s)[/green]"
+    )

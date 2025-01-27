@@ -395,12 +395,12 @@ class R2DatasetLoader(DatasetLoader):
                     pf_data = {"file": f, "parquet": pf}
                     self._parquet_cache[chosen_shard["path"]] = pf_data
 
-                # Read rows using shard's row count from metadata
-                rows_per_group = (
-                    chosen_shard["num_rows"] // pf_data["parquet"].num_row_groups
-                )
-                group_index = shard_offset // rows_per_group
+                # Fix: Ensure row group index is within bounds
+                num_row_groups = pf_data["parquet"].num_row_groups
+                rows_per_group = chosen_shard["num_rows"] // num_row_groups
+                group_index = min(shard_offset // rows_per_group, num_row_groups - 1)
 
+                # Read the row group
                 table = await asyncio.to_thread(
                     pf_data["parquet"].read_row_group,
                     group_index,
@@ -408,7 +408,11 @@ class R2DatasetLoader(DatasetLoader):
                     use_threads=True,
                 )
 
+                # Adjust start_idx based on actual rows in the group
                 start_idx = shard_offset % rows_per_group
+                group_rows = len(table)  # Get actual rows in this group
+                start_idx = min(start_idx, max(0, group_rows - self.num_rows_per_page))
+
                 texts = table["text"].to_pylist()[
                     start_idx : start_idx + self.num_rows_per_page
                 ]  # type: ignore

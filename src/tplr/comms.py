@@ -37,6 +37,7 @@ class Comms(ChainManager):
         uid=None,
         **kwargs,
     ):
+        print("hi")
         self.wallet = wallet
         self.uid = uid
         # Create temp directory for this instance
@@ -830,7 +831,7 @@ class Comms(ChainManager):
             ) as s3_client:
                 # Ensure that self.current_window is set
                 if not hasattr(self, "current_window") or self.current_window is None:
-                    tplr.logger.error(
+                    tplr.logger.info(
                         "current_window is not set in comms. Please set comms.current_window from the main thread."
                     )
                     return False
@@ -841,42 +842,42 @@ class Comms(ChainManager):
                     current_window - recent_windows, current_window + 1
                 ):
                     filename = f"gradient-{window}-{uid}-v{__version__}.pt"
-                    tplr.logger.debug(
+                    tplr.logger.info(
                         f"Checking for {filename} in bucket {peer_bucket.name}"
                     )
                     try:
                         await s3_client.head_object(
                             Bucket=peer_bucket.name, Key=filename
                         )
-                        tplr.logger.debug(f"Found {filename} for UID {uid}")
+                        tplr.logger.info(f"Found {filename} for UID {uid}")
                         return True
                     except botocore.exceptions.ClientError as e:
                         if e.response["Error"]["Code"] not in ["404", "403"]:
-                            tplr.logger.error(
+                            tplr.logger.info(
                                 f"Error checking activity for UID {uid}: {e}"
                             )
                             return False
-                        tplr.logger.debug(f"{filename} not found for UID {uid}")
+                        tplr.logger.info(f"{filename} not found for UID {uid}")
         except Exception as e:
-            tplr.logger.error(f"Error accessing bucket for UID {uid}: {e}")
+            tplr.logger.info(f"Error accessing bucket for UID {uid}: {e}")
             return False
 
         return False
 
     async def track_active_peers(self):
         """Background task to keep track of active peers."""
+        tplr.logger.info("Starting to track active peers...")
         while True:
             active_peers = set()
             tasks = []
             semaphore = asyncio.Semaphore(10)  # Limit concurrent S3 requests
-
-            tplr.logger.debug(f"Commitments: {self.commitments}")
 
             async def check_peer(uid):
                 async with semaphore:
                     is_active = await self.is_miner_active(
                         uid, recent_windows=self.recent_windows
                     )
+                    tplr.logger.info(f"UID {uid} active status: {is_active}")
                     if is_active:
                         active_peers.add(uid)
 
@@ -908,6 +909,7 @@ class Comms(ChainManager):
                 return None
 
             tplr.logger.info(f"Validator Bucket: {validator_bucket}")
+
             # List checkpoint files from validator's bucket
             checkpoint_files = []
             async with self.session.create_client(
@@ -919,10 +921,10 @@ class Comms(ChainManager):
                 aws_secret_access_key=validator_bucket.secret_access_key,
             ) as s3_client:
                 # Use regex pattern to match checkpoint files
-                pattern = re.compile(
-                    rf"^checkpoint-(\d+)-{validator_uid}-v{__version__}\.pt$"
-                )
-
+                pattern = re.compile(r"^checkpoint-(\d+)-(\d+)-v([\d\.]+)\.pt$")
+                response = await s3_client.list_objects_v2(Bucket=validator_bucket.account_id)
+                # print(response)
+                self.bucket.name = validator_bucket.account_id
                 paginator = s3_client.get_paginator("list_objects_v2")
                 async for page in paginator.paginate(
                     Bucket=self.bucket.name, Prefix="checkpoint"

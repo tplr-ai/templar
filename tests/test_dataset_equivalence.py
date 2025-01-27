@@ -63,7 +63,7 @@ async def test_dataset_equivalence():
     batch_size = 2
     sequence_length = 128
     n_pages = 2
-    seed = "test-equivalence-seed"
+    seed = 255
     offset = 0
 
     # Load tokenizer

@@ -7,7 +7,7 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-
+import argparse
 
 # Find and load the correct .env file
 env_path = Path(__file__).parent.parent / ".env"
@@ -16,7 +16,6 @@ if not env_path.exists():
 
 # Load environment variables before any other imports
 load_dotenv(env_path, override=True)
-
 
 import sys
 import asyncio
@@ -29,8 +28,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tplr
 
 
-async def cleanup_bucket():
-    """Delete objects in the R2 bucket that are in the 'gathers' directory"""
+async def cleanup_bucket(version: str):
+    """Delete objects in the R2 bucket that are in the 'gathers/<version>' directory"""
     # Load environment variables
     load_dotenv()
 
@@ -63,20 +62,21 @@ async def cleanup_bucket():
         aws_secret_access_key=secret_access_key,
         config=tplr.config.client_config,
     ) as client:
-        logger.info("Listing objects in gathers directory...")
+        prefix = f"gathers/{version}/"
+        logger.info(f"Listing objects in {prefix} directory...")
 
         # Use paginator to handle buckets with >1000 objects
         paginator = client.get_paginator("list_objects_v2")
         objects_to_delete = []
 
         try:
-            async for page in paginator.paginate(Bucket=account_id, Prefix="gathers/"):
+            async for page in paginator.paginate(Bucket=account_id, Prefix=prefix):
                 if "Contents" in page:
                     filtered_objects = [{"Key": obj["Key"]} for obj in page["Contents"]]
                     objects_to_delete.extend(filtered_objects)
 
             if not objects_to_delete:
-                logger.info("No files found in gathers directory")
+                logger.info(f"No files found in {prefix} directory")
                 return
 
             # Delete objects in batches of 1000 (S3 limit)
@@ -97,7 +97,7 @@ async def cleanup_bucket():
                         )
 
             logger.success(
-                f"Successfully deleted {len(objects_to_delete)} files from gathers directory"
+                f"Successfully deleted {len(objects_to_delete)} files from {prefix} directory"
             )
 
         except Exception as e:
@@ -106,5 +106,11 @@ async def cleanup_bucket():
 
 
 if __name__ == "__main__":
-    logger.info("Starting cleanup of gathers directory...")
-    asyncio.run(cleanup_bucket())
+    parser = argparse.ArgumentParser(
+        description="Delete gathers for a specific version"
+    )
+    parser.add_argument("version", type=str, help='Version to delete (e.g., "0.2.14")')
+    args = parser.parse_args()
+
+    logger.info(f"Starting cleanup of gathers/{args.version} directory...")
+    asyncio.run(cleanup_bucket(args.version))

@@ -269,7 +269,7 @@ class Comms(ChainManager):
 
             # Handle PyTorch files
             file_size = os.path.getsize(file_path)
-            multipart_threshold = 100 * 1024 * 1024  # 100MB
+            multipart_threshold = 5 * 1024 * 1024 * 1024  # 5GB
 
             async with self.session.create_client(
                 "s3",
@@ -748,14 +748,17 @@ class Comms(ChainManager):
 
         # Put own state if provided
         if state_dict is not None:
-            await self.put(
-                state_dict=state_dict,
-                uid=str(my_uid),
-                window=window,
-                key=key,
-                global_step=global_step,
-                local=local,
-                stale_retention=stale_retention,
+            # Start upload in background without waiting
+            asyncio.create_task(
+                self.put(
+                    state_dict=state_dict,
+                    uid=str(my_uid),
+                    window=window,
+                    key=key,
+                    global_step=global_step,
+                    local=local,
+                    stale_retention=stale_retention,
+                )
             )
             metrics["upload_bytes"] += sum(
                 tensor.element_size() * tensor.nelement()
@@ -803,39 +806,50 @@ class Comms(ChainManager):
 
             # Store raw gradients if enabled
             if store_gathers:
-                try:
-                    gradient_data = {
-                        "state_dict": {
-                            k: v.cpu().numpy() for k, v in state_dict_resp.items()
-                        },
-                        "metadata": {
-                            "uid": uid,
-                            "window": window,
-                            "global_step": global_step_resp,
-                            "timestamp": time.time(),
-                            "version": __version__,
-                        },
-                    }
 
-                    # Create temporary file
-                    temp_file = os.path.join(
-                        self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
-                    )
+                async def store_gradient_task(
+                    self, state_dict_resp, uid, window, global_step_resp
+                ):
                     try:
-                        np.savez_compressed(temp_file, **gradient_data)
-                        key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
+                        gradient_data = {
+                            "state_dict": {
+                                k: v.cpu().numpy() for k, v in state_dict_resp.items()
+                            },
+                            "metadata": {
+                                "uid": uid,
+                                "window": window,
+                                "global_step": global_step_resp,
+                                "timestamp": time.time(),
+                                "version": __version__,
+                            },
+                        }
 
-                        await self.s3_put_object(
-                            key=key, file_path=temp_file, bucket=self.bucket
+                        # Create temporary file
+                        temp_file = os.path.join(
+                            self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
                         )
-                    finally:
-                        if os.path.exists(temp_file):
-                            os.remove(temp_file)
+                        try:
+                            np.savez_compressed(temp_file, **gradient_data)
+                            key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
 
-                except Exception as e:
-                    tplr.logger.error(
-                        f"Failed to store gradient from UID {uid}: {str(e)}"
+                            await self.s3_put_object(
+                                key=key, file_path=temp_file, bucket=self.bucket
+                            )
+                        finally:
+                            if os.path.exists(temp_file):
+                                os.remove(temp_file)
+
+                    except Exception as e:
+                        tplr.logger.error(
+                            f"Failed to store gradient from UID {uid}: {str(e)}"
+                        )
+
+                # Fire and forget the storage task
+                asyncio.create_task(
+                    store_gradient_task(
+                        self, state_dict_resp, uid, window, global_step_resp
                     )
+                )
 
             # Normalize each gradient value individually
             normalized_dict = {}

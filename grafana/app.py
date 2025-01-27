@@ -4,12 +4,15 @@
 # 3. Apply migrations: flask db upgrade
 
 import os
+import sys
 from flask import Flask, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 import asyncio
-from grafana.classes.grafana_tools import Grafana, WINDOW_OFFSET
+from classes.grafana_tools import Grafana, WINDOW_OFFSET
 import tplr
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 # Initialize Flask App
 app = Flask(__name__)

@@ -3,16 +3,19 @@
 # 2. Create migration file: flask db migrate -m "Initial migration"
 # 3. Apply migrations: flask db upgrade
 
-import os
 import sys
+import os
+
+# Add the src directory to the Python path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
+
+# Now proceed with other imports
 from flask import Flask, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 import asyncio
 from classes.grafana_tools import Grafana, WINDOW_OFFSET
 import tplr
-
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
 
 # Initialize Flask App
 app = Flask(__name__)

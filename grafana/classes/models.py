@@ -1,7 +1,8 @@
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 
-db = SQLAlchemy()
+# Import the shared db instance
+from app import db
 
 class Version(db.Model):
     __tablename__ = 'tbl_version'

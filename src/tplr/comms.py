@@ -748,14 +748,17 @@ class Comms(ChainManager):
 
         # Put own state if provided
         if state_dict is not None:
-            await self.put(
-                state_dict=state_dict,
-                uid=str(my_uid),
-                window=window,
-                key=key,
-                global_step=global_step,
-                local=local,
-                stale_retention=stale_retention,
+            # Start upload in background without waiting
+            asyncio.create_task(
+                self.put(
+                    state_dict=state_dict,
+                    uid=str(my_uid),
+                    window=window,
+                    key=key,
+                    global_step=global_step,
+                    local=local,
+                    stale_retention=stale_retention,
+                )
             )
             metrics["upload_bytes"] += sum(
                 tensor.element_size() * tensor.nelement()

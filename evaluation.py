@@ -9,14 +9,10 @@ import asyncio
 import traceback
 import bittensor as bt
 import wandb
+import tplr
+from tplr.hparams import load_hparams
+from transformers import LlamaForCausalLM
 
-from dotenv import load_dotenv
-# Load environment variables from the .env file
-try:
-    load_dotenv(dotenv_path=".env")  # Ensure the file name and path are correct
-    print("Environment variables loaded from .env file.")
-except Exception as e:
-    print(f"Error loading environment variables: {e}")
 # Verify environment variables are loaded
 required_keys = [
     "R2_ACCOUNT_ID", 
@@ -31,23 +27,6 @@ for key in required_keys:
         print(f"{key} is set.")
     else:
         print(f"{key} is missing or not set.")
-
-# Templar imports
-# Dynamically add the templar src directory to sys.path
-templar_src_path = "/root/piyush_workspace/templar/src"
-if templar_src_path not in sys.path:
-    sys.path.insert(0, templar_src_path)
-    print(f"Added '{templar_src_path}' to sys.path.")
-
-# Import tplr after updating sys.path
-try:
-    import tplr
-    print("tplr imported successfully.")
-except Exception as e:
-    print(f"Error during tplr import: {e}")
-    traceback.print_exc()
-from tplr.hparams import load_hparams
-from transformers import LlamaForCausalLM
 
 
 async def evaluate_latest_checkpoint(config):
@@ -194,12 +173,6 @@ async def evaluate_latest_checkpoint(config):
 
 
 def main():
-    # # Debug: Print all environment variables before proceeding
-    # print("\nEnvironment Variables:")
-    # for key, value in os.environ.items():
-    #     if "R2" in key:  # Print only R2-related variables
-    #         print(f"{key}={value}")
-    # print("\n")
     parser = argparse.ArgumentParser(description="Templar evaluation script via get_latest_checkpoint().")
     parser.add_argument("--project", type=str, default="templar", help="Wandb project name.")
     parser.add_argument("--use_wandb", action="store_true", help="Enable wandb logging.")
@@ -223,8 +196,7 @@ def main():
     )
 
     config.wallet = bt.wallet(config=config)
-    # If you only have one GPU, you can just say "cuda" or "cuda:0"
-    config.device = "cuda:4" if torch.cuda.is_available() else "cpu"
+    config.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     init_config = {
         "project": config.project,

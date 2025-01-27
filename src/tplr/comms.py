@@ -3,17 +3,24 @@ import os
 import re
 import math
 import json
+import math
+import json
 import time
 import torch
 import asyncio
 import aiofiles
 import botocore
 import numpy as np
+import botocore
+import numpy as np
 import bittensor as bt
+from tqdm import tqdm as std_tqdm
 from tqdm import tqdm as std_tqdm
 from types import SimpleNamespace
 from typing import List, Dict, Optional, TypeVar, Any, Tuple
+from typing import List, Dict, Optional, TypeVar, Any, Tuple
 from aiobotocore.session import get_session
+
 
 from . import __version__
 from .config import client_config, BUCKET_SECRETS
@@ -26,6 +33,9 @@ import tplr as tplr
 # Constants
 CF_REGION_NAME: str = "enam"
 LOCAL_TMP_DIR = "/tmp/local_store"
+
+T = TypeVar("T", bound=Any)
+FixtureFunction = TypeVar("FixtureFunction", bound=Any)
 
 T = TypeVar("T", bound=Any)
 FixtureFunction = TypeVar("FixtureFunction", bound=Any)
@@ -51,6 +61,7 @@ class Comms(ChainManager):
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
         os.makedirs(self.temp_dir, exist_ok=True)
         # Get the bucket directly
+        self.bucket = self.get_own_bucket("gradients", "write")
         self.bucket = self.get_own_bucket("gradients", "write")
         # Now initialize ChainManager with the bucket
         super().__init__(
@@ -82,6 +93,31 @@ class Comms(ChainManager):
         # Start background tasks
         self.loop.create_task(self.track_active_peers())
 
+    def get_own_bucket(self, bucket_type, access_type=None) -> Bucket:
+        """Gets bucket configuration from environment variables via config.BUCKET_SECRETS.
+
+        Args:
+            bucket_type: Either "gradients" or "dataset" to determine which bucket to use
+            access_type: For gradients bucket, either "read" or "write" to determine access level
+        """
+        try:
+            if bucket_type not in ["gradients", "dataset"]:
+                raise ValueError("bucket_type must be either 'gradients' or 'dataset'")
+
+            if bucket_type == "gradients":
+                if access_type not in ["read", "write"]:
+                    raise ValueError(
+                        "For gradients bucket, access_type must be either 'read' or 'write'"
+                    )
+
+                bucket_config = BUCKET_SECRETS["gradients"]
+                credentials = bucket_config["credentials"][access_type]  # type: ignore
+            else:  # dataset bucket
+                bucket_config = BUCKET_SECRETS["dataset"]
+                # For dataset, we'll use read credentials by default
+                credentials = bucket_config["credentials"]["read"]  # type: ignore
+
+            # Create a Bucket object using specified credentials
     def get_own_bucket(self, bucket_type, access_type=None) -> Bucket:
         """Gets bucket configuration from environment variables via config.BUCKET_SECRETS.
 
@@ -980,17 +1016,8 @@ class Comms(ChainManager):
                         tplr.logger.info(f"Found {filename} for UID {uid}")
                         return True
                     except botocore.exceptions.ClientError as e:
-<<<<<<< HEAD
-<<<<<<< HEAD
-                        if e.response["Error"]["Code"] not in ["404", "403"]:
-                            tplr.logger.info(
-=======
-                        if e.response["Error"]["Code"] not in ["404", "403"]: #type: ignore
-=======
                         if e.response["Error"]["Code"] not in ["404", "403"]:  # type: ignore
->>>>>>> e31ea26 (feat[comms] : optionally , store gathers)
                             tplr.logger.error(
->>>>>>> 4db2b15 (chore: clean up)
                                 f"Error checking activity for UID {uid}: {e}"
                             )
                             return False
@@ -1073,18 +1100,11 @@ class Comms(ChainManager):
                 rf"^checkpoint-(\d+)-{validator_uid}-v([0-9A-Za-z\.]+)\.pt$"
             )
 
-<<<<<<< HEAD
-<<<<<<< HEAD
             tplr.logger.info(f"Validator Bucket: {validator_bucket}")
 
             # List checkpoint files from validator's bucket
             checkpoint_files = []
-=======
             # List checkpoint files efficiently
->>>>>>> 1d1cd18 (stash)
-=======
-            # 3. List checkpoint objects from the validator's bucket
->>>>>>> 0725e17 (making it compatible with main)
             async with self.session.create_client(
                 "s3",
                 endpoint_url=self.get_base_url(validator_bucket.account_id),
@@ -1093,45 +1113,12 @@ class Comms(ChainManager):
                 aws_access_key_id=validator_bucket.access_key_id,
                 aws_secret_access_key=validator_bucket.secret_access_key,
             ) as s3_client:
-<<<<<<< HEAD
-<<<<<<< HEAD
-                # Use regex pattern to match checkpoint files
-                pattern = re.compile(r"^checkpoint-(\d+)-(\d+)-v([\d\.]+)\.pt$")
-                response = await s3_client.list_objects_v2(Bucket=validator_bucket.account_id)
-                # print(response)
-                self.bucket.name = validator_bucket.account_id
-                paginator = s3_client.get_paginator("list_objects_v2")
-                async for page in paginator.paginate(
-                    Bucket=self.bucket.name, Prefix="checkpoint"
-                ):
-                    for obj in page.get("Contents", []):
-                        key = obj["Key"]
-                        match = pattern.match(key)
-                        if match:
-                            window = int(match.group(1))
-                            checkpoint_files.append(
-                                {
-                                    "key": key,
-                                    "window": window,
-                                    "size": obj["Size"],
-                                    "last_modified": obj["LastModified"],
-                                }
-                            )
-=======
-                pattern = re.compile(
-                    rf"^checkpoint-(\d+)-{validator_uid}-v{__version__}\.pt$"
-                )
-
-                # Get the most recent objects
-=======
                 # Grab up to 50 objects prefixed with "checkpoint"
->>>>>>> 0725e17 (making it compatible with main)
                 response = await s3_client.list_objects_v2(
                     Bucket=validator_bucket.name,
                     Prefix="checkpoint",
                     MaxKeys=50,
                 )
->>>>>>> 1d1cd18 (stash)
 
                 # 3a. If no objects at all:
                 if "Contents" not in response or not response["Contents"]:
@@ -1286,14 +1273,64 @@ class Comms(ChainManager):
             if window_difference < 0:
                 tplr.logger.warning(
                     "Local current_window is behind checkpoint; using checkpoint without catch-up."
+                    "Local current_window is behind checkpoint; using checkpoint without catch-up."
                 )
+                return True, momentum, global_step, optimizer, scheduler
+            if window_difference == 0:
+                tplr.logger.info("No catch-up needed — aligned with checkpoint.")
+                return True, momentum, global_step, optimizer, scheduler
                 return True, momentum, global_step, optimizer, scheduler
             if window_difference == 0:
                 tplr.logger.info("No catch-up needed — aligned with checkpoint.")
                 return True, momentum, global_step, optimizer, scheduler
 
             tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
+            tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
 
+            # 4) Option: Parallel gather in batches, but apply in ascending order
+            BATCH_SIZE = 5  # tweak based on memory/time constraints
+            windows_to_catch_up = range(
+                checkpoint_current_window + 1, current_window + 1
+            )
+
+            for i in range(0, len(windows_to_catch_up), BATCH_SIZE):
+                batch_windows = list(windows_to_catch_up)[i : i + BATCH_SIZE]
+
+                # Launch gathers in parallel
+                tasks = [
+                    self.gather(
+                        state_dict={},
+                        my_uid=uid,
+                        uids=peers,
+                        window=w,
+                        key="gradient",
+                        timeout=30,
+                        device=device,
+                        local=False,
+                        stale_retention=100,
+                        global_step=global_step,
+                    )
+                    for w in batch_windows
+                ]
+                batch_results = await asyncio.gather(*tasks)
+
+                # Store results in dict so we can apply them in correct ascending order
+                gathered_data = dict(zip(batch_windows, batch_results))
+
+                # 5) Apply each window's updates in ascending order
+                for w in sorted(gathered_data.keys()):
+                    gather_result = gathered_data[w]
+                    if not gather_result:
+                        tplr.logger.info(
+                            f"No valid gather data for window {w}, skipping."
+                        )
+                        continue
+
+                    # Build param updates
+                    param_updates = {}
+                    for n, p in model.named_parameters():
+                        idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
+                        vals = getattr(gather_result.state_dict, f"{n}vals", None)
             # 4) Option: Parallel gather in batches, but apply in ascending order
             BATCH_SIZE = 5  # tweak based on memory/time constraints
             windows_to_catch_up = range(
@@ -1382,9 +1419,6 @@ class Comms(ChainManager):
             return False, {}, 0, optimizer, scheduler
         except Exception as e:
             tplr.logger.error(f"Failed to load checkpoint: {e}")
-<<<<<<< HEAD
-            return False, {}, 0
-=======
             return False, {}, 0, optimizer, scheduler
         # TODO: Add more robust error handling for large window_difference or gather failures.
 
@@ -1453,4 +1487,3 @@ class Comms(ChainManager):
             except Exception as e:
                 tplr.logger.error(f"Error fetching start_window: {e}")
                 await asyncio.sleep(10)
->>>>>>> 1d1cd18 (stash)

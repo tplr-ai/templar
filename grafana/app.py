@@ -1,8 +1,3 @@
-# Migration commands
-# 1. Initialize migrations: flask db init
-# 2. Create migration file: flask db migrate -m "Initial migration"
-# 3. Apply migrations: flask db upgrade
-
 import sys
 import os
 

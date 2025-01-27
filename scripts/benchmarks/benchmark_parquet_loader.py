@@ -17,6 +17,7 @@ import psutil
 from pathlib import Path
 from transformers import AutoTokenizer
 import sys
+
 # Find and load the correct .env file
 env_path = Path(__file__).parent.parent.parent / ".env"
 if not env_path.exists():
@@ -34,7 +35,9 @@ required_vars = [
 
 missing_vars = [var for var in required_vars if not os.environ.get(var)]
 if missing_vars:
-    raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
+    raise EnvironmentError(
+        f"Missing required environment variables: {', '.join(missing_vars)}"
+    )
 
 # Now safe to import tplr
 import tplr

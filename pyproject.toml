@@ -26,7 +26,6 @@ dependencies = [
     "Flask-SQLAlchemy==2.5.1",
     "Flask-Migrate==3.1.0",
     "asyncio==3.4.3",
-    "botocore==1.27.9",
     "werkzeug==2.2.3"
 ]
 

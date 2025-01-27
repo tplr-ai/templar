@@ -1,8 +1,6 @@
 import json
 import yaml
 import s3fs
-import torch
-import random
 import asyncio
 import numpy as np
 from pathlib import Path
@@ -126,177 +124,123 @@ class R2DatasetLoader(DatasetLoader):
         return pad_size % self.sequence_length
 
     def _refill_padded_buffer(self):
-        """Simplified buffer refill"""
-        if not self.buffer:
-            return
+        """Match DatasetLoader's buffer refill logic exactly"""
+        while (
+            self.buffer
+            and len(self.padded_buffer) < self.sequence_length * self.batch_size
+        ):
+            try:
+                # Find next EOS token
+                eos_index = self.buffer.index(self.tokenizer.eos_token_id)
 
-        # Process entire buffer at once
-        eos_positions = [
-            i
-            for i, token in enumerate(self.buffer)
-            if token == self.tokenizer.eos_token_id
-        ]
+                # Get sequence up to and including EOS
+                input_ids = self.buffer[: eos_index + 1]
+                self.buffer = self.buffer[eos_index + 1 :]
 
-        if not eos_positions:
-            self.padded_buffer.extend(self.buffer)
-            self.buffer = []
-            return
+                # Track used tokens
+                self.used_buffer.extend(input_ids)
 
-        # Process all complete sequences
-        last_eos = eos_positions[-1]
-        sequences = []
-        start = 0
+                # Add to padded buffer without the EOS token
+                self.padded_buffer.extend(input_ids[:-1])
 
-        for pos in eos_positions:
-            seq = self.buffer[start:pos]
-            if not self.pack_samples:
-                # Pad to sequence length
-                pad_size = (-len(seq)) % self.sequence_length
-                seq.extend([self.tokenizer.pad_token_id] * pad_size)
-            sequences.extend(seq)
-            start = pos + 1
+                # Add padding using EOS tokens (not pad tokens)
+                pad_size = self._get_pad_size(input_ids[:-1])
+                self.padded_buffer.extend([self.tokenizer.eos_token_id] * pad_size)
 
-        # Update buffers
-        self.padded_buffer.extend(sequences)
-        self.buffer = self.buffer[last_eos + 1 :]
+            except ValueError:  # No EOS token found
+                if self.buffer:  # Add remaining tokens if any
+                    self.padded_buffer.extend(self.buffer)
+                    self.used_buffer.extend(self.buffer)
+                    self.buffer = []
 
     @staticmethod
     async def fetch_dataset_configs() -> dict:
         """
-        Scans the R2 bucket for Parquet dataset configurations.
-
-        Each subfolder represents a config containing 'train.parquet' files.
-
-        Returns:
-            dict: Dataset configurations with row counts and shard info
-
-        Raises:
-            Exception: If scanning fails
+        Load dataset configurations from cached metadata and shard sizes.
         """
         if R2DatasetLoader._configs_data_cache is not None:
             return R2DatasetLoader._configs_data_cache
 
-        fs = R2DatasetLoader._get_fs()
-
-        # Build the full path including dataset subfolder
-        dataset_path = (
-            f"{BUCKET_SECRETS['dataset']['name']}/{R2DatasetLoader.DATASET_SUBFOLDER}"
-        )
-
         try:
-            print(f"Listing dataset path: {dataset_path}")
-            all_paths = fs.ls(dataset_path)
-            print("Available config paths:")
-            for path in all_paths:
-                print(f"  {path}")
+            # Use _load_r2_metadata to get both metadata and shard sizes
+            shard_sizes, metadata_config = await R2DatasetLoader._load_r2_metadata()
 
+            # Build configs data from both files
             configs_data = {}
-            for path in all_paths:
-                config_name = path.split("/")[
-                    -1
-                ]  # This will be CC-MAIN-2017-04 etc. #type: ignore
-
-                # List all parquet files in this config
-                parquet_files = [f for f in fs.ls(path) if f.endswith(".parquet")]
-                if not parquet_files:
-                    print(f"Skipping {config_name} - no parquet files found")
+            for config in metadata_config.get("configs", []):
+                config_name = config.get("config_name")
+                if config_name == "default":
                     continue
 
-                # Count total rows across all parquet files
-                total_rows = 0
-                for parquet_file in parquet_files:
-                    with fs.open(parquet_file, "rb") as f:
-                        pf = pq.ParquetFile(f)
-                        total_rows += pf.metadata.num_rows
+                # Get shard info from shard_sizes
+                shard_info = shard_sizes.get(config_name, {})
+                if not shard_info:
+                    continue
 
                 configs_data[config_name] = {
-                    "num_rows": total_rows,
-                    "split": "train",
-                    "num_shards": len(parquet_files),
+                    "num_rows": shard_info.get("total_rows", 0),
+                    "split": shard_info.get("split", "train"),
+                    "shards": shard_info.get("shards", []),
                 }
-                print(
-                    f"Added config {config_name} with {total_rows} rows across {len(parquet_files)} shards"
-                )
 
             R2DatasetLoader._configs_data_cache = configs_data
             return configs_data
 
         except Exception as e:
-            print(f"Error scanning dataset folder: {str(e)}")
+            logger.error(f"Error loading dataset configs: {e}")
             raise
 
     @staticmethod
-    async def next_pages(offset: int, n_pages: int, seed: str) -> list:
-        """
-        Generate next set of pages using cached metadata.
+    async def next_pages(
+        offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
+    ) -> list:
+        """Get next n_pages random pages starting from offset."""
+        configs_data = await R2DatasetLoader.fetch_dataset_configs()
 
-        Pages are selected randomly weighted by row counts.
+        # Create RNG with same method as DatasetLoader
+        rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
+        rng.bit_generator.advance(offset)  # Skip ahead by offset
 
-        Args:
-            offset (int): Starting offset (unused)
-            n_pages (int): Number of pages to generate
-            seed (str): Random seed for reproducibility
+        # Sort config keys for consistent ordering
+        sorted_keys = sorted(configs_data.keys())
 
-        Returns:
-            list: List of (config_name, page_number, split) tuples
+        result = []
+        for _ in range(n_pages):
+            config = rng.choice(sorted_keys)
+            choice = rng.integers(
+                0, configs_data[config]["num_rows"] - 1 - num_rows_per_page
+            )
+            result.append((str(config), int(choice), configs_data[config]["split"]))
 
-        Raises:
-            RuntimeError: If no configs found
-        """
-        logger.info(f"Generating {n_pages} pages with seed {seed}")
-        rng = random.Random(seed)
-
-        # Load cached metadata
-        shard_sizes, _ = await R2DatasetLoader._load_r2_metadata()
-
-        # Get configs with their total rows
-        configs = [(name, data["total_rows"]) for name, data in shard_sizes.items()]
-        if not configs:
-            raise RuntimeError("No configs found in shard sizes data")
-
-        # Generate weighted random pages based on row counts
-        total_rows = sum(rows for _, rows in configs)
-        pages = []
-        for i in range(n_pages):
-            # Pick config weighted by row count
-            config_name = rng.choices(
-                [name for name, _ in configs],
-                weights=[rows / total_rows for _, rows in configs],
-            )[0]
-
-            # Get random page number within config's row count
-            max_rows = shard_sizes[config_name]["total_rows"]
-            page_number = rng.randint(0, max_rows - 1)
-
-            pages.append((config_name, page_number, "train"))
-            logger.info(f"Generated page {i + 1}: {pages[-1]}")
-
-        return pages
+        return result
 
     @staticmethod
     async def create(
         batch_size, sequence_length, pages_info, tokenizer, pack_samples=True
     ):
-        """Optimized loader creation with prefetching"""
+        """Create loader with proper initialization"""
         loader = R2DatasetLoader(
             batch_size=batch_size,
             sequence_length=sequence_length,
             tokenizer=tokenizer,
             pack_samples=pack_samples,
         )
+
+        # Initialize buffers
         loader.buffer = []
         loader.pages = pages_info.copy()
 
-        # Process pages in parallel with increased concurrency
+        # Process all pages first
         sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
         tasks = [
             asyncio.create_task(loader._process_page(page, sem)) for page in pages_info
         ]
 
-        # Wait for all pages and process results
+        # Gather all tokens
         results = await asyncio.gather(*tasks)
         for tokens in results:
-            loader.buffer.extend(tokens)
+            if tokens:
+                loader.buffer.extend(tokens)
 
         return loader
 
@@ -406,66 +350,87 @@ class R2DatasetLoader(DatasetLoader):
             await self._prefetch_queue.put(None)  # Signal completion
 
     async def _process_page(self, page, sem):
-        """Process a single page with optimized caching"""
+        """Process page with deterministic shard selection"""
         async with sem:
             config_name, page_number, split = page
             cache_key = f"{config_name}:{page_number}"
 
             try:
-                # Try to get from cache first
                 if cache_key in self._token_cache:
                     return self._token_cache[cache_key]
 
-                # Get metadata and choose shard
                 metadata = self._metadata_cache.get(config_name)
                 if not metadata:
                     shard_sizes, _ = await self._load_r2_metadata()
                     metadata = shard_sizes[config_name]
                     self._metadata_cache[config_name] = metadata
 
-                chosen_shard = random.choice(metadata["shards"])
-                shard_path = chosen_shard["path"]
+                # Find exact shard based on page_number
+                cumulative_rows = 0
+                chosen_shard = None
+                for shard in metadata["shards"]:
+                    if (
+                        cumulative_rows
+                        <= page_number
+                        < cumulative_rows + shard["num_rows"]
+                    ):
+                        chosen_shard = shard
+                        break
+                    cumulative_rows += shard["num_rows"]
 
-                # Get or create ParquetFile
-                pf_data = self._parquet_cache.get(shard_path)
+                if not chosen_shard:
+                    raise ValueError(f"Could not find shard for page {page_number}")
+
+                # Calculate offset within shard
+                shard_offset = page_number - cumulative_rows
+
+                # Read data from exact position
+                pf_data = self._parquet_cache.get(chosen_shard["path"])
                 if not pf_data:
                     fs = self._get_fs()
-                    f = fs.open(shard_path, "rb", buffer_size=self.READ_BUFFER_SIZE)
+                    f = fs.open(
+                        chosen_shard["path"], "rb", buffer_size=self.READ_BUFFER_SIZE
+                    )
                     pf = pq.ParquetFile(f, memory_map=True)
                     pf_data = {"file": f, "parquet": pf}
-                    self._parquet_cache[shard_path] = pf_data
+                    self._parquet_cache[chosen_shard["path"]] = pf_data
 
-                # Read data efficiently
-                selected_group = random.randint(
-                    0, pf_data["parquet"].num_row_groups - 1
+                # Read rows using shard's row count from metadata
+                rows_per_group = (
+                    chosen_shard["num_rows"] // pf_data["parquet"].num_row_groups
                 )
+                group_index = shard_offset // rows_per_group
+
                 table = await asyncio.to_thread(
                     pf_data["parquet"].read_row_group,
-                    selected_group,
+                    group_index,
                     columns=["text"],
                     use_threads=True,
                 )
 
-                # Process in large batches
-                texts = table["text"].to_pylist()  # type: ignore
-                all_tokens = []
+                start_idx = shard_offset % rows_per_group
+                texts = table["text"].to_pylist()[
+                    start_idx : start_idx + self.num_rows_per_page
+                ]  # type: ignore
 
-                for i in range(0, len(texts), self.BATCH_SIZE):
-                    batch = texts[i : i + self.BATCH_SIZE]
+                # Process texts deterministically
+                all_tokens = []
+                for text in texts:
                     tokens = await asyncio.to_thread(
                         self.tokenizer,
-                        batch,
+                        text,
                         padding=False,
                         truncation=True,
                         max_length=self.sequence_length,
                         return_tensors=None,
                     )
 
-                    for input_ids in tokens["input_ids"]:  # type: ignore
+                    input_ids = tokens["input_ids"]  # type: ignore
+                    if input_ids:
                         all_tokens.extend(input_ids)
-                        all_tokens.append(self.tokenizer.eos_token_id)
+                        if input_ids[-1] != self.tokenizer.eos_token_id:
+                            all_tokens.append(self.tokenizer.eos_token_id)
 
-                # Cache results
                 self._token_cache[cache_key] = all_tokens
                 return all_tokens
 
@@ -474,40 +439,37 @@ class R2DatasetLoader(DatasetLoader):
                 raise
 
     def __iter__(self):
-        """Iterator with prefetching"""
-        self.buffer = self.used_buffer + self.buffer
-        self.padded_buffer = []
-        self._refill_padded_buffer()
-
-        # Start prefetching next batch
-        if self._next_batch is None:
-            self._prefetch_next_batch()
-
+        """Reset buffers and prepare for iteration"""
+        self.buffer = self.used_buffer + self.buffer  # Combine buffers
+        self.used_buffer = []  # Reset used buffer
+        self.padded_buffer = []  # Reset padded buffer
+        self._refill_padded_buffer()  # Initial fill
         return self
 
-    def _prefetch_next_batch(self):
-        """Prefetch next batch in background"""
-        if len(self.padded_buffer) >= self.sequence_length * self.batch_size:
-            batch = []
-            for _ in range(self.batch_size):
-                batch.append(self.padded_buffer[: self.sequence_length])
-                self.padded_buffer = self.padded_buffer[self.sequence_length :]
-            self._next_batch = torch.tensor(np.stack(batch))
-
     def __next__(self):
-        """Get next batch with prefetching"""
-        if self._next_batch is not None:
-            result = self._next_batch
-            self._next_batch = None
-            self._prefetch_next_batch()
-            return result
+        """Get next batch, exactly matching DatasetLoader's logic"""
+        batch = []
 
-        if len(self.padded_buffer) < self.sequence_length * self.batch_size:
-            self._refill_padded_buffer()
-            if len(self.padded_buffer) < self.sequence_length * self.batch_size:
-                raise StopIteration
+        while len(self.padded_buffer) >= self.sequence_length:
+            # Extract sequence_length tokens
+            sequence = self.padded_buffer[: self.sequence_length]
+            self.padded_buffer = self.padded_buffer[self.sequence_length :]
 
-        return self.__next__()
+            batch.append(sequence)
+
+            # Return batch when we have batch_size sequences
+            if len(batch) == self.batch_size:
+                self._refill_padded_buffer()  # Refill after creating batch
+                return np.stack(batch)
+
+            # Refill if needed
+            if len(self.padded_buffer) < self.sequence_length:
+                self._refill_padded_buffer()
+
+        # No more complete batches
+        if batch:  # Partial batch - should not happen with current logic
+            raise StopIteration
+        raise StopIteration
 
     def _read_parquet_table(self, fs, path):
         """

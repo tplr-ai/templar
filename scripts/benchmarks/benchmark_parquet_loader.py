@@ -18,24 +18,26 @@ from pathlib import Path
 from transformers import AutoTokenizer
 import sys
 
-# Check for required environment variables
+# Find and load the correct .env file
+env_path = Path(__file__).parent.parent.parent / ".env"
+if not env_path.exists():
+    raise FileNotFoundError(f"Required .env file not found at {env_path}")
+
+load_dotenv(env_path, override=True)
+
+# Verify environment variables are loaded
 required_vars = [
-    "R2_ACCOUNT_ID",
-    "R2_READ_ACCESS_KEY_ID",
-    "R2_READ_SECRET_ACCESS_KEY",
-    "R2_WRITE_ACCESS_KEY_ID",
-    "R2_WRITE_SECRET_ACCESS_KEY",
+    "R2_DATASET_ACCOUNT_ID",
+    "R2_DATASET_BUCKET_NAME",
+    "R2_DATASET_READ_ACCESS_KEY_ID",
+    "R2_DATASET_READ_SECRET_ACCESS_KEY",
 ]
 
-missing_vars = [var for var in required_vars if not os.getenv(var)]
+missing_vars = [var for var in required_vars if not os.environ.get(var)]
 if missing_vars:
-    print("Please create a .env file with the following variables:")
-    for var in missing_vars:
-        print(f"{var}=your_{var.lower()}_here")
-    print("\nOr export them in your shell:")
-    for var in missing_vars:
-        print(f"export {var}=your_{var.lower()}_here")
-    sys.exit(1)
+    raise EnvironmentError(
+        f"Missing required environment variables: {', '.join(missing_vars)}"
+    )
 
 # Now safe to import tplr
 import tplr
@@ -90,6 +92,9 @@ class ParquetLoaderBenchmark:
 
                 for batch in loader:
                     batch_start = T()
+                    # Convert numpy array to torch tensor if needed
+                    if isinstance(batch, np.ndarray):
+                        batch = torch.from_numpy(batch)
                     total_tokens += batch.numel()
                     batch_times.append(T() - batch_start)
                     n_batches += 1
@@ -180,6 +185,7 @@ async def main():
         (2, 8, 512),
         (4, 4, 512),
         (5, 6, 2048),
+        (24, 16, 2048),
     ]
 
     for n_pages, batch_size, sequence_length in configs:

@@ -23,6 +23,10 @@ import botocore.config
 
 # Local imports
 from .logging import logger
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure bucket secrets from environment variables
 BUCKET_SECRETS = {

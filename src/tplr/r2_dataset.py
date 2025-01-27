@@ -1,8 +1,6 @@
 import json
 import yaml
 import s3fs
-import torch
-import random
 import asyncio
 import numpy as np
 from pathlib import Path
@@ -127,25 +125,28 @@ class R2DatasetLoader(DatasetLoader):
 
     def _refill_padded_buffer(self):
         """Match DatasetLoader's buffer refill logic exactly"""
-        while self.buffer and len(self.padded_buffer) < self.sequence_length * self.batch_size:
+        while (
+            self.buffer
+            and len(self.padded_buffer) < self.sequence_length * self.batch_size
+        ):
             try:
                 # Find next EOS token
                 eos_index = self.buffer.index(self.tokenizer.eos_token_id)
-                
+
                 # Get sequence up to and including EOS
                 input_ids = self.buffer[: eos_index + 1]
                 self.buffer = self.buffer[eos_index + 1 :]
-                
+
                 # Track used tokens
                 self.used_buffer.extend(input_ids)
-                
+
                 # Add to padded buffer without the EOS token
                 self.padded_buffer.extend(input_ids[:-1])
-                
+
                 # Add padding using EOS tokens (not pad tokens)
                 pad_size = self._get_pad_size(input_ids[:-1])
                 self.padded_buffer.extend([self.tokenizer.eos_token_id] * pad_size)
-                
+
             except ValueError:  # No EOS token found
                 if self.buffer:  # Add remaining tokens if any
                     self.padded_buffer.extend(self.buffer)
@@ -163,23 +164,23 @@ class R2DatasetLoader(DatasetLoader):
         try:
             # Use _load_r2_metadata to get both metadata and shard sizes
             shard_sizes, metadata_config = await R2DatasetLoader._load_r2_metadata()
-            
+
             # Build configs data from both files
             configs_data = {}
-            for config in metadata_config.get('configs', []):
-                config_name = config.get('config_name')
-                if config_name == 'default':
+            for config in metadata_config.get("configs", []):
+                config_name = config.get("config_name")
+                if config_name == "default":
                     continue
-                    
+
                 # Get shard info from shard_sizes
                 shard_info = shard_sizes.get(config_name, {})
                 if not shard_info:
                     continue
-                    
+
                 configs_data[config_name] = {
-                    'num_rows': shard_info.get('total_rows', 0),
-                    'split': shard_info.get('split', 'train'),
-                    'shards': shard_info.get('shards', [])
+                    "num_rows": shard_info.get("total_rows", 0),
+                    "split": shard_info.get("split", "train"),
+                    "shards": shard_info.get("shards", []),
                 }
 
             R2DatasetLoader._configs_data_cache = configs_data
@@ -190,34 +191,33 @@ class R2DatasetLoader(DatasetLoader):
             raise
 
     @staticmethod
-    async def next_pages(offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100) -> list:
+    async def next_pages(
+        offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
+    ) -> list:
         """Get next n_pages random pages starting from offset."""
         configs_data = await R2DatasetLoader.fetch_dataset_configs()
-        
+
         # Create RNG with same method as DatasetLoader
         rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
         rng.bit_generator.advance(offset)  # Skip ahead by offset
-        
+
         # Sort config keys for consistent ordering
         sorted_keys = sorted(configs_data.keys())
-        
+
         result = []
         for _ in range(n_pages):
             config = rng.choice(sorted_keys)
             choice = rng.integers(
-                0, 
-                configs_data[config]["num_rows"] - 1 - num_rows_per_page
+                0, configs_data[config]["num_rows"] - 1 - num_rows_per_page
             )
-            result.append((
-                str(config),
-                int(choice),
-                configs_data[config]["split"]
-            ))
-        
+            result.append((str(config), int(choice), configs_data[config]["split"]))
+
         return result
 
     @staticmethod
-    async def create(batch_size, sequence_length, pages_info, tokenizer, pack_samples=True):
+    async def create(
+        batch_size, sequence_length, pages_info, tokenizer, pack_samples=True
+    ):
         """Create loader with proper initialization"""
         loader = R2DatasetLoader(
             batch_size=batch_size,
@@ -225,24 +225,23 @@ class R2DatasetLoader(DatasetLoader):
             tokenizer=tokenizer,
             pack_samples=pack_samples,
         )
-        
+
         # Initialize buffers
         loader.buffer = []
         loader.pages = pages_info.copy()
-        
+
         # Process all pages first
         sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
         tasks = [
-            asyncio.create_task(loader._process_page(page, sem)) 
-            for page in pages_info
+            asyncio.create_task(loader._process_page(page, sem)) for page in pages_info
         ]
-        
+
         # Gather all tokens
         results = await asyncio.gather(*tasks)
         for tokens in results:
             if tokens:
                 loader.buffer.extend(tokens)
-        
+
         return loader
 
     @staticmethod
@@ -370,7 +369,11 @@ class R2DatasetLoader(DatasetLoader):
                 cumulative_rows = 0
                 chosen_shard = None
                 for shard in metadata["shards"]:
-                    if cumulative_rows <= page_number < cumulative_rows + shard["num_rows"]:
+                    if (
+                        cumulative_rows
+                        <= page_number
+                        < cumulative_rows + shard["num_rows"]
+                    ):
                         chosen_shard = shard
                         break
                     cumulative_rows += shard["num_rows"]
@@ -380,20 +383,24 @@ class R2DatasetLoader(DatasetLoader):
 
                 # Calculate offset within shard
                 shard_offset = page_number - cumulative_rows
-                
+
                 # Read data from exact position
                 pf_data = self._parquet_cache.get(chosen_shard["path"])
                 if not pf_data:
                     fs = self._get_fs()
-                    f = fs.open(chosen_shard["path"], "rb", buffer_size=self.READ_BUFFER_SIZE)
+                    f = fs.open(
+                        chosen_shard["path"], "rb", buffer_size=self.READ_BUFFER_SIZE
+                    )
                     pf = pq.ParquetFile(f, memory_map=True)
                     pf_data = {"file": f, "parquet": pf}
                     self._parquet_cache[chosen_shard["path"]] = pf_data
 
                 # Read rows using shard's row count from metadata
-                rows_per_group = chosen_shard["num_rows"] // pf_data["parquet"].num_row_groups
+                rows_per_group = (
+                    chosen_shard["num_rows"] // pf_data["parquet"].num_row_groups
+                )
                 group_index = shard_offset // rows_per_group
-                
+
                 table = await asyncio.to_thread(
                     pf_data["parquet"].read_row_group,
                     group_index,
@@ -402,7 +409,9 @@ class R2DatasetLoader(DatasetLoader):
                 )
 
                 start_idx = shard_offset % rows_per_group
-                texts = table["text"].to_pylist()[start_idx:start_idx + self.num_rows_per_page]  # type: ignore
+                texts = table["text"].to_pylist()[
+                    start_idx : start_idx + self.num_rows_per_page
+                ]  # type: ignore
 
                 # Process texts deterministically
                 all_tokens = []
@@ -415,7 +424,7 @@ class R2DatasetLoader(DatasetLoader):
                         max_length=self.sequence_length,
                         return_tensors=None,
                     )
-                    
+
                     input_ids = tokens["input_ids"]  # type: ignore
                     if input_ids:
                         all_tokens.extend(input_ids)
@@ -440,23 +449,23 @@ class R2DatasetLoader(DatasetLoader):
     def __next__(self):
         """Get next batch, exactly matching DatasetLoader's logic"""
         batch = []
-        
+
         while len(self.padded_buffer) >= self.sequence_length:
             # Extract sequence_length tokens
             sequence = self.padded_buffer[: self.sequence_length]
             self.padded_buffer = self.padded_buffer[self.sequence_length :]
-            
+
             batch.append(sequence)
-            
+
             # Return batch when we have batch_size sequences
             if len(batch) == self.batch_size:
                 self._refill_padded_buffer()  # Refill after creating batch
                 return np.stack(batch)
-            
+
             # Refill if needed
             if len(self.padded_buffer) < self.sequence_length:
                 self._refill_padded_buffer()
-        
+
         # No more complete batches
         if batch:  # Partial batch - should not happen with current logic
             raise StopIteration

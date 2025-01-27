@@ -3,24 +3,17 @@ import os
 import re
 import math
 import json
-import math
-import json
 import time
 import torch
 import asyncio
 import aiofiles
 import botocore
 import numpy as np
-import botocore
-import numpy as np
 import bittensor as bt
 from tqdm import tqdm as std_tqdm
-from tqdm import tqdm as std_tqdm
 from types import SimpleNamespace
-from typing import List, Dict, Optional, TypeVar, Any, Tuple
-from typing import List, Dict, Optional, TypeVar, Any, Tuple
+from typing import List, Dict, Optional, TypeVar, Any
 from aiobotocore.session import get_session
-
 
 from . import __version__
 from .config import client_config, BUCKET_SECRETS
@@ -33,9 +26,6 @@ import tplr as tplr
 # Constants
 CF_REGION_NAME: str = "enam"
 LOCAL_TMP_DIR = "/tmp/local_store"
-
-T = TypeVar("T", bound=Any)
-FixtureFunction = TypeVar("FixtureFunction", bound=Any)
 
 T = TypeVar("T", bound=Any)
 FixtureFunction = TypeVar("FixtureFunction", bound=Any)
@@ -54,14 +44,12 @@ class Comms(ChainManager):
         uid=None,
         **kwargs,
     ):
-        print("hi")
         self.wallet = wallet
         self.uid = uid
         # Create temp directory for this instance
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
         os.makedirs(self.temp_dir, exist_ok=True)
         # Get the bucket directly
-        self.bucket = self.get_own_bucket("gradients", "write")
         self.bucket = self.get_own_bucket("gradients", "write")
         # Now initialize ChainManager with the bucket
         super().__init__(
@@ -93,31 +81,6 @@ class Comms(ChainManager):
         # Start background tasks
         self.loop.create_task(self.track_active_peers())
 
-    def get_own_bucket(self, bucket_type, access_type=None) -> Bucket:
-        """Gets bucket configuration from environment variables via config.BUCKET_SECRETS.
-
-        Args:
-            bucket_type: Either "gradients" or "dataset" to determine which bucket to use
-            access_type: For gradients bucket, either "read" or "write" to determine access level
-        """
-        try:
-            if bucket_type not in ["gradients", "dataset"]:
-                raise ValueError("bucket_type must be either 'gradients' or 'dataset'")
-
-            if bucket_type == "gradients":
-                if access_type not in ["read", "write"]:
-                    raise ValueError(
-                        "For gradients bucket, access_type must be either 'read' or 'write'"
-                    )
-
-                bucket_config = BUCKET_SECRETS["gradients"]
-                credentials = bucket_config["credentials"][access_type]  # type: ignore
-            else:  # dataset bucket
-                bucket_config = BUCKET_SECRETS["dataset"]
-                # For dataset, we'll use read credentials by default
-                credentials = bucket_config["credentials"]["read"]  # type: ignore
-
-            # Create a Bucket object using specified credentials
     def get_own_bucket(self, bucket_type, access_type=None) -> Bucket:
         """Gets bucket configuration from environment variables via config.BUCKET_SECRETS.
 
@@ -995,7 +958,7 @@ class Comms(ChainManager):
             ) as s3_client:
                 # Ensure that self.current_window is set
                 if not hasattr(self, "current_window") or self.current_window is None:
-                    tplr.logger.info(
+                    tplr.logger.error(
                         "current_window is not set in comms. Please set comms.current_window from the main thread."
                     )
                     return False
@@ -1006,14 +969,14 @@ class Comms(ChainManager):
                     current_window - recent_windows, current_window + 1
                 ):
                     filename = f"gradient-{window}-{uid}-v{__version__}.pt"
-                    tplr.logger.info(
+                    tplr.logger.debug(
                         f"Checking for {filename} in bucket {peer_bucket.name}"
                     )
                     try:
                         await s3_client.head_object(
                             Bucket=peer_bucket.name, Key=filename
                         )
-                        tplr.logger.info(f"Found {filename} for UID {uid}")
+                        tplr.logger.debug(f"Found {filename} for UID {uid}")
                         return True
                     except botocore.exceptions.ClientError as e:
                         if e.response["Error"]["Code"] not in ["404", "403"]:  # type: ignore
@@ -1021,27 +984,27 @@ class Comms(ChainManager):
                                 f"Error checking activity for UID {uid}: {e}"
                             )
                             return False
-                        tplr.logger.info(f"{filename} not found for UID {uid}")
+                        tplr.logger.debug(f"{filename} not found for UID {uid}")
         except Exception as e:
-            tplr.logger.info(f"Error accessing bucket for UID {uid}: {e}")
+            tplr.logger.error(f"Error accessing bucket for UID {uid}: {e}")
             return False
 
         return False
 
     async def track_active_peers(self):
         """Background task to keep track of active peers."""
-        tplr.logger.info("Starting to track active peers...")
         while True:
             active_peers = set()
             tasks = []
             semaphore = asyncio.Semaphore(10)  # Limit concurrent S3 requests
+
+            tplr.logger.debug(f"Commitments: {self.commitments}")
 
             async def check_peer(uid):
                 async with semaphore:
                     is_active = await self.is_miner_active(
                         uid, recent_windows=self.recent_windows
                     )
-                    tplr.logger.info(f"UID {uid} active status: {is_active}")
                     if is_active:
                         active_peers.add(uid)
 
@@ -1057,7 +1020,8 @@ class Comms(ChainManager):
 
             await asyncio.sleep(self.active_check_interval)
 
-    
+    # Checkpoint Operations
+
     async def _get_highest_stake_validator_bucket(self):
         """Get the bucket for the validator with highest stake."""
         # Get validator with highest stake
@@ -1074,8 +1038,8 @@ class Comms(ChainManager):
 
         tplr.logger.info(f"Validator Bucket: {validator_bucket}")
         return validator_bucket, validator_uid
+
     
-    # Checkpoint Operations
 
     async def get_latest_checkpoint(self):
         """
@@ -1100,11 +1064,7 @@ class Comms(ChainManager):
                 rf"^checkpoint-(\d+)-{validator_uid}-v([0-9A-Za-z\.]+)\.pt$"
             )
 
-            tplr.logger.info(f"Validator Bucket: {validator_bucket}")
-
-            # List checkpoint files from validator's bucket
-            checkpoint_files = []
-            # List checkpoint files efficiently
+            # 3. List checkpoint objects from the validator's bucket
             async with self.session.create_client(
                 "s3",
                 endpoint_url=self.get_base_url(validator_bucket.account_id),
@@ -1273,64 +1233,14 @@ class Comms(ChainManager):
             if window_difference < 0:
                 tplr.logger.warning(
                     "Local current_window is behind checkpoint; using checkpoint without catch-up."
-                    "Local current_window is behind checkpoint; using checkpoint without catch-up."
                 )
                 return True, momentum, global_step, optimizer, scheduler
             if window_difference == 0:
                 tplr.logger.info("No catch-up needed — aligned with checkpoint.")
                 return True, momentum, global_step, optimizer, scheduler
-                return True, momentum, global_step, optimizer, scheduler
-            if window_difference == 0:
-                tplr.logger.info("No catch-up needed — aligned with checkpoint.")
-                return True, momentum, global_step, optimizer, scheduler
 
             tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
-            tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
 
-            # 4) Option: Parallel gather in batches, but apply in ascending order
-            BATCH_SIZE = 5  # tweak based on memory/time constraints
-            windows_to_catch_up = range(
-                checkpoint_current_window + 1, current_window + 1
-            )
-
-            for i in range(0, len(windows_to_catch_up), BATCH_SIZE):
-                batch_windows = list(windows_to_catch_up)[i : i + BATCH_SIZE]
-
-                # Launch gathers in parallel
-                tasks = [
-                    self.gather(
-                        state_dict={},
-                        my_uid=uid,
-                        uids=peers,
-                        window=w,
-                        key="gradient",
-                        timeout=30,
-                        device=device,
-                        local=False,
-                        stale_retention=100,
-                        global_step=global_step,
-                    )
-                    for w in batch_windows
-                ]
-                batch_results = await asyncio.gather(*tasks)
-
-                # Store results in dict so we can apply them in correct ascending order
-                gathered_data = dict(zip(batch_windows, batch_results))
-
-                # 5) Apply each window's updates in ascending order
-                for w in sorted(gathered_data.keys()):
-                    gather_result = gathered_data[w]
-                    if not gather_result:
-                        tplr.logger.info(
-                            f"No valid gather data for window {w}, skipping."
-                        )
-                        continue
-
-                    # Build param updates
-                    param_updates = {}
-                    for n, p in model.named_parameters():
-                        idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
-                        vals = getattr(gather_result.state_dict, f"{n}vals", None)
             # 4) Option: Parallel gather in batches, but apply in ascending order
             BATCH_SIZE = 5  # tweak based on memory/time constraints
             windows_to_catch_up = range(

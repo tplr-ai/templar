@@ -1,7 +1,7 @@
 .env.yaml
 .env
 *.pth
-env
+env/
 
 # Python
 __pycache__/

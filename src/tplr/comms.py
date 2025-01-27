@@ -1039,17 +1039,32 @@ class Comms(ChainManager):
         tplr.logger.info(f"Validator Bucket: {validator_bucket}")
         return validator_bucket, validator_uid
 
-    async def get_latest_checkpoint(self):
-        """Get the latest checkpoint: Returns (checkpoint_data, window) tuple."""
-        try:
-            (
-                validator_bucket,
-                validator_uid,
-            ) = await self._get_highest_stake_validator_bucket()
-            if not validator_bucket:
-                return None
+    
 
-            # List checkpoint files efficiently
+    async def get_latest_checkpoint(self):
+        """
+        Gets the most recent checkpoint from the validator with the highest stake.
+        Returns:
+            A tuple (checkpoint_data, window) if a valid checkpoint is downloaded successfully,
+            or None if any failure occurs (no objects, no match, or download error).
+        """
+        try:
+            # 1. Identify the top-staked validator and their bucket.
+            validator_bucket, validator_uid = await self._get_highest_stake_validator_bucket()
+            if not validator_bucket:
+                tplr.logger.warning(
+                    "No validator bucket found (no highest-staked validator). Returning None."
+                )
+                return None
+            
+            # 2. Compile a more flexible regex for the version part.
+            #    Example: checkpoint-<window>-<validator_uid>-v0.2.14.pt
+            #    We'll match any combination of digits/letters/periods in the version:
+            pattern = re.compile(
+                rf"^checkpoint-(\d+)-{validator_uid}-v([0-9A-Za-z\.]+)\.pt$"
+            )
+
+            # 3. List checkpoint objects from the validator's bucket
             async with self.session.create_client(
                 "s3",
                 endpoint_url=self.get_base_url(validator_bucket.account_id),
@@ -1058,65 +1073,89 @@ class Comms(ChainManager):
                 aws_access_key_id=validator_bucket.access_key_id,
                 aws_secret_access_key=validator_bucket.secret_access_key,
             ) as s3_client:
-                pattern = re.compile(
-                    rf"^checkpoint-(\d+)-{validator_uid}-v{__version__}\.pt$"
-                )
-
-                # Get the most recent objects
+                # Grab up to 50 objects prefixed with "checkpoint"
                 response = await s3_client.list_objects_v2(
                     Bucket=validator_bucket.name,
                     Prefix="checkpoint",
-                    MaxKeys=50,  # Limit to recent checkpoints
+                    MaxKeys=50,
                 )
 
-                if not response.get("Contents"):
-                    tplr.logger.info("No checkpoint files found")
+                # 3a. If no objects at all:
+                if "Contents" not in response or not response["Contents"]:
+                    tplr.logger.warning(
+                        f"No checkpoint objects found in bucket '{validator_bucket.name}'."
+                    )
                     return None
 
-                # Find latest valid checkpoint that matches pattern
-                latest = None
-                valid_checkpoints = []
+                all_objects = response["Contents"]
+                tplr.logger.info(
+                    f"Found {len(all_objects)} total objects in bucket '{validator_bucket.name}' with Prefix='checkpoint'."
+                )
+                # 4. Log each object so you see what's in the bucket
+                for obj in all_objects:
+                    tplr.logger.info(
+                        f" - Key='{obj['Key']}', Size={obj['Size']} bytes, LastModified={obj['LastModified']}"
+                    )
 
-                for obj in response.get("Contents", []):
-                    key: str = obj.get("Key", "")
+                # 5. Filter by the strict naming pattern
+                valid_checkpoints = []
+                for obj in all_objects:
+                    key = obj.get("Key", "")
                     match = pattern.match(key)
                     if match:
-                        valid_checkpoints.append(
-                            {
-                                "key": key,
-                                "window": int(match.group(1)),
-                                "size": obj["Size"],  # type: ignore
-                                "last_modified": obj["LastModified"],  # type: ignore
-                            }
+                        window_str = match.group(1)
+                        version_str = match.group(2)
+                        tplr.logger.debug(
+                            f"Matched checkpoint file '{key}' with window={window_str}, version={version_str}."
                         )
+                        valid_checkpoints.append({
+                            "key": key,
+                            "window": int(window_str),
+                            "size": obj["Size"],
+                            "last_modified": obj["LastModified"],
+                        })
 
-                if valid_checkpoints:
-                    # Sort by LastModified timestamp (most recent first)
-                    latest = max(valid_checkpoints, key=lambda x: x["last_modified"])  # type: ignore
-                else:
-                    tplr.logger.info("No valid checkpoint files found")
+                if not valid_checkpoints:
+                    tplr.logger.warning(
+                        f"Found {len(all_objects)} checkpoint objects, but none match the pattern "
+                        f"(uid={validator_uid}, version={__version__})."
+                    )
                     return None
 
+                # 6. Determine the latest checkpoint by LastModified timestamp
+                latest = max(valid_checkpoints, key=lambda x: x["last_modified"])
                 tplr.logger.info(
-                    f"Found latest checkpoint: {latest['key']} from window {latest['window']}, "  # type: ignore
-                    f"modified at {latest['last_modified']}"  # type: ignore
+                    f"Found latest checkpoint: {latest['key']} from window {latest['window']}, "
+                    f"modified at {latest['last_modified']}. Downloading..."
                 )
 
-                # Get the checkpoint data using the window from the latest checkpoint
+                # 7. Attempt to download
                 loaded_data = await self.s3_get_object(
                     key=latest["key"],
-                    bucket=validator_bucket,  # type: ignore
+                    bucket=validator_bucket,
                 )
 
                 if loaded_data is None:
-                    tplr.logger.error(f"Failed to download checkpoint {latest['key']}")  # type: ignore
+                    # Distinguish partial success/failure
+                    tplr.logger.error(
+                        f"Checkpoint key '{latest['key']}' was found, but s3_get_object returned None. "
+                        f"This usually indicates a download or OOM error."
+                    )
                     return None
 
-                return loaded_data, latest["window"]  # type: ignore
+                # 8. If we get here, download succeeded
+                tplr.logger.info(
+                    f"Successfully downloaded checkpoint '{latest['key']}' from window {latest['window']}."
+                )
+                return loaded_data, latest["window"]
 
-        except Exception as e:
-            tplr.logger.error(f"Error getting latest checkpoint: {e}")
+        except botocore.exceptions.ClientError as e:
+            tplr.logger.error(f"S3 ClientError while getting latest checkpoint: {e}")
             return None
+        except Exception as e:
+            tplr.logger.error(f"Unexpected error getting latest checkpoint: {e}")
+            return None
+
 
     async def load_checkpoint(
         self,

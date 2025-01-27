@@ -11,6 +11,10 @@ from flask_migrate import Migrate
 import asyncio
 from classes.grafana_tools import Grafana, WINDOW_OFFSET
 import tplr
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Initialize Flask App
 app = Flask(__name__)

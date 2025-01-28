@@ -842,9 +842,7 @@ class Comms(ChainManager):
                         # Create task for uploading but don't await it
                         asyncio.create_task(
                             self.s3_put_object(
-                                key=key,
-                                file_path=temp_file,
-                                bucket=self.bucket
+                                key=key, file_path=temp_file, bucket=self.bucket
                             )
                         )
                     finally:
@@ -1382,4 +1380,3 @@ class Comms(ChainManager):
             except Exception as e:
                 tplr.logger.error(f"Error fetching start_window: {e}")
                 await asyncio.sleep(10)
-

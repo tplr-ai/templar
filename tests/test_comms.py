@@ -337,10 +337,10 @@ async def test_gather_store_gathers(comms_instance):
 
     # Wait a bit for async tasks to be created
     await asyncio.sleep(0.1)
-    
+
     # Verify s3_put_object was called
     assert comms_instance.s3_put_object.called
-    
+
     # Verify correct arguments
     call_args = comms_instance.s3_put_object.call_args
     assert call_args is not None
@@ -835,6 +835,7 @@ async def test_gather_store_gathers_non_blocking(comms_instance):
     async def slow_upload(*args, **kwargs):
         await asyncio.sleep(1)  # Simulate slow upload
         return True
+
     comms_instance.s3_put_object = AsyncMock(side_effect=slow_upload)
 
     # Measure time taken

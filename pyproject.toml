@@ -52,3 +52,11 @@ asyncio_mode = "auto"
 markers = [
     "asyncio: mark test as async",
 ]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::FutureWarning",
+    # Keep other warnings
+    "default::RuntimeWarning",
+    "default::UserWarning",
+]

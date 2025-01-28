@@ -62,7 +62,6 @@ class Miner:
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
-        parser.add_argument('--peers', type=int, nargs='+', default=[], help='List of UIDs to peer with')
         parser.add_argument('--store-gathers', action='store_true', help='Store gathered gradients in R2')
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)

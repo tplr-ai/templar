@@ -799,3 +799,54 @@ async def test_get_start_window_retry(comms_instance):
 
     start_window = await comms_instance.get_start_window()
     assert start_window == 100
+
+
+async def test_gather_store_gathers_non_blocking(comms_instance):
+    """Test that storing gradients doesn't block the gather operation"""
+    import time
+    
+    # Setup test data
+    state_dict = {
+        "layer.idxs": torch.tensor([0, 1]),
+        "layer.vals": torch.tensor([0.1, 0.2]),
+    }
+
+    # Mock get_with_retry
+    comms_instance.get_with_retry = AsyncMock()
+    peer_response = (state_dict, 1)
+    comms_instance.get_with_retry.side_effect = [peer_response]
+
+    # Mock s3_put_object to simulate slow upload
+    async def slow_upload(*args, **kwargs):
+        await asyncio.sleep(1)  # Simulate slow upload
+        return True
+    
+    comms_instance.s3_put_object = AsyncMock(side_effect=slow_upload)
+
+    # Measure time taken
+    start_time = time.perf_counter()
+    
+    result = await comms_instance.gather(
+        state_dict=None,
+        my_uid="0",
+        uids=["1"],
+        window=1,
+        key="gradient",
+        timeout=5,
+        device="cpu",
+        global_step=0,
+        store_gathers=True,
+    )
+
+    end_time = time.perf_counter()
+    duration = end_time - start_time
+
+    # Verify gather completed quickly (much less than 1 second)
+    assert duration < 0.5, f"Gather took {duration:.2f}s, should be near-instant"
+    
+    # Verify upload was initiated
+    assert comms_instance.s3_put_object.called
+    
+    # Verify gather worked normally
+    assert result is not None
+    assert hasattr(result, 'state_dict')

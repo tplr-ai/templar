@@ -817,47 +817,53 @@ class Comms(ChainManager):
 
             # Store raw gradients if enabled
             if store_gathers:
-                tplr.logger.debug(f"Storing raw gradients for UID {uid}")
-                try:
-                    gradient_data = {
-                        "state_dict": {
-                            k: v.cpu().numpy() for k, v in state_dict_resp.items()
-                        },
-                        "metadata": {
-                            "uid": uid,
-                            "window": window,
-                            "global_step": global_step_resp,
-                            "timestamp": time.time(),
-                            "version": __version__,
-                        },
-                    }
 
-                    # Create temporary file
-                    temp_file = os.path.join(
-                        self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
-                    )
+                async def store_gradient_task(
+                    self, state_dict_resp, uid, window, global_step_resp
+                ):
                     try:
-                        np.savez_compressed(temp_file, **gradient_data)
-                        key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
-                        tplr.logger.debug(f"Saving gradient file to S3: {key}")
+                        gradient_data = {
+                            "state_dict": {
+                                k: v.cpu().numpy() for k, v in state_dict_resp.items()
+                            },
+                            "metadata": {
+                                "uid": uid,
+                                "window": window,
+                                "global_step": global_step_resp,
+                                "timestamp": time.time(),
+                                "version": __version__,
+                            },
+                        }
 
-                        await self.s3_put_object(
-                            key=key, file_path=temp_file, bucket=self.bucket
+                        # Create temporary file
+                        temp_file = os.path.join(
+                            self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
                         )
-                        tplr.logger.debug(
-                            f"Successfully stored gradients for UID {uid}"
-                        )
-                    finally:
-                        if os.path.exists(temp_file):
-                            os.remove(temp_file)
-                            tplr.logger.debug(f"Cleaned up temporary file: {temp_file}")
+                        try:
+                            np.savez_compressed(temp_file, **gradient_data)
+                            key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
 
-                except Exception as e:
-                    tplr.logger.error(
-                        f"Failed to store gradient from UID {uid}: {str(e)}"
+                            await self.s3_put_object(
+                                key=key, file_path=temp_file, bucket=self.bucket
+                            )
+                        finally:
+                            if os.path.exists(temp_file):
+                                os.remove(temp_file)
+
+                    except Exception as e:
+                        tplr.logger.warning(
+                            f"Failed to store gradient from UID {uid}: {str(e)}"
+                        )
+
+                # Fire and forget the storage task
+                asyncio.create_task(
+                    store_gradient_task(
+                        self, state_dict_resp, uid, window, global_step_resp
                     )
+                )
 
             # Add normalized tensors to aggregated_state_dict
+            tplr.logger.debug(f"Processing tensors from UID {uid}")
             for param_name, tensor in state_dict_resp.items():
                 if param_name.endswith("vals"):
                     tensor = tensor.to(device)
@@ -867,6 +873,9 @@ class Comms(ChainManager):
                     if param_name not in aggregated_state_dict:
                         aggregated_state_dict[param_name] = []
                     aggregated_state_dict[param_name].append(normalized)
+                    tplr.logger.debug(
+                        f"Normalized tensor {param_name} from UID {uid}, norm: {norm}"
+                    )
                 else:
                     # Keep indices unchanged
                     if param_name not in aggregated_state_dict:
@@ -1370,3 +1379,4 @@ class Comms(ChainManager):
             except Exception as e:
                 tplr.logger.error(f"Error fetching start_window: {e}")
                 await asyncio.sleep(10)
+

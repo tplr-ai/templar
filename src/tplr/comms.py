@@ -269,7 +269,7 @@ class Comms(ChainManager):
 
             # Handle PyTorch files
             file_size = os.path.getsize(file_path)
-            multipart_threshold = 5 * 1024 * 1024 * 1024  # 5GB
+            multipart_threshold = 500 * 1024 * 1024  # 500MB
 
             async with self.session.create_client(
                 "s3",
@@ -740,34 +740,40 @@ class Comms(ChainManager):
         global_step: int,
         local: bool = True,
         stale_retention: int = 10,
-        store_gathers: bool = False,  # New parameter
+        store_gathers: bool = False,  # Parameter for storing gathered gradients
     ) -> Optional[SimpleNamespace]:
         """Gather operation with individual gradient normalization."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
+        tplr.logger.debug(
+            f"Starting gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
+        )
+        tplr.logger.debug(f"Target UIDs for gathering: {uids}")
+
         # Put own state if provided
         if state_dict is not None:
-            # Start upload in background without waiting
-            asyncio.create_task(
-                self.put(
-                    state_dict=state_dict,
-                    uid=str(my_uid),
-                    window=window,
-                    key=key,
-                    global_step=global_step,
-                    local=local,
-                    stale_retention=stale_retention,
-                )
+            tplr.logger.debug(f"Putting own state dict for UID {my_uid}")
+            await self.put(
+                state_dict=state_dict,
+                uid=str(my_uid),
+                window=window,
+                key=key,
+                global_step=global_step,
+                local=local,
+                stale_retention=stale_retention,
             )
-            metrics["upload_bytes"] += sum(
+            upload_size = sum(
                 tensor.element_size() * tensor.nelement()
                 for tensor in state_dict.values()
             )
+            metrics["upload_bytes"] += upload_size
+            tplr.logger.debug(f"Uploaded {upload_size} bytes of own state")
 
         await asyncio.sleep(0.1)
 
         # Prepare gather tasks
+        tplr.logger.debug("Preparing gather tasks for all UIDs")
         gather_tasks = [
             self.get_with_retry(
                 uid=uid,
@@ -786,9 +792,11 @@ class Comms(ChainManager):
         global_steps = []
 
         # Process responses
+        tplr.logger.debug("Awaiting responses from all UIDs")
         responses = await asyncio.gather(*gather_tasks)
         for idx, response in enumerate(responses):
             uid = uids[idx]
+            tplr.logger.debug(f"Processing response from UID {uid}")
 
             if response is None:
                 tplr.logger.debug(f"No data received from UID {uid}")
@@ -796,6 +804,9 @@ class Comms(ChainManager):
 
             try:
                 state_dict_resp, global_step_resp = response
+                tplr.logger.debug(
+                    f"Received state dict and global step {global_step_resp} from UID {uid}"
+                )
             except (TypeError, ValueError) as e:
                 tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
                 continue
@@ -806,106 +817,103 @@ class Comms(ChainManager):
 
             # Store raw gradients if enabled
             if store_gathers:
+                try:
+                    gradient_data = {
+                        "state_dict": {
+                            k: v.cpu().numpy() for k, v in state_dict_resp.items()
+                        },
+                        "metadata": {
+                            "uid": uid,
+                            "window": window,
+                            "global_step": global_step_resp,
+                            "timestamp": time.time(),
+                            "version": __version__,
+                        },
+                    }
 
-                async def store_gradient_task(
-                    self, state_dict_resp, uid, window, global_step_resp
-                ):
+                    # Create temporary file
+                    temp_file = os.path.join(
+                        self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
+                    )
                     try:
-                        gradient_data = {
-                            "state_dict": {
-                                k: v.cpu().numpy() for k, v in state_dict_resp.items()
-                            },
-                            "metadata": {
-                                "uid": uid,
-                                "window": window,
-                                "global_step": global_step_resp,
-                                "timestamp": time.time(),
-                                "version": __version__,
-                            },
-                        }
+                        np.savez_compressed(temp_file, **gradient_data)
+                        key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
 
-                        # Create temporary file
-                        temp_file = os.path.join(
-                            self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
-                        )
-                        try:
-                            np.savez_compressed(temp_file, **gradient_data)
-                            key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
-
-                            await self.s3_put_object(
+                        # Create task for uploading but don't await it
+                        asyncio.create_task(
+                            self.s3_put_object(
                                 key=key, file_path=temp_file, bucket=self.bucket
                             )
-                        finally:
-                            if os.path.exists(temp_file):
-                                os.remove(temp_file)
-
-                    except Exception as e:
-                        tplr.logger.error(
-                            f"Failed to store gradient from UID {uid}: {str(e)}"
                         )
+                    finally:
+                        # Schedule cleanup of temp file
+                        asyncio.create_task(self._cleanup_temp_file(temp_file))
 
-                # Fire and forget the storage task
-                asyncio.create_task(
-                    store_gradient_task(
-                        self, state_dict_resp, uid, window, global_step_resp
+                except Exception as e:
+                    tplr.logger.warning(
+                        f"Failed to store gradient from UID {uid}: {str(e)}"
                     )
-                )
 
-            # Normalize each gradient value individually
-            normalized_dict = {}
+            # Add normalized tensors to aggregated_state_dict
+            tplr.logger.debug(f"Processing tensors from UID {uid}")
             for param_name, tensor in state_dict_resp.items():
                 if param_name.endswith("vals"):
                     tensor = tensor.to(device)
-                    orig_dtype = tensor.dtype
-                    # Convert to float32 for normalization
-                    tensor_f = tensor.to(torch.float32)
-                    # Compute norm
-                    norm = torch.norm(tensor_f)
-                    # Normalize and keep as float32
-                    normalized = tensor_f / (norm + 1e-8)
-                    normalized_dict[param_name] = normalized
+                    # Normalize in original dtype
+                    norm = torch.norm(tensor)
+                    normalized = tensor / (norm + 1e-8)
+                    if param_name not in aggregated_state_dict:
+                        aggregated_state_dict[param_name] = []
+                    aggregated_state_dict[param_name].append(normalized)
+                    tplr.logger.debug(
+                        f"Normalized tensor {param_name} from UID {uid}, norm: {norm}"
+                    )
                 else:
                     # Keep indices unchanged
-                    normalized_dict[param_name] = tensor.to(device)
+                    if param_name not in aggregated_state_dict:
+                        aggregated_state_dict[param_name] = []
+                    aggregated_state_dict[param_name].append(tensor.to(device))
                 metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
 
             # Move these outside the parameter loop to ensure they are executed once per UID
             valid_uids.append(uid)
             global_steps.append(global_step_resp)
-
-            # Add normalized tensors to aggregated_state_dict
-            for param_name, tensor in normalized_dict.items():
-                if param_name not in aggregated_state_dict:
-                    aggregated_state_dict[param_name] = []
-                aggregated_state_dict[param_name].append(tensor)
+            tplr.logger.debug(f"Successfully processed all tensors from UID {uid}")
 
         # If no valid responses, return None
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")
             return None
 
-        # Convert normalized gradients back to original dtype
-        final_state_dict = {}
-        for param_name, tensors in aggregated_state_dict.items():
-            # Get original dtype
-            orig_dtype = (
-                state_dict_resp[param_name].dtype if state_dict_resp else torch.float32  # type: ignore
-            )
-            # Convert back to original dtype
-            final_state_dict[param_name] = tensors[0].to(orig_dtype)  # type: ignore
+        total_time = time.time() - start_time
+        tplr.logger.debug(
+            f"Gather operation completed in {total_time:.2f}s. "
+            f"Success rate: {len(valid_uids)}/{len(uids)}, "
+            f"Upload: {metrics['upload_bytes']} bytes, "
+            f"Download: {metrics['download_bytes']} bytes"
+        )
 
         # Create result namespace
         result = SimpleNamespace(
-            time=time.time() - start_time,
+            time=total_time,
             upload_bytes=metrics["upload_bytes"],
             download_bytes=metrics["download_bytes"],
             success_rate=len(valid_uids) / len(uids),
-            state_dict=SimpleNamespace(**final_state_dict),
+            state_dict=SimpleNamespace(**aggregated_state_dict),
             uids=valid_uids,
             global_steps=global_steps,
         )
 
         return result
+
+    async def _cleanup_temp_file(self, file_path: str):
+        """Helper to cleanup temporary files asynchronously"""
+        try:
+            await asyncio.sleep(1)  # Give time for upload to complete
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception as e:
+            tplr.logger.warning(f"Failed to cleanup temp file {file_path}: {str(e)}")
 
     async def cleanup_old_checkpoints(self, keep_last: int = 3):
         """

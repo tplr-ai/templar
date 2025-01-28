@@ -269,7 +269,7 @@ class Comms(ChainManager):
 
             # Handle PyTorch files
             file_size = os.path.getsize(file_path)
-            multipart_threshold = 100 * 1024 * 1024  # 100MB
+            multipart_threshold = 500 * 1024 * 1024  # 500MB
 
             async with self.session.create_client(
                 "s3",
@@ -746,8 +746,14 @@ class Comms(ChainManager):
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
+        tplr.logger.debug(
+            f"Starting gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
+        )
+        tplr.logger.debug(f"Target UIDs for gathering: {uids}")
+
         # Put own state if provided
         if state_dict is not None:
+            tplr.logger.debug(f"Putting own state dict for UID {my_uid}")
             await self.put(
                 state_dict=state_dict,
                 uid=str(my_uid),
@@ -757,14 +763,17 @@ class Comms(ChainManager):
                 local=local,
                 stale_retention=stale_retention,
             )
-            metrics["upload_bytes"] += sum(
+            upload_size = sum(
                 tensor.element_size() * tensor.nelement()
                 for tensor in state_dict.values()
             )
+            metrics["upload_bytes"] += upload_size
+            tplr.logger.debug(f"Uploaded {upload_size} bytes of own state")
 
         await asyncio.sleep(0.1)
 
         # Prepare gather tasks
+        tplr.logger.debug("Preparing gather tasks for all UIDs")
         gather_tasks = [
             self.get_with_retry(
                 uid=uid,
@@ -783,9 +792,11 @@ class Comms(ChainManager):
         global_steps = []
 
         # Process responses
+        tplr.logger.debug("Awaiting responses from all UIDs")
         responses = await asyncio.gather(*gather_tasks)
         for idx, response in enumerate(responses):
             uid = uids[idx]
+            tplr.logger.debug(f"Processing response from UID {uid}")
 
             if response is None:
                 tplr.logger.debug(f"No data received from UID {uid}")
@@ -793,6 +804,9 @@ class Comms(ChainManager):
 
             try:
                 state_dict_resp, global_step_resp = response
+                tplr.logger.debug(
+                    f"Received state dict and global step {global_step_resp} from UID {uid}"
+                )
             except (TypeError, ValueError) as e:
                 tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
                 continue
@@ -803,6 +817,7 @@ class Comms(ChainManager):
 
             # Store raw gradients if enabled
             if store_gathers:
+                tplr.logger.debug(f"Storing raw gradients for UID {uid}")
                 try:
                     gradient_data = {
                         "state_dict": {
@@ -824,13 +839,18 @@ class Comms(ChainManager):
                     try:
                         np.savez_compressed(temp_file, **gradient_data)
                         key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
+                        tplr.logger.debug(f"Saving gradient file to S3: {key}")
 
                         await self.s3_put_object(
                             key=key, file_path=temp_file, bucket=self.bucket
                         )
+                        tplr.logger.debug(
+                            f"Successfully stored gradients for UID {uid}"
+                        )
                     finally:
                         if os.path.exists(temp_file):
                             os.remove(temp_file)
+                            tplr.logger.debug(f"Cleaned up temporary file: {temp_file}")
 
                 except Exception as e:
                     tplr.logger.error(
@@ -838,6 +858,7 @@ class Comms(ChainManager):
                     )
 
             # Add normalized tensors to aggregated_state_dict
+            tplr.logger.debug(f"Processing tensors from UID {uid}")
             for param_name, tensor in state_dict_resp.items():
                 if param_name.endswith("vals"):
                     tensor = tensor.to(device)
@@ -847,6 +868,9 @@ class Comms(ChainManager):
                     if param_name not in aggregated_state_dict:
                         aggregated_state_dict[param_name] = []
                     aggregated_state_dict[param_name].append(normalized)
+                    tplr.logger.debug(
+                        f"Normalized tensor {param_name} from UID {uid}, norm: {norm}"
+                    )
                 else:
                     # Keep indices unchanged
                     if param_name not in aggregated_state_dict:
@@ -857,15 +881,24 @@ class Comms(ChainManager):
             # Move these outside the parameter loop to ensure they are executed once per UID
             valid_uids.append(uid)
             global_steps.append(global_step_resp)
+            tplr.logger.debug(f"Successfully processed all tensors from UID {uid}")
 
         # If no valid responses, return None
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")
             return None
 
+        total_time = time.time() - start_time
+        tplr.logger.debug(
+            f"Gather operation completed in {total_time:.2f}s. "
+            f"Success rate: {len(valid_uids)}/{len(uids)}, "
+            f"Upload: {metrics['upload_bytes']} bytes, "
+            f"Download: {metrics['download_bytes']} bytes"
+        )
+
         # Create result namespace
         result = SimpleNamespace(
-            time=time.time() - start_time,
+            time=total_time,
             upload_bytes=metrics["upload_bytes"],
             download_bytes=metrics["download_bytes"],
             success_rate=len(valid_uids) / len(uids),

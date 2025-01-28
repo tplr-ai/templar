@@ -14,6 +14,9 @@ load_dotenv()
 
 from tplr.comms import Comms
 import tplr
+from tplr import logger, debug
+
+debug()
 
 # Setup pytest-asyncio
 pytestmark = [pytest.mark.asyncio]
@@ -318,6 +321,89 @@ async def test_gather_averaging(comms_instance):
     print(f"Expected: {expected_vals}")
 
     assert torch.allclose(actual_vals, expected_vals, rtol=1e-3, atol=1e-3)
+
+
+async def test_gather_complex_normalization(comms_instance):
+    # Test multiple peers with different scales and patterns
+    peer1_response = (
+        {
+            "layer.idxs": torch.tensor([0, 1, 2]),
+            "layer.vals": torch.tensor([1.0, 2.0, 2.0]),  # norm ≈ 3
+        },
+        1,
+    )
+    peer2_response = (
+        {
+            "layer.idxs": torch.tensor([0, 1, 2]),
+            "layer.vals": torch.tensor(
+                [10.0, 20.0, 20.0]
+            ),  # Same pattern, larger scale
+        },
+        2,
+    )
+    peer3_response = (
+        {
+            "layer.idxs": torch.tensor([0, 1, 2]),
+            "layer.vals": torch.tensor([-5.0, 5.0, 5.0]),  # Different sign
+        },
+        3,
+    )
+
+    comms_instance.get_with_retry = AsyncMock()
+    comms_instance.get_with_retry.side_effect = [
+        peer1_response,
+        peer2_response,
+        peer3_response,
+    ]
+
+    result = await comms_instance.gather(
+        state_dict=None,
+        my_uid="0",
+        uids=["1", "2", "3"],
+        window=1,
+        key="gradient",
+        timeout=5,
+        device="cpu",
+        global_step=0,
+    )
+
+    assert result is not None
+    # Fix: Get all normalized tensors and average them
+    normalized_tensors = getattr(result.state_dict, "layer.vals")
+    actual_vals = torch.stack(normalized_tensors).mean(dim=0)
+
+    # Calculate expected normalized values
+    norm1 = torch.norm(peer1_response[0]["layer.vals"])
+    norm2 = torch.norm(peer2_response[0]["layer.vals"])
+    norm3 = torch.norm(peer3_response[0]["layer.vals"])
+
+    # Add small epsilon to avoid division by zero
+    eps = 1e-8
+    normalized1 = peer1_response[0]["layer.vals"] / (norm1 + eps)
+    normalized2 = peer2_response[0]["layer.vals"] / (norm2 + eps)
+    normalized3 = peer3_response[0]["layer.vals"] / (norm3 + eps)
+
+    # Average all three normalized values
+    expected_vals = torch.stack([normalized1, normalized2, normalized3]).mean(dim=0)
+
+    # Print values for debugging
+    print(f"\nPeer 1 original: {peer1_response[0]['layer.vals']}, norm: {norm1}")
+    print(f"Peer 1 normalized: {normalized1}")
+    print(f"\nPeer 2 original: {peer2_response[0]['layer.vals']}, norm: {norm2}")
+    print(f"Peer 2 normalized: {normalized2}")
+    print(f"\nPeer 3 original: {peer3_response[0]['layer.vals']}, norm: {norm3}")
+    print(f"Peer 3 normalized: {normalized3}")
+    print(f"\nExpected average: {expected_vals}")
+    print(f"Actual result: {actual_vals}")
+
+    # Compare with higher tolerance due to floating point operations
+    assert torch.allclose(actual_vals, expected_vals, rtol=1e-3, atol=1e-3)
+
+    # Additional assertions to verify all peers were processed
+    assert len(normalized_tensors) == 3, (
+        f"Expected 3 normalized tensors, got {len(normalized_tensors)}"
+    )
+    assert len(result.uids) == 3, f"Expected 3 valid UIDs, got {len(result.uids)}"
 
 
 # TODO:

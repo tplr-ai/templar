@@ -892,7 +892,9 @@ class Comms(ChainManager):
                 state_dict_resp[param_name].dtype if state_dict_resp else torch.float32  # type: ignore
             )
             # Convert back to original dtype
-            final_state_dict[param_name] = tensors[0].to(orig_dtype)  # type: ignore
+            stacked = torch.stack([t.to(torch.float32) for t in tensors], dim=0)
+            mean_t = stacked.mean(dim=0) 
+            final_state_dict[param_name] = mean_t.to(orig_dtype)
 
         # Create result namespace
         result = SimpleNamespace(

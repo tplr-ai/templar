@@ -858,7 +858,6 @@ class Comms(ChainManager):
                     )
 
             # Add normalized tensors to aggregated_state_dict
-            tplr.logger.debug(f"Processing tensors from UID {uid}")
             for param_name, tensor in state_dict_resp.items():
                 if param_name.endswith("vals"):
                     tensor = tensor.to(device)
@@ -868,9 +867,6 @@ class Comms(ChainManager):
                     if param_name not in aggregated_state_dict:
                         aggregated_state_dict[param_name] = []
                     aggregated_state_dict[param_name].append(normalized)
-                    tplr.logger.debug(
-                        f"Normalized tensor {param_name} from UID {uid}, norm: {norm}"
-                    )
                 else:
                     # Keep indices unchanged
                     if param_name not in aggregated_state_dict:

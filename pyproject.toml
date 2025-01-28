@@ -47,7 +47,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
-addopts = "-v -s --capture=no --log-cli-level=DEBUG"
+addopts = "-v -s --capture=no --log-cli-level=INFO"
 asyncio_mode = "auto"
 markers = [
     "asyncio: mark test as async",

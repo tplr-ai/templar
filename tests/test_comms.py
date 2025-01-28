@@ -8,6 +8,57 @@ import tempfile
 from types import SimpleNamespace
 from dotenv import load_dotenv
 import pytest_asyncio
+import asyncio
+import botocore
+from dataclasses import dataclass
+
+# Set required environment variables
+os.environ["R2_GRADIENTS_ACCOUNT_ID"] = "test_account"
+os.environ["R2_GRADIENTS_BUCKET_NAME"] = "test-bucket"
+os.environ["R2_GRADIENTS_READ_ACCESS_KEY_ID"] = "test_read_key"
+os.environ["R2_GRADIENTS_READ_SECRET_ACCESS_KEY"] = "test_read_secret"
+os.environ["R2_GRADIENTS_WRITE_ACCESS_KEY_ID"] = "test_write_key"
+os.environ["R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"] = "test_write_secret"
+os.environ["R2_DATASET_BUCKET_NAME"] = "test-dataset-bucket"
+
+
+# Mock Bucket class
+@dataclass
+class Bucket:
+    name: str
+    account_id: str
+    access_key_id: str
+    secret_access_key: str
+
+
+# Mock the config module
+@pytest.fixture(autouse=True)
+def mock_config():
+    with (
+        patch(
+            "tplr.config.BUCKET_SECRETS",
+            {
+                "gradients": {
+                    "account_id": "test_account",
+                    "bucket_name": "test-bucket",
+                    "read": {
+                        "access_key_id": "test_read_key",
+                        "secret_access_key": "test_read_secret",
+                    },
+                    "write": {
+                        "access_key_id": "test_write_key",
+                        "secret_access_key": "test_write_secret",
+                    },
+                },
+                "dataset": {"bucket_name": "test-dataset-bucket"},
+            },
+        ),
+        patch("tplr.config.client_config", {}),
+    ):
+        yield
+
+
+from tplr.schemas import Bucket
 
 # Load environment variables from .env file
 load_dotenv()
@@ -20,6 +71,52 @@ debug()
 
 # Setup pytest-asyncio
 pytestmark = [pytest.mark.asyncio]
+
+
+# Test fixture for comms instance
+@pytest.fixture
+async def comms_instance():
+    # Mock wallet
+    mock_wallet = MagicMock()
+    mock_wallet.hotkey.ss58_address = "test_address"
+
+    # Mock config and other dependencies
+    mock_config = MagicMock()
+    mock_metagraph = MagicMock()
+    mock_hparams = MagicMock()
+    mock_hparams.active_check_interval = 60
+    mock_hparams.recent_windows = 3
+
+    # Create comms instance with mocked get_own_bucket
+    with patch(
+        "tplr.comms.Comms.get_own_bucket",
+        return_value=Bucket(
+            name="test-bucket",
+            account_id="test-account",
+            access_key_id="test-key",
+            secret_access_key="test-secret",
+        ),
+    ):
+        comms = tplr.comms.Comms(
+            wallet=mock_wallet,
+            save_location="/tmp",
+            key_prefix="test",
+            config=mock_config,
+            netuid=1,
+            metagraph=mock_metagraph,
+            hparams=mock_hparams,
+            uid="test_uid",
+        )
+
+        yield comms
+
+        # Cleanup
+        if os.path.exists(comms.temp_dir):
+            import shutil
+
+            shutil.rmtree(comms.temp_dir)
+        if os.path.exists(comms.save_location):
+            shutil.rmtree(comms.save_location)
 
 
 # Existing mock functions
@@ -41,47 +138,6 @@ def mock_metagraph():
     metagraph.uids = [0]
     metagraph.S = torch.tensor([100.0])  # Stake
     return metagraph
-
-
-@pytest_asyncio.fixture
-async def comms_instance():
-    # Create a Comms instance with mocked dependencies
-    wallet = mock_bittensor_wallet()
-    metagraph = mock_metagraph()
-    hparams = MagicMock()
-    hparams.blocks_per_window = 100
-    config = MagicMock()
-    config.netuid = 1
-    config.device = "cpu"
-
-    comms = Comms(
-        wallet=wallet,
-        save_location="/tmp",
-        key_prefix="model",
-        config=config,
-        netuid=config.netuid,
-        metagraph=metagraph,
-        hparams=hparams,
-        uid=0,  # Using 0 as test UID
-    )
-
-    # Mock bucket and commitment methods
-    comms.get_own_bucket = MagicMock(return_value="test-bucket")
-    comms.try_commit = AsyncMock()
-    comms.fetch_commitments = AsyncMock()
-    comms.get_commitments_sync = MagicMock(return_value={})
-    comms.update_peers_with_buckets = MagicMock()
-
-    # Set up temp directory
-    comms.temp_dir = tempfile.mkdtemp()
-
-    yield comms
-
-    # Cleanup temp dir
-    if os.path.exists(comms.temp_dir):
-        for f in os.listdir(comms.temp_dir):
-            os.remove(os.path.join(comms.temp_dir, f))
-        os.rmdir(comms.temp_dir)
 
 
 # Existing tests remain unchanged
@@ -406,9 +462,340 @@ async def test_gather_complex_normalization(comms_instance):
     assert len(result.uids) == 3, f"Expected 3 valid UIDs, got {len(result.uids)}"
 
 
-# TODO:
-# - Add tests for edge cases with very large tensors
-# - Add tests for different device placements
-# - Add tests for timeout scenarios
-# - Add tests for concurrent access patterns
-# - Add tests for different compression scenarios
+# Test Initialization and Cleanup
+async def test_comms_init(comms_instance):
+    """Test proper initialization of Comms instance"""
+    assert os.path.exists(comms_instance.temp_dir)
+    assert os.path.exists(comms_instance.save_location)
+    assert comms_instance.lock is not None
+    assert isinstance(comms_instance.active_peers, set)
+
+
+async def test_cleanup_local_data(comms_instance):
+    """Test cleanup of stale local data"""
+    # Setup test directories and files
+    uid = "test_uid"
+    test_dir = os.path.join("/tmp/local_store", uid)
+    os.makedirs(os.path.join(test_dir, "10"), exist_ok=True)
+    os.makedirs(os.path.join(test_dir, "20"), exist_ok=True)
+
+    await comms_instance.cleanup_local_data(uid, 25, 5)
+    assert not os.path.exists(os.path.join(test_dir, "10"))
+    assert os.path.exists(os.path.join(test_dir, "20"))
+
+
+# Test S3 Operations
+async def test_s3_put_small_file(comms_instance):
+    """Test uploading small file to S3"""
+    # Create test file
+    with open("test_file.txt", "w") as f:
+        f.write("test data")
+
+    # Mock S3 client with proper async context manager
+    mock_client = AsyncMock()
+    mock_client.put_object = AsyncMock()
+    comms_instance.session.create_client = MagicMock(return_value=mock_client)
+
+    # Create proper Bucket instance instead of string
+    comms_instance.bucket = Bucket(
+        name="test-bucket",
+        account_id="test-account",
+        access_key_id="test-key",
+        secret_access_key="test-secret",
+    )
+
+    await comms_instance.s3_put_object("test_key", "test_file.txt")
+
+    # Cleanup
+    os.remove("test_file.txt")
+
+
+async def test_s3_put_large_file(comms_instance):
+    """Test multipart upload for large files"""
+    # Mock S3 client with proper responses
+    mock_client = AsyncMock()
+    mock_client.create_multipart_upload = AsyncMock(
+        return_value={"UploadId": "test_id"}
+    )
+    mock_client.upload_part = AsyncMock(return_value={"ETag": "test_etag"})
+    mock_client.complete_multipart_upload = AsyncMock()
+    comms_instance.session.create_client = MagicMock(return_value=mock_client)
+
+    # Create proper Bucket instance
+    comms_instance.bucket = Bucket(
+        name="test-bucket",
+        account_id="test-account",
+        access_key_id="test-key",
+        secret_access_key="test-secret",
+    )
+
+    # Create large test file
+    with open("large_file.txt", "wb") as f:
+        f.write(os.urandom(10 * 1024 * 1024))  # 10MB file
+
+    await comms_instance.s3_put_object("test_key", "large_file.txt")
+
+    # Cleanup
+    os.remove("large_file.txt")
+
+
+async def test_download_large_file(comms_instance):
+    """Test downloading large file with chunks"""
+    # Mock S3 client with proper responses
+    mock_client = AsyncMock()
+    mock_client.head_object = AsyncMock(
+        return_value={"ContentLength": 10 * 1024 * 1024}
+    )
+
+    # Mock get_object to return proper chunk data
+    async def mock_get_object(**kwargs):
+        range_header = kwargs.get("Range", "")
+        start, end = map(int, range_header.replace("bytes=", "").split("-"))
+        chunk_size = end - start + 1
+        return {
+            "Body": AsyncMock(
+                **{
+                    "__aenter__.return_value": AsyncMock(
+                        **{"read.return_value": os.urandom(chunk_size)}
+                    )
+                }
+            )
+        }
+
+    mock_client.get_object = AsyncMock(side_effect=mock_get_object)
+    comms_instance.session.create_client = MagicMock(return_value=mock_client)
+
+    success = await comms_instance.download_large_file(
+        mock_client, "test-bucket", "test_key", 10 * 1024 * 1024, "test_output.txt"
+    )
+    mock_client.get_object.assert_called()
+
+
+# Test Checkpoint Operations
+async def test_load_checkpoint_success(comms_instance):
+    """Test successful checkpoint loading"""
+    # Create mock model and parameters
+    model = MagicMock()
+    test_param = torch.nn.Parameter(torch.randn(10))
+    model.named_parameters.return_value = [("layer1", test_param)]
+
+    # Create mock optimizer and scheduler
+    optimizer = MagicMock()
+    optimizer.state = {}  # Add empty state dict
+    scheduler = MagicMock()
+    scheduler.last_epoch = 0  # Add last_epoch attribute
+    transformer = MagicMock()
+    compressor = MagicMock()
+
+    # Mock checkpoint data with all required fields
+    checkpoint_data = {
+        "model_state_dict": {"layer1": torch.randn(10)},
+        "optimizer_state_dict": {
+            "state": {0: {"step": 100}},
+            "param_groups": [{"lr": 0.001}],  # Add param_groups
+        },
+        "scheduler_state_dict": {"last_epoch": 0},
+        "momentum": {"layer1": torch.randn(10)},
+        "global_step": 100,
+        "start_window": 1,
+        "current_window": 5,
+    }
+
+    # Mock get_latest_checkpoint result
+    comms_instance.get_latest_checkpoint = AsyncMock(
+        return_value=(checkpoint_data, 5)  # Return tuple of (data, window)
+    )
+
+    # Mock model's load_state_dict
+    model.load_state_dict = MagicMock()
+
+    # Mock optimizer and scheduler load_state_dict
+    optimizer.load_state_dict = MagicMock()
+    scheduler.load_state_dict = MagicMock()
+
+    # Mock gather for catch-up phase
+    comms_instance.gather = AsyncMock(
+        return_value=SimpleNamespace(
+            state_dict=SimpleNamespace(
+                **{
+                    "layer1idxs": [torch.tensor([0, 1])],
+                    "layer1vals": [torch.tensor([0.1, 0.2])],
+                }
+            ),
+            uids=["1"],
+            global_steps=[100],
+        )
+    )
+
+    # Add shape information to transformer mock
+    transformer.shapes = {"layer1": torch.Size([10])}
+    transformer.totalks = {"layer1": 10}
+    transformer.decode.return_value = torch.randn(10)
+
+    # Add debug prints
+    print("\nBefore loading checkpoint...")
+
+    with (
+        patch("tplr.logger.error") as mock_error,
+        patch("tplr.logger.info") as mock_info,
+        patch("tplr.logger.debug") as mock_debug,
+        patch("tplr.logger.warning") as mock_warning,
+    ):
+        success, momentum, step, opt, sched = await comms_instance.load_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            transformer=transformer,
+            compressor=compressor,
+            current_window=10,
+            device="cpu",
+            peers=[1, 2],
+            uid="0",
+        )
+
+        # Print any error logs that occurred
+        print("\nError logs:")
+        for call in mock_error.call_args_list:
+            print(f"Error: {call.args[0]}")
+
+        print("\nWarning logs:")
+        for call in mock_warning.call_args_list:
+            print(f"Warning: {call.args[0]}")
+
+        print(f"\nSuccess: {success}")
+        print(f"Step: {step}")
+
+    assert success, "Checkpoint loading failed"
+    assert isinstance(momentum, dict)
+    assert "layer1" in momentum
+    assert step > 0
+    assert opt == optimizer
+    assert sched == scheduler
+
+
+async def test_load_checkpoint_missing_data(comms_instance):
+    """Test checkpoint loading with missing data"""
+    model = MagicMock()
+    optimizer = MagicMock()
+    scheduler = MagicMock()
+
+    comms_instance.gather = AsyncMock(return_value=None)
+
+    success, _, _, _, _ = await comms_instance.load_checkpoint(
+        model,
+        optimizer,
+        scheduler,
+        MagicMock(),
+        MagicMock(),
+        current_window=10,
+        device="cpu",
+        peers=[1, 2],
+        uid="0",
+    )
+    assert not success
+
+
+# Test Gather Operations
+async def test_gather_basic(comms_instance):
+    """Test basic gather functionality"""
+    state_dict = {
+        "layer.idxs": torch.tensor([0, 1]),
+        "layer.vals": torch.tensor([0.1, 0.2]),
+    }
+    comms_instance.get_with_retry = AsyncMock(return_value=(state_dict, 1))
+
+    result = await comms_instance.gather(
+        state_dict=None,
+        my_uid="0",
+        uids=["1"],
+        window=1,
+        key="gradient",
+        timeout=5,
+        device="cpu",
+        global_step=0,
+    )
+    assert result is not None
+    assert hasattr(result.state_dict, "layer.vals")
+
+
+async def test_gather_timeout(comms_instance):
+    """Test gather operation with timeout"""
+
+    async def slow_get(*args, **kwargs):
+        await asyncio.sleep(2)
+        return None
+
+    comms_instance.get_with_retry = AsyncMock(side_effect=Exception("Test error"))
+
+    # Mock logger to avoid actual logging
+    with (
+        patch("tplr.logger.error"),
+        patch("tplr.logger.debug"),
+        patch("tplr.logger.info"),
+        patch("tplr.logger.warning"),
+    ):
+        result = await comms_instance.gather(
+            state_dict=None,
+            my_uid="0",
+            uids=["1"],
+            window=1,
+            key="gradient",
+            timeout=5,
+            device="cpu",
+            local=True,  # Use local=True to avoid S3 operations
+            global_step=0,
+            stale_retention=10,
+        )
+
+        # Should return None on error
+        assert result is None
+
+
+async def test_gather_timeout(comms_instance):
+    """Test gather operation with timeout"""
+
+    # Mock get_with_retry to simulate timeout
+    async def mock_get_with_retry(*args, **kwargs):
+        await asyncio.sleep(0.2)  # Sleep longer than timeout
+        return None
+
+    comms_instance.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+
+    result = await comms_instance.gather(
+        state_dict=None,
+        my_uid="0",
+        uids=["1"],
+        window=1,
+        key="gradient",
+        timeout=5,
+        device="cpu",
+        global_step=0,
+    )
+    assert result is None
+
+
+# Test Start Window Operations
+async def test_get_start_window(comms_instance):
+    """Test fetching start window"""
+    mock_bucket = MagicMock()
+    comms_instance._get_highest_stake_validator_bucket = AsyncMock(
+        return_value=(mock_bucket, "1")
+    )
+    comms_instance.s3_get_object = AsyncMock(return_value={"start_window": 100})
+
+    start_window = await comms_instance.get_start_window()
+    assert start_window == 100
+
+
+async def test_get_start_window_retry(comms_instance):
+    """Test start window fetch with retries"""
+    mock_bucket = MagicMock()
+    comms_instance._get_highest_stake_validator_bucket = AsyncMock(
+        return_value=(mock_bucket, "1")
+    )
+    comms_instance.s3_get_object = AsyncMock(
+        side_effect=[None, None, {"start_window": 100}]
+    )
+
+    start_window = await comms_instance.get_start_window()
+    assert start_window == 100

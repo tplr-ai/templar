@@ -979,7 +979,7 @@ class Comms(ChainManager):
                         tplr.logger.debug(f"Found {filename} for UID {uid}")
                         return True
                     except botocore.exceptions.ClientError as e:
-                        if e.response["Error"]["Code"] not in ["404", "403"]:  # type: ignore
+                        if e.response["Error"]["Code"] not in ["404", "403", "401"]:  # type: ignore
                             tplr.logger.error(
                                 f"Error checking activity for UID {uid}: {e}"
                             )

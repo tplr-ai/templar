@@ -1071,9 +1071,14 @@ class Comms(ChainManager):
         """
         try:
             # 1. Check validator bucket
-            validator_bucket, validator_uid = await self._get_highest_stake_validator_bucket()
+            (
+                validator_bucket,
+                validator_uid,
+            ) = await self._get_highest_stake_validator_bucket()
             if validator_bucket:
-                result = await self._get_bucket_checkpoint(validator_bucket, validator_uid)
+                result = await self._get_bucket_checkpoint(
+                    validator_bucket, validator_uid
+                )
                 if result:
                     # If successfully retrieved, return immediately.
                     return result
@@ -1090,7 +1095,9 @@ class Comms(ChainManager):
             if local_result:
                 return local_result
 
-            tplr.logger.info("No checkpoint found in validator / self R2 / local storage")
+            tplr.logger.info(
+                "No checkpoint found in validator / self R2 / local storage"
+            )
             return None
 
         except Exception as e:
@@ -1098,7 +1105,6 @@ class Comms(ChainManager):
             return None
 
     def _load_latest_local_checkpoint(self):
-
         try:
             local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
             pattern = rf"checkpoint-(\d+)-{self.uid}-v{__version__}\.pt$"
@@ -1118,23 +1124,24 @@ class Comms(ChainManager):
                         # window number comes from match.group(1)
                         w = int(match.group(1))
                         file_path = os.path.join(path, file)
-                        checkpoints.append({
-                            'path': file_path,
-                            'window': w,
-                            'modified': os.path.getmtime(file_path)
-                        })
+                        checkpoints.append(
+                            {
+                                "path": file_path,
+                                "window": w,
+                                "modified": os.path.getmtime(file_path),
+                            }
+                        )
 
             if checkpoints:
                 # choose the last modified checkpoint
-                latest = max(checkpoints, key=lambda x: x['modified'])
-                checkpoint_data = torch.load(latest['path'])
-                return checkpoint_data, latest['window']
+                latest = max(checkpoints, key=lambda x: x["modified"])
+                checkpoint_data = torch.load(latest["path"])
+                return checkpoint_data, latest["window"]
             else:
                 return None
         except Exception as e:
             tplr.logger.error(f"Error in local checkpoint loading: {e}")
             return None
-
 
     async def _get_bucket_checkpoint(self, bucket, uid):
         """Helper to get checkpoint from a specific bucket."""
@@ -1147,11 +1154,9 @@ class Comms(ChainManager):
             aws_secret_access_key=bucket.secret_access_key,
         ) as s3_client:
             pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{__version__}\.pt$")
-            
+
             response = await s3_client.list_objects_v2(
-                Bucket=bucket.name,
-                Prefix="checkpoint",
-                MaxKeys=50
+                Bucket=bucket.name, Prefix="checkpoint", MaxKeys=50
             )
 
             if not response.get("Contents"):
@@ -1162,21 +1167,20 @@ class Comms(ChainManager):
                 key = obj.get("Key", "")
                 match = pattern.match(key)
                 if match:
-                    valid_checkpoints.append({
-                        "key": key,
-                        "window": int(match.group(1)),
-                        "last_modified": obj["LastModified"]
-                    })
+                    valid_checkpoints.append(
+                        {
+                            "key": key,
+                            "window": int(match.group(1)),
+                            "last_modified": obj["LastModified"],
+                        }
+                    )
 
             if valid_checkpoints:
                 latest = max(valid_checkpoints, key=lambda x: x["last_modified"])
-                loaded_data = await self.s3_get_object(
-                    key=latest["key"],
-                    bucket=bucket
-                )
+                loaded_data = await self.s3_get_object(key=latest["key"], bucket=bucket)
                 if loaded_data:
                     return loaded_data, latest["window"]
-            
+
             return None
 
     async def load_checkpoint(
@@ -1420,17 +1424,29 @@ class Comms(ChainManager):
                 tplr.logger.error(f"Error fetching start_window: {e}")
                 await asyncio.sleep(10)
 
-
-    async def save_checkpoint(self, model, optimizer, scheduler, momentum, global_step, current_window, start_window):
+    async def save_checkpoint(
+        self,
+        model,
+        optimizer,
+        scheduler,
+        momentum,
+        global_step,
+        current_window,
+        start_window,
+    ):
         """Save checkpoint to R2 and local storage"""
         checkpoint_data = {
-            'model_state_dict': {k: v.cpu().clone() for k, v in model.state_dict().items()},
-            'optimizer_state_dict': {k: v.cpu().clone() if torch.is_tensor(v) else v 
-                                    for k, v in optimizer.state_dict().items()},
-            'scheduler_state_dict': scheduler.state_dict(),
-            'momentum': {k: v.cpu().clone() for k, v in momentum.items()},
-            'start_window': start_window,
-            'current_window': current_window
+            "model_state_dict": {
+                k: v.cpu().clone() for k, v in model.state_dict().items()
+            },
+            "optimizer_state_dict": {
+                k: v.cpu().clone() if torch.is_tensor(v) else v
+                for k, v in optimizer.state_dict().items()
+            },
+            "scheduler_state_dict": scheduler.state_dict(),
+            "momentum": {k: v.cpu().clone() for k, v in momentum.items()},
+            "start_window": start_window,
+            "current_window": current_window,
         }
 
         # save locally
@@ -1438,19 +1454,19 @@ class Comms(ChainManager):
             state_dict=checkpoint_data,
             uid=str(self.uid),
             window=current_window,
-            key='checkpoint',
+            key="checkpoint",
             global_step=global_step,
-            local=True
+            local=True,
         )
-        
+
         # upload to R2
         await self.put(
             state_dict=checkpoint_data,
             uid=str(self.uid),
             window=current_window,
-            key='checkpoint', 
+            key="checkpoint",
             global_step=global_step,
-            local=False
+            local=False,
         )
 
         return True

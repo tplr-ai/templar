@@ -1001,7 +1001,7 @@ class Comms(ChainManager):
                         tplr.logger.debug(f"Found {filename} for UID {uid}")
                         return True
                     except botocore.exceptions.ClientError as e:
-                        if e.response["Error"]["Code"] not in ["404", "403"]:  # type: ignore
+                        if e.response["Error"]["Code"] not in ["404", "403", "401"]:  # type: ignore
                             tplr.logger.error(
                                 f"Error checking activity for UID {uid}: {e}"
                             )
@@ -1062,82 +1062,121 @@ class Comms(ChainManager):
         return validator_bucket, validator_uid
 
     async def get_latest_checkpoint(self):
-        """Get the latest checkpoint: Returns (checkpoint_data, window) tuple."""
+        """
+        Sequentially check:
+        1. Whether the highest-staked validator has a checkpoint.
+        2. Whether the R2 bucket of this instance has a checkpoint.
+        3. Whether a checkpoint exists locally.
+        If none are found, return None.
+        """
         try:
-            (
-                validator_bucket,
-                validator_uid,
-            ) = await self._get_highest_stake_validator_bucket()
-            if not validator_bucket:
-                return None
+            # 1. Check validator bucket
+            validator_bucket, validator_uid = await self._get_highest_stake_validator_bucket()
+            if validator_bucket:
+                result = await self._get_bucket_checkpoint(validator_bucket, validator_uid)
+                if result:
+                    # If successfully retrieved, return immediately.
+                    return result
 
-            # List checkpoint files efficiently
-            async with self.session.create_client(
-                "s3",
-                endpoint_url=self.get_base_url(validator_bucket.account_id),
-                region_name=CF_REGION_NAME,
-                config=client_config,
-                aws_access_key_id=validator_bucket.access_key_id,
-                aws_secret_access_key=validator_bucket.secret_access_key,
-            ) as s3_client:
-                pattern = re.compile(
-                    rf"^checkpoint-(\d+)-{validator_uid}-v{__version__}\.pt$"
-                )
+            # 2. Check self R2 bucket
+            self_bucket = self.bucket  # Use self.bucket saved in __init__
+            if self_bucket:
+                result = await self._get_bucket_checkpoint(self_bucket, self.uid)
+                if result:
+                    return result
 
-                # Get the most recent objects
-                response = await s3_client.list_objects_v2(
-                    Bucket=validator_bucket.name,
-                    Prefix="checkpoint",
-                    MaxKeys=50,  # Limit to recent checkpoints
-                )
+            # 3. Check local storage
+            local_result = self._load_latest_local_checkpoint()
+            if local_result:
+                return local_result
 
-                if not response.get("Contents"):
-                    tplr.logger.info("No checkpoint files found")
-                    return None
-
-                # Find latest valid checkpoint that matches pattern
-                latest = None
-                valid_checkpoints = []
-
-                for obj in response.get("Contents", []):
-                    key: str = obj.get("Key", "")
-                    match = pattern.match(key)
-                    if match:
-                        valid_checkpoints.append(
-                            {
-                                "key": key,
-                                "window": int(match.group(1)),
-                                "size": obj["Size"],  # type: ignore
-                                "last_modified": obj["LastModified"],  # type: ignore
-                            }
-                        )
-
-                if valid_checkpoints:
-                    # Sort by LastModified timestamp (most recent first)
-                    latest = max(valid_checkpoints, key=lambda x: x["last_modified"])  # type: ignore
-                else:
-                    tplr.logger.info("No valid checkpoint files found")
-                    return None
-
-                tplr.logger.info(
-                    f"Found latest checkpoint: {latest['key']} from window {latest['window']}, "  # type: ignore
-                    f"modified at {latest['last_modified']}"  # type: ignore
-                )
-
-                # Get the checkpoint data using the window from the latest checkpoint
-                loaded_data = await self.s3_get_object(
-                    key=latest["key"],
-                    bucket=validator_bucket,  # type: ignore
-                )
-
-                if loaded_data is None:
-                    tplr.logger.error(f"Failed to download checkpoint {latest['key']}")  # type: ignore
-                    return None
-
-                return loaded_data, latest["window"]  # type: ignore
+            tplr.logger.info("No checkpoint found in validator / self R2 / local storage")
+            return None
 
         except Exception as e:
             tplr.logger.error(f"Error getting latest checkpoint: {e}")
+            return None
+
+    def _load_latest_local_checkpoint(self):
+
+        try:
+            local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
+            pattern = rf"checkpoint-(\d+)-{self.uid}-v{__version__}\.pt$"
+
+            if not os.path.exists(local_dir):
+                return None
+
+            checkpoints = []
+            for window_dir in os.listdir(local_dir):
+                path = os.path.join(local_dir, window_dir)
+                if not os.path.isdir(path):
+                    continue
+
+                for file in os.listdir(path):
+                    match = re.match(pattern, file)
+                    if match:
+                        # window number comes from match.group(1)
+                        w = int(match.group(1))
+                        file_path = os.path.join(path, file)
+                        checkpoints.append({
+                            'path': file_path,
+                            'window': w,
+                            'modified': os.path.getmtime(file_path)
+                        })
+
+            if checkpoints:
+                # choose the last modified checkpoint
+                latest = max(checkpoints, key=lambda x: x['modified'])
+                checkpoint_data = torch.load(latest['path'])
+                return checkpoint_data, latest['window']
+            else:
+                return None
+        except Exception as e:
+            tplr.logger.error(f"Error in local checkpoint loading: {e}")
+            return None
+
+
+    async def _get_bucket_checkpoint(self, bucket, uid):
+        """Helper to get checkpoint from a specific bucket."""
+        async with self.session.create_client(
+            "s3",
+            endpoint_url=self.get_base_url(bucket.account_id),
+            region_name=CF_REGION_NAME,
+            config=client_config,
+            aws_access_key_id=bucket.access_key_id,
+            aws_secret_access_key=bucket.secret_access_key,
+        ) as s3_client:
+            pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{__version__}\.pt$")
+            
+            response = await s3_client.list_objects_v2(
+                Bucket=bucket.name,
+                Prefix="checkpoint",
+                MaxKeys=50
+            )
+
+            if not response.get("Contents"):
+                return None
+
+            valid_checkpoints = []
+            for obj in response.get("Contents", []):
+                key = obj.get("Key", "")
+                match = pattern.match(key)
+                if match:
+                    valid_checkpoints.append({
+                        "key": key,
+                        "window": int(match.group(1)),
+                        "last_modified": obj["LastModified"]
+                    })
+
+            if valid_checkpoints:
+                latest = max(valid_checkpoints, key=lambda x: x["last_modified"])
+                loaded_data = await self.s3_get_object(
+                    key=latest["key"],
+                    bucket=bucket
+                )
+                if loaded_data:
+                    return loaded_data, latest["window"]
+            
             return None
 
     async def load_checkpoint(
@@ -1380,3 +1419,38 @@ class Comms(ChainManager):
             except Exception as e:
                 tplr.logger.error(f"Error fetching start_window: {e}")
                 await asyncio.sleep(10)
+
+
+    async def save_checkpoint(self, model, optimizer, scheduler, momentum, global_step, current_window, start_window):
+        """Save checkpoint to R2 and local storage"""
+        checkpoint_data = {
+            'model_state_dict': {k: v.cpu().clone() for k, v in model.state_dict().items()},
+            'optimizer_state_dict': {k: v.cpu().clone() if torch.is_tensor(v) else v 
+                                    for k, v in optimizer.state_dict().items()},
+            'scheduler_state_dict': scheduler.state_dict(),
+            'momentum': {k: v.cpu().clone() for k, v in momentum.items()},
+            'start_window': start_window,
+            'current_window': current_window
+        }
+
+        # save locally
+        await self.put(
+            state_dict=checkpoint_data,
+            uid=str(self.uid),
+            window=current_window,
+            key='checkpoint',
+            global_step=global_step,
+            local=True
+        )
+        
+        # upload to R2
+        await self.put(
+            state_dict=checkpoint_data,
+            uid=str(self.uid),
+            window=current_window,
+            key='checkpoint', 
+            global_step=global_step,
+            local=False
+        )
+
+        return True

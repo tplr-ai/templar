@@ -454,6 +454,25 @@ class Miner:
             self.window_step += 1
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
 
+            # Save checkpoint logic
+            if self.global_step % self.hparams.checkpoint_frequency == 0:
+                tplr.logger.info(f"Creating checkpoint at global_step {self.global_step}")
+                
+                # asyncio checkpoint saving task
+                asyncio.create_task(
+                    self.comms.save_checkpoint(
+                        model=self.model,
+                        optimizer=self.optimizer,
+                        scheduler=self.scheduler,
+                        momentum=self.momentum,
+                        global_step=self.global_step,
+                        current_window=self.current_window,
+                        start_window=self.start_window
+                    )
+                )
+            else:
+                tplr.logger.info("Skipping checkpoint save this round")
+
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
         def handler(event, _u, _s):

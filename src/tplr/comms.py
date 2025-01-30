@@ -1206,6 +1206,7 @@ class Comms(ChainManager):
         """
         Loads the latest checkpoint from a specified source, then catches up
         across missed windows if necessary.
+
         Args:
             source (str): 'any', 'validator', 'r2', or 'local'.
                           Decides which store(s) to check in get_latest_checkpoint().
@@ -1257,7 +1258,9 @@ class Comms(ChainManager):
             # 3) Sync the scheduler steps if needed
             steps_needed = global_step - scheduler.last_epoch
             if steps_needed > 0:
-                tplr.logger.info(f"Syncing optimizer/scheduler by stepping {steps_needed} times…")
+                tplr.logger.info(
+                    f"Syncing optimizer/scheduler by stepping {steps_needed} times…"
+                )
                 for _ in range(steps_needed):
                     optimizer.step()
                     scheduler.step()
@@ -1300,6 +1303,7 @@ class Comms(ChainManager):
                     for w in batch_windows
                 ]
                 batch_results = await asyncio.gather(*tasks)
+
                 # store in dict to apply in ascending order
                 gathered_data = dict(zip(batch_windows, batch_results))
                 for w in sorted(gathered_data.keys()):
@@ -1479,4 +1483,3 @@ class Comms(ChainManager):
             )
 
         return True
-

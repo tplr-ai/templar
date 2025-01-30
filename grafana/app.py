@@ -74,12 +74,9 @@ async def run_grafana():
 
 
 # Run Grafana background task
-@app.before_first_request
-def start_grafana_task():
-    print("-------Started grafana task------")
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.create_task(run_grafana())
+async def start():
+    task = asyncio.create_task(run_grafana())
+    await task
 
 
 # Testing endpoint
@@ -90,4 +87,8 @@ def test_endpoint():
 
 if __name__ == "__main__":
     print("-------App started-------")
+
+    # Start Grafana task in a separate thread
+    asyncio.run(start())  # Start Grafana loop
+
     app.run(debug=True, port=5000)

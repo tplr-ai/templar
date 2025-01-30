@@ -269,7 +269,7 @@ class Comms(ChainManager):
 
             # Handle PyTorch files
             file_size = os.path.getsize(file_path)
-            multipart_threshold = 100 * 1024 * 1024  # 100MB
+            multipart_threshold = 500 * 1024 * 1024  # 500MB
 
             async with self.session.create_client(
                 "s3",
@@ -740,14 +740,20 @@ class Comms(ChainManager):
         global_step: int,
         local: bool = True,
         stale_retention: int = 10,
-        store_gathers: bool = False,  # New parameter
+        store_gathers: bool = False,  # Parameter for storing gathered gradients
     ) -> Optional[SimpleNamespace]:
         """Gather operation with individual gradient normalization."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
+        tplr.logger.debug(
+            f"Starting gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
+        )
+        tplr.logger.debug(f"Target UIDs for gathering: {uids}")
+
         # Put own state if provided
         if state_dict is not None:
+            tplr.logger.debug(f"Putting own state dict for UID {my_uid}")
             await self.put(
                 state_dict=state_dict,
                 uid=str(my_uid),
@@ -757,14 +763,17 @@ class Comms(ChainManager):
                 local=local,
                 stale_retention=stale_retention,
             )
-            metrics["upload_bytes"] += sum(
+            upload_size = sum(
                 tensor.element_size() * tensor.nelement()
                 for tensor in state_dict.values()
             )
+            metrics["upload_bytes"] += upload_size
+            tplr.logger.debug(f"Uploaded {upload_size} bytes of own state")
 
         await asyncio.sleep(0.1)
 
         # Prepare gather tasks
+        tplr.logger.debug("Preparing gather tasks for all UIDs")
         gather_tasks = [
             self.get_with_retry(
                 uid=uid,
@@ -783,9 +792,11 @@ class Comms(ChainManager):
         global_steps = []
 
         # Process responses
+        tplr.logger.debug("Awaiting responses from all UIDs")
         responses = await asyncio.gather(*gather_tasks)
         for idx, response in enumerate(responses):
             uid = uids[idx]
+            tplr.logger.debug(f"Processing response from UID {uid}")
 
             if response is None:
                 tplr.logger.debug(f"No data received from UID {uid}")
@@ -793,6 +804,9 @@ class Comms(ChainManager):
 
             try:
                 state_dict_resp, global_step_resp = response
+                tplr.logger.debug(
+                    f"Received state dict and global step {global_step_resp} from UID {uid}"
+                )
             except (TypeError, ValueError) as e:
                 tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
                 continue
@@ -825,73 +839,81 @@ class Comms(ChainManager):
                         np.savez_compressed(temp_file, **gradient_data)
                         key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
 
-                        await self.s3_put_object(
-                            key=key, file_path=temp_file, bucket=self.bucket
+                        # Create task for uploading but don't await it
+                        asyncio.create_task(
+                            self.s3_put_object(
+                                key=key, file_path=temp_file, bucket=self.bucket
+                            )
                         )
                     finally:
-                        if os.path.exists(temp_file):
-                            os.remove(temp_file)
+                        # Schedule cleanup of temp file
+                        asyncio.create_task(self._cleanup_temp_file(temp_file))
 
                 except Exception as e:
-                    tplr.logger.error(
+                    tplr.logger.warning(
                         f"Failed to store gradient from UID {uid}: {str(e)}"
                     )
 
-            # Normalize each gradient value individually
-            normalized_dict = {}
+            # Add normalized tensors to aggregated_state_dict
+            tplr.logger.debug(f"Processing tensors from UID {uid}")
             for param_name, tensor in state_dict_resp.items():
                 if param_name.endswith("vals"):
                     tensor = tensor.to(device)
-                    orig_dtype = tensor.dtype
-                    # Convert to float32 for normalization
-                    tensor_f = tensor.to(torch.float32)
-                    # Compute norm
-                    norm = torch.norm(tensor_f)
-                    # Normalize and keep as float32
-                    normalized = tensor_f / (norm + 1e-8)
-                    normalized_dict[param_name] = normalized
+                    # Normalize in original dtype
+                    norm = torch.norm(tensor)
+                    normalized = tensor / (norm + 1e-8)
+                    if param_name not in aggregated_state_dict:
+                        aggregated_state_dict[param_name] = []
+                    aggregated_state_dict[param_name].append(normalized)
+                    tplr.logger.debug(
+                        f"Normalized tensor {param_name} from UID {uid}, norm: {norm}"
+                    )
                 else:
                     # Keep indices unchanged
-                    normalized_dict[param_name] = tensor.to(device)
+                    if param_name not in aggregated_state_dict:
+                        aggregated_state_dict[param_name] = []
+                    aggregated_state_dict[param_name].append(tensor.to(device))
                 metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
 
             # Move these outside the parameter loop to ensure they are executed once per UID
             valid_uids.append(uid)
             global_steps.append(global_step_resp)
-
-            # Add normalized tensors to aggregated_state_dict
-            for param_name, tensor in normalized_dict.items():
-                if param_name not in aggregated_state_dict:
-                    aggregated_state_dict[param_name] = []
-                aggregated_state_dict[param_name].append(tensor)
+            tplr.logger.debug(f"Successfully processed all tensors from UID {uid}")
 
         # If no valid responses, return None
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")
             return None
 
-        # Convert normalized gradients back to original dtype
-        final_state_dict = {}
-        for param_name, tensors in aggregated_state_dict.items():
-            # Get original dtype
-            orig_dtype = (
-                state_dict_resp[param_name].dtype if state_dict_resp else torch.float32  # type: ignore
-            )
-            # Convert back to original dtype
-            final_state_dict[param_name] = tensors[0].to(orig_dtype)  # type: ignore
+        total_time = time.time() - start_time
+        tplr.logger.debug(
+            f"Gather operation completed in {total_time:.2f}s. "
+            f"Success rate: {len(valid_uids)}/{len(uids)}, "
+            f"Upload: {metrics['upload_bytes']} bytes, "
+            f"Download: {metrics['download_bytes']} bytes"
+        )
 
         # Create result namespace
         result = SimpleNamespace(
-            time=time.time() - start_time,
+            time=total_time,
             upload_bytes=metrics["upload_bytes"],
             download_bytes=metrics["download_bytes"],
             success_rate=len(valid_uids) / len(uids),
-            state_dict=SimpleNamespace(**final_state_dict),
+            state_dict=SimpleNamespace(**aggregated_state_dict),
             uids=valid_uids,
             global_steps=global_steps,
         )
 
         return result
+
+    async def _cleanup_temp_file(self, file_path: str):
+        """Helper to cleanup temporary files asynchronously"""
+        try:
+            await asyncio.sleep(1)  # Give time for upload to complete
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception as e:
+            tplr.logger.warning(f"Failed to cleanup temp file {file_path}: {str(e)}")
 
     async def cleanup_old_checkpoints(self, keep_last: int = 3):
         """
@@ -1040,82 +1062,125 @@ class Comms(ChainManager):
         return validator_bucket, validator_uid
 
     async def get_latest_checkpoint(self):
-        """Get the latest checkpoint: Returns (checkpoint_data, window) tuple."""
+        """
+        Sequentially check:
+        1. Whether the highest-staked validator has a checkpoint.
+        2. Whether the R2 bucket of this instance has a checkpoint.
+        3. Whether a checkpoint exists locally.
+        If none are found, return None.
+        """
         try:
+            # 1. Check validator bucket
             (
                 validator_bucket,
                 validator_uid,
             ) = await self._get_highest_stake_validator_bucket()
-            if not validator_bucket:
-                return None
-
-            # List checkpoint files efficiently
-            async with self.session.create_client(
-                "s3",
-                endpoint_url=self.get_base_url(validator_bucket.account_id),
-                region_name=CF_REGION_NAME,
-                config=client_config,
-                aws_access_key_id=validator_bucket.access_key_id,
-                aws_secret_access_key=validator_bucket.secret_access_key,
-            ) as s3_client:
-                pattern = re.compile(
-                    rf"^checkpoint-(\d+)-{validator_uid}-v{__version__}\.pt$"
+            if validator_bucket:
+                result = await self._get_bucket_checkpoint(
+                    validator_bucket, validator_uid
                 )
+                if result:
+                    # If successfully retrieved, return immediately.
+                    return result
 
-                # Get the most recent objects
-                response = await s3_client.list_objects_v2(
-                    Bucket=validator_bucket.name,
-                    Prefix="checkpoint",
-                    MaxKeys=50,  # Limit to recent checkpoints
-                )
+            # 2. Check self R2 bucket
+            self_bucket = self.bucket  # Use self.bucket saved in __init__
+            if self_bucket:
+                result = await self._get_bucket_checkpoint(self_bucket, self.uid)
+                if result:
+                    return result
 
-                if not response.get("Contents"):
-                    tplr.logger.info("No checkpoint files found")
-                    return None
+            # 3. Check local storage
+            local_result = self._load_latest_local_checkpoint()
+            if local_result:
+                return local_result
 
-                # Find latest valid checkpoint that matches pattern
-                latest = None
-                valid_checkpoints = []
-
-                for obj in response.get("Contents", []):
-                    key: str = obj.get("Key", "")
-                    match = pattern.match(key)
-                    if match:
-                        valid_checkpoints.append(
-                            {
-                                "key": key,
-                                "window": int(match.group(1)),
-                                "size": obj["Size"],  # type: ignore
-                                "last_modified": obj["LastModified"],  # type: ignore
-                            }
-                        )
-
-                if valid_checkpoints:
-                    # Sort by LastModified timestamp (most recent first)
-                    latest = max(valid_checkpoints, key=lambda x: x["last_modified"])  # type: ignore
-                else:
-                    tplr.logger.info("No valid checkpoint files found")
-                    return None
-
-                tplr.logger.info(
-                    f"Found latest checkpoint: {latest['key']} from window {latest['window']}, "  # type: ignore
-                    f"modified at {latest['last_modified']}"  # type: ignore
-                )
-
-                # Get the checkpoint data using the window from the latest checkpoint
-                loaded_data = await self.s3_get_object(
-                    key=latest["key"],
-                    bucket=validator_bucket,  # type: ignore
-                )
-
-                if loaded_data is None:
-                    tplr.logger.error(f"Failed to download checkpoint {latest['key']}")  # type: ignore
-                    return None
-
-                return loaded_data, latest["window"]  # type: ignore
+            tplr.logger.info(
+                "No checkpoint found in validator / self R2 / local storage"
+            )
+            return None
 
         except Exception as e:
             tplr.logger.error(f"Error getting latest checkpoint: {e}")
+            return None
+
+    def _load_latest_local_checkpoint(self):
+        try:
+            local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
+            pattern = rf"checkpoint-(\d+)-{self.uid}-v{__version__}\.pt$"
+
+            if not os.path.exists(local_dir):
+                return None
+
+            checkpoints = []
+            for window_dir in os.listdir(local_dir):
+                path = os.path.join(local_dir, window_dir)
+                if not os.path.isdir(path):
+                    continue
+
+                for file in os.listdir(path):
+                    match = re.match(pattern, file)
+                    if match:
+                        # window number comes from match.group(1)
+                        w = int(match.group(1))
+                        file_path = os.path.join(path, file)
+                        checkpoints.append(
+                            {
+                                "path": file_path,
+                                "window": w,
+                                "modified": os.path.getmtime(file_path),
+                            }
+                        )
+
+            if checkpoints:
+                # choose the last modified checkpoint
+                latest = max(checkpoints, key=lambda x: x["modified"])
+                checkpoint_data = torch.load(latest["path"])
+                return checkpoint_data, latest["window"]
+            else:
+                return None
+        except Exception as e:
+            tplr.logger.error(f"Error in local checkpoint loading: {e}")
+            return None
+
+    async def _get_bucket_checkpoint(self, bucket, uid):
+        """Helper to get checkpoint from a specific bucket."""
+        async with self.session.create_client(
+            "s3",
+            endpoint_url=self.get_base_url(bucket.account_id),
+            region_name=CF_REGION_NAME,
+            config=client_config,
+            aws_access_key_id=bucket.access_key_id,
+            aws_secret_access_key=bucket.secret_access_key,
+        ) as s3_client:
+            pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{__version__}\.pt$")
+
+            response = await s3_client.list_objects_v2(
+                Bucket=bucket.name, Prefix="checkpoint", MaxKeys=50
+            )
+
+            if not response.get("Contents"):
+                return None
+
+            valid_checkpoints = []
+            for obj in response.get("Contents", []):
+                key = obj.get("Key", "")
+                match = pattern.match(key)
+                if match:
+                    valid_checkpoints.append(
+                        {
+                            "key": key,
+                            "window": int(match.group(1)),
+                            "last_modified": obj["LastModified"],
+                        }
+                    )
+
+            if valid_checkpoints:
+                latest = max(valid_checkpoints, key=lambda x: x["last_modified"])
+                loaded_data = await self.s3_get_object(key=latest["key"], bucket=bucket)
+                if loaded_data:
+                    return loaded_data, latest["window"]
+
             return None
 
     async def load_checkpoint(
@@ -1358,3 +1423,50 @@ class Comms(ChainManager):
             except Exception as e:
                 tplr.logger.error(f"Error fetching start_window: {e}")
                 await asyncio.sleep(10)
+
+    async def save_checkpoint(
+        self,
+        model,
+        optimizer,
+        scheduler,
+        momentum,
+        global_step,
+        current_window,
+        start_window,
+    ):
+        """Save checkpoint to R2 and local storage"""
+        checkpoint_data = {
+            "model_state_dict": {
+                k: v.cpu().clone() for k, v in model.state_dict().items()
+            },
+            "optimizer_state_dict": {
+                k: v.cpu().clone() if torch.is_tensor(v) else v
+                for k, v in optimizer.state_dict().items()
+            },
+            "scheduler_state_dict": scheduler.state_dict(),
+            "momentum": {k: v.cpu().clone() for k, v in momentum.items()},
+            "start_window": start_window,
+            "current_window": current_window,
+        }
+
+        # save locally
+        await self.put(
+            state_dict=checkpoint_data,
+            uid=str(self.uid),
+            window=current_window,
+            key="checkpoint",
+            global_step=global_step,
+            local=True,
+        )
+
+        # upload to R2
+        await self.put(
+            state_dict=checkpoint_data,
+            uid=str(self.uid),
+            window=current_window,
+            key="checkpoint",
+            global_step=global_step,
+            local=False,
+        )
+
+        return True

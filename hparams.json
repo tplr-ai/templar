@@ -5,7 +5,7 @@
     "pages_per_window": 5,
     "batch_size": 6,
     "learning_rate": 4e-4,
-    "blocks_per_window": 4,
+    "blocks_per_window": 5,
     "windows_per_sync": 100,
     "windows_per_weights": 100,
     "momentum_decay": 0.999,
@@ -25,11 +25,11 @@
     "alpha_f": 0.1,
     "t_max": 20000,
     "validator_offset": 4,
-    "checkpoint_frequency": 20,
+    "checkpoint_frequency": 50,
     "topk_peers": 20,
     "minimum_peers": 5,
     "active_check_interval": 60,
     "recent_windows": 5,
     "power_normalisation": 2.0,
-    "validator_sample_rate": 0.4
+    "validator_sample_rate": 0.5
 }

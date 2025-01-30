@@ -31,6 +31,7 @@ from classes.models import *
 
 # Async function moved from grafana_tools.py
 async def run_grafana():
+    print("--------Running grafana task------")
     grafana = Grafana()
     await grafana.initialize()
 
@@ -38,6 +39,7 @@ async def run_grafana():
     step_window = grafana.current_window - WINDOW_OFFSET
 
     tplr.logger.info(f"\n{'-' * 20} Window: {step_window} {'-' * 20}")
+    print(f"\n{'-' * 20} Window: {step_window} {'-' * 20} ---------")
 
     while True:
         if step_window != grafana.current_window - WINDOW_OFFSET:
@@ -74,6 +76,7 @@ async def run_grafana():
 # Run Grafana background task
 @app.before_first_request
 def start_grafana_task():
+    print("-------Started grafana task------")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.create_task(run_grafana())
@@ -86,4 +89,5 @@ def test_endpoint():
     return jsonify({"message": "API is up and running!"})
 
 if __name__ == "__main__":
+    print("-------App started-------")
     app.run(debug=True, port=5000)

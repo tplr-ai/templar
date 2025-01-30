@@ -485,7 +485,8 @@ class Validator:
                 self.evaluated_uids.add(eval_uid)
 
                 self.scores[eval_uid] = score
-                self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
+                # Ensure moving average score is non-negative
+                self.moving_avg_scores[eval_uid] = max(self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score, 0.0)
 
                 # 12. Calculate weights using temperature-based softmax
                 weights = torch.zeros_like(self.moving_avg_scores)

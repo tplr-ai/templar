@@ -823,7 +823,7 @@ class Comms(ChainManager):
 
             # Create separate tasks for upload and cleanup
             upload_task = asyncio.create_task(
-                self.s3_put_object(key=key, file_path=temp_file, bucket=self.bucket)
+                self.s3_put_object(key=key, file_path=temp_file)
             )
 
             # Schedule cleanup to run after upload completes
@@ -1469,10 +1469,8 @@ class Comms(ChainManager):
             async with aiofiles.open(temp_file, "w") as f:
                 await f.write(json.dumps(start_window_data))
 
-            validator_bucket = self.get_own_bucket("gradients", "write")
-            print(f"Validator Access Key : {validator_bucket.access_key_id}")
             await self.s3_put_object(
-                key=key, file_path=temp_file, bucket=validator_bucket
+                key=key, file_path=temp_file
             )
         finally:
             if os.path.exists(temp_file):

@@ -19,8 +19,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: uv sync --extra all
+      - name: Install dev dependencies
+        run: uv pip install -e ".[dev]"
 
       - name: Run Ruff Lint
         uses: astral-sh/ruff-action@v1

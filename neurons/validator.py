@@ -194,6 +194,9 @@ class Validator:
         self.peers = []
         self.eval_peers = []
 
+        # Track inactive peer scores
+        self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
+        self.inactivity_slash_rate = 0.25  # 25% slash per window
 
     async def run(self):
         # Load Peers
@@ -277,6 +280,45 @@ class Validator:
 
             tplr.logger.info(f'Current gather peers: {self.peers}')
             tplr.logger.info(f'Current evaluation peers: {self.eval_peers}')
+
+            # After self.comms.update_peers_with_buckets()
+            newly_inactive = self.comms.inactive_peers
+            current_window = self.sync_window
+            
+            # Process newly inactive peers
+            for uid in newly_inactive:
+                if uid not in self.inactive_scores:
+                    self.inactive_scores[uid] = (current_window, self.moving_avg_scores[uid].item())
+                    tplr.logger.info(f"UID {uid} became inactive at window {current_window} with score {self.moving_avg_scores[uid].item():.4f}")
+            
+            # Apply penalties to all inactive peers
+            for uid, (inactive_since, _) in list(self.inactive_scores.items()):
+                # If peer became active again, remove from inactive tracking
+                if uid in self.eval_peers:
+                    del self.inactive_scores[uid]
+                    tplr.logger.info(f"UID {uid} became active again")
+                    continue
+                
+                # Calculate and apply slash
+                windows_inactive = current_window - inactive_since
+                slash_factor = (1 - self.inactivity_slash_rate) ** windows_inactive
+                
+                old_score = self.moving_avg_scores[uid].item()
+                self.moving_avg_scores[uid] *= slash_factor
+                new_score = self.moving_avg_scores[uid].item()
+                
+                tplr.logger.info(
+                    f"UID {uid} slashed for {windows_inactive} windows of inactivity: "
+                    f"{old_score:.4f} -> {new_score:.4f}"
+                )
+                
+                # Log slash metrics
+                self.wandb.log({
+                    f"validator/inactivity/{uid}/windows_inactive": windows_inactive,
+                    f"validator/inactivity/{uid}/slash_factor": slash_factor,
+                    f"validator/inactivity/{uid}/score_before": old_score,
+                    f"validator/inactivity/{uid}/score_after": new_score,
+                }, step=self.global_step)
 
             # 3. Gather gradients from peers
             gather_start = tplr.T()

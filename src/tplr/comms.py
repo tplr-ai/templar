@@ -1157,8 +1157,48 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error in local checkpoint loading: {e}")
             return None
 
-    async def _get_bucket_checkpoint(self, uid: int):
-        """Get latest checkpoint for a specific UID using direct bucket access."""
+    async def _get_bucket_checkpoint(self, bucket, uid):
+        """Helper to get checkpoint from a specific bucket."""
+        async with self.session.create_client(
+            "s3",
+            endpoint_url=self.get_base_url(bucket.account_id),
+            region_name=CF_REGION_NAME,
+            config=client_config,
+            aws_access_key_id=bucket.access_key_id,
+            aws_secret_access_key=bucket.secret_access_key,
+        ) as s3_client:
+            pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{__version__}\.pt$")
+
+            response = await s3_client.list_objects_v2(
+                Bucket=bucket.name, Prefix="checkpoint", MaxKeys=50
+            )
+
+            if not response.get("Contents"):
+                return None
+
+            valid_checkpoints = []
+            for obj in response.get("Contents", []):
+                key = obj.get("Key", "")
+                match = pattern.match(key)
+                if match:
+                    valid_checkpoints.append(
+                        {
+                            "key": key,
+                            "window": int(match.group(1)),
+                            "last_modified": obj["LastModified"],
+                        }
+                    )
+
+            if valid_checkpoints:
+                latest = max(valid_checkpoints, key=lambda x: x["last_modified"])
+                loaded_data = await self.s3_get_object(key=latest["key"], bucket=bucket)
+                if loaded_data:
+                    return loaded_data, latest["window"]
+
+            return None
+
+    async def _get_bucket_checkpoint_for_eval(self, uid: int):
+        """Get latest checkpoint for evaluation purposes only."""
         try:
             # Get commitment directly from subtensor
             subtensor = bt.subtensor()

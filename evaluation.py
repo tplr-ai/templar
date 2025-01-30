@@ -60,7 +60,7 @@ async def evaluate_latest_checkpoint(config):
         tplr.logger.debug(
             f"Fetching latest checkpoint for UID {config.uid_for_eval}..."
         )
-        result = await comms._get_bucket_checkpoint(config.uid_for_eval)
+        result = await comms._get_bucket_checkpoint_for_eval(config.uid_for_eval)
         if not result:
             tplr.logger.info(f"No valid checkpoint found for UID {config.uid_for_eval}")
             return

@@ -19,6 +19,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Create venv
+        run: uv venv
+
       - name: Install dev dependencies
         run: uv pip install -e ".[dev]"
 

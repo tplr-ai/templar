@@ -1061,11 +1061,7 @@ class Comms(ChainManager):
         tplr.logger.info(f"Validator Bucket: {validator_bucket}")
         return validator_bucket, validator_uid
 
-<<<<<<< Updated upstream
-    async def get_latest_checkpoint(self, source='any'):
-=======
     async def get_latest_checkpoint(self, source="any"):
->>>>>>> Stashed changes
         """
         Depending on 'source', selectively search for a valid checkpoint.
         1) 'validator':   Check only the highest-stake validator's R2 bucket.
@@ -1078,12 +1074,6 @@ class Comms(ChainManager):
         """
         try:
             # 1. Check validator bucket
-<<<<<<< Updated upstream
-            if source in ['any', 'validator']:
-                validator_bucket, validator_uid = await self._get_highest_stake_validator_bucket()
-                if validator_bucket:
-                    result = await self._get_bucket_checkpoint(validator_bucket, validator_uid)
-=======
             if source in ["any", "validator"]:
                 (
                     validator_bucket,
@@ -1093,28 +1083,19 @@ class Comms(ChainManager):
                     result = await self._get_bucket_checkpoint(
                         validator_bucket, validator_uid
                     )
->>>>>>> Stashed changes
                     if result:
                         # If successfully retrieved, return immediately.
                         return result
 
             # 2. Check self R2 bucket
-<<<<<<< Updated upstream
-            if source in ['any', 'r2']:
-=======
             if source in ["any", "r2"]:
->>>>>>> Stashed changes
                 if self.bucket:
                     result = await self._get_bucket_checkpoint(self.bucket, self.uid)
                     if result:
                         return result
 
             # 3. Check local storage
-<<<<<<< Updated upstream
-            if source in ['any', 'local']:
-=======
             if source in ["any", "local"]:
->>>>>>> Stashed changes
                 local_result = self._load_latest_local_checkpoint()
                 if local_result:
                     return local_result
@@ -1218,22 +1199,13 @@ class Comms(ChainManager):
         device: str,
         peers: list,
         uid: str,
-<<<<<<< Updated upstream
-        source: str = 'any'    # NEW PARAM: 'any', 'validator', 'r2', or 'local'
-=======
         source: str = "any",  # NEW PARAM: 'any', 'validator', 'r2', or 'local'
->>>>>>> Stashed changes
     ) -> tuple[
         bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
     ]:
         """
         Loads the latest checkpoint from a specified source, then catches up
         across missed windows if necessary.
-<<<<<<< Updated upstream
-        
-=======
-
->>>>>>> Stashed changes
         Args:
             source (str): 'any', 'validator', 'r2', or 'local'.
                           Decides which store(s) to check in get_latest_checkpoint().
@@ -1249,18 +1221,12 @@ class Comms(ChainManager):
         checkpoint_data, checkpoint_window = result
         try:
             # 2) Load checkpoint states into model/optimizer/scheduler
-<<<<<<< Updated upstream
-            model.load_state_dict({
-                k: v.to(device) for k, v in checkpoint_data["model_state_dict"].items()
-            })
-=======
             model.load_state_dict(
                 {
                     k: v.to(device)
                     for k, v in checkpoint_data["model_state_dict"].items()
                 }
             )
->>>>>>> Stashed changes
             model.to(device)
 
             for state in optimizer.state.values():
@@ -1307,11 +1273,6 @@ class Comms(ChainManager):
                 return True, momentum, global_step, optimizer, scheduler
 
             # 5) Perform catch-up across the missed windows
-<<<<<<< Updated upstream
-            tplr.logger.info(f"Catching up for {window_difference} windows from {checkpoint_current_window+1} to {current_window}…")
-            BATCH_SIZE = 5  # or any suitable number
-            windows_to_catch_up = range(checkpoint_current_window + 1, current_window + 1)
-=======
             tplr.logger.info(
                 f"Catching up for {window_difference} windows from {checkpoint_current_window + 1} to {current_window}…"
             )
@@ -1319,7 +1280,6 @@ class Comms(ChainManager):
             windows_to_catch_up = range(
                 checkpoint_current_window + 1, current_window + 1
             )
->>>>>>> Stashed changes
 
             for i in range(0, len(windows_to_catch_up), BATCH_SIZE):
                 batch_windows = list(windows_to_catch_up)[i : i + BATCH_SIZE]
@@ -1340,11 +1300,6 @@ class Comms(ChainManager):
                     for w in batch_windows
                 ]
                 batch_results = await asyncio.gather(*tasks)
-<<<<<<< Updated upstream
-                
-=======
-
->>>>>>> Stashed changes
                 # store in dict to apply in ascending order
                 gathered_data = dict(zip(batch_windows, batch_results))
                 for w in sorted(gathered_data.keys()):
@@ -1373,11 +1328,7 @@ class Comms(ChainManager):
                                     vals,
                                     # assume you have transforms/shapes stored,
                                     # or adapt code as needed
-<<<<<<< Updated upstream
-                                    transformer.shapes.get(n, None),  
-=======
                                     transformer.shapes.get(n, None),
->>>>>>> Stashed changes
                                     transformer.totalks.get(n, None),
                                 )
                             )
@@ -1392,13 +1343,6 @@ class Comms(ChainManager):
                     scheduler.step()
                     global_step += 1
 
-<<<<<<< Updated upstream
-                    tplr.logger.info(f"[load_checkpoint] Catch-up window {w} done. global_step => {global_step}")
-
-            tplr.logger.info(
-                f"[load_checkpoint] Finished catch-up, final global_step={global_step}, "
-                f"optimizer steps={optimizer.state_dict()['state'].get(0,{}).get('step',0)}, "
-=======
                     tplr.logger.info(
                         f"[load_checkpoint] Catch-up window {w} done. global_step => {global_step}"
                     )
@@ -1406,7 +1350,6 @@ class Comms(ChainManager):
             tplr.logger.info(
                 f"[load_checkpoint] Finished catch-up, final global_step={global_step}, "
                 f"optimizer steps={optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
->>>>>>> Stashed changes
                 f"scheduler last_epoch={scheduler.last_epoch}"
             )
             return True, momentum, global_step, optimizer, scheduler
@@ -1494,11 +1437,7 @@ class Comms(ChainManager):
         global_step,
         current_window,
         start_window,
-<<<<<<< Updated upstream
-        strategy='both',  # 新增参数，默认both
-=======
         strategy="both",  # 新增参数，默认both
->>>>>>> Stashed changes
     ):
         """Save checkpoint to R2 and/or local storage, depending on strategy."""
 
@@ -1514,17 +1453,10 @@ class Comms(ChainManager):
             "momentum": {k: v.cpu().clone() for k, v in momentum.items()},
             "start_window": start_window,
             "current_window": current_window,
-<<<<<<< Updated upstream
-            "global_step": global_step
-        }
-
-        if strategy in ['local', 'both']:
-=======
             "global_step": global_step,
         }
 
         if strategy in ["local", "both"]:
->>>>>>> Stashed changes
             # local
             await self.put(
                 state_dict=checkpoint_data,
@@ -1535,11 +1467,7 @@ class Comms(ChainManager):
                 local=True,
             )
 
-<<<<<<< Updated upstream
-        if strategy in ['R2', 'both']:
-=======
         if strategy in ["R2", "both"]:
->>>>>>> Stashed changes
             # R2
             await self.put(
                 state_dict=checkpoint_data,

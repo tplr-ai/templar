@@ -474,11 +474,7 @@ class Miner:
                 f"Current average loss: {avg_loss:.8f}, Best recorded loss: {self.best_loss:.8f}"
             )
             improvement = self.best_loss - avg_loss
-<<<<<<< Updated upstream
-            if improvement >= 1:
-=======
             if improvement >= 0.5:
->>>>>>> Stashed changes
                 # Update best_loss if this new avg_loss is better than the current best
                 if avg_loss < self.best_loss:
                     self.best_loss = avg_loss

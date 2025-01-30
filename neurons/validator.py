@@ -321,23 +321,18 @@ class Validator:
                     tplr.logger.info(f"UID {uid} became active again")
                     continue
                 
-                # Calculate and apply slash
-                windows_inactive = current_window - inactive_since
-                slash_factor = (1 - self.inactivity_slash_rate) ** windows_inactive
-                
+                # Apply flat 25% penalty instead of exponential decay
                 old_score = self.moving_avg_scores[uid].item()
-                self.moving_avg_scores[uid] *= slash_factor
+                self.moving_avg_scores[uid] *= 0.75  # Apply flat 25% reduction
                 new_score = self.moving_avg_scores[uid].item()
                 
                 tplr.logger.info(
-                    f"UID {uid} slashed for {windows_inactive} windows of inactivity: "
+                    f"UID {uid} penalized for inactivity: "
                     f"{old_score:.4f} -> {new_score:.4f}"
                 )
                 
                 # Log slash metrics
                 self.wandb.log({
-                    f"validator/inactivity/{uid}/windows_inactive": windows_inactive,
-                    f"validator/inactivity/{uid}/slash_factor": slash_factor,
                     f"validator/inactivity/{uid}/score_before": old_score,
                     f"validator/inactivity/{uid}/score_after": new_score,
                 }, step=self.global_step)

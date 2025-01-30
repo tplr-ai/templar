@@ -56,7 +56,7 @@ elif [ "$NODE_TYPE" = "validator" ]; then
         --device ${CUDA_DEVICE} \
         --subtensor.network ${NETWORK} \
         --use_wandb \
-        --store-gathers \
+        # --store-gathers \
         ${DEBUG_FLAG}
 else
     echo "Error: NODE_TYPE must be either \"miner\" or \"validator\""

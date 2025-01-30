@@ -40,7 +40,8 @@ dev = [
     "matplotlib",
     "seaborn",
     "pytest-asyncio",
-    "ruff"
+    "ruff",
+    "pytest-xdist"
 
 ]
 
@@ -56,6 +57,7 @@ filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
     "ignore::FutureWarning",
+    "ignore::pytest_asyncio.plugin.PytestDeprecationWarning",
     # Keep other warnings
     "default::RuntimeWarning",
     "default::UserWarning",

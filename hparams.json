@@ -11,7 +11,7 @@
     "momentum_decay": 0.999,
     "topk_compression": 32,
     "target_chunk": 64,
-    "scores_alpha": 0.001,
+    "ma_alpha": 0.6,
     "tokenizer_name": "togethercomputer/LLaMA-2-7B-32K",
     "hidden_size": 2048,
     "num_hidden_layers": 16,

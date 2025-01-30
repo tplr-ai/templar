@@ -2,7 +2,6 @@
 # © 2024 templar.tech
 
 import os
-import sys
 import json
 import uuid
 import torch
@@ -12,12 +11,10 @@ import asyncio
 import traceback
 import bittensor as bt
 import wandb
-from dotenv import load_dotenv
 from transformers import LlamaForCausalLM
 
 import tplr
 from tplr.hparams import load_hparams
-from tplr import __version__
 
 # Constants
 REQUIRED_ENV_KEYS = [

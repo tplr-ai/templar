@@ -12,6 +12,7 @@ import asyncio
 import botocore
 from dataclasses import dataclass
 import time
+import numpy as np
 
 # Set required environment variables
 os.environ["R2_GRADIENTS_ACCOUNT_ID"] = "test_account"
@@ -308,46 +309,48 @@ async def test_gather_empty_responses(comms_instance):
     assert result is None
 
 
-async def test_gather_store_gathers(comms_instance):
-    """Test that gradients are stored when store_gathers=True"""
-    # Setup test data
-    state_dict = {
-        "layer.idxs": torch.tensor([0, 1]),
-        "layer.vals": torch.tensor([0.1, 0.2]),
-    }
+#  TODO: Move to analyser when refactored
 
-    # Mock methods
-    comms_instance.get_with_retry = AsyncMock()
-    peer_response = (state_dict, 1)
-    comms_instance.get_with_retry.side_effect = [peer_response]
-    comms_instance.s3_put_object = AsyncMock()
+# async def test_gather_store_gathers(comms_instance):
+#     """Test that gradients are stored when store_gathers=True"""
+#     # Setup test data
+#     state_dict = {
+#         "layer.idxs": torch.tensor([0, 1]),
+#         "layer.vals": torch.tensor([0.1, 0.2]),
+#     }
 
-    # Call gather with store_gathers=True
-    await comms_instance.gather(
-        state_dict=None,
-        my_uid="0",
-        uids=["1"],
-        window=1,
-        key="gradient",
-        timeout=5,
-        device="cpu",
-        global_step=0,
-        store_gathers=True,
-    )
+#     # Mock methods
+#     comms_instance.get_with_retry = AsyncMock()
+#     peer_response = (state_dict, 1)
+#     comms_instance.get_with_retry.side_effect = [peer_response]
+#     comms_instance.s3_put_object = AsyncMock()
 
-    # Wait a bit for async tasks to be created
-    await asyncio.sleep(0.1)
+#     # Call gather with store_gathers=True
+#     await comms_instance.gather(
+#         state_dict=None,
+#         my_uid="0",
+#         uids=["1"],
+#         window=1,
+#         key="gradient",
+#         timeout=5,
+#         device="cpu",
+#         global_step=0,
+#         store_gathers=True,
+#     )
 
-    # Verify s3_put_object was called
-    assert comms_instance.s3_put_object.called
+#     # Wait a bit for async tasks to be created
+#     await asyncio.sleep(0.1)
 
-    # Verify correct arguments
-    call_args = comms_instance.s3_put_object.call_args
-    assert call_args is not None
-    kwargs = call_args.kwargs
-    assert kwargs["bucket"] == comms_instance.bucket
-    assert kwargs["key"].startswith("gathers/")
-    assert kwargs["key"].endswith(".npz")
+#     # Verify s3_put_object was called
+#     assert comms_instance.s3_put_object.called
+
+#     # Verify correct arguments
+#     call_args = comms_instance.s3_put_object.call_args
+#     assert call_args is not None
+#     kwargs = call_args.kwargs
+#     assert kwargs["bucket"] == comms_instance.bucket
+#     assert kwargs["key"].startswith("gathers/")
+#     assert kwargs["key"].endswith(".npz")
 
 
 async def test_gather_averaging(comms_instance):
@@ -864,3 +867,189 @@ async def test_gather_store_gathers_non_blocking(comms_instance):
 
     # Verify upload was initiated
     assert comms_instance.s3_put_object.called
+
+async def test_store_gradient_data_success(comms_instance):
+    """Test successful gradient data storage"""
+    # Setup test data
+    uid = "1"
+    window = 10
+    global_step = 5
+    state_dict_resp = {
+        "layer1.weight": torch.tensor([1.0, 2.0, 3.0]),
+        "layer1.bias": torch.tensor([0.1, 0.2])
+    }
+    global_step_resp = 5
+
+    # Mock s3_put_object
+    comms_instance.s3_put_object = AsyncMock()
+
+    # Call the function
+    await comms_instance._store_gradient_data(
+        uid=uid,
+        window=window,
+        global_step=global_step,
+        state_dict_resp=state_dict_resp,
+        global_step_resp=global_step_resp
+    )
+
+    # Wait for all pending tasks to complete
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    await asyncio.gather(*tasks)
+    
+    # Additional wait for file cleanup
+    await asyncio.sleep(1.2)  # Slightly longer than cleanup delay
+
+    # Verify s3_put_object was called with correct parameters
+    assert comms_instance.s3_put_object.called
+    call_args = comms_instance.s3_put_object.call_args
+    assert call_args is not None
+    
+    # Verify the key format
+    expected_key = f"gathers/{tplr.__version__}/{uid}/{window}/{global_step}.npz"
+    assert call_args.kwargs["key"] == expected_key
+    
+    # Verify the file was created and then cleaned up
+    temp_file_pattern = f"gradient_{uid}_{window}_{global_step}.npz"
+    assert not any(temp_file_pattern in f for f in os.listdir(comms_instance.temp_dir))
+
+async def test_store_gradient_data_error_handling(comms_instance):
+    """Test error handling in gradient data storage"""
+    # Setup test data with invalid tensor to trigger error
+    uid = "1"
+    window = 10
+    global_step = 5
+    state_dict_resp = {
+        "layer1.weight": "invalid_tensor",  # This will cause an error
+    }
+    global_step_resp = 5
+
+    # Mock logger
+    with patch("tplr.logger.warning") as mock_warning:
+        await comms_instance._store_gradient_data(
+            uid=uid,
+            window=window,
+            global_step=global_step,
+            state_dict_resp=state_dict_resp,
+            global_step_resp=global_step_resp
+        )
+        
+        # Verify warning was logged
+        mock_warning.assert_called_once()
+        assert "Failed to store gradient" in mock_warning.call_args[0][0]
+
+async def test_cleanup_temp_file(comms_instance):
+    """Test temporary file cleanup"""
+    # Create a test file
+    test_file = os.path.join(comms_instance.temp_dir, "test_temp_file.npz")
+    with open(test_file, "w") as f:
+        f.write("test")
+
+    # Call cleanup
+    await comms_instance._cleanup_temp_file(test_file)
+    
+    # Wait for async cleanup
+    await asyncio.sleep(1.1)  # Slightly longer than the sleep in cleanup
+    
+    # Verify file was removed
+    assert not os.path.exists(test_file)
+
+async def test_cleanup_temp_file_nonexistent(comms_instance):
+    """Test cleanup with non-existent file"""
+    nonexistent_file = os.path.join(comms_instance.temp_dir, "nonexistent.npz")
+    
+    # Mock logger
+    with patch("tplr.logger.warning") as mock_warning:
+        await comms_instance._cleanup_temp_file(nonexistent_file)
+        
+        # Verify no warning was logged (clean exit)
+        mock_warning.assert_not_called()
+
+async def test_gather_with_store_gathers(comms_instance):
+    """Test gather operation with store_gathers enabled"""
+    # Setup test data
+    state_dict = {
+        "layer1.weightsidxs": torch.tensor([0, 1, 2]),
+        "layer1.weightsvals": torch.tensor([0.1, 0.2, 0.3]),
+    }
+
+    # Mock get_with_retry
+    peer_response = (state_dict, 1)
+    comms_instance.get_with_retry = AsyncMock(return_value=peer_response)
+    
+    # Mock s3_put_object
+    comms_instance.s3_put_object = AsyncMock()
+
+    # Call gather with store_gathers=True
+    result = await comms_instance.gather(
+        state_dict=state_dict,
+        my_uid="0",
+        uids=["1"],
+        window=1,
+        key="gradient",
+        timeout=5,
+        device="cpu",
+        global_step=0,
+        local=True,
+        store_gathers=True
+    )
+
+    # Wait for async tasks
+    await asyncio.sleep(0.1)
+
+    # Verify s3_put_object was called
+    assert comms_instance.s3_put_object.called
+    
+    # Verify the key format in the call
+    call_args = comms_instance.s3_put_object.call_args
+    assert call_args is not None
+    assert call_args.kwargs["key"].startswith(f"gathers/{tplr.__version__}/")
+    assert call_args.kwargs["key"].endswith(".npz")
+
+async def test_gather_concurrent_store_gathers(comms_instance):
+    """Test concurrent gradient storage during gather"""
+    # Setup multiple peer responses
+    state_dict = {
+        "layer1.weightsidxs": torch.tensor([0, 1, 2]),
+        "layer1.weightsvals": torch.tensor([0.1, 0.2, 0.3]),
+    }
+    
+    peer_responses = [(state_dict, i) for i in range(3)]
+    comms_instance.get_with_retry = AsyncMock(side_effect=peer_responses)
+    
+    # Mock s3_put_object with delay to simulate upload
+    async def delayed_upload(*args, **kwargs):
+        await asyncio.sleep(0.1)
+        return True
+    comms_instance.s3_put_object = AsyncMock(side_effect=delayed_upload)
+
+    # Call gather with store_gathers=True
+    result = await comms_instance.gather(
+        state_dict=state_dict,
+        my_uid="0",
+        uids=["1", "2", "3"],
+        window=1,
+        key="gradient",
+        timeout=5,
+        device="cpu",
+        global_step=0,
+        local=True,
+        store_gathers=True
+    )
+
+    # Wait for all pending tasks to complete
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    await asyncio.gather(*tasks)
+    
+    # Additional wait for file cleanup
+    await asyncio.sleep(1.2)  # Slightly longer than cleanup delay
+
+    # Verify s3_put_object was called multiple times
+    assert comms_instance.s3_put_object.call_count == 3
+
+    # Verify all calls had correct key format
+    for call in comms_instance.s3_put_object.call_args_list:
+        assert call.kwargs["key"].startswith(f"gathers/{tplr.__version__}/")
+        assert call.kwargs["key"].endswith(".npz")
+
+    # Verify temp directory is clean
+    assert len(os.listdir(comms_instance.temp_dir)) == 0

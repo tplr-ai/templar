@@ -1163,13 +1163,12 @@ class Comms(ChainManager):
             # Get commitment directly from subtensor
             subtensor = bt.subtensor()
             commitment = subtensor.get_commitment(netuid=3, uid=uid)
-            
+
             if not commitment:
                 tplr.logger.debug(f"No commitment found for UID {uid}")
                 return None
 
             # Parse commitment into bucket credentials
-            name = commitment[:32]
             account_id = commitment[:32]
             access_key_id = commitment[32:64]
             secret_access_key = commitment[64:]
@@ -1184,47 +1183,54 @@ class Comms(ChainManager):
                 aws_secret_access_key=secret_access_key,
             ) as s3_client:
                 response = await s3_client.list_objects_v2(
-                    Bucket=account_id,
-                    Prefix="checkpoint"
+                    Bucket=account_id, Prefix="checkpoint"
                 )
 
-                if 'Contents' not in response:
+                if "Contents" not in response:
                     tplr.logger.debug(f"No objects found in bucket for UID {uid}")
                     return None
 
                 pattern = re.compile(r"^checkpoint-(\d+)-(\d+)-v([0-9.]+)\.pt$")
                 valid_checkpoints = []
-                
-                for obj in response.get('Contents', []):
-                    key = obj['Key']
+
+                for obj in response.get("Contents", []):
+                    key = obj["Key"]
                     match = pattern.match(os.path.basename(key))
                     if match:
                         checkpoint_uid = int(match.group(2))
-                        if checkpoint_uid == uid:  # Only accept checkpoints for this UID
-                            valid_checkpoints.append({
-                                'key': key,
-                                'last_modified': obj['LastModified']
-                            })
+                        if (
+                            checkpoint_uid == uid
+                        ):  # Only accept checkpoints for this UID
+                            valid_checkpoints.append(
+                                {"key": key, "last_modified": obj["LastModified"]}
+                            )
 
                 if not valid_checkpoints:
                     tplr.logger.debug(f"No valid checkpoints found for UID {uid}")
                     return None
 
                 # Get the latest checkpoint
-                latest = max(valid_checkpoints, key=lambda x: x['last_modified'])
-                tplr.logger.info(f"Found latest checkpoint for UID {uid}: {latest['key']}")
-                
-                response = await s3_client.get_object(Bucket=account_id, Key=latest['key'])
-                async with response['Body'] as stream:
+                latest = max(valid_checkpoints, key=lambda x: x["last_modified"])
+                tplr.logger.info(
+                    f"Found latest checkpoint for UID {uid}: {latest['key']}"
+                )
+
+                response = await s3_client.get_object(
+                    Bucket=account_id, Key=latest["key"]
+                )
+                async with response["Body"] as stream:
                     data = await stream.read()
-                    loaded_data = torch.load(io.BytesIO(data), map_location='cpu')
-                    window = int(pattern.match(os.path.basename(latest['key'])).group(1))
+                    loaded_data = torch.load(io.BytesIO(data), map_location="cpu")
+                    window = int(
+                        pattern.match(os.path.basename(latest["key"])).group(1)
+                    )
                     return loaded_data, window
 
         except Exception as e:
             tplr.logger.error(f"Error getting checkpoint for UID {uid}: {e}")
             if tplr.logger.getEffectiveLevel() <= 10:  # DEBUG level
                 import traceback
+
                 traceback.print_exc()
             return None
 

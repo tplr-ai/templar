@@ -57,7 +57,9 @@ async def evaluate_latest_checkpoint(config):
         )
 
         # Get latest checkpoint directly from the UID's bucket
-        tplr.logger.debug(f"Fetching latest checkpoint for UID {config.uid_for_eval}...")
+        tplr.logger.debug(
+            f"Fetching latest checkpoint for UID {config.uid_for_eval}..."
+        )
         result = await comms._get_bucket_checkpoint(config.uid_for_eval)
         if not result:
             tplr.logger.info(f"No valid checkpoint found for UID {config.uid_for_eval}")
@@ -117,7 +119,7 @@ async def evaluate_latest_checkpoint(config):
         if config.use_wandb:
             tplr.logger.info("Waiting for WandB to sync...")
             await asyncio.sleep(5)  # Give wandb time to sync
-            
+
         # Cleanup
         if model_dir and os.path.exists(model_dir):
             tplr.logger.debug(f"Cleaning up {model_dir}")
@@ -148,14 +150,18 @@ async def _process_eval_results(results_dir: str, global_step: int, use_wandb: b
             tplr.logger.info(f"{task_name} metrics:")
             for metric_name, value in metrics.items():
                 if isinstance(value, (int, float)):  # Only log numeric values
-                    formatted_value = f"{value:.4f}" if isinstance(value, float) else str(value)
+                    formatted_value = (
+                        f"{value:.4f}" if isinstance(value, float) else str(value)
+                    )
                     tplr.logger.info(f"  {metric_name}: {formatted_value}")
-                    
+
                     if use_wandb:
-                        wandb.log({
-                            f"eval/{task_name}/{metric_name}": value,
-                            "global_step": global_step
-                        })
+                        wandb.log(
+                            {
+                                f"eval/{task_name}/{metric_name}": value,
+                                "global_step": global_step,
+                            }
+                        )
 
     except Exception as e:
         tplr.logger.error(f"Failed to process results: {str(e)}")
@@ -176,11 +182,11 @@ def main():
     bt.subtensor.add_args(parser)
     bt.logging.add_args(parser)
     bt.wallet.add_args(parser)
-    
+
     # Parse args directly first
     args = parser.parse_args()
     config = bt.config(parser)
-    
+
     # Transfer our custom args to config
     config.use_wandb = args.use_wandb
     config.project = args.project
@@ -193,9 +199,7 @@ def main():
     config.netuid = getattr(config, "netuid", 3)
     config.subtensor.network = getattr(config.subtensor, "network", "finney")
     config.subtensor.chain_endpoint = getattr(
-        config.subtensor,
-        "chain_endpoint",
-        "wss://entrypoint-finney.opentensor.ai:443"
+        config.subtensor, "chain_endpoint", "wss://entrypoint-finney.opentensor.ai:443"
     )
 
     config.wallet = bt.wallet(config=config)
@@ -208,7 +212,9 @@ def main():
         else:
             gpu_id = int(config.device.split(":")[1])
             if gpu_id >= torch.cuda.device_count():
-                tplr.logger.warning(f"GPU {gpu_id} not available, falling back to cuda:0")
+                tplr.logger.warning(
+                    f"GPU {gpu_id} not available, falling back to cuda:0"
+                )
                 config.device = "cuda:0"
 
     tplr.logger.info(f"Using device: {config.device}")
@@ -225,7 +231,7 @@ def main():
                 "netuid": config.netuid,
                 "device": config.device,
                 "batch_size": config.actual_batch_size,
-            }
+            },
         )
         tplr.logger.info(f"WandB run initialized: {run.name}")
 

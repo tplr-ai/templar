@@ -36,4 +36,4 @@ jobs:
           args: format --check
 
       - name: Run Tests
-        run: pytest tests/ -v
+        run: uv run pytest tests/ -v

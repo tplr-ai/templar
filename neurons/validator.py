@@ -660,6 +660,9 @@ class Validator:
                                 self.totalks[n],
                             )
                         )
+                        # Store pre-sign gradient in momentum
+                        self.momentum[n] = new_grad.clone()
+                        
                         if p.grad is None:
                             p.grad = new_grad
                         else:

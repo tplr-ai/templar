@@ -1132,7 +1132,7 @@ class Comms(ChainManager):
                 for file_name in os.listdir(path):
                     match = pattern.match(file_name)
                     if match:
-                        window = int(match.group(1))
+                        w = int(match.group(1))
                         checkpoint_uid = int(match.group(2))
                         if (
                             checkpoint_uid == self.uid
@@ -1141,7 +1141,7 @@ class Comms(ChainManager):
                             checkpoints.append(
                                 {
                                     "path": file_path,
-                                    "window": window,
+                                    "window": w,
                                     "modified": os.path.getmtime(file_path),
                                 }
                             )

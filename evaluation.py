@@ -22,7 +22,7 @@ REQUIRED_ENV_KEYS = [
     "R2_READ_ACCESS_KEY_ID",
     "R2_READ_SECRET_ACCESS_KEY",
     "R2_WRITE_ACCESS_KEY_ID",
-    "R2_WRITE_SECRET_ACCESS_KEY"
+    "R2_WRITE_SECRET_ACCESS_KEY",
 ]
 
 DEFAULT_TASKS = "arc_challenge,arc_easy,openbookqa,hellaswag"
@@ -80,7 +80,7 @@ async def evaluate_latest_checkpoint(config):
         model = LlamaForCausalLM(config=hparams.model_config)
         model.load_state_dict(
             {k: v.cpu() for k, v in checkpoint_data["model_state_dict"].items()},
-            strict=False
+            strict=False,
         )
         model.to(config.device)
 
@@ -116,7 +116,7 @@ async def evaluate_latest_checkpoint(config):
         tplr.logger.error(f"Evaluation failed: {str(e)}")
         tplr.logger.debug(traceback.format_exc())
     finally:
-        if 'model_dir' in locals():
+        if "model_dir" in locals():
             shutil.rmtree(model_dir)
         torch.cuda.empty_cache()
 
@@ -125,16 +125,16 @@ async def _process_eval_results(results_dir: str, global_step: int, use_wandb: b
     """Helper to process and log evaluation results."""
     try:
         subfolders = [
-            f for f in os.listdir(results_dir)
+            f
+            for f in os.listdir(results_dir)
             if os.path.isdir(os.path.join(results_dir, f))
         ]
         latest_folder = max(
-            (os.path.join(results_dir, f) for f in subfolders),
-            key=os.path.getctime
+            (os.path.join(results_dir, f) for f in subfolders), key=os.path.getctime
         )
         latest_file = max(
             (os.path.join(latest_folder, f) for f in os.listdir(latest_folder)),
-            key=os.path.getctime
+            key=os.path.getctime,
         )
 
         with open(latest_file, "r") as f:
@@ -145,10 +145,7 @@ async def _process_eval_results(results_dir: str, global_step: int, use_wandb: b
                 score = float(metrics["acc,none"])
                 tplr.logger.info(f"{task_name}: {score:.4f}")
                 if use_wandb:
-                    wandb.log({
-                        f"eval/{task_name}": score,
-                        "global_step": global_step
-                    })
+                    wandb.log({f"eval/{task_name}": score, "global_step": global_step})
 
     except Exception as e:
         tplr.logger.error(f"Failed to process results: {str(e)}")
@@ -174,9 +171,7 @@ def main():
     config.netuid = getattr(config, "netuid", 3)
     config.subtensor.network = getattr(config.subtensor, "network", "finney")
     config.subtensor.chain_endpoint = getattr(
-        config.subtensor,
-        "chain_endpoint",
-        "wss://entrypoint-finney.opentensor.ai:443"
+        config.subtensor, "chain_endpoint", "wss://entrypoint-finney.opentensor.ai:443"
     )
 
     config.wallet = bt.wallet(config=config)
@@ -192,7 +187,7 @@ def main():
                 "uid_for_eval": config.uid_for_eval,
                 "netuid": config.netuid,
                 "device": config.device,
-            }
+            },
         )
 
     try:

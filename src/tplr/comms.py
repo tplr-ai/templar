@@ -1071,15 +1071,24 @@ class Comms(ChainManager):
         """
         try:
             # 1. Check validator bucket
-            validator_bucket, validator_uid = await self._get_highest_stake_validator_bucket()
+            (
+                validator_bucket,
+                validator_uid,
+            ) = await self._get_highest_stake_validator_bucket()
             if validator_bucket:
-                tplr.logger.info(f"Trying highest-staked validator UID={validator_uid}…")
-                result = await self._get_bucket_checkpoint(validator_bucket, validator_uid)
+                tplr.logger.info(
+                    f"Trying highest-staked validator UID={validator_uid}…"
+                )
+                result = await self._get_bucket_checkpoint(
+                    validator_bucket, validator_uid
+                )
                 if result:
                     return result
 
             # 2. Check self R2 bucket
-            tplr.logger.info(f"No validator checkpoint found, checking self bucket (UID={self.uid}).")
+            tplr.logger.info(
+                f"No validator checkpoint found, checking self bucket (UID={self.uid})."
+            )
             self_bucket = self.bucket
             if self_bucket:
                 result = await self._get_bucket_checkpoint(self_bucket, self.uid)
@@ -1087,12 +1096,16 @@ class Comms(ChainManager):
                     return result
 
             # 3. Check local storage
-            tplr.logger.info("No checkpoint found in validator bucket or self bucket, checking local storage.")
+            tplr.logger.info(
+                "No checkpoint found in validator bucket or self bucket, checking local storage."
+            )
             local_result = self._load_latest_local_checkpoint()
             if local_result:
                 return local_result
 
-            tplr.logger.info("No checkpoint found in validator / self R2 / local storage")
+            tplr.logger.info(
+                "No checkpoint found in validator / self R2 / local storage"
+            )
             return None
 
         except Exception as e:
@@ -1120,7 +1133,9 @@ class Comms(ChainManager):
                     if match:
                         window = int(match.group(1))
                         checkpoint_uid = int(match.group(2))
-                        if checkpoint_uid == self.uid:  # Only accept checkpoints for this UID
+                        if (
+                            checkpoint_uid == self.uid
+                        ):  # Only accept checkpoints for this UID
                             file_path = os.path.join(path, file_name)
                             checkpoints.append(
                                 {
@@ -1134,13 +1149,13 @@ class Comms(ChainManager):
                 latest = max(checkpoints, key=lambda x: x["modified"])
                 checkpoint_data = torch.load(latest["path"])
                 return checkpoint_data, latest["window"]
-            
+
             return None
 
         except Exception as e:
             tplr.logger.error(f"Error in local checkpoint loading: {e}")
             return None
-    
+
     async def _get_bucket_checkpoint(self, bucket, uid):
         """Helper to get checkpoint from a specific bucket."""
         try:
@@ -1156,17 +1171,19 @@ class Comms(ChainManager):
                 pattern = re.compile(r"^checkpoint-(\d+)-(\d+)-v([0-9.]+)\.pt$")
 
                 response = await s3_client.list_objects_v2(
-                    Bucket=bucket.name,
-                    Prefix="checkpoint",
-                    MaxKeys=50
+                    Bucket=bucket.name, Prefix="checkpoint", MaxKeys=50
                 )
 
                 contents = response.get("Contents", [])
                 if not contents:
-                    tplr.logger.debug(f"No checkpoint objects found in bucket='{bucket.name}' for UID={uid}")
+                    tplr.logger.debug(
+                        f"No checkpoint objects found in bucket='{bucket.name}' for UID={uid}"
+                    )
                     return None
 
-                tplr.logger.debug(f"Found {len(contents)} checkpoint objects in bucket='{bucket.name}'")
+                tplr.logger.debug(
+                    f"Found {len(contents)} checkpoint objects in bucket='{bucket.name}'"
+                )
 
                 valid_checkpoints = []
                 for obj in contents:
@@ -1175,7 +1192,9 @@ class Comms(ChainManager):
                     if match:
                         checkpoint_window = int(match.group(1))
                         checkpoint_uid = int(match.group(2))
-                        if checkpoint_uid == uid:  # Only accept checkpoints for the specified UID
+                        if (
+                            checkpoint_uid == uid
+                        ):  # Only accept checkpoints for the specified UID
                             valid_checkpoints.append(
                                 {
                                     "key": key,

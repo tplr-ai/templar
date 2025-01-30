@@ -695,22 +695,32 @@ class Validator:
                 time.sleep(1)
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):
-    # Ensure logits is at least 1D
+    """Normalizes logits using a minimum power normalization approach.
+    
+    This function applies power normalization to the input logits, raising them to a power
+    and normalizing to create a probability distribution. If the sum is too small (below epsilon),
+    returns zeros to avoid division by very small numbers.
+
+    Args:
+        logits (torch.Tensor): Input tensor to be normalized
+        power (float, optional): Power to raise the logits to. Defaults to 2.0.
+        epsilon (float, optional): Small value to prevent division by zero. Defaults to 1e-8.
+
+    Returns:
+        torch.Tensor: Normalized probabilities
+    """
     if logits.dim() == 0:
         logits = logits.unsqueeze(0)
     
-    # Shift by minimum and apply power
-    adjusted_logits = logits - torch.min(logits)
-    powered_logits = adjusted_logits ** power
-    
-    # Normalize to sum to 1
+    powered_logits = logits ** power
     sum_powered = torch.sum(powered_logits)
-    if sum_powered > epsilon:  # Avoid division by zero
+    if sum_powered > epsilon:
         probabilities = powered_logits / sum_powered
     else:
         probabilities = torch.zeros_like(powered_logits)
     
     return probabilities
+
 
 if __name__ == "__main__":
     asyncio.run(Validator().run())

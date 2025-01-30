@@ -192,6 +192,9 @@ class Validator:
         self.peers = []
         self.eval_peers = []
 
+        # Track inactive peer scores
+        self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
+        self.inactivity_slash_rate = 0.25  # 25% slash per window
 
     async def run(self):
         # Load Peers
@@ -255,11 +258,35 @@ class Validator:
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
 
-        while True:       
-            # 1. Wait for validator offset - single wait loop
+        while True:
+            # Check for catch-up need
+            catch_up_success, new_global_step, new_optimizer, new_scheduler = await self.comms.check_and_perform_catch_up(
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                transformer=self.transformer,
+                compressor=self.compressor,
+                current_window=self.current_window,
+                sync_window=self.sync_window,
+                device=self.config.device,
+                peers=self.peers,
+                uid=self.uid,
+                global_step=self.global_step,
+                hparams=self.hparams
+            )
+            
+            if catch_up_success:
+                self.global_step = new_global_step
+                self.optimizer = new_optimizer
+                self.scheduler = new_scheduler
+                self.sync_window = self.current_window
+                continue
+
+            # Normal processing continues...
             while self.sync_window >= (self.current_window - self.hparams.validator_offset):
                 tplr.logger.info(f'Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}')
                 await asyncio.sleep(12)
+
             tplr.logger.info(f'Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
             
             # 2. Increment sync window and update peer lists
@@ -275,6 +302,40 @@ class Validator:
 
             tplr.logger.info(f'Current gather peers: {self.peers}')
             tplr.logger.info(f'Current evaluation peers: {self.eval_peers}')
+
+            # After self.comms.update_peers_with_buckets()
+            newly_inactive = self.comms.inactive_peers
+            current_window = self.sync_window
+            
+            # Process newly inactive peers
+            for uid in newly_inactive:
+                if uid not in self.inactive_scores:
+                    self.inactive_scores[uid] = (current_window, self.moving_avg_scores[uid].item())
+                    tplr.logger.info(f"UID {uid} became inactive at window {current_window} with score {self.moving_avg_scores[uid].item():.4f}")
+            
+            # Apply penalties to all inactive peers
+            for uid, (inactive_since, _) in list(self.inactive_scores.items()):
+                # If peer became active again, remove from inactive tracking
+                if uid in self.eval_peers:
+                    del self.inactive_scores[uid]
+                    tplr.logger.info(f"UID {uid} became active again")
+                    continue
+                
+                # Apply flat 25% penalty instead of exponential decay
+                old_score = self.moving_avg_scores[uid].item()
+                self.moving_avg_scores[uid] *= 0.75  # Apply flat 25% reduction
+                new_score = self.moving_avg_scores[uid].item()
+                
+                tplr.logger.info(
+                    f"UID {uid} penalized for inactivity: "
+                    f"{old_score:.4f} -> {new_score:.4f}"
+                )
+                
+                # Log slash metrics
+                self.wandb.log({
+                    f"validator/inactivity/{uid}/score_before": old_score,
+                    f"validator/inactivity/{uid}/score_after": new_score,
+                }, step=self.global_step)
 
             # 3. Gather gradients from peers
             gather_start = tplr.T()
@@ -441,7 +502,8 @@ class Validator:
                 self.evaluated_uids.add(eval_uid)
 
                 self.scores[eval_uid] = score
-                self.moving_avg_scores[eval_uid] = self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score
+                # Ensure moving average score is non-negative
+                self.moving_avg_scores[eval_uid] = max(self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score, 0.0)
 
                 # 12. Calculate weights using temperature-based softmax
                 weights = torch.zeros_like(self.moving_avg_scores)
@@ -598,6 +660,9 @@ class Validator:
                                 self.totalks[n],
                             )
                         )
+                        # Store pre-sign gradient in momentum
+                        self.momentum[n] = new_grad.clone()
+                        
                         if p.grad is None:
                             p.grad = new_grad
                         else:
@@ -650,22 +715,32 @@ class Validator:
                 time.sleep(1)
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):
-    # Ensure logits is at least 1D
+    """Normalizes logits using a minimum power normalization approach.
+    
+    This function applies power normalization to the input logits, raising them to a power
+    and normalizing to create a probability distribution. If the sum is too small (below epsilon),
+    returns zeros to avoid division by very small numbers.
+
+    Args:
+        logits (torch.Tensor): Input tensor to be normalized
+        power (float, optional): Power to raise the logits to. Defaults to 2.0.
+        epsilon (float, optional): Small value to prevent division by zero. Defaults to 1e-8.
+
+    Returns:
+        torch.Tensor: Normalized probabilities
+    """
     if logits.dim() == 0:
         logits = logits.unsqueeze(0)
     
-    # Shift by minimum and apply power
-    adjusted_logits = logits - torch.min(logits)
-    powered_logits = adjusted_logits ** power
-    
-    # Normalize to sum to 1
+    powered_logits = logits ** power
     sum_powered = torch.sum(powered_logits)
-    if sum_powered > epsilon:  # Avoid division by zero
+    if sum_powered > epsilon:
         probabilities = powered_logits / sum_powered
     else:
         probabilities = torch.zeros_like(powered_logits)
     
     return probabilities
+
 
 if __name__ == "__main__":
     asyncio.run(Validator().run())

@@ -10,9 +10,13 @@ import aiofiles
 import botocore
 import numpy as np
 import bittensor as bt
+from torch.optim import SGD
+from transformers import LlamaForCausalLM
+from torch.optim.lr_scheduler import SequentialLR
+
 from tqdm import tqdm as std_tqdm
 from types import SimpleNamespace
-from typing import List, Dict, Optional, TypeVar, Any
+from typing import List, Dict, Optional, TypeVar, Any, Tuple
 from aiobotocore.session import get_session
 
 from . import __version__
@@ -21,6 +25,8 @@ from .chain import ChainManager
 from .schemas import Bucket
 
 import tplr as tplr
+from .compress import TransformDCT, CompressDCT
+# from .hparams import HParams
 
 
 # Constants
@@ -75,6 +81,10 @@ class Comms(ChainManager):
         self.recent_windows = (
             self.hparams.recent_windows
         )  # Number of recent windows to check
+
+        # Add connection management
+        self.client_semaphore = asyncio.Semaphore(30)  # Limit concurrent connections
+        self.retry_config = {"max_attempts": 3, "backoff_base": 1.5}
 
     def start_background_tasks(self):
         self.loop = asyncio.get_running_loop()
@@ -232,7 +242,6 @@ class Comms(ChainManager):
         self,
         key: str,
         file_path: Optional[str] = None,
-        bucket: Optional[Bucket] = None,
     ):
         """
         Puts an object into S3 storage, handling different file types appropriately.
@@ -387,77 +396,132 @@ class Comms(ChainManager):
     #  Large File Operations
 
     async def upload_large_file(self, file_path: str, key: str, s3_client):
-        """Uploads a large file to S3 using asynchronous multipart upload."""
+        """Uploads a large file to S3 using asynchronous multipart upload with improved connection handling."""
+        upload_id = None
+        MAX_RETRIES = 3
+        PART_SIZE = 50 * 1024 * 1024  # 50MB chunks for better throughput
+        MAX_CONCURRENT_PARTS = 5  # Reduced from 8 to prevent connection issues
+
         try:
-            # Initiate multipart upload
-            response = await s3_client.create_multipart_upload(
-                Bucket=self.bucket.name, Key=key
-            )
-            upload_id = response["UploadId"]  # type: ignore
+            async with self.client_semaphore:  # Use existing connection semaphore
+                # Initiate multipart upload with retry
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        response = await s3_client.create_multipart_upload(
+                            Bucket=self.bucket.name, Key=key
+                        )
+                        upload_id = response["UploadId"]
+                        break
+                    except Exception:
+                        if attempt == MAX_RETRIES - 1:
+                            raise
+                        await asyncio.sleep(2**attempt)
 
-            # Define part size (e.g., 64MB)
-            part_size = 64 * 1024 * 1024  # 64MB
-            file_size = os.path.getsize(file_path)
-            total_parts = math.ceil(file_size / part_size)
+                file_size = os.path.getsize(file_path)
+                total_parts = math.ceil(file_size / PART_SIZE)
 
-            semaphore = asyncio.Semaphore(8)  # Limit concurrency
+                # Process parts in smaller batches
+                parts = []
+                for batch_start in range(1, total_parts + 1, MAX_CONCURRENT_PARTS):
+                    batch_end = min(batch_start + MAX_CONCURRENT_PARTS, total_parts + 1)
+                    batch_parts = range(batch_start, batch_end)
 
-            # Queue to hold part numbers
-            part_queue = asyncio.Queue()
+                    # Create queue for this batch
+                    part_queue = asyncio.Queue()
+                    for part_number in batch_parts:
+                        part_queue.put_nowait(part_number)
 
-            for part_number in range(1, total_parts + 1):
-                part_queue.put_nowait(part_number)
-
-            parts = []
-
-            async def upload_part():
-                part_results = []
-                while not part_queue.empty():
-                    part_number = await part_queue.get()
-                    byte_range_start = (part_number - 1) * part_size
-                    byte_range_end = min(byte_range_start + part_size, file_size)
-                    async with semaphore:
-                        async with aiofiles.open(file_path, "rb") as f:
-                            await f.seek(byte_range_start)
-                            data = await f.read(byte_range_end - byte_range_start)
-
-                            response = await s3_client.upload_part(
-                                Bucket=self.bucket.name,
-                                Key=key,
-                                PartNumber=part_number,
-                                UploadId=upload_id,
-                                Body=data,
+                    async def upload_part():
+                        part_results = []
+                        while not part_queue.empty():
+                            part_number = await part_queue.get()
+                            byte_range_start = (part_number - 1) * PART_SIZE
+                            byte_range_end = min(
+                                byte_range_start + PART_SIZE, file_size
                             )
-                            part_results.append(
-                                {"ETag": response["ETag"], "PartNumber": part_number}  # type: ignore
-                            )
-                    part_queue.task_done()
-                return part_results
 
-            # Start worker tasks
-            workers = [upload_part() for _ in range(min(8, total_parts))]
-            results_nested = await asyncio.gather(*workers)
+                            # Retry logic for each part
+                            for attempt in range(MAX_RETRIES):
+                                try:
+                                    async with aiofiles.open(file_path, "rb") as f:
+                                        await f.seek(byte_range_start)
+                                        data = await f.read(
+                                            byte_range_end - byte_range_start
+                                        )
 
-            # Flatten the results
-            parts = [item for sublist in results_nested for item in sublist]
-            parts.sort(key=lambda x: x["PartNumber"])  # type: ignore
+                                        response = await s3_client.upload_part(
+                                            Bucket=self.bucket.name,
+                                            Key=key,
+                                            PartNumber=part_number,
+                                            UploadId=upload_id,
+                                            Body=data,
+                                        )
+                                        part_results.append(
+                                            {
+                                                "ETag": response["ETag"],
+                                                "PartNumber": part_number,
+                                            }
+                                        )
+                                        break
+                                except Exception as e:
+                                    if attempt == MAX_RETRIES - 1:
+                                        tplr.logger.error(
+                                            f"Failed to upload part {part_number} after {MAX_RETRIES} attempts: {e}"
+                                        )
+                                        raise
+                                    await asyncio.sleep(2**attempt)
 
-            # Complete multipart upload
-            await s3_client.complete_multipart_upload(
-                Bucket=self.bucket.name,
-                Key=key,
-                UploadId=upload_id,
-                MultipartUpload={"Parts": parts},
-            )
+                            part_queue.task_done()
+                        return part_results
 
-            tplr.logger.info(f"Successfully uploaded {key}")
+                    # Start workers for this batch
+                    workers = [
+                        upload_part()
+                        for _ in range(min(MAX_CONCURRENT_PARTS, len(batch_parts)))
+                    ]
+                    try:
+                        batch_results = await asyncio.gather(*workers)
+                        # Add successful parts from this batch
+                        parts.extend(
+                            [item for sublist in batch_results for item in sublist]
+                        )
+                    except Exception as e:
+                        tplr.logger.error(
+                            f"Batch upload failed for parts {batch_start}-{batch_end - 1}: {e}"
+                        )
+                        raise
+
+                    # Small delay between batches
+                    await asyncio.sleep(0.1)
+
+                # Sort parts by part number
+                parts.sort(key=lambda x: x["PartNumber"])
+
+                # Complete multipart upload with retry
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        await s3_client.complete_multipart_upload(
+                            Bucket=self.bucket.name,
+                            Key=key,
+                            UploadId=upload_id,
+                            MultipartUpload={"Parts": parts},
+                        )
+                        tplr.logger.info(f"Successfully uploaded {key}")
+                        break
+                    except Exception:
+                        if attempt == MAX_RETRIES - 1:
+                            raise
+                        await asyncio.sleep(2**attempt)
 
         except Exception as e:
             tplr.logger.error(f"Error during multipart upload of {key}: {e}")
-            # Abort the multipart upload in case of error
-            await s3_client.abort_multipart_upload(
-                Bucket=self.bucket.name, Key=key, UploadId=upload_id
-            )
+            if upload_id:
+                try:
+                    await s3_client.abort_multipart_upload(
+                        Bucket=self.bucket.name, Key=key, UploadId=upload_id
+                    )
+                except Exception as abort_e:
+                    tplr.logger.error(f"Failed to abort multipart upload: {abort_e}")
             raise
 
     async def download_large_file(
@@ -728,6 +792,51 @@ class Comms(ChainManager):
             # Retry after a short delay
             await asyncio.sleep(0.1)
 
+    async def _store_gradient_data(
+        self,
+        uid: str,
+        window: int,
+        global_step: int,
+        state_dict_resp: dict,
+        global_step_resp: int,
+    ):
+        """Separate async function to handle gradient storage"""
+        try:
+            gradient_data = {
+                "state_dict": {k: v.cpu().numpy() for k, v in state_dict_resp.items()},
+                "metadata": {
+                    "uid": uid,
+                    "window": window,
+                    "global_step": global_step_resp,
+                    "timestamp": time.time(),
+                    "version": __version__,
+                },
+            }
+
+            # Create temporary file
+            temp_file = os.path.join(
+                self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
+            )
+
+            np.savez_compressed(temp_file, **gradient_data)
+            key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
+
+            # Create separate tasks for upload and cleanup
+            upload_task = asyncio.create_task(
+                self.s3_put_object(key=key, file_path=temp_file)
+            )
+
+            # Schedule cleanup to run after upload completes
+            upload_task.add_done_callback(
+                lambda _: asyncio.create_task(self._cleanup_temp_file(temp_file))
+            )
+
+        except Exception as e:
+            tplr.logger.warning(f"Failed to store gradient from UID {uid}: {str(e)}")
+            # Ensure cleanup happens even on error
+            if "temp_file" in locals():
+                asyncio.create_task(self._cleanup_temp_file(temp_file))
+
     async def gather(
         self,
         state_dict: Optional[Dict[str, torch.Tensor]],
@@ -742,7 +851,7 @@ class Comms(ChainManager):
         stale_retention: int = 10,
         store_gathers: bool = False,  # Parameter for storing gathered gradients
     ) -> Optional[SimpleNamespace]:
-        """Gather operation with individual gradient normalization."""
+        """Gather operation with individual gradient normalization and connection management."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
@@ -772,113 +881,102 @@ class Comms(ChainManager):
 
         await asyncio.sleep(0.1)
 
-        # Prepare gather tasks
-        tplr.logger.debug("Preparing gather tasks for all UIDs")
-        gather_tasks = [
-            self.get_with_retry(
-                uid=uid,
-                window=window,
-                key=key,
-                timeout=timeout,
-                local=local,
-                stale_retention=stale_retention,
-            )
-            for uid in uids
-        ]
-
         # Initialize variables
         aggregated_state_dict = {}
         valid_uids = []
         global_steps = []
 
-        # Process responses
-        tplr.logger.debug("Awaiting responses from all UIDs")
-        responses = await asyncio.gather(*gather_tasks)
-        for idx, response in enumerate(responses):
-            uid = uids[idx]
-            tplr.logger.debug(f"Processing response from UID {uid}")
+        # Process UIDs in batches to manage connections
+        BATCH_SIZE = 5
+        for i in range(0, len(uids), BATCH_SIZE):
+            batch_uids = uids[i : i + BATCH_SIZE]
 
-            if response is None:
-                tplr.logger.debug(f"No data received from UID {uid}")
-                continue
-
-            try:
-                state_dict_resp, global_step_resp = response
-                tplr.logger.debug(
-                    f"Received state dict and global step {global_step_resp} from UID {uid}"
-                )
-            except (TypeError, ValueError) as e:
-                tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
-                continue
-
-            if state_dict_resp is None:
-                tplr.logger.debug(f"Empty state dict from UID {uid}")
-                continue
-
-            # Store raw gradients if enabled
-            if store_gathers:
-                try:
-                    gradient_data = {
-                        "state_dict": {
-                            k: v.cpu().numpy() for k, v in state_dict_resp.items()
-                        },
-                        "metadata": {
-                            "uid": uid,
-                            "window": window,
-                            "global_step": global_step_resp,
-                            "timestamp": time.time(),
-                            "version": __version__,
-                        },
-                    }
-
-                    # Create temporary file
-                    temp_file = os.path.join(
-                        self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
+            async with self.client_semaphore:
+                # Prepare gather tasks for batch
+                batch_tasks = [
+                    self.get_with_retry(
+                        uid=uid,
+                        window=window,
+                        key=key,
+                        timeout=timeout
+                        // (len(uids) // BATCH_SIZE + 1),  # Adjust timeout per batch
+                        local=local,
+                        stale_retention=stale_retention,
                     )
-                    try:
-                        np.savez_compressed(temp_file, **gradient_data)
-                        key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
+                    for uid in batch_uids
+                ]
 
-                        # Create task for uploading but don't await it
-                        asyncio.create_task(
-                            self.s3_put_object(
-                                key=key, file_path=temp_file, bucket=self.bucket
+                # Process batch responses
+                try:
+                    batch_responses = await asyncio.gather(
+                        *batch_tasks, return_exceptions=True
+                    )
+
+                    for uid, response in zip(batch_uids, batch_responses):
+                        if isinstance(response, Exception):
+                            tplr.logger.debug(
+                                f"Error getting response from UID {uid}: {str(response)}"
                             )
-                        )
-                    finally:
-                        # Schedule cleanup of temp file
-                        asyncio.create_task(self._cleanup_temp_file(temp_file))
+                            continue
+
+                        if response is None:
+                            tplr.logger.debug(f"No data received from UID {uid}")
+                            continue
+
+                        try:
+                            state_dict_resp, global_step_resp = response
+                            tplr.logger.debug(
+                                f"Received state dict and global step {global_step_resp} from UID {uid}"
+                            )
+                        except (TypeError, ValueError) as e:
+                            tplr.logger.debug(
+                                f"Invalid response format from UID {uid}: {e}"
+                            )
+                            continue
+
+                        if state_dict_resp is None:
+                            tplr.logger.debug(f"Empty state dict from UID {uid}")
+                            continue
+
+                        # Store raw gradients if enabled
+                        if store_gathers:
+                            asyncio.create_task(
+                                self._store_gradient_data(
+                                    uid=uid,
+                                    window=window,
+                                    global_step=global_step,
+                                    state_dict_resp=state_dict_resp,
+                                    global_step_resp=global_step_resp,
+                                )
+                            )
+
+                        # Process tensors (keeping existing normalization logic)
+                        for param_name, tensor in state_dict_resp.items():
+                            if param_name.endswith("vals"):
+                                tensor = tensor.to(device)
+                                norm = torch.norm(tensor)
+                                normalized = tensor / (norm + 1e-8)
+                                if param_name not in aggregated_state_dict:
+                                    aggregated_state_dict[param_name] = []
+                                aggregated_state_dict[param_name].append(normalized)
+                            else:
+                                if param_name not in aggregated_state_dict:
+                                    aggregated_state_dict[param_name] = []
+                                aggregated_state_dict[param_name].append(
+                                    tensor.to(device)
+                                )
+                            metrics["download_bytes"] += (
+                                tensor.element_size() * tensor.nelement()
+                            )
+
+                        valid_uids.append(uid)
+                        global_steps.append(global_step_resp)
 
                 except Exception as e:
-                    tplr.logger.warning(
-                        f"Failed to store gradient from UID {uid}: {str(e)}"
+                    tplr.logger.error(
+                        f"Error processing batch {i}-{i + BATCH_SIZE}: {str(e)}"
                     )
-
-            # Add normalized tensors to aggregated_state_dict
-            tplr.logger.debug(f"Processing tensors from UID {uid}")
-            for param_name, tensor in state_dict_resp.items():
-                if param_name.endswith("vals"):
-                    tensor = tensor.to(device)
-                    # Normalize in original dtype
-                    norm = torch.norm(tensor)
-                    normalized = tensor / (norm + 1e-8)
-                    if param_name not in aggregated_state_dict:
-                        aggregated_state_dict[param_name] = []
-                    aggregated_state_dict[param_name].append(normalized)
-                    tplr.logger.debug(
-                        f"Normalized tensor {param_name} from UID {uid}, norm: {norm}"
-                    )
-                else:
-                    # Keep indices unchanged
-                    if param_name not in aggregated_state_dict:
-                        aggregated_state_dict[param_name] = []
-                    aggregated_state_dict[param_name].append(tensor.to(device))
-                metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
-
-            # Move these outside the parameter loop to ensure they are executed once per UID
-            valid_uids.append(uid)
-            global_steps.append(global_step_resp)
-            tplr.logger.debug(f"Successfully processed all tensors from UID {uid}")
+                    continue
 
         # If no valid responses, return None
         if not valid_uids:
@@ -1371,11 +1469,7 @@ class Comms(ChainManager):
             async with aiofiles.open(temp_file, "w") as f:
                 await f.write(json.dumps(start_window_data))
 
-            validator_bucket = self.get_own_bucket("gradients", "write")
-            print(f"Validator Access Key : {validator_bucket.access_key_id}")
-            await self.s3_put_object(
-                key=key, file_path=temp_file, bucket=validator_bucket
-            )
+            await self.s3_put_object(key=key, file_path=temp_file)
         finally:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
@@ -1470,3 +1564,221 @@ class Comms(ChainManager):
         )
 
         return True
+
+    async def _gather_window_batch(
+        self,
+        batch_windows: List[int],
+        uid: str,
+        peers: List[int],
+        device: str,
+        global_step: int,
+    ) -> Dict[int, SimpleNamespace]:
+        """Gather gradients for multiple windows in parallel."""
+        try:
+            gather_tasks = [
+                self.gather(
+                    state_dict={},
+                    my_uid=uid,
+                    uids=peers,
+                    window=w,
+                    key="gradient",
+                    timeout=30,
+                    device=device,
+                    local=False,
+                    stale_retention=100,
+                    global_step=global_step,
+                )
+                for w in batch_windows
+            ]
+
+            # Wait for all gather tasks to complete
+            batch_results = await asyncio.gather(*gather_tasks, return_exceptions=True)
+
+            # Filter out exceptions and create window->result mapping
+            result_dict = {w: None for w in batch_windows}  # Initialize with None
+            for window, result in zip(batch_windows, batch_results):
+                if not isinstance(result, Exception) and result is not None:
+                    result_dict[window] = result
+
+            return result_dict
+
+        except Exception as e:
+            tplr.logger.error(
+                f"Failed to gather window batch {batch_windows}: {str(e)}"
+            )
+            return {
+                w: None for w in batch_windows
+            }  # Return dict with None values on failure
+
+    async def _apply_gathered_gradients(
+        self,
+        gather_result,
+        model: LlamaForCausalLM,
+        optimizer: SGD,
+        scheduler: SequentialLR,
+        transformer: TransformDCT,
+        compressor: CompressDCT,
+        device: str,
+        window: int,
+        global_step: int,
+    ) -> Tuple[bool, int]:
+        """Apply gathered gradients to model parameters.
+
+        Args:
+            gather_result: Gathered gradient data
+            model: The model to update
+            optimizer: SGD optimizer
+            scheduler: Learning rate scheduler
+            transformer: DCT transformer
+            compressor: Gradient compressor
+            device: Computing device
+            window: Current window number
+            global_step: Global step counter
+
+        Returns:
+            Tuple[bool, int]: (success, new_global_step)
+        """
+        try:
+            if not gather_result or not gather_result.state_dict:
+                return False, global_step
+
+            model.train()
+            optimizer.zero_grad()
+            model.zero_grad()
+
+            # Apply gradients
+            for n, p in model.named_parameters():
+                idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
+                vals = getattr(gather_result.state_dict, f"{n}vals", None)
+
+                if idxs is not None and vals is not None:
+                    if not isinstance(idxs, (list, tuple)):
+                        idxs = [idxs]
+                    if not isinstance(vals, (list, tuple)):
+                        vals = [vals]
+
+                    new_grad = transformer.decode(
+                        compressor.batch_decompress(
+                            p.to(device),
+                            idxs,
+                            vals,
+                            transformer.shapes[n],
+                            transformer.totalks[n],
+                        )
+                    )
+                    if p.grad is None:
+                        p.grad = new_grad
+                    else:
+                        p.grad.copy_(new_grad)
+                    p.grad.sign_()
+
+            optimizer.step()
+            scheduler.step()
+            global_step += 1
+
+            tplr.logger.info(
+                f"Applied gradients for window {window}, global_step => {global_step}"
+            )
+            return True, global_step
+
+        except Exception as e:
+            tplr.logger.error(
+                f"Failed to apply gradients for window {window}: {str(e)}"
+            )
+            return False, global_step
+
+    async def check_and_perform_catch_up(
+        self,
+        model: LlamaForCausalLM,
+        optimizer: SGD,
+        scheduler: SequentialLR,
+        transformer: TransformDCT,
+        compressor: CompressDCT,
+        current_window: int,
+        sync_window: int,
+        device: str,
+        peers: List[int],
+        uid: str,
+        global_step: int,
+        hparams,
+    ) -> Tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
+        window_gap = current_window - sync_window
+
+        if window_gap <= hparams.catch_up_threshold:
+            return False, global_step, optimizer, scheduler
+
+        if len(peers) < hparams.catch_up_min_peers:
+            tplr.logger.warning(f"Not enough peers ({len(peers)}) for catch-up")
+            return False, global_step, optimizer, scheduler
+
+        catch_up_start = time.time()
+        tplr.logger.info(f"Initiating catch-up for {window_gap} windows")
+
+        try:
+            # Process windows in batches
+            for i in range(
+                sync_window + 1, current_window + 1, hparams.catch_up_batch_size
+            ):
+                batch_end = min(i + hparams.catch_up_batch_size, current_window + 1)
+                batch_windows = list(range(i, batch_end))
+
+                # Check timeout
+                if time.time() - catch_up_start > hparams.catch_up_timeout:
+                    tplr.logger.warning("Catch-up exceeded maximum time")
+                    return False, global_step, optimizer, scheduler
+
+                try:
+                    # Use asyncio.wait_for to handle timeout for gather operation
+                    gathered_data = await asyncio.wait_for(
+                        self._gather_window_batch(
+                            batch_windows=batch_windows,
+                            uid=uid,
+                            peers=peers,
+                            device=device,
+                            global_step=global_step,
+                        ),
+                        timeout=max(
+                            0.1,
+                            hparams.catch_up_timeout - (time.time() - catch_up_start),
+                        ),
+                    )
+
+                    # Verify gathered_data is a dict
+                    if not isinstance(gathered_data, dict):
+                        raise TypeError(
+                            f"Expected dict from _gather_window_batch, got {type(gathered_data)}"
+                        )
+
+                    # Apply updates in order
+                    for w in sorted(gathered_data.keys()):
+                        success, new_global_step = await self._apply_gathered_gradients(
+                            gather_result=gathered_data[w],
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            transformer=transformer,
+                            compressor=compressor,
+                            device=device,
+                            window=w,
+                            global_step=global_step,
+                        )
+
+                        if success:
+                            global_step = new_global_step
+
+                    torch.cuda.empty_cache()
+
+                except asyncio.TimeoutError:
+                    tplr.logger.warning(
+                        f"Timeout while gathering windows {batch_windows}"
+                    )
+                    return False, global_step, optimizer, scheduler
+                except (TypeError, AttributeError) as e:
+                    tplr.logger.error(f"Invalid data format during catch-up: {str(e)}")
+                    return False, global_step, optimizer, scheduler
+
+            return True, global_step, optimizer, scheduler
+
+        except Exception as e:
+            tplr.logger.error(f"Catch-up failed: {str(e)}")
+            return False, global_step, optimizer, scheduler

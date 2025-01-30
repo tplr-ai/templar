@@ -82,6 +82,10 @@ class Comms(ChainManager):
             self.hparams.recent_windows
         )  # Number of recent windows to check
 
+        # Add connection management
+        self.client_semaphore = asyncio.Semaphore(30)  # Limit concurrent connections
+        self.retry_config = {"max_attempts": 3, "backoff_base": 1.5}
+
     def start_background_tasks(self):
         self.loop = asyncio.get_running_loop()
         # Start background tasks
@@ -392,77 +396,132 @@ class Comms(ChainManager):
     #  Large File Operations
 
     async def upload_large_file(self, file_path: str, key: str, s3_client):
-        """Uploads a large file to S3 using asynchronous multipart upload."""
+        """Uploads a large file to S3 using asynchronous multipart upload with improved connection handling."""
+        upload_id = None
+        MAX_RETRIES = 3
+        PART_SIZE = 50 * 1024 * 1024  # 50MB chunks for better throughput
+        MAX_CONCURRENT_PARTS = 5  # Reduced from 8 to prevent connection issues
+
         try:
-            # Initiate multipart upload
-            response = await s3_client.create_multipart_upload(
-                Bucket=self.bucket.name, Key=key
-            )
-            upload_id = response["UploadId"]  # type: ignore
+            async with self.client_semaphore:  # Use existing connection semaphore
+                # Initiate multipart upload with retry
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        response = await s3_client.create_multipart_upload(
+                            Bucket=self.bucket.name, Key=key
+                        )
+                        upload_id = response["UploadId"]
+                        break
+                    except Exception:
+                        if attempt == MAX_RETRIES - 1:
+                            raise
+                        await asyncio.sleep(2**attempt)
 
-            # Define part size (e.g., 64MB)
-            part_size = 64 * 1024 * 1024  # 64MB
-            file_size = os.path.getsize(file_path)
-            total_parts = math.ceil(file_size / part_size)
+                file_size = os.path.getsize(file_path)
+                total_parts = math.ceil(file_size / PART_SIZE)
 
-            semaphore = asyncio.Semaphore(8)  # Limit concurrency
+                # Process parts in smaller batches
+                parts = []
+                for batch_start in range(1, total_parts + 1, MAX_CONCURRENT_PARTS):
+                    batch_end = min(batch_start + MAX_CONCURRENT_PARTS, total_parts + 1)
+                    batch_parts = range(batch_start, batch_end)
 
-            # Queue to hold part numbers
-            part_queue = asyncio.Queue()
+                    # Create queue for this batch
+                    part_queue = asyncio.Queue()
+                    for part_number in batch_parts:
+                        part_queue.put_nowait(part_number)
 
-            for part_number in range(1, total_parts + 1):
-                part_queue.put_nowait(part_number)
-
-            parts = []
-
-            async def upload_part():
-                part_results = []
-                while not part_queue.empty():
-                    part_number = await part_queue.get()
-                    byte_range_start = (part_number - 1) * part_size
-                    byte_range_end = min(byte_range_start + part_size, file_size)
-                    async with semaphore:
-                        async with aiofiles.open(file_path, "rb") as f:
-                            await f.seek(byte_range_start)
-                            data = await f.read(byte_range_end - byte_range_start)
-
-                            response = await s3_client.upload_part(
-                                Bucket=self.bucket.name,
-                                Key=key,
-                                PartNumber=part_number,
-                                UploadId=upload_id,
-                                Body=data,
+                    async def upload_part():
+                        part_results = []
+                        while not part_queue.empty():
+                            part_number = await part_queue.get()
+                            byte_range_start = (part_number - 1) * PART_SIZE
+                            byte_range_end = min(
+                                byte_range_start + PART_SIZE, file_size
                             )
-                            part_results.append(
-                                {"ETag": response["ETag"], "PartNumber": part_number}  # type: ignore
-                            )
-                    part_queue.task_done()
-                return part_results
 
-            # Start worker tasks
-            workers = [upload_part() for _ in range(min(8, total_parts))]
-            results_nested = await asyncio.gather(*workers)
+                            # Retry logic for each part
+                            for attempt in range(MAX_RETRIES):
+                                try:
+                                    async with aiofiles.open(file_path, "rb") as f:
+                                        await f.seek(byte_range_start)
+                                        data = await f.read(
+                                            byte_range_end - byte_range_start
+                                        )
 
-            # Flatten the results
-            parts = [item for sublist in results_nested for item in sublist]
-            parts.sort(key=lambda x: x["PartNumber"])  # type: ignore
+                                        response = await s3_client.upload_part(
+                                            Bucket=self.bucket.name,
+                                            Key=key,
+                                            PartNumber=part_number,
+                                            UploadId=upload_id,
+                                            Body=data,
+                                        )
+                                        part_results.append(
+                                            {
+                                                "ETag": response["ETag"],
+                                                "PartNumber": part_number,
+                                            }
+                                        )
+                                        break
+                                except Exception as e:
+                                    if attempt == MAX_RETRIES - 1:
+                                        tplr.logger.error(
+                                            f"Failed to upload part {part_number} after {MAX_RETRIES} attempts: {e}"
+                                        )
+                                        raise
+                                    await asyncio.sleep(2**attempt)
 
-            # Complete multipart upload
-            await s3_client.complete_multipart_upload(
-                Bucket=self.bucket.name,
-                Key=key,
-                UploadId=upload_id,
-                MultipartUpload={"Parts": parts},
-            )
+                            part_queue.task_done()
+                        return part_results
 
-            tplr.logger.info(f"Successfully uploaded {key}")
+                    # Start workers for this batch
+                    workers = [
+                        upload_part()
+                        for _ in range(min(MAX_CONCURRENT_PARTS, len(batch_parts)))
+                    ]
+                    try:
+                        batch_results = await asyncio.gather(*workers)
+                        # Add successful parts from this batch
+                        parts.extend(
+                            [item for sublist in batch_results for item in sublist]
+                        )
+                    except Exception as e:
+                        tplr.logger.error(
+                            f"Batch upload failed for parts {batch_start}-{batch_end - 1}: {e}"
+                        )
+                        raise
+
+                    # Small delay between batches
+                    await asyncio.sleep(0.1)
+
+                # Sort parts by part number
+                parts.sort(key=lambda x: x["PartNumber"])
+
+                # Complete multipart upload with retry
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        await s3_client.complete_multipart_upload(
+                            Bucket=self.bucket.name,
+                            Key=key,
+                            UploadId=upload_id,
+                            MultipartUpload={"Parts": parts},
+                        )
+                        tplr.logger.info(f"Successfully uploaded {key}")
+                        break
+                    except Exception:
+                        if attempt == MAX_RETRIES - 1:
+                            raise
+                        await asyncio.sleep(2**attempt)
 
         except Exception as e:
             tplr.logger.error(f"Error during multipart upload of {key}: {e}")
-            # Abort the multipart upload in case of error
-            await s3_client.abort_multipart_upload(
-                Bucket=self.bucket.name, Key=key, UploadId=upload_id
-            )
+            if upload_id:
+                try:
+                    await s3_client.abort_multipart_upload(
+                        Bucket=self.bucket.name, Key=key, UploadId=upload_id
+                    )
+                except Exception as abort_e:
+                    tplr.logger.error(f"Failed to abort multipart upload: {abort_e}")
             raise
 
     async def download_large_file(
@@ -792,7 +851,7 @@ class Comms(ChainManager):
         stale_retention: int = 10,
         store_gathers: bool = False,  # Parameter for storing gathered gradients
     ) -> Optional[SimpleNamespace]:
-        """Gather operation with individual gradient normalization."""
+        """Gather operation with individual gradient normalization and connection management."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
@@ -822,88 +881,102 @@ class Comms(ChainManager):
 
         await asyncio.sleep(0.1)
 
-        # Prepare gather tasks
-        tplr.logger.debug("Preparing gather tasks for all UIDs")
-        gather_tasks = [
-            self.get_with_retry(
-                uid=uid,
-                window=window,
-                key=key,
-                timeout=timeout,
-                local=local,
-                stale_retention=stale_retention,
-            )
-            for uid in uids
-        ]
-
         # Initialize variables
         aggregated_state_dict = {}
         valid_uids = []
         global_steps = []
 
-        # Process responses
-        tplr.logger.debug("Awaiting responses from all UIDs")
-        responses = await asyncio.gather(*gather_tasks)
-        for idx, response in enumerate(responses):
-            uid = uids[idx]
-            tplr.logger.debug(f"Processing response from UID {uid}")
+        # Process UIDs in batches to manage connections
+        BATCH_SIZE = 5
+        for i in range(0, len(uids), BATCH_SIZE):
+            batch_uids = uids[i : i + BATCH_SIZE]
 
-            if response is None:
-                tplr.logger.debug(f"No data received from UID {uid}")
-                continue
-
-            try:
-                state_dict_resp, global_step_resp = response
-                tplr.logger.debug(
-                    f"Received state dict and global step {global_step_resp} from UID {uid}"
-                )
-            except (TypeError, ValueError) as e:
-                tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
-                continue
-
-            if state_dict_resp is None:
-                tplr.logger.debug(f"Empty state dict from UID {uid}")
-                continue
-
-            # TODO: Spilt out to analyser
-            # Store raw gradients if enabled
-            if store_gathers:
-                # Fire and forget - don't wait for completion
-                asyncio.create_task(
-                    self._store_gradient_data(
+            async with self.client_semaphore:
+                # Prepare gather tasks for batch
+                batch_tasks = [
+                    self.get_with_retry(
                         uid=uid,
                         window=window,
-                        global_step=global_step,
-                        state_dict_resp=state_dict_resp,
-                        global_step_resp=global_step_resp,
+                        key=key,
+                        timeout=timeout
+                        // (len(uids) // BATCH_SIZE + 1),  # Adjust timeout per batch
+                        local=local,
+                        stale_retention=stale_retention,
                     )
-                )
+                    for uid in batch_uids
+                ]
 
-            # Add normalized tensors to aggregated_state_dict
-            tplr.logger.debug(f"Processing tensors from UID {uid}")
-            for param_name, tensor in state_dict_resp.items():
-                if param_name.endswith("vals"):
-                    tensor = tensor.to(device)
-                    # Normalize in original dtype
-                    norm = torch.norm(tensor)
-                    normalized = tensor / (norm + 1e-8)
-                    if param_name not in aggregated_state_dict:
-                        aggregated_state_dict[param_name] = []
-                    aggregated_state_dict[param_name].append(normalized)
-                    tplr.logger.debug(
-                        f"Normalized tensor {param_name} from UID {uid}, norm: {norm}"
+                # Process batch responses
+                try:
+                    batch_responses = await asyncio.gather(
+                        *batch_tasks, return_exceptions=True
                     )
-                else:
-                    # Keep indices unchanged
-                    if param_name not in aggregated_state_dict:
-                        aggregated_state_dict[param_name] = []
-                    aggregated_state_dict[param_name].append(tensor.to(device))
-                metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
 
-            # Move these outside the parameter loop to ensure they are executed once per UID
-            valid_uids.append(uid)
-            global_steps.append(global_step_resp)
-            tplr.logger.debug(f"Successfully processed all tensors from UID {uid}")
+                    for uid, response in zip(batch_uids, batch_responses):
+                        if isinstance(response, Exception):
+                            tplr.logger.debug(
+                                f"Error getting response from UID {uid}: {str(response)}"
+                            )
+                            continue
+
+                        if response is None:
+                            tplr.logger.debug(f"No data received from UID {uid}")
+                            continue
+
+                        try:
+                            state_dict_resp, global_step_resp = response
+                            tplr.logger.debug(
+                                f"Received state dict and global step {global_step_resp} from UID {uid}"
+                            )
+                        except (TypeError, ValueError) as e:
+                            tplr.logger.debug(
+                                f"Invalid response format from UID {uid}: {e}"
+                            )
+                            continue
+
+                        if state_dict_resp is None:
+                            tplr.logger.debug(f"Empty state dict from UID {uid}")
+                            continue
+
+                        # Store raw gradients if enabled
+                        if store_gathers:
+                            asyncio.create_task(
+                                self._store_gradient_data(
+                                    uid=uid,
+                                    window=window,
+                                    global_step=global_step,
+                                    state_dict_resp=state_dict_resp,
+                                    global_step_resp=global_step_resp,
+                                )
+                            )
+
+                        # Process tensors (keeping existing normalization logic)
+                        for param_name, tensor in state_dict_resp.items():
+                            if param_name.endswith("vals"):
+                                tensor = tensor.to(device)
+                                norm = torch.norm(tensor)
+                                normalized = tensor / (norm + 1e-8)
+                                if param_name not in aggregated_state_dict:
+                                    aggregated_state_dict[param_name] = []
+                                aggregated_state_dict[param_name].append(normalized)
+                            else:
+                                if param_name not in aggregated_state_dict:
+                                    aggregated_state_dict[param_name] = []
+                                aggregated_state_dict[param_name].append(
+                                    tensor.to(device)
+                                )
+                            metrics["download_bytes"] += (
+                                tensor.element_size() * tensor.nelement()
+                            )
+
+                        valid_uids.append(uid)
+                        global_steps.append(global_step_resp)
+
+                except Exception as e:
+                    tplr.logger.error(
+                        f"Error processing batch {i}-{i + BATCH_SIZE}: {str(e)}"
+                    )
+                    continue
 
         # If no valid responses, return None
         if not valid_uids:

@@ -97,7 +97,10 @@ class TestInactivitySlashing:
         uid = 1
         initial_score = 1.0
         mock_validator.moving_avg_scores[uid] = initial_score
-        mock_validator.inactive_scores[uid] = (1, initial_score)  # Inactive since window 1
+        mock_validator.inactive_scores[uid] = (
+            1,
+            initial_score,
+        )  # Inactive since window 1
         mock_validator.sync_window = 3  # 2 windows of inactivity
 
         # Execute scoring logic from run()
@@ -137,7 +140,9 @@ class TestInactivitySlashing:
         mock_validator.wandb.log(
             {
                 f"validator/inactivity/{uid}/score_before": old_score,
-                f"validator/inactivity/{uid}/score_after": mock_validator.moving_avg_scores[uid].item(),
+                f"validator/inactivity/{uid}/score_after": mock_validator.moving_avg_scores[
+                    uid
+                ].item(),
             },
             step=mock_validator.global_step,
         )
@@ -161,7 +166,10 @@ class TestInactivitySlashing:
         # Verify
         for uid, initial_score in peers.items():
             expected_score = initial_score * 0.75
-            assert abs(mock_validator.moving_avg_scores[uid].item() - expected_score) < 1e-6
+            assert (
+                abs(mock_validator.moving_avg_scores[uid].item() - expected_score)
+                < 1e-6
+            )
 
     def test_edge_cases(self, mock_validator):
         """Test various edge cases"""

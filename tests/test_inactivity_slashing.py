@@ -92,27 +92,20 @@ class TestInactivitySlashing:
         )  # No slash on first window
 
     def test_score_slashing_over_time(self, mock_validator):
-        """Test that scores are correctly slashed over multiple windows"""
+        """Test that scores are correctly slashed with flat rate"""
         # Setup
         uid = 1
         initial_score = 1.0
         mock_validator.moving_avg_scores[uid] = initial_score
-        mock_validator.inactive_scores[uid] = (
-            1,
-            initial_score,
-        )  # Inactive since window 1
+        mock_validator.inactive_scores[uid] = (1, initial_score)  # Inactive since window 1
         mock_validator.sync_window = 3  # 2 windows of inactivity
 
         # Execute scoring logic from run()
-        windows_inactive = (
-            mock_validator.sync_window - mock_validator.inactive_scores[uid][0]
-        )
-        slash_factor = (1 - mock_validator.inactivity_slash_rate) ** windows_inactive
         old_score = mock_validator.moving_avg_scores[uid].item()
-        mock_validator.moving_avg_scores[uid] *= slash_factor
+        mock_validator.moving_avg_scores[uid] *= 0.75  # Flat 25% reduction
 
-        # Verify
-        expected_score = initial_score * (1 - 0.25) ** 2
+        # Verify - should be 75% of original score regardless of windows inactive
+        expected_score = initial_score * 0.75
         assert abs(mock_validator.moving_avg_scores[uid].item() - expected_score) < 1e-6
 
     def test_peer_reactivation(self, mock_validator):
@@ -138,21 +131,13 @@ class TestInactivitySlashing:
         mock_validator.sync_window = 3
 
         # Execute logging logic from run()
-        windows_inactive = (
-            mock_validator.sync_window - mock_validator.inactive_scores[uid][0]
-        )
-        slash_factor = (1 - mock_validator.inactivity_slash_rate) ** windows_inactive
         old_score = mock_validator.moving_avg_scores[uid].item()
-        mock_validator.moving_avg_scores[uid] *= slash_factor
+        mock_validator.moving_avg_scores[uid] *= 0.75  # Flat 25% reduction
 
         mock_validator.wandb.log(
             {
-                f"validator/inactivity/{uid}/windows_inactive": windows_inactive,
-                f"validator/inactivity/{uid}/slash_factor": slash_factor,
                 f"validator/inactivity/{uid}/score_before": old_score,
-                f"validator/inactivity/{uid}/score_after": mock_validator.moving_avg_scores[
-                    uid
-                ].item(),
+                f"validator/inactivity/{uid}/score_after": mock_validator.moving_avg_scores[uid].item(),
             },
             step=mock_validator.global_step,
         )
@@ -171,21 +156,12 @@ class TestInactivitySlashing:
 
         # Execute scoring logic for each peer
         for uid in peers:
-            windows_inactive = (
-                mock_validator.sync_window - mock_validator.inactive_scores[uid][0]
-            )
-            slash_factor = (
-                1 - mock_validator.inactivity_slash_rate
-            ) ** windows_inactive
-            mock_validator.moving_avg_scores[uid] *= slash_factor
+            mock_validator.moving_avg_scores[uid] *= 0.75  # Flat 25% reduction
 
         # Verify
         for uid, initial_score in peers.items():
-            expected_score = initial_score * (1 - 0.25) ** 2
-            assert (
-                abs(mock_validator.moving_avg_scores[uid].item() - expected_score)
-                < 1e-6
-            )
+            expected_score = initial_score * 0.75
+            assert abs(mock_validator.moving_avg_scores[uid].item() - expected_score) < 1e-6
 
     def test_edge_cases(self, mock_validator):
         """Test various edge cases"""

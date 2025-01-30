@@ -10,9 +10,13 @@ import aiofiles
 import botocore
 import numpy as np
 import bittensor as bt
+from torch.optim import SGD
+from transformers import LlamaForCausalLM
+from torch.optim.lr_scheduler import SequentialLR
+
 from tqdm import tqdm as std_tqdm
 from types import SimpleNamespace
-from typing import List, Dict, Optional, TypeVar, Any
+from typing import List, Dict, Optional, TypeVar, Any, Tuple
 from aiobotocore.session import get_session
 
 from . import __version__
@@ -21,6 +25,8 @@ from .chain import ChainManager
 from .schemas import Bucket
 
 import tplr as tplr
+from .compress import TransformDCT, CompressDCT
+# from .hparams import HParams
 
 
 # Constants
@@ -728,13 +734,18 @@ class Comms(ChainManager):
             # Retry after a short delay
             await asyncio.sleep(0.1)
 
-    async def _store_gradient_data(self, uid: str, window: int, global_step: int, state_dict_resp: dict, global_step_resp: int):
+    async def _store_gradient_data(
+        self,
+        uid: str,
+        window: int,
+        global_step: int,
+        state_dict_resp: dict,
+        global_step_resp: int,
+    ):
         """Separate async function to handle gradient storage"""
         try:
             gradient_data = {
-                "state_dict": {
-                    k: v.cpu().numpy() for k, v in state_dict_resp.items()
-                },
+                "state_dict": {k: v.cpu().numpy() for k, v in state_dict_resp.items()},
                 "metadata": {
                     "uid": uid,
                     "window": window,
@@ -748,28 +759,24 @@ class Comms(ChainManager):
             temp_file = os.path.join(
                 self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
             )
-            
+
             np.savez_compressed(temp_file, **gradient_data)
             key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
 
             # Create separate tasks for upload and cleanup
             upload_task = asyncio.create_task(
-                self.s3_put_object(
-                    key=key, file_path=temp_file, bucket=self.bucket
-                )
+                self.s3_put_object(key=key, file_path=temp_file, bucket=self.bucket)
             )
-            
+
             # Schedule cleanup to run after upload completes
             upload_task.add_done_callback(
                 lambda _: asyncio.create_task(self._cleanup_temp_file(temp_file))
             )
 
         except Exception as e:
-            tplr.logger.warning(
-                f"Failed to store gradient from UID {uid}: {str(e)}"
-            )
+            tplr.logger.warning(f"Failed to store gradient from UID {uid}: {str(e)}")
             # Ensure cleanup happens even on error
-            if 'temp_file' in locals():
+            if "temp_file" in locals():
                 asyncio.create_task(self._cleanup_temp_file(temp_file))
 
     async def gather(
@@ -858,7 +865,7 @@ class Comms(ChainManager):
             if state_dict_resp is None:
                 tplr.logger.debug(f"Empty state dict from UID {uid}")
                 continue
-            
+
             # TODO: Spilt out to analyser
             # Store raw gradients if enabled
             if store_gathers:
@@ -869,7 +876,7 @@ class Comms(ChainManager):
                         window=window,
                         global_step=global_step,
                         state_dict_resp=state_dict_resp,
-                        global_step_resp=global_step_resp
+                        global_step_resp=global_step_resp,
                     )
                 )
 
@@ -1489,3 +1496,221 @@ class Comms(ChainManager):
         )
 
         return True
+
+    async def _gather_window_batch(
+        self,
+        batch_windows: List[int],
+        uid: str,
+        peers: List[int],
+        device: str,
+        global_step: int,
+    ) -> Dict[int, SimpleNamespace]:
+        """Gather gradients for multiple windows in parallel."""
+        try:
+            gather_tasks = [
+                self.gather(
+                    state_dict={},
+                    my_uid=uid,
+                    uids=peers,
+                    window=w,
+                    key="gradient",
+                    timeout=30,
+                    device=device,
+                    local=False,
+                    stale_retention=100,
+                    global_step=global_step,
+                )
+                for w in batch_windows
+            ]
+
+            # Wait for all gather tasks to complete
+            batch_results = await asyncio.gather(*gather_tasks, return_exceptions=True)
+
+            # Filter out exceptions and create window->result mapping
+            result_dict = {w: None for w in batch_windows}  # Initialize with None
+            for window, result in zip(batch_windows, batch_results):
+                if not isinstance(result, Exception) and result is not None:
+                    result_dict[window] = result
+
+            return result_dict
+
+        except Exception as e:
+            tplr.logger.error(
+                f"Failed to gather window batch {batch_windows}: {str(e)}"
+            )
+            return {
+                w: None for w in batch_windows
+            }  # Return dict with None values on failure
+
+    async def _apply_gathered_gradients(
+        self,
+        gather_result,
+        model: LlamaForCausalLM,
+        optimizer: SGD,
+        scheduler: SequentialLR,
+        transformer: TransformDCT,
+        compressor: CompressDCT,
+        device: str,
+        window: int,
+        global_step: int,
+    ) -> Tuple[bool, int]:
+        """Apply gathered gradients to model parameters.
+
+        Args:
+            gather_result: Gathered gradient data
+            model: The model to update
+            optimizer: SGD optimizer
+            scheduler: Learning rate scheduler
+            transformer: DCT transformer
+            compressor: Gradient compressor
+            device: Computing device
+            window: Current window number
+            global_step: Global step counter
+
+        Returns:
+            Tuple[bool, int]: (success, new_global_step)
+        """
+        try:
+            if not gather_result or not gather_result.state_dict:
+                return False, global_step
+
+            model.train()
+            optimizer.zero_grad()
+            model.zero_grad()
+
+            # Apply gradients
+            for n, p in model.named_parameters():
+                idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
+                vals = getattr(gather_result.state_dict, f"{n}vals", None)
+
+                if idxs is not None and vals is not None:
+                    if not isinstance(idxs, (list, tuple)):
+                        idxs = [idxs]
+                    if not isinstance(vals, (list, tuple)):
+                        vals = [vals]
+
+                    new_grad = transformer.decode(
+                        compressor.batch_decompress(
+                            p.to(device),
+                            idxs,
+                            vals,
+                            transformer.shapes[n],
+                            transformer.totalks[n],
+                        )
+                    )
+                    if p.grad is None:
+                        p.grad = new_grad
+                    else:
+                        p.grad.copy_(new_grad)
+                    p.grad.sign_()
+
+            optimizer.step()
+            scheduler.step()
+            global_step += 1
+
+            tplr.logger.info(
+                f"Applied gradients for window {window}, global_step => {global_step}"
+            )
+            return True, global_step
+
+        except Exception as e:
+            tplr.logger.error(
+                f"Failed to apply gradients for window {window}: {str(e)}"
+            )
+            return False, global_step
+
+    async def check_and_perform_catch_up(
+        self,
+        model: LlamaForCausalLM,
+        optimizer: SGD,
+        scheduler: SequentialLR,
+        transformer: TransformDCT,
+        compressor: CompressDCT,
+        current_window: int,
+        sync_window: int,
+        device: str,
+        peers: List[int],
+        uid: str,
+        global_step: int,
+        hparams,
+    ) -> Tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
+        window_gap = current_window - sync_window
+
+        if window_gap <= hparams.catch_up_threshold:
+            return False, global_step, optimizer, scheduler
+
+        if len(peers) < hparams.catch_up_min_peers:
+            tplr.logger.warning(f"Not enough peers ({len(peers)}) for catch-up")
+            return False, global_step, optimizer, scheduler
+
+        catch_up_start = time.time()
+        tplr.logger.info(f"Initiating catch-up for {window_gap} windows")
+
+        try:
+            # Process windows in batches
+            for i in range(
+                sync_window + 1, current_window + 1, hparams.catch_up_batch_size
+            ):
+                batch_end = min(i + hparams.catch_up_batch_size, current_window + 1)
+                batch_windows = list(range(i, batch_end))
+
+                # Check timeout
+                if time.time() - catch_up_start > hparams.catch_up_timeout:
+                    tplr.logger.warning("Catch-up exceeded maximum time")
+                    return False, global_step, optimizer, scheduler
+
+                try:
+                    # Use asyncio.wait_for to handle timeout for gather operation
+                    gathered_data = await asyncio.wait_for(
+                        self._gather_window_batch(
+                            batch_windows=batch_windows,
+                            uid=uid,
+                            peers=peers,
+                            device=device,
+                            global_step=global_step,
+                        ),
+                        timeout=max(
+                            0.1,
+                            hparams.catch_up_timeout - (time.time() - catch_up_start),
+                        ),
+                    )
+
+                    # Verify gathered_data is a dict
+                    if not isinstance(gathered_data, dict):
+                        raise TypeError(
+                            f"Expected dict from _gather_window_batch, got {type(gathered_data)}"
+                        )
+
+                    # Apply updates in order
+                    for w in sorted(gathered_data.keys()):
+                        success, new_global_step = await self._apply_gathered_gradients(
+                            gather_result=gathered_data[w],
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            transformer=transformer,
+                            compressor=compressor,
+                            device=device,
+                            window=w,
+                            global_step=global_step,
+                        )
+
+                        if success:
+                            global_step = new_global_step
+
+                    torch.cuda.empty_cache()
+
+                except asyncio.TimeoutError:
+                    tplr.logger.warning(
+                        f"Timeout while gathering windows {batch_windows}"
+                    )
+                    return False, global_step, optimizer, scheduler
+                except (TypeError, AttributeError) as e:
+                    tplr.logger.error(f"Invalid data format during catch-up: {str(e)}")
+                    return False, global_step, optimizer, scheduler
+
+            return True, global_step, optimizer, scheduler
+
+        except Exception as e:
+            tplr.logger.error(f"Catch-up failed: {str(e)}")
+            return False, global_step, optimizer, scheduler

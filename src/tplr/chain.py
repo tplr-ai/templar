@@ -464,7 +464,7 @@ class ChainManager:
         self.inactive_peers = newly_inactive
         
         logger.debug(f"Active peers: {active_peers}")
-        logger.debug(f"Newly inactive peers: {newly_inactive}")
+        logger.info(f"Newly inactive peers: {newly_inactive}")
         logger.debug(f"Stakes: {uid_to_stake}")
 
         if not active_peers:
@@ -505,3 +505,4 @@ class ChainManager:
             f"Updated gather peers (top {self.hparams.topk_peers}% or minimum {self.hparams.minimum_peers}): {self.peers}"
         )
         logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
+        logger.info(f"Total inactive peers: {len(self.inactive_peers)}")

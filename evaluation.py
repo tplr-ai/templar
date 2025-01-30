@@ -156,12 +156,6 @@ async def _process_eval_results(results_dir: str, global_step: int, use_wandb: b
                             f"eval/{task_name}/{metric_name}": value,
                             "global_step": global_step
                         })
-        if "versions" in results:
-            tplr.logger.info("Version Info:")
-            for k, v in results["versions"].items():
-                tplr.logger.info(f"  {k}: {v}")
-                if use_wandb:
-                    wandb.log({f"versions/{k}": v})
 
     except Exception as e:
         tplr.logger.error(f"Failed to process results: {str(e)}")

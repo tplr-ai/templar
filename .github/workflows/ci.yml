@@ -31,3 +31,6 @@ jobs:
         uses: astral-sh/ruff-action@v1
         with:
           args: format --check
+
+      - name: Run Tests
+        run: pytest tests/ -v

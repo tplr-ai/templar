@@ -16,6 +16,7 @@ import numpy as np
 from torch.optim import SGD
 from torch.optim.lr_scheduler import SequentialLR
 from transformers import LlamaForCausalLM
+import math
 
 
 # Set required environment variables
@@ -563,18 +564,18 @@ async def test_s3_put_small_file(comms_instance):
     os.remove("test_file.txt")
 
 
+@pytest.mark.asyncio
 async def test_s3_put_large_file(comms_instance):
-    """Test multipart upload for large files"""
-    # Mock S3 client with proper responses
+    """Test multipart upload for large files with batching and retries"""
     mock_client = AsyncMock()
     mock_client.create_multipart_upload = AsyncMock(
         return_value={"UploadId": "test_id"}
     )
     mock_client.upload_part = AsyncMock(return_value={"ETag": "test_etag"})
     mock_client.complete_multipart_upload = AsyncMock()
+    mock_client.abort_multipart_upload = AsyncMock()
     comms_instance.session.create_client = MagicMock(return_value=mock_client)
 
-    # Create proper Bucket instance
     comms_instance.bucket = Bucket(
         name="test-bucket",
         account_id="test-account",
@@ -582,13 +583,17 @@ async def test_s3_put_large_file(comms_instance):
         secret_access_key="test-secret",
     )
 
-    # Create large test file
     with open("large_file.txt", "wb") as f:
-        f.write(os.urandom(10 * 1024 * 1024))  # 10MB file
+        f.write(os.urandom(100 * 1024 * 1024))
 
     await comms_instance.s3_put_object("test_key", "large_file.txt")
 
-    # Cleanup
+    upload_part_calls = mock_client.upload_part.call_args_list
+    assert len(upload_part_calls) <= 20
+
+    part_numbers = [call.kwargs["PartNumber"] for call in upload_part_calls]
+    assert part_numbers == sorted(part_numbers)
+
     os.remove("large_file.txt")
 
 
@@ -1757,3 +1762,220 @@ class TestCheckAndPerformCatchUp:
         assert result[1] > 10  # Global step should increase
         assert comms_instance._gather_window_batch.called
         assert comms_instance._apply_gathered_gradients.called
+
+
+# New tests for upload_large_file retry behavior
+@pytest.mark.asyncio
+async def test_upload_large_file_retry_success(comms_instance):
+    """Test retry logic in upload_large_file with exact implementation parameters"""
+    mock_client = AsyncMock()
+
+    # Track uploaded parts for verification
+    uploaded_parts = []
+
+    async def mock_upload_part(**kwargs):
+        uploaded_parts.append(
+            {"PartNumber": kwargs["PartNumber"], "ETag": f"etag_{kwargs['PartNumber']}"}
+        )
+        return {"ETag": f"etag_{kwargs['PartNumber']}"}
+
+    mock_client.create_multipart_upload = AsyncMock(
+        side_effect=[Exception("First attempt failed"), {"UploadId": "test_id"}]
+    )
+    mock_client.upload_part = AsyncMock(side_effect=mock_upload_part)
+    mock_client.complete_multipart_upload = AsyncMock()
+    mock_client.abort_multipart_upload = AsyncMock()
+
+    async def mock_create_client(*args, **kwargs):
+        return mock_client
+
+    comms_instance.session.create_client = AsyncMock(side_effect=mock_create_client)
+
+    # Create test file matching implementation's part size
+    PART_SIZE = 50 * 1024 * 1024  # 50MB chunks from implementation
+    MAX_CONCURRENT_PARTS = 5  # From implementation
+
+    # Create a file that will generate multiple batches (120MB = 3 parts)
+    file_size = 120 * 1024 * 1024
+    with open("test_file.txt", "wb") as f:
+        f.write(b"\0" * file_size)
+
+    try:
+        await comms_instance.upload_large_file(
+            file_path="test_file.txt", key="test_key", s3_client=mock_client
+        )
+
+        # Verify create_multipart_upload retry behavior
+        assert mock_client.create_multipart_upload.call_count == 2
+        create_calls = mock_client.create_multipart_upload.call_args_list
+        for call in create_calls:
+            assert call.kwargs["Bucket"] == comms_instance.bucket.name
+            assert call.kwargs["Key"] == "test_key"
+
+        # Verify part upload behavior
+        expected_parts = math.ceil(file_size / PART_SIZE)
+        expected_batches = math.ceil(expected_parts / MAX_CONCURRENT_PARTS)
+
+        print(f"\nFile size: {file_size / (1024 * 1024):.2f}MB")
+        print(f"Part size: {PART_SIZE / (1024 * 1024):.2f}MB")
+        print(f"Expected parts: {expected_parts}")
+        print(f"Expected batches: {expected_batches}")
+        print(f"Actual uploaded parts: {len(uploaded_parts)}")
+
+        # Verify number of parts
+        assert len(uploaded_parts) == expected_parts
+
+        # Verify all required part numbers are present (order doesn't matter for uploads)
+        uploaded_part_numbers = {part["PartNumber"] for part in uploaded_parts}
+        expected_part_numbers = set(range(1, expected_parts + 1))
+        assert uploaded_part_numbers == expected_part_numbers, (
+            f"Missing part numbers. Got {uploaded_part_numbers}, expected {expected_part_numbers}"
+        )
+
+        # Verify complete_multipart_upload was called with correct parts
+        assert mock_client.complete_multipart_upload.call_count == 1
+        complete_call = mock_client.complete_multipart_upload.call_args
+        assert complete_call.kwargs["Bucket"] == comms_instance.bucket.name
+        assert complete_call.kwargs["Key"] == "test_key"
+        assert complete_call.kwargs["UploadId"] == "test_id"
+
+        # Verify parts in complete_multipart_upload are sorted by PartNumber
+        complete_parts = complete_call.kwargs["MultipartUpload"]["Parts"]
+        assert len(complete_parts) == expected_parts
+        complete_part_numbers = [p["PartNumber"] for p in complete_parts]
+        assert complete_part_numbers == sorted(complete_part_numbers), (
+            f"Parts in complete_multipart_upload not properly sorted: {complete_part_numbers}"
+        )
+
+        # Verify abort was not called (successful upload)
+        assert mock_client.abort_multipart_upload.call_count == 0
+
+    finally:
+        if os.path.exists("test_file.txt"):
+            os.remove("test_file.txt")
+
+
+# New test for gather batching
+@pytest.mark.asyncio
+async def test_gather_with_batching(comms_instance):
+    """Test gather operation with batched processing"""
+    state_dict = {
+        "layer1.weightsidxs": torch.tensor([0, 1, 2]),
+        "layer1.weightsvals": torch.tensor([0.1, 0.2, 0.3]),
+    }
+
+    peer_responses = [
+        (
+            {
+                "layer1.weightsidxs": torch.tensor([i, i + 1]),
+                "layer1.weightsvals": torch.tensor([0.1 * i, 0.2 * i]),
+            },
+            i,
+        )
+        for i in range(1, 8)
+    ]
+
+    call_count = 0
+
+    async def mock_get_with_retry(*args, **kwargs):
+        nonlocal call_count
+        if call_count < len(peer_responses):
+            response = peer_responses[call_count]
+            call_count += 1
+            return response
+        return None
+
+    comms_instance.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+
+    result = await comms_instance.gather(
+        state_dict=state_dict,
+        my_uid="0",
+        uids=[str(i) for i in range(1, 8)],
+        window=1,
+        key="gradient",
+        timeout=5,
+        device="cpu",
+        global_step=0,
+        local=True,
+    )
+
+    assert result is not None
+    assert len(result.uids) == 7
+    assert hasattr(result.state_dict, "layer1.weightsvals")
+
+    # Access the attributes using dictionary style access
+    vals = getattr(result.state_dict, "layer1.weightsvals")
+    idxs = getattr(result.state_dict, "layer1.weightsidxs")
+
+    # Print debug info
+    print("\nGathered state dict attributes:", vars(result.state_dict))
+    print("Vals type:", type(vals))
+    print("Vals:", vals)
+
+    # Verify we got a list of tensors
+    assert isinstance(vals, list), f"Expected list but got {type(vals)}"
+    assert all(isinstance(v, torch.Tensor) for v in vals), (
+        "All elements should be tensors"
+    )
+    assert len(vals) == 7, f"Expected 7 tensors but got {len(vals)}"
+
+    # Verify tensor shapes
+    for i, v in enumerate(vals):
+        assert v.shape == torch.Size([2]), f"Tensor {i} has wrong shape: {v.shape}"
+
+    # Verify we got responses from all peers
+    assert len(result.uids) == 7
+    assert all(str(uid) in result.uids for uid in range(1, 8))
+
+    # Verify the global steps were collected
+    assert len(result.global_steps) == 7
+    assert result.global_steps == list(range(1, 8))
+
+
+# New test for connection semaphore
+@pytest.mark.asyncio
+async def test_gather_connection_limiting(comms_instance):
+    """Test connection limiting in gather operation"""
+
+    async def delayed_response(*args, **kwargs):
+        await asyncio.sleep(0.1)
+        return (
+            {
+                "layer1.weightsidxs": torch.tensor([0]),
+                "layer1.weightsvals": torch.tensor([0.1]),
+            },
+            1,
+        )
+
+    max_concurrent = 0
+    current_concurrent = 0
+    lock = asyncio.Lock()
+
+    async def wrapped_get_with_retry(*args, **kwargs):
+        nonlocal max_concurrent, current_concurrent
+        async with lock:
+            current_concurrent += 1
+            max_concurrent = max(max_concurrent, current_concurrent)
+
+        result = await delayed_response(*args, **kwargs)
+
+        async with lock:
+            current_concurrent -= 1
+        return result
+
+    comms_instance.get_with_retry = AsyncMock(side_effect=wrapped_get_with_retry)
+
+    result = await comms_instance.gather(
+        state_dict=None,
+        my_uid="0",
+        uids=[str(i) for i in range(10)],
+        window=1,
+        key="gradient",
+        timeout=5,
+        device="cpu",
+        global_step=0,
+    )
+
+    assert max_concurrent <= 5
+    assert result is not None
+    assert len(result.uids) == 10

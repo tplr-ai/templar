@@ -1469,9 +1469,7 @@ class Comms(ChainManager):
             async with aiofiles.open(temp_file, "w") as f:
                 await f.write(json.dumps(start_window_data))
 
-            await self.s3_put_object(
-                key=key, file_path=temp_file
-            )
+            await self.s3_put_object(key=key, file_path=temp_file)
         finally:
             if os.path.exists(temp_file):
                 os.remove(temp_file)

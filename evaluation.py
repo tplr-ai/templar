@@ -29,7 +29,8 @@ DEFAULT_TASKS = "arc_challenge,arc_easy,openbookqa,hellaswag"
 
 
 async def evaluate_latest_checkpoint(config):
-    """Evaluates the latest checkpoint from highest-staked validator using lm-eval."""
+    """Evaluates the latest checkpoint from the specified UID."""
+    model_dir = None
     try:
         # Initialize components
         hparams = load_hparams()
@@ -55,15 +56,11 @@ async def evaluate_latest_checkpoint(config):
             uid=config.uid_for_eval,
         )
 
-        # Sync commitments
-        comms.commitments = comms.get_commitments_sync()
-        comms.update_peers_with_buckets()
-
-        # Get latest checkpoint
-        tplr.logger.debug("Fetching latest checkpoint...")
-        result = await comms.get_latest_checkpoint()
+        # Get latest checkpoint directly from the UID's bucket
+        tplr.logger.debug(f"Fetching latest checkpoint for UID {config.uid_for_eval}...")
+        result = await comms._get_bucket_checkpoint(config.uid_for_eval)
         if not result:
-            tplr.logger.info("No valid checkpoint found")
+            tplr.logger.info(f"No valid checkpoint found for UID {config.uid_for_eval}")
             return
 
         checkpoint_data, checkpoint_window = result
@@ -73,7 +70,7 @@ async def evaluate_latest_checkpoint(config):
 
         global_step = checkpoint_data.get("global_step", 0)
         tplr.logger.info(
-            f"Found checkpoint: window={checkpoint_window}, global_step={global_step}"
+            f"Found checkpoint for UID {config.uid_for_eval}: window={checkpoint_window}, global_step={global_step}"
         )
 
         # Load model
@@ -116,7 +113,14 @@ async def evaluate_latest_checkpoint(config):
         tplr.logger.error(f"Evaluation failed: {str(e)}")
         tplr.logger.debug(traceback.format_exc())
     finally:
-        if "model_dir" in locals():
+        # Add delay to ensure wandb has time to sync
+        if config.use_wandb:
+            tplr.logger.info("Waiting for WandB to sync...")
+            await asyncio.sleep(5)  # Give wandb time to sync
+            
+        # Cleanup
+        if model_dir and os.path.exists(model_dir):
+            tplr.logger.debug(f"Cleaning up {model_dir}")
             shutil.rmtree(model_dir)
         torch.cuda.empty_cache()
 
@@ -141,11 +145,23 @@ async def _process_eval_results(results_dir: str, global_step: int, use_wandb: b
             results = json.load(f)
 
         for task_name, metrics in results.get("results", {}).items():
-            if "acc,none" in metrics:
-                score = float(metrics["acc,none"])
-                tplr.logger.info(f"{task_name}: {score:.4f}")
+            tplr.logger.info(f"{task_name} metrics:")
+            for metric_name, value in metrics.items():
+                if isinstance(value, (int, float)):  # Only log numeric values
+                    formatted_value = f"{value:.4f}" if isinstance(value, float) else str(value)
+                    tplr.logger.info(f"  {metric_name}: {formatted_value}")
+                    
+                    if use_wandb:
+                        wandb.log({
+                            f"eval/{task_name}/{metric_name}": value,
+                            "global_step": global_step
+                        })
+        if "versions" in results:
+            tplr.logger.info("Version Info:")
+            for k, v in results["versions"].items():
+                tplr.logger.info(f"  {k}: {v}")
                 if use_wandb:
-                    wandb.log({f"eval/{task_name}": score, "global_step": global_step})
+                    wandb.log({f"versions/{k}": v})
 
     except Exception as e:
         tplr.logger.error(f"Failed to process results: {str(e)}")
@@ -154,31 +170,58 @@ async def _process_eval_results(results_dir: str, global_step: int, use_wandb: b
 def main():
     """Entry point for evaluation script."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--project", type=str, default="templar")
-    parser.add_argument("--use_wandb", action="store_true")
+    parser.add_argument("--project", type=str, default="eval")
+    parser.add_argument("--use_wandb", action="store_true", help="Enable WandB logging")
     parser.add_argument("--tasks", type=str, default=DEFAULT_TASKS)
     parser.add_argument("--actual_batch_size", type=int, default=8)
     parser.add_argument("--uid_for_eval", type=int, default=1)
     parser.add_argument("--netuid", type=int, default=3)
+    parser.add_argument("--device", type=str, default="cuda:0")
 
     # Add bittensor args
     bt.subtensor.add_args(parser)
     bt.logging.add_args(parser)
     bt.wallet.add_args(parser)
+    
+    # Parse args directly first
+    args = parser.parse_args()
     config = bt.config(parser)
+    
+    # Transfer our custom args to config
+    config.use_wandb = args.use_wandb
+    config.project = args.project
+    config.device = args.device
+    config.tasks = args.tasks
+    config.actual_batch_size = args.actual_batch_size
+    config.uid_for_eval = args.uid_for_eval
 
     # Set defaults
     config.netuid = getattr(config, "netuid", 3)
     config.subtensor.network = getattr(config.subtensor, "network", "finney")
     config.subtensor.chain_endpoint = getattr(
-        config.subtensor, "chain_endpoint", "wss://entrypoint-finney.opentensor.ai:443"
+        config.subtensor,
+        "chain_endpoint",
+        "wss://entrypoint-finney.opentensor.ai:443"
     )
 
     config.wallet = bt.wallet(config=config)
-    config.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    # Verify device is available
+    if config.device.startswith("cuda"):
+        if not torch.cuda.is_available():
+            tplr.logger.warning("CUDA not available, falling back to CPU")
+            config.device = "cpu"
+        else:
+            gpu_id = int(config.device.split(":")[1])
+            if gpu_id >= torch.cuda.device_count():
+                tplr.logger.warning(f"GPU {gpu_id} not available, falling back to cuda:0")
+                config.device = "cuda:0"
+
+    tplr.logger.info(f"Using device: {config.device}")
 
     if config.use_wandb:
-        wandb.init(
+        tplr.logger.info("Initializing WandB...")
+        run = wandb.init(
             project=config.project,
             name="eval-run",
             config={
@@ -187,8 +230,10 @@ def main():
                 "uid_for_eval": config.uid_for_eval,
                 "netuid": config.netuid,
                 "device": config.device,
-            },
+                "batch_size": config.actual_batch_size,
+            }
         )
+        tplr.logger.info(f"WandB run initialized: {run.name}")
 
     try:
         tplr.logger.setLevel("DEBUG")
@@ -200,6 +245,7 @@ def main():
         tplr.logger.debug(traceback.format_exc())
     finally:
         if config.use_wandb:
+            tplr.logger.info("Finishing WandB run...")
             wandb.finish()
 
 

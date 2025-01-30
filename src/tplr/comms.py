@@ -14,6 +14,7 @@ from tqdm import tqdm as std_tqdm
 from types import SimpleNamespace
 from typing import List, Dict, Optional, TypeVar, Any
 from aiobotocore.session import get_session
+import io
 
 from . import __version__
 from .config import client_config, BUCKET_SECRETS
@@ -1156,66 +1157,75 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error in local checkpoint loading: {e}")
             return None
 
-    async def _get_bucket_checkpoint(self, bucket, uid):
-        """Helper to get checkpoint from a specific bucket."""
+    async def _get_bucket_checkpoint(self, uid: int):
+        """Get latest checkpoint for a specific UID using direct bucket access."""
         try:
-            async with self.session.create_client(
-                "s3",
-                endpoint_url=self.get_base_url(bucket.account_id),
-                region_name=CF_REGION_NAME,
-                config=client_config,
-                aws_access_key_id=bucket.access_key_id,
-                aws_secret_access_key=bucket.secret_access_key,
-            ) as s3_client:
-                # Match exactly what we see in the bucket
-                pattern = re.compile(r"^checkpoint-(\d+)-(\d+)-v([0-9.]+)\.pt$")
-
-                response = await s3_client.list_objects_v2(
-                    Bucket=bucket.name, Prefix="checkpoint", MaxKeys=50
-                )
-
-                contents = response.get("Contents", [])
-                if not contents:
-                    tplr.logger.debug(
-                        f"No checkpoint objects found in bucket='{bucket.name}' for UID={uid}"
-                    )
-                    return None
-
-                tplr.logger.debug(
-                    f"Found {len(contents)} checkpoint objects in bucket='{bucket.name}'"
-                )
-
-                valid_checkpoints = []
-                for obj in contents:
-                    key = obj.get("Key", "")
-                    match = pattern.match(os.path.basename(key))
-                    if match:
-                        checkpoint_window = int(match.group(1))
-                        checkpoint_uid = int(match.group(2))
-                        if (
-                            checkpoint_uid == uid
-                        ):  # Only accept checkpoints for the specified UID
-                            valid_checkpoints.append(
-                                {
-                                    "key": key,
-                                    "window": checkpoint_window,
-                                    "last_modified": obj["LastModified"],
-                                }
-                            )
-
-                if not valid_checkpoints:
-                    tplr.logger.debug(f"No valid checkpoints found for UID={uid}")
-                    return None
-
-                latest = max(valid_checkpoints, key=lambda x: x["last_modified"])
-                loaded_data = await self.s3_get_object(key=latest["key"], bucket=bucket)
-                if loaded_data:
-                    return loaded_data, latest["window"]
-
+            # Get commitment directly from subtensor
+            subtensor = bt.subtensor()
+            commitment = subtensor.get_commitment(netuid=3, uid=uid)
+            
+            if not commitment:
+                tplr.logger.debug(f"No commitment found for UID {uid}")
                 return None
 
+            # Parse commitment into bucket credentials
+            name = commitment[:32]
+            account_id = commitment[:32]
+            access_key_id = commitment[32:64]
+            secret_access_key = commitment[64:]
+
+            # Setup S3 client
+            async with self.session.create_client(
+                "s3",
+                endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com/",
+                region_name=CF_REGION_NAME,
+                config=client_config,
+                aws_access_key_id=access_key_id,
+                aws_secret_access_key=secret_access_key,
+            ) as s3_client:
+                response = await s3_client.list_objects_v2(
+                    Bucket=account_id,
+                    Prefix="checkpoint"
+                )
+
+                if 'Contents' not in response:
+                    tplr.logger.debug(f"No objects found in bucket for UID {uid}")
+                    return None
+
+                pattern = re.compile(r"^checkpoint-(\d+)-(\d+)-v([0-9.]+)\.pt$")
+                valid_checkpoints = []
+                
+                for obj in response.get('Contents', []):
+                    key = obj['Key']
+                    match = pattern.match(os.path.basename(key))
+                    if match:
+                        checkpoint_uid = int(match.group(2))
+                        if checkpoint_uid == uid:  # Only accept checkpoints for this UID
+                            valid_checkpoints.append({
+                                'key': key,
+                                'last_modified': obj['LastModified']
+                            })
+
+                if not valid_checkpoints:
+                    tplr.logger.debug(f"No valid checkpoints found for UID {uid}")
+                    return None
+
+                # Get the latest checkpoint
+                latest = max(valid_checkpoints, key=lambda x: x['last_modified'])
+                tplr.logger.info(f"Found latest checkpoint for UID {uid}: {latest['key']}")
+                
+                response = await s3_client.get_object(Bucket=account_id, Key=latest['key'])
+                async with response['Body'] as stream:
+                    data = await stream.read()
+                    loaded_data = torch.load(io.BytesIO(data), map_location='cpu')
+                    window = int(pattern.match(os.path.basename(latest['key'])).group(1))
+                    return loaded_data, window
+
         except Exception as e:
-            tplr.logger.error(f"Error in _get_bucket_checkpoint for UID={uid}: {e}")
+            tplr.logger.error(f"Error getting checkpoint for UID {uid}: {e}")
+            if tplr.logger.getEffectiveLevel() <= 10:  # DEBUG level
+                import traceback
+                traceback.print_exc()
             return None
 
     async def load_checkpoint(

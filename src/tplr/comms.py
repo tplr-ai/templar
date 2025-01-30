@@ -728,6 +728,50 @@ class Comms(ChainManager):
             # Retry after a short delay
             await asyncio.sleep(0.1)
 
+    async def _store_gradient_data(self, uid: str, window: int, global_step: int, state_dict_resp: dict, global_step_resp: int):
+        """Separate async function to handle gradient storage"""
+        try:
+            gradient_data = {
+                "state_dict": {
+                    k: v.cpu().numpy() for k, v in state_dict_resp.items()
+                },
+                "metadata": {
+                    "uid": uid,
+                    "window": window,
+                    "global_step": global_step_resp,
+                    "timestamp": time.time(),
+                    "version": __version__,
+                },
+            }
+
+            # Create temporary file
+            temp_file = os.path.join(
+                self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
+            )
+            
+            np.savez_compressed(temp_file, **gradient_data)
+            key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
+
+            # Create separate tasks for upload and cleanup
+            upload_task = asyncio.create_task(
+                self.s3_put_object(
+                    key=key, file_path=temp_file, bucket=self.bucket
+                )
+            )
+            
+            # Schedule cleanup to run after upload completes
+            upload_task.add_done_callback(
+                lambda _: asyncio.create_task(self._cleanup_temp_file(temp_file))
+            )
+
+        except Exception as e:
+            tplr.logger.warning(
+                f"Failed to store gradient from UID {uid}: {str(e)}"
+            )
+            # Ensure cleanup happens even on error
+            if 'temp_file' in locals():
+                asyncio.create_task(self._cleanup_temp_file(temp_file))
+
     async def gather(
         self,
         state_dict: Optional[Dict[str, torch.Tensor]],
@@ -814,45 +858,20 @@ class Comms(ChainManager):
             if state_dict_resp is None:
                 tplr.logger.debug(f"Empty state dict from UID {uid}")
                 continue
-
+            
+            # TODO: Spilt out to analyser
             # Store raw gradients if enabled
             if store_gathers:
-                try:
-                    gradient_data = {
-                        "state_dict": {
-                            k: v.cpu().numpy() for k, v in state_dict_resp.items()
-                        },
-                        "metadata": {
-                            "uid": uid,
-                            "window": window,
-                            "global_step": global_step_resp,
-                            "timestamp": time.time(),
-                            "version": __version__,
-                        },
-                    }
-
-                    # Create temporary file
-                    temp_file = os.path.join(
-                        self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
+                # Fire and forget - don't wait for completion
+                asyncio.create_task(
+                    self._store_gradient_data(
+                        uid=uid,
+                        window=window,
+                        global_step=global_step,
+                        state_dict_resp=state_dict_resp,
+                        global_step_resp=global_step_resp
                     )
-                    try:
-                        np.savez_compressed(temp_file, **gradient_data)
-                        key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
-
-                        # Create task for uploading but don't await it
-                        asyncio.create_task(
-                            self.s3_put_object(
-                                key=key, file_path=temp_file, bucket=self.bucket
-                            )
-                        )
-                    finally:
-                        # Schedule cleanup of temp file
-                        asyncio.create_task(self._cleanup_temp_file(temp_file))
-
-                except Exception as e:
-                    tplr.logger.warning(
-                        f"Failed to store gradient from UID {uid}: {str(e)}"
-                    )
+                )
 
             # Add normalized tensors to aggregated_state_dict
             tplr.logger.debug(f"Processing tensors from UID {uid}")

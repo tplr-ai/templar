@@ -15,3 +15,6 @@ test-run:
 
 dev:
     uv pip install -e ".[dev]"
+
+test:
+    uv run pytest -sv

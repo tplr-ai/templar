@@ -258,11 +258,35 @@ class Validator:
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
 
-        while True:       
-            # 1. Wait for validator offset - single wait loop
+        while True:
+            # Check for catch-up need
+            catch_up_success, new_global_step, new_optimizer, new_scheduler = await self.comms.check_and_perform_catch_up(
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                transformer=self.transformer,
+                compressor=self.compressor,
+                current_window=self.current_window,
+                sync_window=self.sync_window,
+                device=self.config.device,
+                peers=self.peers,
+                uid=self.uid,
+                global_step=self.global_step,
+                hparams=self.hparams
+            )
+            
+            if catch_up_success:
+                self.global_step = new_global_step
+                self.optimizer = new_optimizer
+                self.scheduler = new_scheduler
+                self.sync_window = self.current_window
+                continue
+
+            # Normal processing continues...
             while self.sync_window >= (self.current_window - self.hparams.validator_offset):
                 tplr.logger.info(f'Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}')
                 await asyncio.sleep(12)
+
             tplr.logger.info(f'Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}')
             
             # 2. Increment sync window and update peer lists

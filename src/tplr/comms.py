@@ -238,7 +238,6 @@ class Comms(ChainManager):
         self,
         key: str,
         file_path: Optional[str] = None,
-        bucket: Optional[Bucket] = None,
     ):
         """
         Puts an object into S3 storage, handling different file types appropriately.

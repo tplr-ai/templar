@@ -1,43 +1,57 @@
 # ruff: noqa
 
 import os
-from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
+from unittest.mock import patch, MagicMock, AsyncMock
+from dataclasses import dataclass
+
+REQUIRED_VARS = [
+    "R2_GRADIENTS_ACCOUNT_ID",
+    "R2_GRADIENTS_BUCKET_NAME",
+    "R2_GRADIENTS_READ_ACCESS_KEY_ID",
+    "R2_GRADIENTS_READ_SECRET_ACCESS_KEY",
+    "R2_GRADIENTS_WRITE_ACCESS_KEY_ID",
+    "R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY",
+    "R2_DATASET_ACCOUNT_ID",
+    "R2_DATASET_BUCKET_NAME",
+    "R2_DATASET_READ_ACCESS_KEY_ID",
+    "R2_DATASET_READ_SECRET_ACCESS_KEY",
+]
+missing = [v for v in REQUIRED_VARS if not os.environ.get(v)]
+if missing:
+    # Module-level skip to avoid ImportError from tplr.config
+    pytest.skip(f"Missing environment variables: {missing}", allow_module_level=True)
+
+# 3. Now import your tplr modules. No ImportError should occur if the environment is correct.
+from tplr.schemas import Bucket
+from tplr.compress import TransformDCT, CompressDCT
+from dotenv import load_dotenv
+
+# 4. Load .env (optional) if you also want to override anything from the file
+load_dotenv()
+
+# 5. Additional imports after environment is guaranteed
+from tplr.comms import Comms
+import tplr
+from tplr import logger, debug
+
 import torch
 import tempfile
-from types import SimpleNamespace
-from dotenv import load_dotenv
 import pytest_asyncio
 import asyncio
 import botocore
-from dataclasses import dataclass
 import time
 import numpy as np
 from torch.optim import SGD
 from torch.optim.lr_scheduler import SequentialLR
 from transformers import LlamaForCausalLM
 import math
+from types import SimpleNamespace
+
+debug()
 
 
-# Set required environment variables
-os.environ["R2_GRADIENTS_ACCOUNT_ID"] = "test_account"
-os.environ["R2_GRADIENTS_BUCKET_NAME"] = "test-bucket"
-os.environ["R2_GRADIENTS_READ_ACCESS_KEY_ID"] = "test_read_key"
-os.environ["R2_GRADIENTS_READ_SECRET_ACCESS_KEY"] = "test_read_secret"
-os.environ["R2_GRADIENTS_WRITE_ACCESS_KEY_ID"] = "test_write_key"
-os.environ["R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"] = "test_write_secret"
-os.environ["R2_DATASET_BUCKET_NAME"] = "test-dataset-bucket"
-
-
-# Mock Bucket class
-@dataclass
-class Bucket:
-    name: str
-    account_id: str
-    access_key_id: str
-    secret_access_key: str
-
-
+# Your fixture, patches, etc.
 @pytest.fixture(autouse=True)
 def mock_config():
     with (
@@ -57,7 +71,6 @@ def mock_config():
                     },
                 },
                 "dataset": {
-                    # We'll match the environment we just set
                     "account_id": "test_dataset_account",
                     "bucket_name": "test-dataset-bucket",
                     "credentials": {

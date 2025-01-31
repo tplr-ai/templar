@@ -450,15 +450,21 @@ class ChainManager:
             return None
 
     def update_peers_with_buckets(self):
-        """Updates both peers for gradient gathering and evaluation peers."""
+        """Updates peers for gradient gathering, evaluation peers, and tracks inactive peers."""
         # Create mappings
         uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
         uid_to_incentive = dict(zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist()))
 
-        active_peers = self.active_peers
-        active_peers = set(int(uid) for uid in active_peers)
-
+        # Get currently active peers
+        active_peers = set(int(uid) for uid in self.active_peers)
+        
+        # Track inactive peers (previously active peers that are no longer active)
+        previously_active = set(self.eval_peers)
+        newly_inactive = previously_active - active_peers
+        self.inactive_peers = newly_inactive
+        
         logger.debug(f"Active peers: {active_peers}")
+        logger.info(f"Newly inactive peers: {newly_inactive}")
         logger.debug(f"Stakes: {uid_to_stake}")
 
         if not active_peers:
@@ -499,3 +505,4 @@ class ChainManager:
             f"Updated gather peers (top {self.hparams.topk_peers}% or minimum {self.hparams.minimum_peers}): {self.peers}"
         )
         logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
+        logger.info(f"Total inactive peers: {len(self.inactive_peers)}")

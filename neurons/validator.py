@@ -378,7 +378,7 @@ class Validator:
 
             scoring_start = tplr.T()
             if eval_result is not None and eval_result[0] is not None:
-                # 7. Load evaluation data
+                # 7. Load evaluation data for miner's own dataset
                 data_start = tplr.T()
                 pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
                     offset=self.sync_window,
@@ -392,9 +392,11 @@ class Validator:
                     tokenizer=self.tokenizer
                 )
                 tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data')
-                state_dict, _ = eval_result
 
-                # 8. Compute initial loss
+                # 8. Save original model state and prepare batches
+                original_params = {n: p.clone() for n, p in self.model.named_parameters()}
+                
+                # First evaluate on miner's own data
                 self.optimizer.zero_grad()
                 self.model.zero_grad()
                 loss_before = 0.0
@@ -402,7 +404,6 @@ class Validator:
 
                 with torch.no_grad():
                     self.model.eval()
-                    # First pass to count batches and store them
                     batches = []
                     for batch in loader:
                         batches.append(batch)
@@ -410,14 +411,11 @@ class Validator:
                     total_batches = len(batches)
                     sample_size = max(1, int(total_batches * self.hparams.validator_sample_rate))
                     sampled_indices = random.sample(range(total_batches), sample_size)
-                    sampled_indices = sorted(sampled_indices)  # Sort for sequential access
-                    
-                    tplr.logger.info(f"Evaluating {sample_size}/{total_batches} batches ({self.hparams.validator_sample_rate*100:.1f}%)")
+                    sampled_indices = sorted(sampled_indices)
                     
                     for i, batch in enumerate(batches):
                         if i not in sampled_indices:
                             continue
-                            
                         input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                         labels = input_ids.clone()
                         labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
@@ -427,13 +425,13 @@ class Validator:
                         del input_ids, labels, outputs
                         torch.cuda.empty_cache()
 
-                loss_before_per_batch = loss_before / n_batches if n_batches > 0 else 0
-                tplr.logger.info(f'Loss before: {loss_before_per_batch}')
+                loss_before_own = loss_before / n_batches if n_batches > 0 else 0
+                tplr.logger.info(f'Loss before (own data): {loss_before_own}')
 
-                # 9. Apply gradient and compute loss after
-                self.optimizer.zero_grad()
-                self.model.zero_grad()
+                # Get state dict from eval result
+                state_dict = eval_result[eval_uid][0]  # Access the state dict from eval result
 
+                # Apply gradient (using existing pattern)
                 for n, p in self.model.named_parameters():
                     idxs_key = n + 'idxs'
                     vals_key = n + 'vals'
@@ -443,7 +441,6 @@ class Validator:
                     if idxs is not None and vals is not None:
                         idxs = idxs.to(self.config.device)
                         vals = vals.to(self.config.device)
-                        
                         grad = self.transformer.decode(
                             self.compressor.decompress(
                                 p.to(self.config.device),
@@ -453,102 +450,155 @@ class Validator:
                                 self.totalks[n],
                             )
                         ).to(self.config.device)
-
+                        
                         if p.grad is None:
                             p.grad = grad
                         else:
                             p.grad.copy_(grad)
                         p.grad.sign_()
+                        p.data.sub_(grad, alpha=self.scheduler.get_last_lr()[0])
 
-                        p.data.sub_(grad, alpha = self.scheduler.get_last_lr()[0] ) 
-
-                # 10. Compute loss after gradient application        
+                # Evaluate after gradient application on own data
                 loss_after = 0.0
-                n_batches = 0
                 with torch.no_grad():
-                    self.model.eval()
-                    # Reuse same batches and indices for consistent comparison
                     for i, batch in enumerate(batches):
                         if i not in sampled_indices:
                             continue
-                            
                         input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                         labels = input_ids.clone()
                         labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
                         outputs = self.model(input_ids=input_ids, labels=labels)
                         loss_after += outputs.loss.item()
-                        n_batches += 1
                         del input_ids, labels, outputs
                         torch.cuda.empty_cache()
-                
-                # Clean up stored batches
-                del batches
-                torch.cuda.empty_cache()
 
-                loss_after_per_batch = loss_after / n_batches if n_batches > 0 else 0
-                tplr.logger.info(f'Loss after: {loss_after_per_batch}')
+                loss_after_own = loss_after / n_batches if n_batches > 0 else 0
+                tplr.logger.info(f'Loss after (own data): {loss_after_own}')
 
-                # 11. Calculate improvements and update scores
-                loss_improvement = loss_before_per_batch - loss_after_per_batch
-                tplr.logger.info(f'Loss improvement: {loss_improvement}')
+                # Now evaluate on random data
+                pages_random = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    offset=self.sync_window,
+                    n_pages=self.hparams.pages_per_window,
+                    seed=random.randint(0, 10000)
+                )
+                loader_random = await tplr.r2_dataset.R2DatasetLoader.create(
+                    batch_size=self.hparams.batch_size,
+                    sequence_length=self.hparams.sequence_length,
+                    pages_info=pages_random,
+                    tokenizer=self.tokenizer
+                )
 
+                # Restore original model state
                 for n, p in self.model.named_parameters():
                     p.data.copy_(original_params[n])
 
-                relative_improvement = loss_improvement / loss_before_per_batch if loss_before_per_batch > 0 else 0.0
-                tplr.logger.info(f"Relative improvement: {relative_improvement:.4f}")
-                score = relative_improvement
-                self.evaluated_uids.add(eval_uid)
+                # Evaluate on random data before gradient
+                loss_before = 0.0
+                with torch.no_grad():
+                    self.model.eval()
+                    batches_random = []
+                    for batch in loader_random:
+                        batches_random.append(batch)
+                    
+                    total_batches = len(batches_random)
+                    sample_size = max(1, int(total_batches * self.hparams.validator_sample_rate))
+                    sampled_indices = random.sample(range(total_batches), sample_size)
+                    sampled_indices = sorted(sampled_indices)
+                    
+                    for i, batch in enumerate(batches_random):
+                        if i not in sampled_indices:
+                            continue
+                        input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
+                        labels = input_ids.clone()
+                        labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                        outputs = self.model(input_ids=input_ids, labels=labels)
+                        loss_before += outputs.loss.item()
+                        del input_ids, labels, outputs
+                        torch.cuda.empty_cache()
 
-                self.scores[eval_uid] = score
-                # Ensure moving average score is non-negative
-                self.moving_avg_scores[eval_uid] = max(self.hparams.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.hparams.ma_alpha) * score, 0.0)
+                loss_before_random = loss_before / len(sampled_indices) if sampled_indices else 0
+                tplr.logger.info(f'Loss before (random data): {loss_before_random}')
 
-                # 12. Calculate weights using temperature-based softmax
+                # Apply gradient (using existing pattern)
+                for n, p in self.model.named_parameters():
+                    idxs_key = n + 'idxs'
+                    vals_key = n + 'vals'
+                    idxs = state_dict.get(idxs_key, None)
+                    vals = state_dict.get(vals_key, None)
+
+                    if idxs is not None and vals is not None:
+                        idxs = idxs.to(self.config.device)
+                        vals = vals.to(self.config.device)
+                        grad = self.transformer.decode(
+                            self.compressor.decompress(
+                                p.to(self.config.device),
+                                idxs,
+                                vals,
+                                self.xshapes[n],
+                                self.totalks[n],
+                            )
+                        ).to(self.config.device)
+                        
+                        if p.grad is None:
+                            p.grad = grad
+                        else:
+                            p.grad.copy_(grad)
+                        p.grad.sign_()
+                        p.data.sub_(grad, alpha=self.scheduler.get_last_lr()[0])
+
+                # Evaluate after gradient on random data
+                loss_after = 0.0
+                with torch.no_grad():
+                    for i, batch in enumerate(batches_random):
+                        if i not in sampled_indices:
+                            continue
+                        input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
+                        labels = input_ids.clone()
+                        labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                        outputs = self.model(input_ids=input_ids, labels=labels)
+                        loss_after += outputs.loss.item()
+                        del input_ids, labels, outputs
+                        torch.cuda.empty_cache()
+
+                loss_after_random = loss_after / len(sampled_indices) if sampled_indices else 0
+                tplr.logger.info(f'Loss after (random data): {loss_after_random}')
+
+                # Calculate improvements and update scores
+                improvement_own = (loss_before_own - loss_after_own) / loss_before_own if loss_before_own > 0 else 0
+                improvement_random = (loss_before_random - loss_after_random) / loss_before_random if loss_before_random > 0 else 0
+                
+                # Binary indicator: 1 if gradient works better on own data, -1 if better on random data
+                binary_indicator = 1 if improvement_own > improvement_random else -1
+                
+                # Update moving average score with binary indicator
+                alpha = 0.05  # Weight for most recent value
+                self.moving_avg_scores[eval_uid] = max(
+                    (1 - alpha) * self.moving_avg_scores[eval_uid] + alpha * binary_indicator,
+                    0.0  # Ensure non-negative
+                )
+
+                # Restore original model state
+                for n, p in self.model.named_parameters():
+                    p.data.copy_(original_params[n])
+
+                # Calculate score based on improvements
+                score = (loss_before_own - loss_after_own) / loss_before_own if loss_before_own > 0 else 0
+
+                # Get valid score indices
+                valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)
+
+                # Calculate weights based on moving averages
                 weights = torch.zeros_like(self.moving_avg_scores)
                 evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
                 evaluated_mask[list(self.evaluated_uids)] = True
-
                 positive_mask = (self.moving_avg_scores > 0) & evaluated_mask
-                
                 if positive_mask.any():
-                    # Apply normalization to all positive scores at once
-                    weights[positive_mask] = min_power_normalization(
-                        self.moving_avg_scores[positive_mask], 
-                        power=self.hparams.power_normalisation
-                    )
-                    
-                    # Log warning if weights don't sum to 1
-                    weight_sum = weights.sum().item()
-                    tplr.logger.debug(f"Weight sum: {weight_sum}")
-                    if abs(weight_sum - 1.0) > 1e-6:
-                        tplr.logger.warning(f"Weights sum to {weight_sum}, expected close to 1.0")
-                else:
-                    tplr.logger.info("No positive scores found, all weights set to 0")
+                    weights[positive_mask] = self.moving_avg_scores[positive_mask] / self.moving_avg_scores[positive_mask].sum()
 
-                # 13. Log scores and metrics
-                tplr.logger.info('Updated scores for evaluated UIDs:')
-                for uid in self.evaluated_uids:
-                    tplr.logger.info(f'UID {uid}:')
-                    tplr.logger.info(f'  - Last score: {self.scores[uid]}')
-                    tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')
-                    tplr.logger.info(f'  - Weight: {weights[uid]:.4f}')
-
-                del loader, pages
-                torch.cuda.empty_cache()
-
-                # 14. Log wandb metrics
-                valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)
-                for uid_i in valid_score_indices:
-                    uid = uid_i.item()
-                    self.wandb.log({
-                        f"validator/scores/{uid}": self.scores[uid_i].item(),
-                        f"validator/moving_avg_scores/{uid}": self.moving_avg_scores[uid_i].item(),
-                        f"validator/weights/{uid}": weights[uid_i].item(),
-                    }, step=self.global_step)
+                # Log Validator Metrics
                 self.wandb.log({
-                    "validator/loss/before": loss_before_per_batch,
-                    "validator/loss/after": loss_after_per_batch,
+                    "validator/loss/before": loss_before_own,
+                    "validator/loss/after": loss_after_own,
                     "validator/loss/improvement": score,
                     "validator/network/block": self.current_block,
                     "validator/network/window": self.sync_window,
@@ -557,9 +607,21 @@ class Validator:
                     "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
                     "validator/network/active_miners": len(valid_score_indices),
                     "validator/scores/mean": self.scores[valid_score_indices].mean().item(),
-                    "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item()
+                    "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item(),
+                    # Additional metrics for new evaluation mechanism
+                    f"validator/improvements/{eval_uid}/own": improvement_own,
+                    f"validator/improvements/{eval_uid}/random": improvement_random,
+                    f"validator/binary_indicator/{eval_uid}": binary_indicator,
                 }, step=self.global_step)
-                tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights')
+
+                # Log per-uid metrics
+                for uid_i in valid_score_indices:
+                    uid = uid_i.item()
+                    self.wandb.log({
+                        f"validator/scores/{uid}": self.scores[uid_i].item(),
+                        f"validator/moving_avg_scores/{uid}": self.moving_avg_scores[uid_i].item(),
+                        f"validator/weights/{uid}": weights[uid_i].item(),
+                    }, step=self.global_step)
             else:
                 tplr.logger.info(f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%.")
                 # Reduce the moving average score by 50%
@@ -599,13 +661,11 @@ class Validator:
                     tplr.logger.info(f'UID {uid}:')
                     tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')
 
-                # Optionally, log to WandB
+                # Log to WandB
                 self.wandb.log({
                     f"validator/moving_avg_scores/{eval_uid}": self.moving_avg_scores[eval_uid].item(),
                     f"validator/weights/{eval_uid}": weights[eval_uid].item(),
                 }, step=self.global_step)
-                tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights')
-            
             tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation')
             # 15. Create checkpoints periodically
             if self.global_step % self.hparams.checkpoint_frequency == 0:
@@ -685,6 +745,22 @@ class Validator:
                     wait_for_inclusion=False,
                     wait_for_finalization=False,
                 )
+                # Log additional metrics
+                self.wandb.log({
+                    "validator/loss/before": loss_before_own,
+                    "validator/loss/after": loss_after_own,
+                    "validator/loss/improvement": score,
+                    "validator/network/block": self.current_block,
+                    "validator/network/window": self.sync_window,
+                    "validator/network/step": self.global_step,
+                    "validator/network/evaluated_uids": len(self.evaluated_uids),
+                    "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
+                    "validator/network/active_miners": len(valid_score_indices),
+                    "validator/scores/mean": self.scores[valid_score_indices].mean().item(),
+                    "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item()
+                }, step=self.global_step)
+            
+            tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights')
             # Log total window time and metrics
             tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration')
             

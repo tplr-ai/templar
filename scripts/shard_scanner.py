@@ -4,10 +4,11 @@ from dotenv import load_dotenv
 
 # Get the project root directory (templar folder)
 PROJECT_ROOT = Path(__file__).parent.parent
-ENV_PATH = PROJECT_ROOT / '.env'
+ENV_PATH = PROJECT_ROOT / ".env"
 
 # Load environment variables from .env file
 load_dotenv(ENV_PATH)
+
 
 async def precompute_shard_counts(
     r2_bucket: str,
@@ -116,14 +117,14 @@ async def precompute_shard_counts(
 
 async def main():
     # Construct R2 endpoint using account ID
-    account_id = os.getenv('R2_DATASET_ACCOUNT_ID')
+    account_id = os.getenv("R2_DATASET_ACCOUNT_ID")
     r2_endpoint = f"https://{account_id}.r2.cloudflarestorage.com"
-    
+
     R2_CREDS = {
-        "r2_bucket": os.getenv('R2_DATASET_BUCKET_NAME'),
+        "r2_bucket": os.getenv("R2_DATASET_BUCKET_NAME"),
         "r2_endpoint": r2_endpoint,
-        "r2_access_key": os.getenv('R2_DATASET_READ_ACCESS_KEY_ID'),
-        "r2_secret_key": os.getenv('R2_DATASET_READ_SECRET_ACCESS_KEY'),
+        "r2_access_key": os.getenv("R2_DATASET_READ_ACCESS_KEY_ID"),
+        "r2_secret_key": os.getenv("R2_DATASET_READ_SECRET_ACCESS_KEY"),
         "local_metadata_path": str(PROJECT_ROOT / "metadata.yaml"),
         "local_output_path": str(PROJECT_ROOT / "shard_sizes.json"),
     }
@@ -144,6 +145,7 @@ async def main():
 
 if __name__ == "__main__":
     import asyncio
+
     try:
         asyncio.run(main())
     except Exception as e:

@@ -285,8 +285,20 @@ class R2DatasetLoader(DatasetLoader):
             if not local_paths["shard_sizes"].exists():
                 logger.info("Downloading shard sizes from R2...")
                 fs.get(r2_paths["shard_sizes"], str(local_paths["shard_sizes"]))
+
             with open(local_paths["shard_sizes"]) as f:
-                R2DatasetLoader._shard_sizes = json.load(f)
+                shard_sizes_data = json.load(f)
+
+            # Reconstruct full paths in shard_sizes
+            bucket_name = BUCKET_SECRETS["dataset"]["name"]
+            for config_name, config_data in shard_sizes_data.items():
+                if "shards" in config_data:
+                    for shard in config_data["shards"]:
+                        if "path" in shard:
+                            # Reconstruct full path by adding bucket name
+                            shard["path"] = f"{bucket_name}/{shard['path']}"
+
+            R2DatasetLoader._shard_sizes = shard_sizes_data
 
             # Download and load metadata config
             if not local_paths["metadata"].exists():

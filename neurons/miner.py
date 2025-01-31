@@ -246,13 +246,18 @@ class Miner:
                 n_pages = self.hparams.pages_per_window,
                 seed = self.metagraph.hotkeys[self.uid] #type: ignore
             )            
+            # Get bucket info from BUCKET_SECRETS
+            bucket_name = tplr.config.BUCKET_SECRETS['dataset']['name']
+            bucket_subfolder = tplr.r2_dataset.R2DatasetLoader.DATASET_SUBFOLDER
+
             loader = await tplr.r2_dataset.R2DatasetLoader.create(
                 batch_size = self.hparams.batch_size,
                 sequence_length = self.hparams.sequence_length,
                 pages_info = pages,
                 tokenizer = self.tokenizer
             )   
-            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - data_start)} Loaded training data')
+
+            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - data_start)} Loaded training data from bucket: {bucket_name}/{bucket_subfolder}')
             tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}") #type: ignore
             
             # 3. Accumulate gradients over batches

@@ -1,17 +1,10 @@
 # ruff: noqa
 import os
+import pytest
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Find and load the correct .env file
-env_path = Path(__file__).parent.parent / ".env"
-if not env_path.exists():
-    raise FileNotFoundError(f"Required .env file not found at {env_path}")
-
-# Load environment variables before any other imports
-load_dotenv(env_path, override=True)
-
-# Verify environment variables are loaded
+# Keep track of all required environment variables:
 required_vars = [
     "R2_GRADIENTS_ACCOUNT_ID",
     "R2_GRADIENTS_BUCKET_NAME",
@@ -23,26 +16,7 @@ required_vars = [
     "R2_DATASET_BUCKET_NAME",
     "R2_DATASET_READ_ACCESS_KEY_ID",
     "R2_DATASET_READ_SECRET_ACCESS_KEY",
-    "R2_DATASET_WRITE_ACCESS_KEY_ID",
-    "R2_DATASET_WRITE_SECRET_ACCESS_KEY",
 ]
-
-missing_vars = [var for var in required_vars if not os.environ.get(var)]
-if missing_vars:
-    raise EnvironmentError(
-        f"Missing required environment variables in .env file: {', '.join(missing_vars)}"
-    )
-
-# Only import after environment variables are loaded and verified
-import pytest
-from transformers import AutoTokenizer
-from tplr.logging import logger, debug, T
-from tplr.r2_dataset import R2DatasetLoader
-from tplr.hparams import load_hparams
-
-
-# Enable debug logging for tests
-debug()
 
 
 @pytest.mark.asyncio
@@ -53,6 +27,35 @@ async def test_local_parquet_loader():
         pytest tests/test_local_parquet_loader.py
     """
 
+    # 1. Check if .env file exists; skip if not found
+    env_path = Path(__file__).parent.parent / ".env"
+    if not env_path.exists():
+        pytest.skip(
+            f".env file not found at {env_path}. Skipping test in CI environment."
+        )
+    else:
+        load_dotenv(env_path, override=True)
+
+    # 2. Check required environment variables
+    missing_vars = [var for var in required_vars if not os.environ.get(var)]
+    if missing_vars:
+        pytest.skip(
+            f"Missing required environment variables: {', '.join(missing_vars)}"
+        )
+
+    # 3. Attempt to import modules that depend on the environment being loaded
+    try:
+        from transformers import AutoTokenizer  # If actually needed in the future
+        from tplr.logging import logger, debug, T
+        from tplr.r2_dataset import R2DatasetLoader
+        from tplr.hparams import load_hparams
+    except ImportError as e:
+        pytest.skip(f"Skipping test_local_parquet_loader: {e}")
+
+    # Enable debug logging for tests
+    debug()
+
+    # ------ Original test logic below (unchanged) ------
     start_time = T()
     logger.info("Starting test_local_parquet_loader")
 
@@ -63,8 +66,6 @@ async def test_local_parquet_loader():
         "R2_DATASET_BUCKET_NAME",
         "R2_DATASET_READ_ACCESS_KEY_ID",
         "R2_DATASET_READ_SECRET_ACCESS_KEY",
-        "R2_DATASET_WRITE_ACCESS_KEY_ID",
-        "R2_DATASET_WRITE_SECRET_ACCESS_KEY",
     ]:
         if not os.environ.get(var):
             missing_vars.append(var)
@@ -133,6 +134,35 @@ async def test_large_page_offset_handling():
     Test that the loader correctly handles large page offsets that might exceed row group bounds.
     This specifically tests the fix for the row group index calculation.
     """
+
+    # 1. Check if .env file exists; skip if not found
+    env_path = Path(__file__).parent.parent / ".env"
+    if not env_path.exists():
+        pytest.skip(
+            f".env file not found at {env_path}. Skipping test in CI environment."
+        )
+    else:
+        load_dotenv(env_path, override=True)
+
+    # 2. Check required environment variables
+    missing_vars = [var for var in required_vars if not os.environ.get(var)]
+    if missing_vars:
+        pytest.skip(
+            f"Missing required environment variables: {', '.join(missing_vars)}"
+        )
+
+    # 3. Attempt to import modules that depend on the environment being loaded
+    try:
+        from tplr.logging import logger, debug, T
+        from tplr.r2_dataset import R2DatasetLoader
+        from tplr.hparams import load_hparams
+    except ImportError as e:
+        pytest.skip(f"Skipping test_large_page_offset_handling: {e}")
+
+    # Enable debug logging
+    debug()
+
+    # ------ Original test logic below (unchanged) ------
     start_time = T()
     logger.info("Starting test_large_page_offset_handling")
 

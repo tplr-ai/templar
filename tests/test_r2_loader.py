@@ -8,7 +8,6 @@ env_path = Path(__file__).parent.parent / ".env"
 if not env_path.exists():
     raise FileNotFoundError(f"Required .env file not found at {env_path}")
 
-# Load environment variables before any other imports
 load_dotenv(env_path, override=True)
 
 # Verify environment variables are loaded
@@ -24,6 +23,11 @@ required_vars = [
     "R2_DATASET_READ_ACCESS_KEY_ID",
     "R2_DATASET_READ_SECRET_ACCESS_KEY",
 ]
+
+# Check for missing variables and raise error
+missing_vars = [var for var in required_vars if not os.environ.get(var)]
+if missing_vars:
+    raise OSError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
 
 def validate_config():
@@ -41,7 +45,6 @@ def validate_config():
         logger.warning(
             "⚠️ Bucket name mismatch - updating BUCKET_SECRETS with environment value"
         )
-        logger.warning(f"Using environment bucket: {env_bucket}")
         # Update BUCKET_SECRETS with environment values
         if "dataset" not in BUCKET_SECRETS:
             BUCKET_SECRETS["dataset"] = {}
@@ -65,7 +68,7 @@ def validate_config():
         )
         logger.info("Updated BUCKET_SECRETS with environment values")
 
-    return True  # Always return True since we've updated the config
+    return True  # Configuration is now valid
 
 
 # Only import after environment variables are loaded and verified

@@ -2,12 +2,10 @@ import json
 import yaml
 import s3fs
 import asyncio
-from datetime import datetime
 import numpy as np
 from pathlib import Path
 import pyarrow.parquet as pq
 from functools import lru_cache
-import time
 
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
@@ -70,12 +68,6 @@ class R2DatasetLoader(DatasetLoader):
     _token_cache = {}  # Cache for tokenized results
     _fs = None
     _prefetch_queue = None
-
-    # Add class-level cache for metadata loading
-    _metadata_loading_lock = asyncio.Lock()
-    _metadata_loaded = False
-    _last_metadata_check = 0
-    _metadata_check_interval = 300  # 5 minutes between checks
 
     def __init__(
         self,
@@ -162,12 +154,15 @@ class R2DatasetLoader(DatasetLoader):
                     self.buffer = []
 
     @staticmethod
-    async def fetch_dataset_configs():
-        """Load dataset configurations from cached metadata and shard sizes."""
+    async def fetch_dataset_configs() -> dict:
+        """
+        Load dataset configurations from cached metadata and shard sizes.
+        """
         if R2DatasetLoader._configs_data_cache is not None:
             return R2DatasetLoader._configs_data_cache
 
         try:
+            # Use _load_r2_metadata to get both metadata and shard sizes
             shard_sizes, metadata_config = await R2DatasetLoader._load_r2_metadata()
 
             # Build configs data from both files
@@ -252,135 +247,74 @@ class R2DatasetLoader(DatasetLoader):
     @staticmethod
     async def _load_r2_metadata():
         """
-        Loads and caches metadata from R2 storage with smart update checking.
-        Uses caching to prevent redundant downloads.
+        Loads and caches metadata from R2 storage.
+
+        Downloads shard sizes and metadata config files if not cached locally.
+
+        Returns:
+            tuple: (shard_sizes dict, metadata_config dict)
+
+        Raises:
+            Exception: If metadata loading fails
         """
-        # Use a lock to prevent multiple concurrent loads
-        async with R2DatasetLoader._metadata_loading_lock:
-            current_time = time.time()
-            
-            # Return cached data if it's fresh enough
-            if (R2DatasetLoader._metadata_loaded and 
-                current_time - R2DatasetLoader._last_metadata_check < R2DatasetLoader._metadata_check_interval):
-                return (R2DatasetLoader._shard_sizes, R2DatasetLoader._metadata_config)
+        if R2DatasetLoader._shard_sizes is not None:
+            return (
+                R2DatasetLoader._shard_sizes,
+                R2DatasetLoader._metadata_config,
+            )
 
-            fs = R2DatasetLoader._get_fs()
-            cache_dir = R2DatasetLoader._local_cache_dir
-            cache_dir.mkdir(parents=True, exist_ok=True)
+        fs = R2DatasetLoader._get_fs()
+        cache_dir = R2DatasetLoader._local_cache_dir
+        cache_dir.mkdir(parents=True, exist_ok=True)
 
-            # Define R2 and local paths
-            r2_base = f"{BUCKET_SECRETS['dataset']['name']}/{R2DatasetLoader.DATASET_SUBFOLDER}"
-            r2_paths = {
-                "shard_sizes": f"{r2_base}/_shard_sizes.json",
-                "metadata": f"{r2_base}/_metadata.yaml",
-            }
-            local_paths = {
-                "shard_sizes": cache_dir / "shard_sizes.json",
-                "metadata": cache_dir / "metadata.yaml",
-            }
+        # Define R2 and local paths
+        r2_base = (
+            f"{BUCKET_SECRETS['dataset']['name']}/{R2DatasetLoader.DATASET_SUBFOLDER}"
+        )
+        r2_paths = {
+            "shard_sizes": f"{r2_base}/_shard_sizes.json",
+            "metadata": f"{r2_base}/_metadata.yaml",
+        }
+        local_paths = {
+            "shard_sizes": cache_dir / "shard_sizes.json",
+            "metadata": cache_dir / "metadata.yaml",
+        }
 
-            try:
-                files_updated = False
+        try:
+            # Download and load shard sizes
+            if not local_paths["shard_sizes"].exists():
+                logger.info("Downloading shard sizes from R2...")
+                fs.get(r2_paths["shard_sizes"], str(local_paths["shard_sizes"]))
 
-                # Check and update each metadata file
-                for file_type, r2_path in r2_paths.items():
-                    local_path = local_paths[file_type]
-                    need_download = True
+            with open(local_paths["shard_sizes"]) as f:
+                shard_sizes_data = json.load(f)
 
-                    try:
-                        # Get R2 file info using run_in_executor for sync operations
-                        r2_info = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: fs.info(r2_path)
-                        )
-                        
-                        if local_path.exists():
-                            r2_modified = r2_info.get('LastModified', None)
-                            r2_size = r2_info.get('Size', 0)
-                            r2_etag = r2_info.get('ETag', '').strip('"')
+            # Reconstruct full paths in shard_sizes
+            bucket_name = BUCKET_SECRETS["dataset"]["name"]
+            for config_name, config_data in shard_sizes_data.items():
+                if "shards" in config_data:
+                    for shard in config_data["shards"]:
+                        if "path" in shard:
+                            # Reconstruct full path by adding bucket name
+                            shard["path"] = f"{bucket_name}/{shard['path']}"
 
-                            # Get local file info
-                            local_size = local_path.stat().st_size
+            R2DatasetLoader._shard_sizes = shard_sizes_data
 
-                            # Convert R2 timestamp if needed
-                            if isinstance(r2_modified, str):
-                                r2_timestamp = datetime.fromisoformat(r2_modified.replace('Z', '+00:00')).timestamp()
-                            elif isinstance(r2_modified, datetime):
-                                r2_timestamp = r2_modified.timestamp()
-                            else:
-                                r2_timestamp = r2_modified
+            # Download and load metadata config
+            if not local_paths["metadata"].exists():
+                logger.info("Downloading metadata config from R2...")
+                fs.get(r2_paths["metadata"], str(local_paths["metadata"]))
+            with open(local_paths["metadata"]) as f:
+                R2DatasetLoader._metadata_config = yaml.safe_load(f)
 
-                            # Record current update state in a .meta file
-                            meta_path = local_path.with_suffix(local_path.suffix + '.meta')
-                            current_meta = {}
-                            if meta_path.exists():
-                                try:
-                                    with open(meta_path) as f:
-                                        current_meta = json.load(f)
-                                except:
-                                    current_meta = {}
+            return (
+                R2DatasetLoader._shard_sizes,
+                R2DatasetLoader._metadata_config,
+            )
 
-                            # Compare metadata
-                            if (r2_size == local_size and 
-                                r2_etag == current_meta.get('etag') and
-                                r2_timestamp and local_path.stat().st_mtime >= r2_timestamp):
-                                need_download = False
-                                logger.debug(f"{file_type} is up to date")
-
-                    except Exception as e:
-                        logger.warning(f"Error checking {file_type} status: {e}")
-                        need_download = True
-                        r2_info = None
-
-                    if need_download:
-                        logger.info(f"Downloading {file_type} from R2...")
-                        # Use run_in_executor for sync file operations
-                        await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: fs.get(r2_path, str(local_path))
-                        )
-                        files_updated = True
-                        
-                        # Get fresh R2 info after download if needed
-                        if r2_info is None:
-                            try:
-                                r2_info = await asyncio.get_event_loop().run_in_executor(
-                                    None, lambda: fs.info(r2_path)
-                                )
-                            except Exception as e:
-                                logger.warning(f"Could not get R2 info after download: {e}")
-                                continue
-
-                        # Save metadata about the download
-                        if r2_info:
-                            meta_path = local_path.with_suffix(local_path.suffix + '.meta')
-                            r2_modified = r2_info.get('LastModified')
-                            meta_info = {
-                                'etag': r2_info.get('ETag', '').strip('"'),
-                                'last_modified': r2_modified.isoformat() if isinstance(r2_modified, datetime) else str(r2_modified),
-                                'size': r2_info.get('Size', 0),
-                                'downloaded_at': datetime.utcnow().isoformat()
-                            }
-                            with open(meta_path, 'w') as f:
-                                json.dump(meta_info, f)
-
-                        logger.info(f"Successfully downloaded {file_type}")
-
-                # If any files were updated or no cache exists, reload everything
-                if files_updated or R2DatasetLoader._shard_sizes is None:
-                    with open(local_paths["shard_sizes"]) as f:
-                        R2DatasetLoader._shard_sizes = json.load(f)
-
-                    with open(local_paths["metadata"]) as f:
-                        R2DatasetLoader._metadata_config = yaml.safe_load(f)
-
-                # Update cache status after successful load
-                R2DatasetLoader._metadata_loaded = True
-                R2DatasetLoader._last_metadata_check = current_time
-                
-                return (R2DatasetLoader._shard_sizes, R2DatasetLoader._metadata_config)
-
-            except Exception as e:
-                logger.error(f"Failed to load R2 metadata: {e}")
-                raise
+        except Exception as e:
+            logger.error(f"Failed to load R2 metadata: {e}")
+            raise
 
     @staticmethod
     def _get_fs():
@@ -596,4 +530,3 @@ class R2DatasetLoader(DatasetLoader):
     def _get_tokenized_cache(cache_key: str):
         """Cached tokenization results"""
         return R2DatasetLoader._token_cache.get(cache_key)
-

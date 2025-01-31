@@ -11,6 +11,10 @@ class Version(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     is_running = db.Column(db.Boolean, nullable=False, default=True)
 
+    @classmethod
+    def get_last(cls):
+        return cls.query.order_by(cls.created_at.desc()).first()
+
 class RunMetadata(db.Model):
     __tablename__ = 'tbl_run_metadata'
     id = db.Column(db.Integer, primary_key=True)

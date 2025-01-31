@@ -63,6 +63,12 @@ class Miner:
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')
         parser.add_argument('--trace', action='store_true', help='Enable trace logging')
         parser.add_argument('--store-gathers', action='store_true', help='Store gathered gradients in R2')
+        parser.add_argument('--save-checkpoint', type=str, default='none',
+                    choices=['none', 'local', 'R2', 'both'],
+                    help='Type of checkpoint saving: none|local|R2|both')
+        parser.add_argument('--load-checkpoint', type=str, default='any',
+                    choices=['any','validator','r2','local'],
+                    help='Where to load checkpoint from. Default "any".')
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -79,7 +85,11 @@ class Miner:
         # Init config and load hparams
         self.config = Miner.config()
         self.hparams = tplr.load_hparams()
-        
+
+        # Init checkpoint method
+        self.best_loss = 11.0
+        self.checkpoint_strategy = self.config.save_checkpoint       # 'none'/'local'/'R2'/'both'
+        self.load_checkpoint_source = self.config.load_checkpoint  # 'any'/'validator'/'r2'/'local'
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
@@ -199,7 +209,8 @@ class Miner:
             current_window=self.current_window,
             device=self.config.device,
             peers=self.peers,
-            uid=self.uid
+            uid=self.uid,
+            source=self.load_checkpoint_source
         )
         if success:
             self.momentum = loaded_momentum
@@ -455,10 +466,25 @@ class Miner:
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
 
             # Save checkpoint logic
-            if self.global_step % self.hparams.checkpoint_frequency == 0:
-                tplr.logger.info(f"Creating checkpoint at global_step {self.global_step}")
+
+            # 1) Check if loss has significantly improved compared to the last saved checkpoint
+            avg_loss = total_loss / (i + 1)
+
+            tplr.logger.info(
+                f"Current average loss: {avg_loss:.8f}, Best recorded loss: {self.best_loss:.8f}"
+            )
+            improvement = self.best_loss - avg_loss
+            if improvement >= 0.5:
+                # Update best_loss if this new avg_loss is better than the current best
+                if avg_loss < self.best_loss:
+                    self.best_loss = avg_loss
+
+                tplr.logger.info(
+                    f"Significant loss improvement detected (improved by {improvement:.8f}). "
+                    f"Saving checkpoint via strategy='{self.checkpoint_strategy}'."
+                )
                 
-                # asyncio checkpoint saving task
+                # Call comms.save_checkpoint, which handles local/R2/both depending on your strategy
                 asyncio.create_task(
                     self.comms.save_checkpoint(
                         model=self.model,
@@ -467,11 +493,69 @@ class Miner:
                         momentum=self.momentum,
                         global_step=self.global_step,
                         current_window=self.current_window,
-                        start_window=self.start_window
+                        start_window=self.start_window,
+                        strategy=self.checkpoint_strategy  # e.g. 'local', 'R2', 'both', or 'none'
                     )
                 )
+
+            # 2) Check if loss has significantly worsened compared to the best_loss
+            elif avg_loss - self.best_loss >= 2.0:
+                tplr.logger.warning(
+                    f"Loss has degraded significantly (current: {avg_loss:.4f}, best: {self.best_loss:.8f}). "
+                    "Attempting to revert to a previous checkpoint."
+                )
+                
+                # Try loading from whichever source(s) you prefer: 'any', 'validator', 'r2', or 'local'
+                # 'any' means it will search validator -> R2 -> local in sequence.
+                success, loaded_momentum, loaded_global_step, loaded_optimizer, loaded_scheduler = await self.comms.load_checkpoint(
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                    transformer=self.transformer,
+                    compressor=self.compressor,
+                    current_window=self.current_window,
+                    device=self.config.device,
+                    peers=self.peers,
+                    uid=self.uid,
+                    source=self.config.load_checkpoint_source
+                )
+
+                if success:
+                    # Update local references
+                    self.momentum = loaded_momentum
+                    self.global_step = loaded_global_step
+                    self.optimizer = loaded_optimizer
+                    self.scheduler = loaded_scheduler
+
+                    tplr.logger.info("Checkpoint loaded. Reducing learning rate and resetting momentum buffer to avoid overshoot.")
+                    
+                    # 1) Reduce LR (example: halve it)
+                    for param_group in self.optimizer.param_groups:
+                        old_lr = param_group['lr']
+                        param_group['lr'] = old_lr * 0.5
+                        tplr.logger.info(f"Reduced LR from {old_lr} to {param_group['lr']}")
+
+                    # 2) Clear or shrink momentum buffer
+                    # Option A: completely zero out
+                    # for _, state in self.optimizer.state.items():
+                    #     buf = state.get('momentum_buffer', None)
+                    #     if buf is not None:
+                    #         buf.zero_()
+
+                    # Option B (alternative): multiply by a factor < 1
+                    for _, state in self.optimizer.state.items():
+                        buf = state.get('momentum_buffer', None)
+                        if buf is not None:
+                            buf.mul_(0.3)
+
+                    tplr.logger.info("Momentum buffer reset done.")
+                    tplr.logger.info("Checkpoint loaded successfully. Restarting training at the reverted state.")
+                    continue  # re-start the training loop from the next iteration
+                else:
+                    tplr.logger.error("Failed to load checkpoint from 'any' source. Continuing with current model.")
             else:
                 tplr.logger.info("Skipping checkpoint save this round")
+            # End of dynamic checkpoint logic
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

@@ -172,7 +172,6 @@ class Validator:
         # Init scores and tracking
         self.scores = torch.zeros(self.metagraph.n, dtype=torch.float32)
         self.moving_avg_scores = torch.zeros(self.metagraph.n, dtype=torch.float32) 
-        self.ma_alpha = 0.95  # Moving average decay factor
         self.evaluated_uids = set()  # Track which UIDs we've seen
 
         # Add step tracking
@@ -503,7 +502,7 @@ class Validator:
 
                 self.scores[eval_uid] = score
                 # Ensure moving average score is non-negative
-                self.moving_avg_scores[eval_uid] = max(self.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.ma_alpha) * score, 0.0)
+                self.moving_avg_scores[eval_uid] = max(self.hparams.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.hparams.ma_alpha) * score, 0.0)
 
                 # 12. Calculate weights using temperature-based softmax
                 weights = torch.zeros_like(self.moving_avg_scores)

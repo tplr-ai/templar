@@ -1159,42 +1159,47 @@ class Comms(ChainManager):
         tplr.logger.info(f"Validator Bucket: {validator_bucket}")
         return validator_bucket, validator_uid
 
-    async def get_latest_checkpoint(self):
+    async def get_latest_checkpoint(self, source="any"):
         """
-        Sequentially check:
-        1. Whether the highest-staked validator has a checkpoint.
-        2. Whether the R2 bucket of this instance has a checkpoint.
-        3. Whether a checkpoint exists locally.
-        If none are found, return None.
+        Depending on 'source', selectively search for a valid checkpoint.
+        1) 'validator':   Check only the highest-stake validator's R2 bucket.
+        2) 'r2':          Check only this self.bucket (i.e., current UID's R2).
+        3) 'local':       Check only local storage.
+        4) 'any':         (default) Check in sequence:
+                          highest-stake validator -> self R2 bucket -> local
+        Returns:
+            (checkpoint_data, window) or None if not found
         """
         try:
             # 1. Check validator bucket
-            (
-                validator_bucket,
-                validator_uid,
-            ) = await self._get_highest_stake_validator_bucket()
-            if validator_bucket:
-                result = await self._get_bucket_checkpoint(
-                    validator_bucket, validator_uid
-                )
-                if result:
-                    # If successfully retrieved, return immediately.
-                    return result
+            if source in ["any", "validator"]:
+                (
+                    validator_bucket,
+                    validator_uid,
+                ) = await self._get_highest_stake_validator_bucket()
+                if validator_bucket:
+                    result = await self._get_bucket_checkpoint(
+                        validator_bucket, validator_uid
+                    )
+                    if result:
+                        # If successfully retrieved, return immediately.
+                        return result
 
             # 2. Check self R2 bucket
-            self_bucket = self.bucket  # Use self.bucket saved in __init__
-            if self_bucket:
-                result = await self._get_bucket_checkpoint(self_bucket, self.uid)
-                if result:
-                    return result
+            if source in ["any", "r2"]:
+                if self.bucket:
+                    result = await self._get_bucket_checkpoint(self.bucket, self.uid)
+                    if result:
+                        return result
 
             # 3. Check local storage
-            local_result = self._load_latest_local_checkpoint()
-            if local_result:
-                return local_result
+            if source in ["any", "local"]:
+                local_result = self._load_latest_local_checkpoint()
+                if local_result:
+                    return local_result
 
             tplr.logger.info(
-                "No checkpoint found in validator / self R2 / local storage"
+                f"No checkpoint found under source={source} (validator / R2 / local)."
             )
             return None
 
@@ -1292,24 +1297,29 @@ class Comms(ChainManager):
         device: str,
         peers: list,
         uid: str,
+        source: str = "any",  # NEW PARAM: 'any', 'validator', 'r2', or 'local'
     ) -> tuple[
         bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
     ]:
         """
-        Loads the latest checkpoint and catches up across missed windows.
-        In this version, we parallelize gathers but still apply updates strictly in ascending window order.
+        Loads the latest checkpoint from a specified source, then catches up
+        across missed windows if necessary.
 
+        Args:
+            source (str): 'any', 'validator', 'r2', or 'local'.
+                          Decides which store(s) to check in get_latest_checkpoint().
         Returns:
-            tuple: (success: bool, momentum: dict, global_step: int, optimizer: Optimizer, scheduler: LRScheduler)
+            (success, momentum, global_step, optimizer, scheduler)
         """
-        result = await self.get_latest_checkpoint()
+        # 1) Attempt to retrieve a checkpoint from the chosen source
+        result = await self.get_latest_checkpoint(source=source)
         if not result:
-            tplr.logger.info("No valid checkpoints found")
+            tplr.logger.info(f"No valid checkpoints found from source={source}")
             return False, {}, 0, optimizer, scheduler
 
         checkpoint_data, checkpoint_window = result
         try:
-            # 1) Load checkpoint data
+            # 2) Load checkpoint states into model/optimizer/scheduler
             model.load_state_dict(
                 {
                     k: v.to(device)
@@ -1339,11 +1349,11 @@ class Comms(ChainManager):
             global_step = current_window - checkpoint_start_window
 
             tplr.logger.info(
-                f"Checkpoint windows (start={checkpoint_start_window}, checkpoint_current={checkpoint_current_window}), "
-                f"local_current={current_window}, window_diff={window_difference}, global_step={global_step}"
+                f"[load_checkpoint] Found checkpoint at window {checkpoint_current_window}. "
+                f"Local current window={current_window}, window_diff={window_difference}, global_step={global_step}"
             )
 
-            # 2) Sync scheduler with global_step if needed
+            # 3) Sync the scheduler steps if needed
             steps_needed = global_step - scheduler.last_epoch
             if steps_needed > 0:
                 tplr.logger.info(
@@ -1353,7 +1363,7 @@ class Comms(ChainManager):
                     optimizer.step()
                     scheduler.step()
 
-            # 3) Return early if no catch-up or behind
+            # 4) Return early if no catch-up or behind
             if window_difference < 0:
                 tplr.logger.warning(
                     "Local current_window is behind checkpoint; using checkpoint without catch-up."
@@ -1363,10 +1373,11 @@ class Comms(ChainManager):
                 tplr.logger.info("No catch-up needed — aligned with checkpoint.")
                 return True, momentum, global_step, optimizer, scheduler
 
-            tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
-
-            # 4) Option: Parallel gather in batches, but apply in ascending order
-            BATCH_SIZE = 5  # tweak based on memory/time constraints
+            # 5) Perform catch-up across the missed windows
+            tplr.logger.info(
+                f"Catching up for {window_difference} windows from {checkpoint_current_window + 1} to {current_window}…"
+            )
+            BATCH_SIZE = 5  # or any suitable number
             windows_to_catch_up = range(
                 checkpoint_current_window + 1, current_window + 1
             )
@@ -1374,7 +1385,6 @@ class Comms(ChainManager):
             for i in range(0, len(windows_to_catch_up), BATCH_SIZE):
                 batch_windows = list(windows_to_catch_up)[i : i + BATCH_SIZE]
 
-                # Launch gathers in parallel
                 tasks = [
                     self.gather(
                         state_dict={},
@@ -1392,67 +1402,65 @@ class Comms(ChainManager):
                 ]
                 batch_results = await asyncio.gather(*tasks)
 
-                # Store results in dict so we can apply them in correct ascending order
+                # store in dict to apply in ascending order
                 gathered_data = dict(zip(batch_windows, batch_results))
-
-                # 5) Apply each window's updates in ascending order
                 for w in sorted(gathered_data.keys()):
                     gather_result = gathered_data[w]
                     if not gather_result:
-                        tplr.logger.info(
-                            f"No valid gather data for window {w}, skipping."
-                        )
+                        tplr.logger.info(f"No gather data for window {w}, skipping.")
                         continue
 
                     # Build param updates
                     param_updates = {}
                     for n, p in model.named_parameters():
-                        idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
-                        vals = getattr(gather_result.state_dict, f"{n}vals", None)
+                        idxs_key = f"{n}idxs"
+                        vals_key = f"{n}vals"
+                        idxs = getattr(gather_result.state_dict, idxs_key, None)
+                        vals = getattr(gather_result.state_dict, vals_key, None)
                         if idxs is not None and vals is not None:
-                            # Convert to lists if necessary
                             if not isinstance(idxs, (list, tuple)):
                                 idxs = [idxs]
                             if not isinstance(vals, (list, tuple)):
                                 vals = [vals]
 
-                            # Decode + decompress + sign
                             new_grad = transformer.decode(
                                 compressor.batch_decompress(
                                     p.to(device),
                                     idxs,
                                     vals,
-                                    transformer.shapes[n],
-                                    transformer.totalks[n],
+                                    # assume you have transforms/shapes stored,
+                                    # or adapt code as needed
+                                    transformer.shapes.get(n, None),
+                                    transformer.totalks.get(n, None),
                                 )
                             )
                             param_updates[n] = new_grad.sign_()
 
-                    # Apply updates, step optimizer/scheduler
+                    # Apply updates, then step optimizer/scheduler
                     with torch.no_grad():
                         for n, p in model.named_parameters():
                             if n in param_updates:
                                 p.grad = param_updates[n]
-
                     optimizer.step()
                     scheduler.step()
                     global_step += 1
+
                     tplr.logger.info(
-                        f"Caught up window {w}, global_step => {global_step}"
+                        f"[load_checkpoint] Catch-up window {w} done. global_step => {global_step}"
                     )
 
             tplr.logger.info(
-                f"Finished catch-up. Final global_step={global_step}, "
-                f"optimizer steps={optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "  # type: ignore
+                f"[load_checkpoint] Finished catch-up, final global_step={global_step}, "
+                f"optimizer steps={optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
                 f"scheduler last_epoch={scheduler.last_epoch}"
             )
             return True, momentum, global_step, optimizer, scheduler
 
         except KeyError as e:
-            tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
+            tplr.logger.error(f"Invalid checkpoint format: missing key: {e}")
             return False, {}, 0, optimizer, scheduler
         except Exception as e:
-            tplr.logger.error(f"Failed to load checkpoint: {e}")
+            tplr.logger.error(f"Failed to load checkpoint from source={source}: {e}")
             return False, {}, 0, optimizer, scheduler
         # TODO: Add more robust error handling for large window_difference or gather failures.
 
@@ -1527,41 +1535,46 @@ class Comms(ChainManager):
         global_step,
         current_window,
         start_window,
+        strategy="both",  # 新增参数，默认both
     ):
-        """Save checkpoint to R2 and local storage"""
+        """Save checkpoint to R2 and/or local storage, depending on strategy."""
+
         checkpoint_data = {
             "model_state_dict": {
                 k: v.cpu().clone() for k, v in model.state_dict().items()
             },
             "optimizer_state_dict": {
-                k: v.cpu().clone() if torch.is_tensor(v) else v
+                k: (v.cpu().clone() if torch.is_tensor(v) else v)
                 for k, v in optimizer.state_dict().items()
             },
             "scheduler_state_dict": scheduler.state_dict(),
             "momentum": {k: v.cpu().clone() for k, v in momentum.items()},
             "start_window": start_window,
             "current_window": current_window,
+            "global_step": global_step,
         }
 
-        # save locally
-        await self.put(
-            state_dict=checkpoint_data,
-            uid=str(self.uid),
-            window=current_window,
-            key="checkpoint",
-            global_step=global_step,
-            local=True,
-        )
+        if strategy in ["local", "both"]:
+            # local
+            await self.put(
+                state_dict=checkpoint_data,
+                uid=str(self.uid),
+                window=current_window,
+                key="checkpoint",
+                global_step=global_step,
+                local=True,
+            )
 
-        # upload to R2
-        await self.put(
-            state_dict=checkpoint_data,
-            uid=str(self.uid),
-            window=current_window,
-            key="checkpoint",
-            global_step=global_step,
-            local=False,
-        )
+        if strategy in ["R2", "both"]:
+            # R2
+            await self.put(
+                state_dict=checkpoint_data,
+                uid=str(self.uid),
+                window=current_window,
+                key="checkpoint",
+                global_step=global_step,
+                local=False,
+            )
 
         return True
 

@@ -6,29 +6,28 @@ import torch
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Find and load the correct .env file
-env_path = Path(__file__).parent.parent / ".env"
-if not env_path.exists():
-    raise FileNotFoundError(f"Required .env file not found at {env_path}")
-
-load_dotenv(env_path, override=True)
-
-# Verify environment variables are loaded
-required_vars = [
+# ----------------------------------------------------------------------
+# We only define the required environment variables here without
+# enforcing them at the module level (so tests can be skipped if missing).
+# ----------------------------------------------------------------------
+REQUIRED_VARS = [
     "R2_DATASET_ACCOUNT_ID",
     "R2_DATASET_BUCKET_NAME",
     "R2_DATASET_READ_ACCESS_KEY_ID",
     "R2_DATASET_READ_SECRET_ACCESS_KEY",
 ]
 
-# Check for missing variables and raise error if any are missing
-missing_vars = [var for var in required_vars if not os.environ.get(var)]
-if missing_vars:
-    raise OSError(f"Missing required environment variables: {', '.join(missing_vars)}")
+from tplr.logging import logger, debug, T
+from tplr.dataset import DatasetLoader
+from tplr.r2_dataset import R2DatasetLoader
+from tplr.hparams import load_hparams
+
+# Enable debug logging
+debug()
 
 
 def validate_config():
-    """Validate configuration consistency and update BUCKET_SECRETS if needed"""
+    """Validate configuration consistency and update BUCKET_SECRETS if needed."""
     env_bucket = os.environ.get("R2_DATASET_BUCKET_NAME")
     from tplr.config import BUCKET_SECRETS
 
@@ -69,7 +68,7 @@ def validate_config():
 
 
 def log_config():
-    """Log current configuration"""
+    """Log current configuration."""
     logger.info("Current configuration:")
     logger.info(f"Account ID: {os.environ.get('R2_DATASET_ACCOUNT_ID', 'Not set')}")
     logger.info(f"Bucket Name: {os.environ.get('R2_DATASET_BUCKET_NAME', 'Not set')}")
@@ -81,24 +80,8 @@ def log_config():
     )
 
 
-missing_vars = [var for var in required_vars if not os.environ.get(var)]
-if missing_vars:
-    raise EnvironmentError(
-        f"Missing required environment variables: {', '.join(missing_vars)}"
-    )
-
-import torch
-from tplr.logging import logger, debug, T
-from tplr.dataset import DatasetLoader
-from tplr.r2_dataset import R2DatasetLoader
-from tplr.hparams import load_hparams
-
-# Enable debug logging
-debug()
-
-
 def set_random_seeds(seed=42):
-    """Set random seeds for reproducibility"""
+    """Set random seeds for reproducibility."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
@@ -108,14 +91,33 @@ def set_random_seeds(seed=42):
 @pytest.mark.asyncio
 async def test_dataset_equivalence():
     """
-    Test that DatasetLoader and R2DatasetLoader produce identical outputs
-    given the same input parameters and seed.
+    Test that compares R2DatasetLoader and DatasetLoader to ensure they produce
+    identical data. The test will be skipped if .env or required environment
+    variables are missing.
     """
+
+    # Attempt to find and load the .env file
+    env_path = Path(__file__).parent.parent / ".env"
+    if not env_path.exists():
+        pytest.skip(f".env file not found at {env_path}. Skipping test.")
+    else:
+        load_dotenv(env_path, override=True)
+
+    # Verify environment variables are loaded; if missing, skip instead of failing
+    missing_vars = [var for var in REQUIRED_VARS if not os.environ.get(var)]
+    if missing_vars:
+        pytest.skip(
+            f"Missing required environment variables: {', '.join(missing_vars)}. Skipping test."
+        )
+
+    # Start the timer
     start_time = T()
     logger.info("Starting dataset equivalence test")
 
     # Log current configuration
     log_config()
+
+    # Validate configuration
     if not validate_config():
         pytest.skip("Configuration mismatch between environment and BUCKET_SECRETS")
 
@@ -139,13 +141,13 @@ async def test_dataset_equivalence():
         r2_pages = await R2DatasetLoader.next_pages(
             offset=offset, n_pages=n_pages, seed=seed
         )
-        logger.info(f"Successfully generated R2 pages")
+        logger.info("Successfully generated R2 pages")
 
         set_random_seeds()  # Reset seeds before generating HF pages
         hf_pages = await DatasetLoader.next_pages(
             offset=offset, n_pages=n_pages, seed=seed
         )
-        logger.info(f"Successfully generated HF pages")
+        logger.info("Successfully generated HF pages")
 
         logger.info(f"R2 pages: {r2_pages}")
         logger.info(f"HF pages: {hf_pages}")
@@ -193,7 +195,6 @@ async def test_dataset_equivalence():
         for batch_idx, (r2_batch, hf_batch) in enumerate(zip(r2_batches, hf_batches)):
             logger.info(f"Comparing batch {batch_idx}")
 
-            # Convert to tensors if they aren't already
             r2_tensor = (
                 torch.tensor(r2_batch)
                 if not isinstance(r2_batch, torch.Tensor)

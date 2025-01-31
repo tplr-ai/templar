@@ -1,17 +1,19 @@
 # ruff: noqa
 import os
 from pathlib import Path
+import pytest
 from dotenv import load_dotenv
 
-# Find and load the correct .env file
-env_path = Path(__file__).parent.parent / ".env"
-if not env_path.exists():
-    raise FileNotFoundError(f"Required .env file not found at {env_path}")
+from tplr.logging import logger, debug, T
+from tplr.r2_dataset import R2DatasetLoader
+from tplr.hparams import load_hparams
 
-load_dotenv(env_path, override=True)
+# Enable debug logging for tests
+debug()
 
-# Verify environment variables are loaded
-required_vars = [
+# We only define the required environment variables here,
+# without enforcing them at the module level:
+REQUIRED_VARS = [
     "R2_GRADIENTS_ACCOUNT_ID",
     "R2_GRADIENTS_BUCKET_NAME",
     "R2_GRADIENTS_READ_ACCESS_KEY_ID",
@@ -24,14 +26,9 @@ required_vars = [
     "R2_DATASET_READ_SECRET_ACCESS_KEY",
 ]
 
-# Check for missing variables and raise error
-missing_vars = [var for var in required_vars if not os.environ.get(var)]
-if missing_vars:
-    raise OSError(f"Missing required environment variables: {', '.join(missing_vars)}")
-
 
 def validate_config():
-    """Validate configuration consistency and update BUCKET_SECRETS if needed"""
+    """Validate configuration consistency and update BUCKET_SECRETS if needed."""
     env_bucket = os.environ.get("R2_DATASET_BUCKET_NAME")
     from tplr.config import BUCKET_SECRETS
 
@@ -71,18 +68,8 @@ def validate_config():
     return True  # Configuration is now valid
 
 
-# Only import after environment variables are loaded and verified
-import pytest
-from tplr.logging import logger, debug, T
-from tplr.r2_dataset import R2DatasetLoader
-from tplr.hparams import load_hparams
-
-# Enable debug logging for tests
-debug()
-
-
 def log_r2_config():
-    """Log R2 configuration details"""
+    """Log R2 configuration details."""
     logger.info("Current R2 Dataset Configuration:")
     logger.info(
         f"Dataset Account ID: {os.environ.get('R2_DATASET_ACCOUNT_ID', 'Not set')}"
@@ -123,10 +110,26 @@ def log_r2_config():
 
 
 @pytest.mark.asyncio
-async def test_local_parquet_loader():
+async def test_dataset_equivalence():
     """
-    Simple integration test to ensure R2DatasetLoader can fetch pages from your R2 parquet data.
+    This test will attempt to load .env and check for required environment variables.
+    If these checks fail, the test is skipped rather than failing outright.
     """
+
+    # Attempt to find and load the .env file
+    env_path = Path(__file__).parent.parent / ".env"
+    if not env_path.exists():
+        pytest.skip(f".env file not found at {env_path}. Skipping test.")
+    else:
+        load_dotenv(env_path, override=True)
+
+    # Verify environment variables are loaded; if missing, skip instead of failing
+    missing_vars = [var for var in REQUIRED_VARS if not os.environ.get(var)]
+    if missing_vars:
+        pytest.skip(
+            f"Missing required environment variables: {', '.join(missing_vars)}"
+        )
+
     start_time = T()
     logger.info("Starting test_local_parquet_loader")
 
@@ -137,8 +140,8 @@ async def test_local_parquet_loader():
     if not validate_config():
         pytest.skip("Configuration mismatch between environment and BUCKET_SECRETS")
 
-    # Verify required environment variables
-    missing_vars = [var for var in required_vars if not os.environ.get(var)]
+    # Double-check required environment variables (in case of any late changes)
+    missing_vars = [var for var in REQUIRED_VARS if not os.environ.get(var)]
     if missing_vars:
         pytest.skip(f"Missing environment variables: {', '.join(missing_vars)}")
 
@@ -189,7 +192,7 @@ async def test_local_parquet_loader():
             logger.info(f"[cyan]Processing batch {batch_count}[/cyan]")
             logger.info(f"Batch shape: {batch.shape}")
 
-            # Decode and log sample from batch
+            # Decode and log a sample from batch
             for i, sequence in enumerate(batch):
                 tokens = sequence[sequence != tokenizer.pad_token_id].tolist()
                 text = tokenizer.decode(tokens)
@@ -206,7 +209,8 @@ async def test_local_parquet_loader():
         # Verification
         assert batch_count > 0, "No batches were produced by the R2DatasetLoader"
         logger.info(
-            f"[green]Test completed successfully. Processed {batch_count} batches ({T() - start_time:.2f}s)[/green]"
+            f"[green]Test completed successfully. Processed {batch_count} batches "
+            f"({T() - start_time:.2f}s)[/green]"
         )
 
     except Exception as e:

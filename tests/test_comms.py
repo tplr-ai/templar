@@ -5,6 +5,19 @@ import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from dataclasses import dataclass
 
+# 1. Set all required environment variables BEFORE importing tplr
+os.environ.setdefault("R2_GRADIENTS_ACCOUNT_ID", "test_account")
+os.environ.setdefault("R2_GRADIENTS_BUCKET_NAME", "test-bucket")
+os.environ.setdefault("R2_GRADIENTS_READ_ACCESS_KEY_ID", "test_read_key")
+os.environ.setdefault("R2_GRADIENTS_READ_SECRET_ACCESS_KEY", "test_read_secret")
+os.environ.setdefault("R2_GRADIENTS_WRITE_ACCESS_KEY_ID", "test_write_key")
+os.environ.setdefault("R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY", "test_write_secret")
+os.environ.setdefault("R2_DATASET_ACCOUNT_ID", "test_dataset_account")
+os.environ.setdefault("R2_DATASET_BUCKET_NAME", "test-dataset-bucket")
+os.environ.setdefault("R2_DATASET_READ_ACCESS_KEY_ID", "test_dataset_read_access")
+os.environ.setdefault("R2_DATASET_READ_SECRET_ACCESS_KEY", "test_dataset_read_secret")
+
+# 2. If you want to SKIP if the environment is truly not set, check right here:
 REQUIRED_VARS = [
     "R2_GRADIENTS_ACCOUNT_ID",
     "R2_GRADIENTS_BUCKET_NAME",

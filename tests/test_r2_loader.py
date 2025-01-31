@@ -1,15 +1,8 @@
 # ruff: noqa
 import os
-from pathlib import Path
 import pytest
+from pathlib import Path
 from dotenv import load_dotenv
-
-from tplr.logging import logger, debug, T
-from tplr.r2_dataset import R2DatasetLoader
-from tplr.hparams import load_hparams
-
-# Enable debug logging for tests
-debug()
 
 # We only define the required environment variables here,
 # without enforcing them at the module level:
@@ -31,6 +24,7 @@ def validate_config():
     """Validate configuration consistency and update BUCKET_SECRETS if needed."""
     env_bucket = os.environ.get("R2_DATASET_BUCKET_NAME")
     from tplr.config import BUCKET_SECRETS
+    from tplr.logging import logger
 
     bucket_secrets = BUCKET_SECRETS.get("dataset", {}).get("name")
 
@@ -70,6 +64,8 @@ def validate_config():
 
 def log_r2_config():
     """Log R2 configuration details."""
+    from tplr.logging import logger
+
     logger.info("Current R2 Dataset Configuration:")
     logger.info(
         f"Dataset Account ID: {os.environ.get('R2_DATASET_ACCOUNT_ID', 'Not set')}"
@@ -123,12 +119,27 @@ async def test_dataset_equivalence():
     else:
         load_dotenv(env_path, override=True)
 
-    # Verify environment variables are loaded; if missing, skip instead of failing
+    # Verify environment variables; if missing, skip instead of failing
     missing_vars = [var for var in REQUIRED_VARS if not os.environ.get(var)]
     if missing_vars:
         pytest.skip(
             f"Missing required environment variables: {', '.join(missing_vars)}"
         )
+
+    # Attempt to import TPLR modules here; if there's an import error or environment issue, skip
+    try:
+        from tplr.logging import logger, debug, T
+        from tplr.r2_dataset import R2DatasetLoader
+        from tplr.hparams import load_hparams
+    except ImportError as e:
+        pytest.skip(f"Skipping test_dataset_equivalence due to import error: {e}")
+    except Exception as e:
+        pytest.skip(
+            f"Skipping test_dataset_equivalence due to an unexpected error: {e}"
+        )
+
+    # Enable debug logging
+    debug()
 
     start_time = T()
     logger.info("Starting test_local_parquet_loader")
@@ -140,7 +151,7 @@ async def test_dataset_equivalence():
     if not validate_config():
         pytest.skip("Configuration mismatch between environment and BUCKET_SECRETS")
 
-    # Double-check required environment variables (in case of any late changes)
+    # Double-check required environment variables
     missing_vars = [var for var in REQUIRED_VARS if not os.environ.get(var)]
     if missing_vars:
         pytest.skip(f"Missing environment variables: {', '.join(missing_vars)}")

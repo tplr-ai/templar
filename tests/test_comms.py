@@ -38,7 +38,6 @@ class Bucket:
     secret_access_key: str
 
 
-# Mock the config module
 @pytest.fixture(autouse=True)
 def mock_config():
     with (
@@ -57,7 +56,17 @@ def mock_config():
                         "secret_access_key": "test_write_secret",
                     },
                 },
-                "dataset": {"bucket_name": "test-dataset-bucket"},
+                "dataset": {
+                    # We'll match the environment we just set
+                    "account_id": "test_dataset_account",
+                    "bucket_name": "test-dataset-bucket",
+                    "credentials": {
+                        "read": {
+                            "access_key_id": "test_dataset_read_access",
+                            "secret_access_key": "test_dataset_read_secret",
+                        }
+                    },
+                },
             },
         ),
         patch("tplr.config.client_config", {}),

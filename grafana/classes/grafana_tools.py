@@ -64,7 +64,7 @@ class Grafana:
         )
 
         self.bucket = self.comms.get_own_bucket()
-        self.comms.try_commit(self.wallet, self.bucket)
+        # self.comms.try_commit(self.wallet, self.bucket) # is it necessary?
         self.comms.fetch_commitments()
 
         # Init state params
@@ -245,8 +245,8 @@ class Grafana:
             "dividends": self.metagraph.dividends,
             "block": self.metagraph.block,
             "active": self.metagraph.active,
-            "hotkey": self.metagraph.hotkey,
-            "coldkey": self.metagraph.coldkey,
+            "hotkeys": self.metagraph.hotkeys,
+            "coldkeys": self.metagraph.coldkeys,
         }
 
         return metagraph_info

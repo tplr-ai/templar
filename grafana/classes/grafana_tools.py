@@ -233,6 +233,7 @@ class Grafana:
         self.metagraph.sync()  # Synchronize the metagraph to fetch the latest state
 
         # Retrieve the required metagraph attributes
+        tplr.logger.info(f"\n{'-' * 20} metagraph: {self.metagraph} {'-' * 20}")
         metagraph_info = {
             "emission": self.metagraph.emission,
             "incentive": self.metagraph.incentive,
@@ -244,6 +245,8 @@ class Grafana:
             "dividends": self.metagraph.dividends,
             "block": self.metagraph.block,
             "active": self.metagraph.active,
+            "hotkey": self.metagraph.hotkey,
+            "coldkey": self.metagraph.coldkey,
         }
 
         return metagraph_info

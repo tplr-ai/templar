@@ -83,18 +83,18 @@ def insert_active_miners(window_id, active_miners):
 
 def sync_neurons(metagraph_info):
     tplr.logger.info(f"\n{'-' * 20} metagraph_info: {metagraph_info} {'-' * 20}")
-    for item in metagraph_info:
-        tplr.logger.info(f"\n{'-' * 20} metagraph item: {item} {'-' * 20}")
-        neuron = Neuron.query.filter_by(uid=item.uid).first()
+    for stake, uid in enumerate(metagraph_info["stake"]):
+        tplr.logger.info(f"\n uid: {uid}, stake: {stake}")
+        neuron = Neuron.query.filter_by(uid=uid).first()
         if neuron:
-            neuron.coldkey = item.coldkey
-            neuron.hotkey = item.hotkey
+            neuron.hotkey = metagraph_info["hotkey"][uid]
+            neuron.coldkey = metagraph_info["coldkey"][uid]
         else:
             new_neuron = Neuron(
-                uid=item.uid,
-                hotkey=item.hotkey,
-                coldkey=item.coldkey,
-                type=item.stake>=1.024e3
+                uid=uid,
+                hotkey=metagraph_info["hotkey"][uid],
+                coldkey=metagraph_info["coldkey"][uid],
+                type=stake>=1.024e3
             )
             # Add the new record to the session
             db.session.add(new_neuron)      

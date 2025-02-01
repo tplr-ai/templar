@@ -1,20 +1,19 @@
 # System Requirements
 
-You will need to make sure you have the bandwidth. 17.1 TB of data (as of 1/31/2025) will be transferred through your machine but NOT be store locally. 
-The higher the internet speed and more workers/cores you can throw into the process the fast the dataset will be finished. 
-Consider that this process will take 12 or more hours so use screen/tmux accordingly.
-Re-run download command for process to verify files and pick up where it left off.
+You will need to make sure you have adequate bandwidth. 17.1 TB of data (as of 1/31/2025) will be transferred through your machine but NOT be stored locally. The higher the internet speed and more workers/cores you can throw into the process, the faster the dataset will be finished. Consider that this process will take 12 or more hours, so use screen/tmux accordingly. Re-run the transfer command for the process to verify the files and pick up where it left off.
 
 ## Recommend workhorse:
 
-Network: 1gbps+ 
-Local Storage: 100gb 
-RAM: 4 gb+ (process not memory intensive) 
-Cores: 8+ estimated download time: 12–18 hrs
+Network: 1gbps+   
+Local Storage: 100gb   
+RAM: 4 GB+ (this process is not memory intensive)   
+Cores: 8+   
+Estimated Download Time: 12–18 hours
 
 ## Instructions
 
 ### r2 bucket dataset population
+
 ```bash
 # clone repo
 git clone https://github.com/distributedstatemachine/HuggingFaceModelDownloader
@@ -54,6 +53,7 @@ go run main.go -d "HuggingFaceFW/fineweb-edu-score-2" --r2 --skip-local -c $CPUC
 ```
 
 ### final config for shard and metadata files
+
 ```bash
 # Return to the templar repo
 cd ~/templar
@@ -77,6 +77,3 @@ dataset bucket top level view
 
 dataset folder
 ![image](https://github.com/user-attachments/assets/d9bd953d-c0a8-4e2a-ab18-79f27d60a12d)
-
-
-

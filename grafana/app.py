@@ -89,6 +89,7 @@ def insert_run_metadata(window_id, avg_window_duration, gradient_retention):
     db.session.add(new_run_metadata)
 
 def insert_active_miners(window_id, active_miners, error_miners):    
+    tplr.logger.info(f"\n window_id: {window_id}")
     tplr.logger.info(f"\n active_miners: {active_miners}, error_miners: {error_miners}")
     # Create a new active miners record
     new_active_miners = ActiveMiners(
@@ -115,6 +116,7 @@ def sync_neurons(metagraph_info):
             )
             # Add the new record to the session
             db.session.add(new_neuron)
+    tplr.logger.info(f"\nSynced neurons")
     db.session.commit()
     # Consider to add tbl_neuron_third_party table
 
@@ -191,7 +193,7 @@ async def run_grafana():
                 tplr.logger.info(f"\nUpdated version {version}")
             # Insert a new window
             window_id = insert_window(step_window, grafana.global_step, grafana.hparams.learning_rate)
-            tplr.logger.info(f"\nInserted a new window {step_window}")
+            tplr.logger.info(f"\nInserted a new window {step_window}, window_id {window_id}")
             # Insert a run metadata
             insert_run_metadata(window_id, grafana.hparams.blocks_per_window, 100)
             tplr.logger.info(f"\nInserted a run metadata {step_window}")

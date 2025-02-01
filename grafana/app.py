@@ -72,8 +72,9 @@ def insert_window(window_number, global_step, learning_rate):
         learning_rate=learning_rate
     )
 
-    # Add the new record to the session
+    # Add and commit the new record
     db.session.add(new_window_info)
+    db.session.flush()  # ✅ Assigns ID without committing
 
     return new_window_info.id
 
@@ -116,7 +117,7 @@ def sync_neurons(metagraph_info):
             )
             # Add the new record to the session
             db.session.add(new_neuron)
-    tplr.logger.info(f"\nSynced neurons")
+    tplr.logger.info(f"\nSynchronized neurons")
     db.session.commit()
     # Consider to add tbl_neuron_third_party table
 

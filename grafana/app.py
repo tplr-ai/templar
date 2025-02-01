@@ -178,7 +178,7 @@ async def run_grafana():
             tplr.logger.info(f"\nInserted a run metadata {step_window}")
             # Insert active miners
             active_miners = grafana.get_active_miners(step_window)
-            insert_active_miners(window_id, active_miners.to_comma_string())
+            insert_active_miners(window_id, active_miners)
             tplr.logger.info(f"\nInserted active miners {step_window}")
 
             # Insert validator eval info & eval info detail

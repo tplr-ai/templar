@@ -195,6 +195,9 @@ class Validator:
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
 
+        # binary moving averages
+        self.binary_moving_averages = {}
+
     async def run(self):
         # Load Peers
         if not self.config.peers:
@@ -648,11 +651,11 @@ class Validator:
                 # Calculate final score incorporating both metrics
                 final_score = score * normalized_binary_avg
             
-                self.evaluated_uids.add(final_score)
+                self.evaluated_uids.add(eval_uid)
 
-                self.scores[eval_uid] = score
+                self.scores[eval_uid] = final_score
                 # Ensure moving average score is non-negative
-                self.moving_avg_scores[eval_uid] = max(self.hparams.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.hparams.ma_alpha) * score, 0.0)
+                self.moving_avg_scores[eval_uid] = max(self.hparams.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.hparams.ma_alpha) * final_score, 0.0)
 
                 # 12. Calculate weights using temperature-based softmax
                 weights = torch.zeros_like(self.moving_avg_scores)

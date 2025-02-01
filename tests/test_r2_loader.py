@@ -39,6 +39,8 @@ from transformers import AutoTokenizer
 from tplr.logging import logger, debug, T
 from tplr.r2_dataset import R2DatasetLoader
 from tplr.hparams import load_hparams
+import torch
+import random
 
 
 # Enable debug logging for tests
@@ -199,4 +201,94 @@ async def test_large_page_offset_handling():
 
     logger.info(
         f"[green]All offset tests completed successfully ({T() - start_time:.2f}s)[/green]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_seed_consistency():
+    """
+    Test that R2DatasetLoader consistently returns the same pages for the same seed
+    and different pages for different seeds.
+    """
+    start_time = T()
+    logger.info("Starting test_seed_consistency")
+
+    # Load tokenizer
+    hparams = load_hparams()
+    tokenizer = hparams.tokenizer
+
+    # Test parameters
+    offset = 1000  # Arbitrary offset
+    n_pages = 2
+    batch_size = 2
+    sequence_length = 128
+
+    # Test same seed returns same pages
+    seed1 = 42
+    seed2 = 42
+    seed3 = 43  # Different seed
+
+    # Get pages with same seed
+    pages1 = await R2DatasetLoader.next_pages(
+        offset=offset, n_pages=n_pages, seed=seed1
+    )
+    pages2 = await R2DatasetLoader.next_pages(
+        offset=offset, n_pages=n_pages, seed=seed2
+    )
+
+    # Get pages with different seed
+    pages3 = await R2DatasetLoader.next_pages(
+        offset=offset, n_pages=n_pages, seed=seed3
+    )
+
+    # Test same seed produces same pages
+    assert pages1 == pages2, "Same seed should produce identical pages"
+
+    # Test different seeds produce different pages
+    assert pages1 != pages3, "Different seeds should produce different pages"
+
+    # Test page content consistency
+    loader1 = await R2DatasetLoader.create(
+        batch_size=batch_size,
+        sequence_length=sequence_length,
+        pages_info=pages1,
+        tokenizer=tokenizer,
+        pack_samples=False,
+    )
+
+    loader2 = await R2DatasetLoader.create(
+        batch_size=batch_size,
+        sequence_length=sequence_length,
+        pages_info=pages2,
+        tokenizer=tokenizer,
+        pack_samples=False,
+    )
+
+    # Get first batch from each loader and convert to tensors
+    batch1 = torch.tensor(next(iter(loader1)))
+    batch2 = torch.tensor(next(iter(loader2)))
+
+    # Test content consistency
+    assert torch.equal(batch1, batch2), (
+        "Same seed should produce identical batch content"
+    )
+
+    # Test seed range
+    seeds = [random.randint(0, 10000) for _ in range(10)]
+    unique_pages = set()
+
+    for seed in seeds:
+        pages = await R2DatasetLoader.next_pages(
+            offset=offset, n_pages=n_pages, seed=seed
+        )
+        page_tuple = tuple(
+            [(p[0], p[1]) for p in pages]
+        )  # Convert to tuple for hashing
+        unique_pages.add(page_tuple)
+
+    # Check if we got different pages for different seeds
+    assert len(unique_pages) > 1, "Random seeds should produce variety of pages"
+
+    logger.success(
+        f"[green]Seed consistency test completed successfully ({T() - start_time:.2f}s)[/green]"
     )

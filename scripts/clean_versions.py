@@ -2,6 +2,8 @@
 # The MIT License (MIT)
 # © 2024 templar.tech
 
+# ruff: noqa
+
 import os
 import sys
 import asyncio
@@ -38,7 +40,9 @@ async def cleanup_version():
 
     missing_vars = [var for var in required_vars if not os.environ.get(var)]
     if missing_vars:
-        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+        logger.error(
+            f"Missing required environment variables: {', '.join(missing_vars)}"
+        )
         sys.exit(1)
 
     # Get credentials from environment
@@ -73,7 +77,8 @@ async def cleanup_version():
                     filtered_objects = [
                         {"Key": obj["Key"]}
                         for obj in page["Contents"]
-                        if version_pattern in obj["Key"] and any(
+                        if version_pattern in obj["Key"]
+                        and any(
                             prefix in obj["Key"]
                             for prefix in ["checkpoint", "start", "gradient"]
                         )

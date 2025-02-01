@@ -35,6 +35,7 @@ class ActiveMiners(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     window_id = db.Column(db.Integer, db.ForeignKey('tbl_window_info.id'), nullable=False)
     active_miners = db.Column(db.PickleType, nullable=False)
+    error_miners = db.Column(db.PickleType, nullable=False)
 
 class Neuron(db.Model):
     __tablename__ = 'tbl_neuron'

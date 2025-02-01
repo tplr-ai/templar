@@ -84,7 +84,6 @@ def insert_active_miners(window_id, active_miners):
 
 def sync_neurons(metagraph_info):
     for uid, stake in enumerate(metagraph_info["stake"]):
-        tplr.logger.info(f"\n uid: {uid}, stake: {stake}")
         neuron = Neuron.query.filter_by(uid=uid).first()
         if neuron:
             neuron.hotkey = metagraph_info["hotkeys"][uid]
@@ -134,6 +133,7 @@ def insert_dummy_eval_info_detail(window_id):
 
 def insert_gradients(window_id, active_miners):
     for item in active_miners:
+        tplr.logger.info(f"\n item: {item}")
         # Create a new gradient record
         new_gradient = Gradients(
             window_id=window_id,
@@ -177,7 +177,7 @@ async def run_grafana():
             insert_run_metadata(window_id, grafana.hparams.blocks_per_window, 100)
             tplr.logger.info(f"\nInserted a run metadata {step_window}")
             # Insert active miners
-            active_miners = grafana.get_active_miners(step_window)
+            active_miners, error_miners = await grafana.get_active_miners(step_window)
             insert_active_miners(window_id, active_miners)
             tplr.logger.info(f"\nInserted active miners {step_window}")
 

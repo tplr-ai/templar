@@ -1,5 +1,8 @@
+import re
 import sys
 import os
+
+import requests
 
 # Add the src directory to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
@@ -32,6 +35,20 @@ from classes.models import *
 def get_current_version_record():
     version = Version.get_last()
     return version
+
+def get_tplr_version():
+    url = "https://raw.githubusercontent.com/tplr-ai/templar/main/src/tplr/__init__.py"
+
+    response = requests.get(url)
+
+    if response.status_code == 200:
+        match = re.search(r'__version__ = ["\']([^"\']+)["\']', response.text)
+        if match:
+            return match.group(1)  # ✅ Extracts version number
+        else:
+            print("Version not found.")
+    else:
+        print("Failed to fetch file.")
 
 def update_current_version(current_version, old_version_record):
     # Create a new version record
@@ -166,10 +183,11 @@ async def run_grafana():
             tplr.logger.info(f"\n{'-' * 20} Window: {step_window} {'-' * 20}")
             grafana.comms.update_peers_with_buckets()
             # Check a version
+            version = get_tplr_version()
             version_record = get_current_version_record()
-            if not version_record or __version__ != version_record.version:
-                update_current_version(__version__, version_record)
-                tplr.logger.info(f"\nUpdated version {__version__}")
+            if not version_record or version != version_record.version:
+                update_current_version(version, version_record)
+                tplr.logger.info(f"\nUpdated version {version}")
             # Insert a new window
             window_id = insert_window(step_window, grafana.global_step, grafana.hparams.learning_rate)
             tplr.logger.info(f"\nInserted a new window {step_window}")

@@ -195,6 +195,9 @@ class Validator:
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
 
+        # Add binary moving averages
+        self.binary_moving_averages = {}
+
     async def run(self):
         # Load Peers
         if not self.config.peers:
@@ -563,29 +566,31 @@ class Validator:
                 loss_after_random = loss_after / len(sampled_indices) if sampled_indices else 0
                 tplr.logger.info(f'Loss after (random data): {loss_after_random}')
 
-                # Calculate improvements and update scores
+                # Calculate original performance score (gradient quality)
+                score = (loss_before_own - loss_after_own) / loss_before_own if loss_before_own > 0 else 0
+                
+                # Calculate binary indicator for overfitting detection
                 improvement_own = (loss_before_own - loss_after_own) / loss_before_own if loss_before_own > 0 else 0
                 improvement_random = (loss_before_random - loss_after_random) / loss_before_random if loss_before_random > 0 else 0
-                
-                # Binary indicator: 1 if gradient works better on own data, -1 if better on random data
                 binary_indicator = 1 if improvement_own > improvement_random else -1
                 
-                # Update moving average score with binary indicator
-                alpha = 0.05  # Weight for most recent value
+                # Update binary indicator moving average (separate from score)
+                if eval_uid not in self.binary_moving_averages:
+                    self.binary_moving_averages[eval_uid] = 0.0
+                
+                self.binary_moving_averages[eval_uid] = (1 - self.hparams.ma_alpha) * self.binary_moving_averages[eval_uid] + self.hparams.ma_alpha * binary_indicator
+                
+                # Normalize binary moving average to [0,1] range
+                normalized_binary_avg = (self.binary_moving_averages[eval_uid] + 1) / 2
+                
+                # Calculate final score incorporating both metrics
+                final_score = score * normalized_binary_avg
+                
+                # Update the moving average score with the final_score
                 self.moving_avg_scores[eval_uid] = max(
-                    (1 - alpha) * self.moving_avg_scores[eval_uid] + alpha * binary_indicator,
+                    (1 - self.hparams.ma_alpha) * self.moving_avg_scores[eval_uid] + self.hparams.ma_alpha * final_score,
                     0.0  # Ensure non-negative
                 )
-
-                # Restore original model state
-                for n, p in self.model.named_parameters():
-                    p.data.copy_(original_params[n])
-
-                # Calculate score based on improvements
-                score = (loss_before_own - loss_after_own) / loss_before_own if loss_before_own > 0 else 0
-
-                # Get valid score indices
-                valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)
 
                 # Calculate weights based on moving averages
                 weights = torch.zeros_like(self.moving_avg_scores)
@@ -595,7 +600,18 @@ class Validator:
                 if positive_mask.any():
                     weights[positive_mask] = self.moving_avg_scores[positive_mask] / self.moving_avg_scores[positive_mask].sum()
 
-                # Log Validator Metrics
+                # Set weights periodically
+                if self.sync_window % self.hparams.windows_per_weights == 0:
+                    self.subtensor.set_weights(
+                        wallet=self.wallet,
+                        netuid=self.config.netuid,
+                        uids=self.metagraph.uids,
+                        weights=weights,
+                        wait_for_inclusion=False,
+                        wait_for_finalization=False,
+                    )
+
+                # Log metrics (keeping existing and adding new)
                 self.wandb.log({
                     "validator/loss/before": loss_before_own,
                     "validator/loss/after": loss_after_own,
@@ -605,22 +621,25 @@ class Validator:
                     "validator/network/step": self.global_step,
                     "validator/network/evaluated_uids": len(self.evaluated_uids),
                     "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
-                    "validator/network/active_miners": len(valid_score_indices),
-                    "validator/scores/mean": self.scores[valid_score_indices].mean().item(),
-                    "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item(),
-                    # Additional metrics for new evaluation mechanism
+                    "validator/network/active_miners": len(positive_mask.nonzero().view(-1)),
+                    "validator/scores/mean": self.scores[positive_mask.nonzero().view(-1)].mean().item(),
+                    "validator/moving_avg_scores/mean": self.moving_avg_scores[positive_mask.nonzero().view(-1)].mean().item(),
+                    # Additional metrics for overfitting detection
                     f"validator/improvements/{eval_uid}/own": improvement_own,
                     f"validator/improvements/{eval_uid}/random": improvement_random,
-                    f"validator/binary_indicator/{eval_uid}": binary_indicator,
+                    f"validator/binary_indicator/{eval_uid}/raw": binary_indicator,
+                    f"validator/binary_indicator/{eval_uid}/moving_avg": self.binary_moving_averages[eval_uid],
+                    f"validator/score/{eval_uid}/raw": score,
+                    f"validator/score/{eval_uid}/final": final_score,
                 }, step=self.global_step)
 
                 # Log per-uid metrics
-                for uid_i in valid_score_indices:
+                for uid_i in positive_mask.nonzero().view(-1):
                     uid = uid_i.item()
                     self.wandb.log({
-                        f"validator/scores/{uid}": self.scores[uid_i].item(),
-                        f"validator/moving_avg_scores/{uid}": self.moving_avg_scores[uid_i].item(),
-                        f"validator/weights/{uid}": weights[uid_i].item(),
+                        f"validator/scores/{uid}": self.scores[uid].item(),
+                        f"validator/moving_avg_scores/{uid}": self.moving_avg_scores[uid].item(),
+                        f"validator/weights/{uid}": weights[uid].item(),
                     }, step=self.global_step)
             else:
                 tplr.logger.info(f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%.")
@@ -755,9 +774,9 @@ class Validator:
                     "validator/network/step": self.global_step,
                     "validator/network/evaluated_uids": len(self.evaluated_uids),
                     "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
-                    "validator/network/active_miners": len(valid_score_indices),
-                    "validator/scores/mean": self.scores[valid_score_indices].mean().item(),
-                    "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item()
+                    "validator/network/active_miners": len(positive_mask.nonzero().view(-1)),
+                    "validator/scores/mean": self.scores[positive_mask.nonzero().view(-1)].mean().item(),
+                    "validator/moving_avg_scores/mean": self.moving_avg_scores[positive_mask.nonzero().view(-1)].mean().item()
                 }, step=self.global_step)
             
             tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights')

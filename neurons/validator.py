@@ -653,6 +653,8 @@ class Validator:
             
                 self.evaluated_uids.add(eval_uid)
 
+                torch.cuda.empty_cache()
+
                 self.scores[eval_uid] = final_score
                 # Ensure moving average score is non-negative
                 self.moving_avg_scores[eval_uid] = max(self.hparams.ma_alpha * self.moving_avg_scores[eval_uid] + (1 - self.hparams.ma_alpha) * final_score, 0.0)
@@ -686,9 +688,6 @@ class Validator:
                     tplr.logger.info(f'  - Last score: {self.scores[uid]}')
                     tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')
                     tplr.logger.info(f'  - Weight: {weights[uid]:.4f}')
-
-                del loader, pages
-                torch.cuda.empty_cache()
 
                 # 14. Log wandb metrics
                 valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)

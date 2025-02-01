@@ -82,8 +82,10 @@ def insert_active_miners(window_id, active_miners):
     db.session.add(new_run_metadata)
 
 def sync_neurons(metagraph_info):
+    tplr.logger.info(f"\n{'-' * 20} metagraph_info: {metagraph_info} {'-' * 20}")
     for item in metagraph_info:
-        neuron = Neuron.get(uid=item.uid)
+        tplr.logger.info(f"\n{'-' * 20} metagraph item: {item} {'-' * 20}")
+        neuron = Neuron.query.filter_by(uid=item.uid).first()
         if neuron:
             neuron.coldkey = item.coldkey
             neuron.hotkey = item.hotkey

@@ -52,8 +52,8 @@ def upgrade():
     op.create_table('tbl_active_miners',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('window_id', sa.Integer(), nullable=False),
-    sa.Column('active_miners', sa.PickleType(), nullable=False),
-    sa.Column('error_miners', sa.PickleType(), nullable=False),
+    sa.Column('active_miners', sa.PickleType(), nullable=True),
+    sa.Column('error_miners', sa.PickleType(), nullable=True),
     sa.ForeignKeyConstraint(['window_id'], ['tbl_window_info.id'], ),
     sa.PrimaryKeyConstraint('id')
     )

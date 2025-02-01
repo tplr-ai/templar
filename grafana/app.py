@@ -82,9 +82,9 @@ def insert_active_miners(window_id, active_miners):
     db.session.add(new_run_metadata)
 
 def sync_neurons(metagraph_info):
-    for stake, uid in enumerate(metagraph_info["stake"]):
+    for uid, stake in enumerate(metagraph_info["stake"]):
         tplr.logger.info(f"\n uid: {uid}, stake: {stake}")
-        tplr.logger.info(f"\n{'-' * 20} hotkeys: {metagraph_info['hotkeys']} {'-' * 20}")
+        tplr.logger.info(f"\n{'-' * 20} hotkey: {metagraph_info['hotkeys'][uid]} {'-' * 20}")
         neuron = Neuron.query.filter_by(uid=uid).first()
         if neuron:
             neuron.hotkey = metagraph_info["hotkeys"][uid]

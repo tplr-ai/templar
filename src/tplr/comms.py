@@ -1254,7 +1254,7 @@ class Comms(ChainManager):
             pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{__version__}\.pt$")
 
             response = await s3_client.list_objects_v2(
-                Bucket=bucket.name, Prefix="checkpoint", MaxKeys=50
+                Bucket=bucket.name, Prefix="checkpoint", MaxKeys=1000
             )
 
             if not response.get("Contents"):
@@ -1443,7 +1443,7 @@ class Comms(ChainManager):
 
             tplr.logger.info(
                 f"Finished catch-up. Final global_step={global_step}, "
-                f"optimizer steps={optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "  # type: ignore
+                f"optimizer steps={optimizer.state_dict()['state'][0]['step']}, "  # Fixed: Access step directly
                 f"scheduler last_epoch={scheduler.last_epoch}"
             )
             return True, momentum, global_step, optimizer, scheduler

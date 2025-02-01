@@ -39,7 +39,7 @@ class ActiveMiners(db.Model):
 class Neuron(db.Model):
     __tablename__ = 'tbl_neuron'
     id = db.Column(db.Integer, primary_key=True)
-    uid = db.Column(db.String(100), nullable=False, unique=True)
+    uid = db.Column(db.Integer, nullable=False, unique=True)
     hotkey = db.Column(db.String(100), nullable=False)
     coldkey = db.Column(db.String(100), nullable=False)
     type = db.Column(db.String(50), nullable=False)

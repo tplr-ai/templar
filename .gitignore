@@ -23,6 +23,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.coverage
 
 # UV specific
 .uv/
@@ -70,4 +71,5 @@ TODO.md
 good/
 rogue/
 test_output.txt
+
 

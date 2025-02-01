@@ -72,20 +72,19 @@ def insert_run_metadata(window_id, avg_window_duration, gradient_retention):
     db.session.add(new_run_metadata)
 
 def insert_active_miners(window_id, active_miners):    
+    tplr.logger.info(f"\n active_miners: {active_miners}")
     # Create a new active miners record
-    new_run_metadata = ActiveMiners(
+    new_active_miners = ActiveMiners(
         window_id=window_id,
         active_miners=active_miners
     )
 
     # Add the new record to the session
-    db.session.add(new_run_metadata)
+    db.session.add(new_active_miners)
 
 def sync_neurons(metagraph_info):
     for uid, stake in enumerate(metagraph_info["stake"]):
         tplr.logger.info(f"\n uid: {uid}, stake: {stake}")
-        tplr.logger.info(f"\n hotkey: {metagraph_info['hotkeys'][uid]}")
-        tplr.logger.info(f"\n coldkey: {metagraph_info['coldkeys'][uid]}")
         neuron = Neuron.query.filter_by(uid=uid).first()
         if neuron:
             neuron.hotkey = metagraph_info["hotkeys"][uid]
@@ -98,7 +97,8 @@ def sync_neurons(metagraph_info):
                 type=bool(stake>=1.024e3)
             )
             # Add the new record to the session
-            db.session.add(new_neuron)      
+            db.session.add(new_neuron)
+    db.session.commit()
     # Consider to add tbl_neuron_third_party table
 
 def insert_dummy_validator_eval_info(window_id):
@@ -177,7 +177,7 @@ async def run_grafana():
             insert_run_metadata(window_id, grafana.hparams.blocks_per_window, 100)
             tplr.logger.info(f"\nInserted a run metadata {step_window}")
             # Insert active miners
-            active_miners, _ = grafana.get_active_miners(step_window)
+            active_miners = grafana.get_active_miners(step_window)
             insert_active_miners(window_id, active_miners.to_comma_string())
             tplr.logger.info(f"\nInserted active miners {step_window}")
 

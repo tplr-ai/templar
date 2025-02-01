@@ -457,13 +457,7 @@ class Validator:
                             )
                         ).to(self.config.device)
 
-                        if p.grad is None:
-                            p.grad = grad
-                        else:
-                            p.grad.copy_(grad)
-                        p.grad.sign_()
-
-                        p.data.sub_(grad, alpha = self.scheduler.get_last_lr()[0] ) 
+                        p.data.sub_(grad.sign(), alpha = self.scheduler.get_last_lr()[0] )
 
                 # 10. Compute loss after gradient application        
                 loss_after_own = 0.0
@@ -578,13 +572,7 @@ class Validator:
                             )
                         ).to(self.config.device)
 
-                        if p.grad is None:
-                            p.grad = grad
-                        else:
-                            p.grad.copy_(grad)
-                        p.grad.sign_()
-
-                        p.data.sub_(grad, alpha = self.scheduler.get_last_lr()[0] ) 
+                        p.data.sub_(grad.sign(), alpha = self.scheduler.get_last_lr()[0] )
 
                 # 10. Compute loss after gradient application        
                 loss_after_random = 0.0
@@ -688,6 +676,9 @@ class Validator:
                     tplr.logger.info(f'  - Last score: {self.scores[uid]}')
                     tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')
                     tplr.logger.info(f'  - Weight: {weights[uid]:.4f}')
+                    tplr.logger.info(f'  - Last Binary score: {self.binary[uid]:.4f}')
+                    tplr.logger.info(f'  - Binary moving avg: {self.binary_moving_averages[uid]:.4f}') 
+                    tplr.logger.info(f'  - Normalised Binary moving avg: {self.normalized_binary_avg[uid]:.4f}')
 
                 # 14. Log wandb metrics
                 valid_score_indices = torch.nonzero(self.scores > 0).squeeze().view(-1)
@@ -699,6 +690,7 @@ class Validator:
                         f"validator/weights/{uid}": weights[uid_i].item(),
                         f"validator/binary_scores/{uid}": binary_indicator,
                         f"validator/binary_moving_avg/{uid}": self.binary_moving_averages[uid],
+                        f"validator/normalised_binary_moving_avg/{uid}": self.normalized_binary_avg[uid],
                     }, step=self.global_step)
                 self.wandb.log({
                     "validator/loss/own/before": loss_before_own,
@@ -712,8 +704,6 @@ class Validator:
                     "validator/network/evaluated_uids": len(self.evaluated_uids),
                     "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
                     "validator/network/active_miners": len(valid_score_indices),
-                    "validator/scores/mean": self.scores[valid_score_indices].mean().item(),
-                    "validator/moving_avg_scores/mean": self.moving_avg_scores[valid_score_indices].mean().item()
                 }, step=self.global_step)
                 tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights')
             else:
@@ -818,11 +808,7 @@ class Validator:
                         # Store pre-sign gradient in momentum
                         self.momentum[n] = new_grad.clone()
                         
-                        if p.grad is None:
-                            p.grad = new_grad
-                        else:
-                            p.grad.copy_(new_grad)
-                        p.grad.sign_()
+                        p.data.sub_(grad.sign(), alpha = self.scheduler.get_last_lr()[0] )
                     else:
                         tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
             tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - update_start)} Updated model')

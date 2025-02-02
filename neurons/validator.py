@@ -635,13 +635,13 @@ class Validator:
                 self.binary_moving_averages[eval_uid] = (1 - self.hparams.binary_score_ma_alpha) * self.binary_moving_averages[eval_uid] + self.hparams.binary_score_ma_alpha *self.binary_indicator_scores[eval_uid]
                 
                 # Normalize binary moving average to [0,1] range
-                self.normalized_binary_avg[eval_uid] = (self.binary_moving_averages[eval_uid]) / 2
+                self.normalised_binary_moving_averages[eval_uid] = (self.binary_moving_averages[eval_uid]) / 2
                 
                 # Calculate final score incorporating both metrics
-                final_score = self.gradient_scores[eval_uid] * self.normalized_binary_avg[eval_uid]
+                final_score = self.gradient_scores[eval_uid] * self.normalised_binary_moving_averages[eval_uid]
 
                 # Ensure moving average score is non-negative
-                self.gradient_moving_avg_scores[eval_uid] = max(self.hparams.ma_alpha * self.gradient_moving_avg_scores[eval_uid] + (1 - self.hparams.ma_alpha) * final_score, 0.0)
+                self.final_moving_avg_scores[eval_uid] = max(self.hparams.final_score_ma_alpha * self.final_moving_avg_scores[eval_uid] + (1 - self.hparams.final_score_ma_alpha) * final_score, 0.0)
             
                 self.evaluated_uids.add(eval_uid)
 

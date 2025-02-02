@@ -313,8 +313,8 @@ class Validator:
             # Process newly inactive peers
             for uid in newly_inactive:
                 if uid not in self.inactive_scores:
-                    self.inactive_scores[uid] = (current_window, self.moving_avg_scores[uid].item())
-                    tplr.logger.info(f"UID {uid} became inactive at window {current_window} with score {self.moving_avg_scores[uid].item():.4f}")
+                    self.inactive_scores[uid] = (current_window, self.final_moving_avg_scores[uid].item())
+                    tplr.logger.info(f"UID {uid} became inactive at window {current_window} with score {self.final_moving_avg_scores[uid].item():.4f}")
             
             # Apply penalties to all inactive peers
             for uid, (inactive_since, _) in list(self.inactive_scores.items()):
@@ -647,17 +647,17 @@ class Validator:
 
 
                 # 12. Calculate weights using min power norm
-                weights = torch.zeros_like(self.moving_avg_scores)
-                evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
+                weights = torch.zeros_like(self.final_moving_avg_scores)
+                evaluated_mask = torch.zeros_like(self.final_moving_avg_scores, dtype=torch.bool)
                 evaluated_mask[list(self.evaluated_uids)] = True
 
                 #  TODO: We should remove this , since scores cant be negative anymore
-                positive_mask = (self.moving_avg_scores > 0) & evaluated_mask
+                positive_mask = (self.final_moving_avg_scores > 0) & evaluated_mask
                 
                 if positive_mask.any():
                     # Apply normalization to all positive scores at once
                     weights[positive_mask] = min_power_normalization(
-                        self.moving_avg_scores[positive_mask], 
+                        self.final_moving_avg_scores[positive_mask], 
                         power=self.hparams.power_normalisation
                     )
                     
@@ -687,7 +687,7 @@ class Validator:
                     uid = uid_i.item()
                     self.wandb.log({
                         f"validator/scores/{uid}": self.scores[uid_i].item(),
-                        f"validator/moving_avg_scores/{uid}": self.moving_avg_scores[uid_i].item(),
+                        f"validator/final_moving_avg_scores/{uid}": self.final_moving_avg_scores[uid_i].item(),
                         f"validator/weights/{uid}": weights[uid_i].item(),
                         f"validator/binary_moving_avg/{uid}": self.binary_moving_averages[uid],
                     }, step=self.global_step)
@@ -709,25 +709,25 @@ class Validator:
             else:
                 tplr.logger.info(f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%.")
                 # Reduce the moving average score by 50%
-                old_score = self.moving_avg_scores[eval_uid].item()  # Get the actual value
-                self.moving_avg_scores[eval_uid] *= 0.5  # Apply 50% reduction
-                new_score = self.moving_avg_scores[eval_uid].item()  # Get new value for logging
+                old_score = self.final_moving_avg_scores[eval_uid].item()  # Get the actual value
+                self.final_moving_avg_scores[eval_uid] *= 0.5  # Apply 50% reduction
+                new_score = self.final_moving_avg_scores[eval_uid].item()  # Get new value for logging
                 tplr.logger.info(f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient.")
 
                 # Ensure the UID is included in evaluated_uids
                 self.evaluated_uids.add(eval_uid)
 
                 # Recalculate weights
-                weights = torch.zeros_like(self.moving_avg_scores)
-                evaluated_mask = torch.zeros_like(self.moving_avg_scores, dtype=torch.bool)
+                weights = torch.zeros_like(self.final_moving_avg_scores)
+                evaluated_mask = torch.zeros_like(self.final_moving_avg_scores, dtype=torch.bool)
                 evaluated_mask[list(self.evaluated_uids)] = True
 
-                positive_mask = (self.moving_avg_scores > 0) & evaluated_mask
+                positive_mask = (self.final_moving_avg_scores > 0) & evaluated_mask
 
                 if positive_mask.any():
                     # Apply normalization to all positive scores at once
                     weights[positive_mask] = min_power_normalization(
-                        self.moving_avg_scores[positive_mask], 
+                        self.final_moving_avg_scores[positive_mask], 
                         power=self.hparams.power_normalisation
                     )
                     
@@ -743,11 +743,11 @@ class Validator:
                 tplr.logger.info('Updated scores for evaluated UIDs after slashing:')
                 for uid in self.evaluated_uids:
                     tplr.logger.info(f'UID {uid}:')
-                    tplr.logger.info(f'  - Moving avg score: {self.moving_avg_scores[uid]:.4f}')
+                    tplr.logger.info(f'  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}')
 
                 # Optionally, log to WandB
                 self.wandb.log({
-                    f"validator/moving_avg_scores/{eval_uid}": self.moving_avg_scores[eval_uid].item(),
+                    f"validator/final_moving_avg_scores/{eval_uid}": self.final_moving_avg_scores[eval_uid].item(),
                     f"validator/weights/{eval_uid}": weights[eval_uid].item(),
                 }, step=self.global_step)
                 tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights')

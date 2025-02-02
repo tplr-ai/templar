@@ -11,7 +11,7 @@ lint:
 fix: lint
 
 test-run:
-    ./scripts/start.sh && pm2 log TM1
+    ./scripts/start.sh
 
 dev:
     uv pip install -e ".[dev]"

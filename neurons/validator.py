@@ -476,7 +476,7 @@ class Validator:
                     with torch.no_grad():
                         model_own_data_eval.eval()
                         # Reuse same batches and indices for consistent comparison
-                        for i, batch in enumerate(batches):
+                        for i, batch in enumerate(batches_own):
                             if i not in sampled_indices_own:
                                 continue
                                 
@@ -546,7 +546,7 @@ class Validator:
                         
                         tplr.logger.info(f"Evaluating {sample_size}/{total_batches_random} batches ({self.hparams.validator_sample_rate*100:.1f}%)")
                         
-                        for i, batch in enumerate(batches):
+                        for i, batch in enumerate(batches_random):
                             if i not in sampled_indices_random:
                                 continue
                                 
@@ -594,7 +594,7 @@ class Validator:
                     with torch.no_grad():
                         model_random_data_eval.eval()
                         # Reuse same batches and indices for consistent comparison
-                        for i, batch in enumerate(batches):
+                        for i, batch in enumerate(batches_random):
                             if i not in sampled_indices_random:
                                 continue
                                 

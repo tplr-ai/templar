@@ -180,7 +180,7 @@ class Miner:
 
         self.comms.commitments = self.comms.get_commitments_sync()
         self.comms.update_peers_with_buckets()
-        tplr.logger.info(f"Loaded commitments: {self.comms.commitments.keys()}")
+        tplr.logger.info("Loaded commitments")
 
         # Fetch start_window from highest stake validator
         self.start_window = await self.comms.get_start_window()

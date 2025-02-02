@@ -12,7 +12,7 @@
     "topk_compression": 32,
     "target_chunk": 64,
     "gradient_score_ma_alpha": 0.6,
-    "binary_score_ma_alpha": 0.95,
+    "binary_score_ma_alpha": 0.05,
     "final_score_ma_alpha": 0.95,
     "tokenizer_name": "togethercomputer/LLaMA-2-7B-32K",
     "hidden_size": 2048,

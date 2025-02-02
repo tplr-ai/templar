@@ -18,3 +18,6 @@ dev:
 
 test:
     uv run pytest -sv
+
+bistro:
+    ps aux | grep Bistro

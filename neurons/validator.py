@@ -212,6 +212,13 @@ class Validator:
 
 
     async def run(self):
+        # Start background block listener
+        self.loop = asyncio.get_running_loop()
+        self.listener = threading.Thread(
+            target=self.block_listener, 
+            args=(self.loop,), 
+            daemon=True
+        ).start()
         # Load Peers
         if not self.config.peers:
             self.peers = self.comms.peers
@@ -264,12 +271,8 @@ class Validator:
             self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
             self.model.to(self.config.device)
         # Start block listener
-        self.loop = asyncio.get_running_loop()
-        self.listener = threading.Thread(
-            target=self.block_listener, 
-            args=(self.loop,), 
-            daemon=True
-        ).start()
+        # self.loop = asyncio.get_running_loop()
+
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
 
@@ -418,30 +421,18 @@ class Validator:
 
                     with torch.no_grad():
                         model_own_data_eval.eval()
-                        # First pass to count batches and store them
-                        batches_own = []
-                        for batch in loader_own:
-                            batches_own.append(batch)
-                        
-                        total_batches_own = len(batches_own)
-                        sample_size_own = max(1, int(total_batches_own * self.hparams.validator_sample_rate))
-                        sampled_indices_own = random.sample(range(total_batches_own), sample_size_own)
-                        sampled_indices_own = sorted(sampled_indices_own)  # Sort for sequential access
-                        
-                        tplr.logger.info(f"Evaluating {sample_size_own}/{total_batches_own} batches ({self.hparams.validator_sample_rate*100:.1f}%)")
-                        
-                        for i, batch in enumerate(batches_own):
-                            if i not in sampled_indices_own:
-                                continue
-                                
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(model_own_data_eval.device)
-                            labels = input_ids.clone()
-                            labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                            outputs = model_own_data_eval(input_ids=input_ids, labels=labels)
-                            loss_before_own += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                        # Modified: only process the first 3 batches.
+                        for i, batch in enumerate(loader_own):
+                             if i >= 15:
+                                 break
+                             input_ids = torch.tensor(batch, dtype=torch.long).to(model_own_data_eval.device)
+                             labels = input_ids.clone()
+                             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                             outputs = model_own_data_eval(input_ids=input_ids, labels=labels)
+                             loss_before_own += outputs.loss.item()
+                             n_batches += 1
+                             del input_ids, labels, outputs
+                             torch.cuda.empty_cache()
 
                     self.loss_before_per_batch_own = loss_before_own / n_batches if n_batches > 0 else 0
                     tplr.logger.info(f'Loss before (own data): {self.loss_before_per_batch_own}')
@@ -473,26 +464,27 @@ class Validator:
                             p.data.sub_(grad.sign(), alpha = self.scheduler.get_last_lr()[0] )
 
                     # 10. Compute loss after gradient application        
+                    self.optimizer.zero_grad()
+                    model_own_data_eval.zero_grad()
                     loss_after_own = 0.0
                     n_batches = 0
                     with torch.no_grad():
                         model_own_data_eval.eval()
-                        # Reuse same batches and indices for consistent comparison
-                        for i, batch in enumerate(batches_own):
-                            if i not in sampled_indices_own:
-                                continue
-                                
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(model_own_data_eval.device)
-                            labels = input_ids.clone()
-                            labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                            outputs = model_own_data_eval(input_ids=input_ids, labels=labels)
-                            loss_after_own += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                        # Modified: only process the first 3 batches.
+                        for i, batch in enumerate(loader_own):
+                             if i >= 15:
+                                 break
+                             input_ids = torch.tensor(batch, dtype=torch.long).to(model_own_data_eval.device)
+                             labels = input_ids.clone()
+                             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                             outputs = model_own_data_eval(input_ids=input_ids, labels=labels)
+                             loss_after_own += outputs.loss.item()
+                             n_batches += 1
+                             del input_ids, labels, outputs
+                             torch.cuda.empty_cache()
                     
                     # Clean up stored batches
-                    del batches_own, pages_own, loader_own, model_own_data_eval
+                    del  pages_own, loader_own, model_own_data_eval
                     torch.cuda.empty_cache()
 
 
@@ -535,30 +527,18 @@ class Validator:
 
                     with torch.no_grad():
                         model_random_data_eval.eval()
-                        # First pass to count batches and store them
-                        batches_random = []
-                        for batch in loader_random:
-                            batches_random.append(batch)
-                        
-                        total_batches_random = len(batches_random)
-                        sample_size_random = max(1, int(total_batches_random * self.hparams.validator_sample_rate))
-                        sampled_indices_random = random.sample(range(total_batches_random), sample_size_random)
-                        sampled_indices_random = sorted(sampled_indices_random)  # Sort for sequential access
-                        
-                        tplr.logger.info(f"Evaluating {sample_size_random}/{total_batches_random} batches ({self.hparams.validator_sample_rate*100:.1f}%)")
-                        
-                        for i, batch in enumerate(batches_random):
-                            if i not in sampled_indices_random:
-                                continue
-                                
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(model_random_data_eval.device)
-                            labels = input_ids.clone()
-                            labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                            outputs = model_random_data_eval(input_ids=input_ids, labels=labels)
-                            loss_before_random += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                        # Modified: only process the first 3 batches.
+                        for i, batch in enumerate(loader_random):
+                             if i >= 15:
+                                 break
+                             input_ids = torch.tensor(batch, dtype=torch.long).to(model_random_data_eval.device)
+                             labels = input_ids.clone()
+                             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                             outputs = model_random_data_eval(input_ids=input_ids, labels=labels)
+                             loss_before_random += outputs.loss.item()
+                             n_batches += 1
+                             del input_ids, labels, outputs
+                             torch.cuda.empty_cache()
 
                     self.loss_before_per_batch_random = loss_before_random / n_batches if n_batches > 0 else 0
                     tplr.logger.info(f'Loss before (random data): {self.loss_before_per_batch_random}')
@@ -590,26 +570,27 @@ class Validator:
                             p.data.sub_(grad.sign(), alpha = self.scheduler.get_last_lr()[0] )
 
                     # 10. Compute loss after gradient application for random data       
+                    self.optimizer.zero_grad()
+                    model_random_data_eval.zero_grad()
                     loss_after_random = 0.0
                     n_batches = 0
                     with torch.no_grad():
                         model_random_data_eval.eval()
-                        # Reuse same batches and indices for consistent comparison
-                        for i, batch in enumerate(batches_random):
-                            if i not in sampled_indices_random:
-                                continue
-                                
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(model_random_data_eval.device)
-                            labels = input_ids.clone()
-                            labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                            outputs = model_random_data_eval(input_ids=input_ids, labels=labels)
-                            loss_after_random += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                        # Modified: only process the first 3 batches.
+                        for i, batch in enumerate(loader_random):
+                             if i >= 15:
+                                 break
+                             input_ids = torch.tensor(batch, dtype=torch.long).to(model_random_data_eval.device)
+                             labels = input_ids.clone()
+                             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+                             outputs = model_random_data_eval(input_ids=input_ids, labels=labels)
+                             loss_after_random += outputs.loss.item()
+                             n_batches += 1
+                             del input_ids, labels, outputs
+                             torch.cuda.empty_cache()
                     
                     # Clean up stored batches, loader & pages
-                    del batches_random, loader_random, pages_random, model_random_data_eval
+                    del  pages_random,loader_random, model_random_data_eval
                     torch.cuda.empty_cache()
 
                     self.loss_after_per_batch_random = loss_after_random / n_batches if n_batches > 0 else 0
@@ -636,21 +617,27 @@ class Validator:
                     tplr.logger.info(f"Gradient moving average : {self.gradient_moving_avg_scores[eval_uid]}")
 
 
-                    # Calculate binary indicator for overfitting detection
-                    improvement_own = (loss_before_own - loss_after_own) / loss_before_own if loss_before_own > 0 else 0
-                    improvement_random = (loss_before_random - loss_after_random) / loss_before_random if loss_before_random > 0 else 0
-                    self.binary_indicator_scores[eval_uid] = 1 if improvement_own > improvement_random else -1
-                    tplr.logger.info(f"Binary Indicator Score : {self.binary_indicator_scores[eval_uid]}")
-                    
-                    # Update binary moving average using exponential moving average formula:
-                    # new_avg = (1-alpha) * old_avg + alpha * new_value
-                    # where alpha is binary_score_ma_alpha hyperparameter
-                    self.binary_moving_averages[eval_uid] = (1 - self.hparams.binary_score_ma_alpha) * self.binary_moving_averages[eval_uid] + self.hparams.binary_score_ma_alpha *self.binary_indicator_scores[eval_uid]
-                    tplr.logger.info(f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}")
-                    
-                    # Normalize binary moving average to [0,1] range
-                    self.normalised_binary_moving_averages[eval_uid] = (self.binary_moving_averages[eval_uid]) / 2
-                    tplr.logger.info(f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[eval_uid]}")
+                    # New scaled indicator based on confidence and relative differences
+                    delta_own = loss_before_own - loss_after_own
+                    delta_random = loss_before_random - loss_after_random
+
+                    # Compute a scaled difference rather than a simple ratio.
+                    scaled_difference = (delta_own - delta_random) / (abs(delta_own) + abs(delta_random) + 1e-6)
+
+                    # Use the absolute difference as a confidence measure and scale accordingly.
+                    confidence = abs(scaled_difference)
+                    binary_indicator = scaled_difference * confidence  # This scales the signal by its confidence
+
+                    self.binary_indicator_scores[eval_uid] = binary_indicator
+
+                    # Update binary moving average using an EMA update (alpha from hyperparameters)
+                    self.binary_moving_averages[eval_uid] = (
+                        (1 - self.hparams.binary_score_ma_alpha) * self.binary_moving_averages[eval_uid] +
+                        self.hparams.binary_score_ma_alpha * binary_indicator
+                    )
+                    # Optionally normalise. Adjust division factor if needed.
+                    self.normalised_binary_moving_averages[eval_uid] = self.binary_moving_averages[eval_uid] / 2
+
                     # Calculate final score incorporating both metrics
                     final_score = self.gradient_scores[eval_uid] * self.normalised_binary_moving_averages[eval_uid]
                     tplr.logger.info(f"Final Score : {self.final_moving_avg_scores[eval_uid]}")

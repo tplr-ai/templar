@@ -11,7 +11,9 @@
     "momentum_decay": 0.999,
     "topk_compression": 32,
     "target_chunk": 64,
-    "ma_alpha": 0.6,
+    "gradient_score_ma_alpha": 0.6,
+    "binary_score_ma_alpha": 0.05,
+    "final_score_ma_alpha": 0.95,
     "tokenizer_name": "togethercomputer/LLaMA-2-7B-32K",
     "hidden_size": 2048,
     "num_hidden_layers": 16,
@@ -31,9 +33,9 @@
     "active_check_interval": 60,
     "recent_windows": 5,
     "power_normalisation": 2.0,
-    "validator_sample_rate": 0.5,
+    "validator_sample_rate": 0.2,
     "catch_up_threshold": 15,
     "catch_up_batch_size": 5,
     "catch_up_timeout": 300,
-    "catch_up_min_peers": 3
+    "uids_per_window": 2
 }

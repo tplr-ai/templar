@@ -169,6 +169,14 @@ class Miner:
 
     # Main training loop.
     async def run(self):
+        # Start background block listener
+        self.loop = asyncio.get_running_loop()
+        self.listener = threading.Thread(
+            target=self.block_listener,
+            args=(self.loop,),
+            daemon=True,
+        )
+        self.listener.start()  # 
         # Load Peers
         if not self.config.peers:
             self.peers = self.comms.peers
@@ -185,6 +193,7 @@ class Miner:
         # Fetch start_window from highest stake validator
         self.start_window = await self.comms.get_start_window()
         tplr.logger.info(f"Using start_window: {self.start_window}")
+
 
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
@@ -216,14 +225,9 @@ class Miner:
         #     self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
         #     self.model.to(self.config.device)
 
-        # Start background block listener
-        self.loop = asyncio.get_running_loop()
-        self.listener = threading.Thread(
-            target=self.block_listener,
-            args=(self.loop,),
-            daemon=True,
-        )
-        self.listener.start()  # 
+
+
+
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
 
@@ -244,7 +248,7 @@ class Miner:
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
                 offset = step_window,
                 n_pages = self.hparams.pages_per_window,
-                seed = self.metagraph.hotkeys[self.uid] #type: ignore
+                seed = self.uid #type: ignore
             )            
             loader = await tplr.r2_dataset.R2DatasetLoader.create(
                 batch_size = self.hparams.batch_size,

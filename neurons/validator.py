@@ -278,27 +278,27 @@ class Validator:
 
         while True:
             # Check for catch-up need
-            # catch_up_success, new_global_step, new_optimizer, new_scheduler = await self.comms.check_and_perform_catch_up(
-            #     model=self.model,
-            #     optimizer=self.optimizer,
-            #     scheduler=self.scheduler,
-            #     transformer=self.transformer,
-            #     compressor=self.compressor,
-            #     current_window=self.current_window,
-            #     sync_window=self.sync_window,
-            #     device=self.config.device,
-            #     peers=self.peers,
-            #     uid=self.uid,
-            #     global_step=self.global_step,
-            #     hparams=self.hparams
-            # )
+            catch_up_success, new_global_step, new_optimizer, new_scheduler = await self.comms.check_and_perform_catch_up(
+                model=self.model,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                transformer=self.transformer,
+                compressor=self.compressor,
+                current_window=self.current_window,
+                sync_window=self.sync_window,
+                device=self.config.device,
+                peers=self.peers,
+                uid=self.uid,
+                global_step=self.global_step,
+                hparams=self.hparams
+            )
             
-            # if catch_up_success:
-            #     self.global_step = new_global_step
-            #     self.optimizer = new_optimizer
-            #     self.scheduler = new_scheduler
-            #     self.sync_window = self.current_window
-            #     continue
+            if catch_up_success:
+                self.global_step = new_global_step
+                self.optimizer = new_optimizer
+                self.scheduler = new_scheduler
+                self.sync_window = self.current_window
+                continue
 
             # Normal processing continues...
             while self.sync_window >= (self.current_window - self.hparams.validator_offset):
@@ -379,7 +379,13 @@ class Validator:
 
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
-            for eval_uid in self.peers:
+            # Sample a random subset of evaluation peers based on hparam uids_per_window
+            evaluation_uids = random.sample(
+                self.eval_peers,
+                min(self.hparams.uids_per_window, len(self.eval_peers))
+            )
+            tplr.logger.info(f'Evaluating random subset of peers: {evaluation_uids}')
+            for eval_uid in evaluation_uids:
                 tplr.logger.info(f'Evaluating uid: {eval_uid}')
 
                 eval_result = await self.comms.get(
@@ -393,21 +399,43 @@ class Validator:
 
                 scoring_start = tplr.T()
                 if eval_result is not None and eval_result[0] is not None:
-                    # 7. Load evaluation data from own page
-                    data_start = tplr.T()
-                    pages_own = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    state_dict, _ = eval_result
+
+                    # Pull miner-sent pages info from metadata
+                    miner_pages = None
+                    if "metadata" in state_dict and "pages_info" in state_dict["metadata"]:
+                        miner_pages = state_dict["metadata"]["pages_info"]
+                    else:
+                        tplr.logger.warning(f"Missing pages info metadata from miner UID {eval_uid}")
+
+                    # Load pages_own exactly once from the dataset loader
+                    local_pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
                         offset=self.sync_window,
                         n_pages=self.hparams.pages_per_window,
                         seed=eval_uid
                     )
+
+                    # Verify the pages_info from the miner matches our locally loaded pages.
+                    if miner_pages is not None:
+                        if local_pages != miner_pages:
+                            tplr.logger.warning(
+                                f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}"
+                            )
+                        else:
+                            tplr.logger.info(f"Pages verified for UID {eval_uid}: pages match.")
+                    else:
+                        tplr.logger.info(f"Using local pages for UID {eval_uid} as miner metadata is missing.")
+                    data_start = tplr.T()
+                    # Create the evaluation loader using the locally loaded pages.
                     loader_own = await tplr.r2_dataset.R2DatasetLoader.create(
                         batch_size=self.hparams.batch_size,
                         sequence_length=self.hparams.sequence_length,
-                        pages_info=pages_own,
+                        pages_info=local_pages,
                         tokenizer=self.tokenizer
                     )
-                    tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data')
-                    tplr.logger.info(f"Pages: {[p[1] for p in pages_own]} for  Window: {self.sync_window}") #type: ignore
+                    tplr.logger.info(
+                        f'{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}'
+                    )
 
                     state_dict, _ = eval_result
                     model_own_data_eval = copy.deepcopy(self.model)
@@ -491,7 +519,7 @@ class Validator:
                             torch.cuda.empty_cache()
                     
                     # Clean up stored batches
-                    del batches_own, pages_own, loader_own, model_own_data_eval
+                    del batches_own, local_pages, loader_own, model_own_data_eval
                     torch.cuda.empty_cache()
 
 

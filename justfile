@@ -11,10 +11,13 @@ lint:
 fix: lint
 
 test-run:
-    ./scripts/start.sh && pm2 monit
+    ./scripts/start.sh
 
 dev:
     uv pip install -e ".[dev]"
 
 test:
     uv run pytest -sv
+
+bistro:
+    ps aux | grep Bistro

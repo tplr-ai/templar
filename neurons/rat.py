@@ -169,6 +169,14 @@ class Miner:
 
     # Main training loop.
     async def run(self):
+        # Start background block listener
+        self.loop = asyncio.get_running_loop()
+        self.listener = threading.Thread(
+            target=self.block_listener,
+            args=(self.loop,),
+            daemon=True,
+        )
+        self.listener.start()  # 
         # Load Peers
         if not self.config.peers:
             self.peers = self.comms.peers
@@ -189,7 +197,7 @@ class Miner:
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
 
-        # Proceed to load checkpoint
+        # # Proceed to load checkpoint
         # success, loaded_momentum, loaded_global_step, loaded_optimizer, loaded_scheduler = await self.comms.load_checkpoint(
         #     model=self.model,
         #     optimizer=self.optimizer, 
@@ -217,13 +225,12 @@ class Miner:
         #     self.model.to(self.config.device)
 
         # Start background block listener
-        self.loop = asyncio.get_running_loop()
-        self.listener = threading.Thread(
-            target=self.block_listener,
-            args=(self.loop,),
-            daemon=True,
-        )
-        self.listener.start()  # 
+        # self.loop = asyncio.get_running_loop()
+        # self.listener = threading.Thread(
+        #     target=self.block_listener,
+        #     args=(self.loop,),
+        #     daemon=True,
+        # )
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
 
@@ -244,7 +251,7 @@ class Miner:
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
                 offset = step_window,
                 n_pages = self.hparams.pages_per_window,
-                seed=random.randint(0, 10000)
+                seed=random.randint(0, 10000) 
             )            
             loader = await tplr.r2_dataset.R2DatasetLoader.create(
                 batch_size = self.hparams.batch_size,

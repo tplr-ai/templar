@@ -95,8 +95,8 @@ def insert_active_miners(window_id, active_miners, error_miners):
     # Create a new active miners record
     new_active_miners = ActiveMiners(
         window_id=window_id,
-        active_miners=active_miners,
-        error_miners=error_miners
+        active_miners=",".join(map(str, active_miners)),
+        error_miners=",".join(map(str, error_miners)),
     )
 
     # Add the new record to the session
@@ -200,7 +200,9 @@ async def run_grafana():
             tplr.logger.info(f"\nInserted a run metadata {step_window}")
             # Insert active miners
             active_miners, error_miners = await grafana.get_active_miners(step_window)
-            insert_active_miners(window_id, active_miners, error_miners)
+            active_miners_uids = [miner["uid"] for miner in active_miners]
+            error_miners_uids = [miner["uid"] for miner in error_miners]
+            insert_active_miners(window_id, active_miners_uids, error_miners_uids)
             tplr.logger.info(f"\nInserted active miners {step_window}")
 
             # Insert validator eval info & eval info detail

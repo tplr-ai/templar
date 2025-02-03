@@ -34,8 +34,8 @@ class ActiveMiners(db.Model):
     __tablename__ = 'tbl_active_miners'
     id = db.Column(db.Integer, primary_key=True)
     window_id = db.Column(db.Integer, db.ForeignKey('tbl_window_info.id'), nullable=False)
-    active_miners = db.Column(db.PickleType, nullable=True)
-    error_miners = db.Column(db.PickleType, nullable=True)
+    active_miners = db.Column(db.String(1000), nullable=True)
+    error_miners = db.Column(db.String(1000), nullable=True)
 
 class Neuron(db.Model):
     __tablename__ = 'tbl_neuron'
@@ -62,7 +62,7 @@ class ValidatorEvalInfo(db.Model):
     loss_after = db.Column(db.Float, nullable=True)
     loss_improvement = db.Column(db.Float, nullable=True)
     current_eval_uid = db.Column(db.String(200), nullable=True)
-    eval_uids = db.Column(db.PickleType, nullable=True)
+    eval_uids = db.Column(db.String(1000), nullable=True)
     mean_scores = db.Column(db.Float, nullable=True)
     mean_moving_avg_scores = db.Column(db.Float, nullable=True)
 

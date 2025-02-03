@@ -52,8 +52,8 @@ def upgrade():
     op.create_table('tbl_active_miners',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('window_id', sa.Integer(), nullable=False),
-    sa.Column('active_miners', sa.PickleType(), nullable=True),
-    sa.Column('error_miners', sa.PickleType(), nullable=True),
+    sa.Column('active_miners', sa.String(length=1000), nullable=True),
+    sa.Column('error_miners', sa.String(length=1000), nullable=True),
     sa.ForeignKeyConstraint(['window_id'], ['tbl_window_info.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
@@ -99,7 +99,7 @@ def upgrade():
     sa.Column('loss_after', sa.Float(), nullable=True),
     sa.Column('loss_improvement', sa.Float(), nullable=True),
     sa.Column('current_eval_uid', sa.String(length=200), nullable=True),
-    sa.Column('eval_uids', sa.PickleType(), nullable=True),
+    sa.Column('eval_uids', sa.String(length=1000), nullable=True),
     sa.Column('mean_scores', sa.Float(), nullable=True),
     sa.Column('mean_moving_avg_scores', sa.Float(), nullable=True),
     sa.ForeignKeyConstraint(['neuron_id'], ['tbl_neuron.id'], ),

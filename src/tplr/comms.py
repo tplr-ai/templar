@@ -1288,7 +1288,7 @@ class Comms(ChainManager):
                     )
 
             if valid_checkpoints:
-                latest = max(valid_checkpoints, key=lambda x: x["last_modified"])
+                latest = max(valid_checkpoints, key=lambda x: int(x["window"]))
                 loaded_data = await self.s3_get_object(key=latest["key"], bucket=bucket)
                 if loaded_data:
                     return loaded_data, latest["window"]
@@ -1455,11 +1455,6 @@ class Comms(ChainManager):
                         f"Caught up window {w}, global_step => {global_step}"
                     )
 
-            tplr.logger.info(
-                f"Finished catch-up. Final global_step={global_step}, "
-                f"optimizer steps={optimizer.state_dict()['state'][0]['step']}, "  # Fixed: Access step directly
-                f"scheduler last_epoch={scheduler.last_epoch}"
-            )
             return True, momentum, global_step, optimizer, scheduler
 
         except KeyError as e:

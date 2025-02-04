@@ -23,6 +23,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.coverage
+coverage.xml
 
 # UV specific
 .uv/

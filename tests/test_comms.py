@@ -1,6 +1,7 @@
 # ruff: noqa
 
 import os
+import random
 from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 import torch
@@ -2028,3 +2029,77 @@ def test_topk_auto_adjust_when_totalk_is_lower():
     invalid_list = [0]  # Too few elements.
     with pytest.raises(ValueError, match="Invalid number of indices"):
         dummy_comms.check_compressed_indices("param", invalid_list, totalk)
+
+# Tests for `weighted_random_sample_no_replacement`
+async def test_empty_candidates(comms_instance):
+    """
+    Test when candidates or weights are empty, or k <= 0.
+    """
+    assert comms_instance.weighted_random_sample_no_replacement([], [], 3) == []
+    assert (
+        comms_instance.weighted_random_sample_no_replacement([1, 2], [0.5, 0.5], 0)
+        == []
+    )
+
+
+async def test_total_weight_zero(comms_instance):
+    """
+    If total weight is <= 0, it should return an empty list.
+    """
+    candidates = [1, 2, 3]
+    weights = [0, 0, 0]
+    result = comms_instance.weighted_random_sample_no_replacement(
+        candidates, weights, 3
+    )
+    assert result == []
+
+
+async def test_k_bigger_than_candidates(comms_instance):
+    """
+    If k > len(candidates), it should only return up to len(candidates).
+    """
+    candidates = [1, 2, 3]
+    weights = [1, 2, 3]
+    result = comms_instance.weighted_random_sample_no_replacement(
+        candidates, weights, 10
+    )
+    # The sample must contain unique items from candidates (no duplicates).
+    assert len(result) == 3
+    assert set(result).issubset(candidates)
+
+
+async def test_basic_weighting(comms_instance):
+    """
+    Test that we can get all candidates if weights are all positive,
+    and the sample size equals the number of candidates.
+    """
+    candidates = ["A", "B", "C", "D"]
+    weights = [1, 2, 3, 4]
+    k = 4
+    result = comms_instance.weighted_random_sample_no_replacement(
+        candidates, weights, k
+    )
+    # Should have exactly the 4 unique candidates
+    assert set(result) == set(candidates)
+
+
+@pytest.mark.parametrize("seed", [42, 100, 9999])
+async def test_random_behavior(seed, comms_instance):
+    """
+    Check that the function runs consistently with a fixed random seed.
+    This doesn't guarantee distribution correctness, but ensures reproducibility.
+    """
+    random.seed(seed)
+    candidates = [1, 2, 3, 4, 5]
+    weights = [1, 2, 10, 0, 5]
+    k = 3
+    # Run multiple times to see it doesn't crash and provides a stable outcome
+    results = []
+    for _ in range(5):
+        random.seed(seed)  # re-seed before each call for reproducible draws
+        result = comms_instance.weighted_random_sample_no_replacement(
+            candidates, weights, k
+        )
+        results.append(result)
+    # Assert that across repeated calls with the same seed, we get the same sample
+    assert len({tuple(r) for r in results}) == 1

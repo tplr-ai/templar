@@ -26,6 +26,7 @@ import asyncio
 import argparse
 import threading
 from contextlib import contextmanager
+from collections import defaultdict
 from time import perf_counter
 
 # Third party
@@ -230,6 +231,9 @@ class Validator:
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
 
+        # Weighted selection counters for fair picking of eval peers
+        self.eval_candidates_counter = defaultdict(int)
+
     async def run(self):
         # Start background block listener
         self.loop = asyncio.get_running_loop()
@@ -403,11 +407,38 @@ class Validator:
 
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
+
             # Sample a random subset of evaluation peers based on hparam uids_per_window
-            evaluation_uids = random.sample(
-                self.eval_peers, min(self.hparams.uids_per_window, len(self.eval_peers))
+            # 1) Add new active peers if they're missing from eval_candidates_counter
+            for uid in self.eval_peers:
+                if uid not in self.eval_candidates_counter:
+                    self.eval_candidates_counter[uid] = 1
+
+            # 2) Remove peers that are no longer active from the counter
+            for uid in list(self.eval_candidates_counter.keys()):
+                if uid not in self.eval_peers:
+                    del self.eval_candidates_counter[uid]
+
+            candidate_uids = list(self.eval_candidates_counter.keys())
+            candidate_weights = [
+                self.eval_candidates_counter[uid] for uid in candidate_uids
+            ]
+            k = min(self.hparams.uids_per_window, len(candidate_uids))
+            evaluation_uids = weighted_random_sample_no_replacement(
+                candidate_uids, candidate_weights, k
             )
+
+            # Reset counters for chosen peers
+            for uid in evaluation_uids:
+                self.eval_candidates_counter[uid] = 0
+
+            # Increment counters for not chosen peers
+            for uid in candidate_uids:
+                if uid not in evaluation_uids:
+                    self.eval_candidates_counter[uid] += 1
+
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
+
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
 
@@ -1211,6 +1242,49 @@ def min_power_normalization(logits, power=2.0, epsilon=1e-8):
         probabilities = torch.zeros_like(powered_logits)
 
     return probabilities
+
+
+def weighted_random_sample_no_replacement(candidates, weights, k):
+    """
+    Perform a weighted random sample (without replacement) of size k.
+    candidates: list of items (uids).
+    weights:    list of corresponding weights (integers or floats).
+    k:          number of items to sample.
+    Returns a list of selected items.
+    """
+    # Safety checks
+    if not candidates or not weights or k <= 0:
+        return []
+
+    # Pair up each candidate with its weight
+    pool = list(zip(candidates, weights))
+    total_w = sum(weights)
+    selected = []
+
+    # If total weight is 0, return empty
+    if total_w <= 0:
+        return []
+
+    for _ in range(min(k, len(candidates))):
+        # If total_w drops to 0 or we run out of pool, stop early
+        if total_w <= 0 or not pool:
+            break
+
+        # Draw a uniform sample in [0, total_w]
+        r = random.random() * total_w
+        # Find which peer is picked
+        cumulative = 0.0
+        for idx, (uid, w) in enumerate(pool):
+            cumulative += w
+            if cumulative >= r:
+                # Found our pick
+                selected.append(uid)
+                # Remove from pool and subtract from total_w
+                total_w -= w
+                pool.pop(idx)
+                break
+
+    return selected
 
 
 if __name__ == "__main__":

@@ -61,7 +61,6 @@ def update_current_version(current_version, old_version_record):
     # Update old version
     if old_version_record:
         old_version_record.is_running = False
-        db.session.update(old_version_record)
 
 def insert_window(window_number, global_step, learning_rate):    
     # Create a new WindowInfo record

@@ -1,5 +1,6 @@
 # type: ignore
 import os
+import random
 import re
 import math
 import json
@@ -1796,3 +1797,47 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.error(f"Catch-up failed: {str(e)}")
             return False, global_step, optimizer, scheduler
+
+    def weighted_random_sample_no_replacement(
+        self, candidates: list[str], weights: list[int], k: int
+    ) -> list[str]:
+        """
+        Perform a weighted random sample (without replacement) of size k.
+        candidates: list of items (uids).
+        weights:    list of corresponding weights (integers or floats).
+        k:          number of items to sample.
+        Returns a list of selected items.
+        """
+        # Safety checks
+        if not candidates or not weights or k <= 0:
+            return []
+
+        # Pair up each candidate with its weight
+        pool = list(zip(candidates, weights))
+        total_w = sum(weights)
+        selected = []
+
+        # If total weight is 0, return empty
+        if total_w <= 0:
+            return []
+
+        for _ in range(min(k, len(candidates))):
+            # If total_w drops to 0 or we run out of pool, stop early
+            if total_w <= 0 or not pool:
+                break
+
+            # Draw a uniform sample in [0, total_w]
+            r = random.random() * total_w
+            # Find which peer is picked
+            cumulative = 0.0
+            for idx, (uid, w) in enumerate(pool):
+                cumulative += w
+                if cumulative >= r:
+                    # Found our pick
+                    selected.append(uid)
+                    # Remove from pool and subtract from total_w
+                    total_w -= w
+                    pool.pop(idx)
+                    break
+
+        return selected

@@ -59,5 +59,13 @@ jobs:
         with:
           args: format --check
 
-      - name: Run Tests
-        run: uv run pytest tests/ -v
+      - name: Run Tests with Coverage
+        run: |
+          uv run pytest tests/ -v --cov=src --cov-report=xml --cov-report=term
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          fail_ci_if_error: true

@@ -15,6 +15,7 @@ ___  _  _ _  _ | _  _
 <div align="center">
 Documentation: <a href="https://github.com/tplr-ai/templar/blob/main/docs/miner.md">Miner</a> • <a href="https://github.com/tplr-ai/templar/blob/main/docs/validator.md">Validator</a>
 </div>
+[![codecov](https://codecov.io/gh/tplr-ai/templar/branch/main/graph/badge.svg)](https://codecov.io/gh/tplr-ai/templar)
 
 ## Introduction
 

@@ -424,9 +424,7 @@ class Validator:
                 self.eval_candidates_counter[uid] for uid in candidate_uids
             ]
             k = min(self.hparams.uids_per_window, len(candidate_uids))
-            evaluation_uids = weighted_random_sample_no_replacement(
-                candidate_uids, candidate_weights, k
-            )
+            evaluation_uids = self.comms.weighted_random_sample_no_replacement(candidate_uids, candidate_weights, k)
 
             # Reset counters for chosen peers
             for uid in evaluation_uids:
@@ -1242,50 +1240,6 @@ def min_power_normalization(logits, power=2.0, epsilon=1e-8):
         probabilities = torch.zeros_like(powered_logits)
 
     return probabilities
-
-
-def weighted_random_sample_no_replacement(candidates, weights, k):
-    """
-    Perform a weighted random sample (without replacement) of size k.
-    candidates: list of items (uids).
-    weights:    list of corresponding weights (integers or floats).
-    k:          number of items to sample.
-    Returns a list of selected items.
-    """
-    # Safety checks
-    if not candidates or not weights or k <= 0:
-        return []
-
-    # Pair up each candidate with its weight
-    pool = list(zip(candidates, weights))
-    total_w = sum(weights)
-    selected = []
-
-    # If total weight is 0, return empty
-    if total_w <= 0:
-        return []
-
-    for _ in range(min(k, len(candidates))):
-        # If total_w drops to 0 or we run out of pool, stop early
-        if total_w <= 0 or not pool:
-            break
-
-        # Draw a uniform sample in [0, total_w]
-        r = random.random() * total_w
-        # Find which peer is picked
-        cumulative = 0.0
-        for idx, (uid, w) in enumerate(pool):
-            cumulative += w
-            if cumulative >= r:
-                # Found our pick
-                selected.append(uid)
-                # Remove from pool and subtract from total_w
-                total_w -= w
-                pool.pop(idx)
-                break
-
-    return selected
-
 
 if __name__ == "__main__":
     asyncio.run(Validator().run())

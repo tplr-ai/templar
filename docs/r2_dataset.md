@@ -15,6 +15,8 @@ Estimated Download Time: 12–18 hours
 ### r2 bucket dataset population
 
 ```bash
+#!/bin/bash
+
 # clone repo
 git clone https://github.com/distributedstatemachine/HuggingFaceModelDownloader
 cd HuggingFaceModelDownloader

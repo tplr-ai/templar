@@ -130,10 +130,10 @@ def insert_dummy_validator_eval_info(window_id, version):
             run_id = run.id
             break
     run = api.run(f"tplr/templar/{run_id}")
-    history = run.history()
+    history = run.history(pandas=False)
     tplr.logger.info(f"\nWandb run {run_id}")
     tplr.logger.info(f"\nWandb run.state {run.state}")
-    for i, row in run.history().iterrows():
+    for i, row in history:
         tplr.logger.info(f"\nWandb loss {row['latest/validator/loss/before']}, {row['latest/validator/loss/after']}")
     # Create a dummy validator eval info record
     new_validator_eval_info = ValidatorEvalInfo(

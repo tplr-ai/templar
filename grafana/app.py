@@ -126,7 +126,7 @@ def insert_dummy_validator_eval_info(window_id, version):
     runs = api.runs(f"tplr/templar")
     run_id = "hvf4v9fp" # Run ID for V1
     for run in runs:
-        if run.name == "V1":
+        if run.name == "V1" and run.state == "running":
             run_id = run.id
             break
     run = api.run(f"tplr/templar/{run_id}")

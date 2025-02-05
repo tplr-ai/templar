@@ -19,7 +19,6 @@
 
 # Standard library
 import sys
-import copy
 import time
 import random
 import asyncio
@@ -300,7 +299,7 @@ class Validator:
                 self.sync_window = self.current_window
                 continue
 
-            # Normal processing continues...
+            # Wait for offset
             while self.sync_window >= (self.current_window - self.hparams.validator_offset):
                 tplr.logger.info(f'Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}')
                 await asyncio.sleep(12)
@@ -331,7 +330,7 @@ class Validator:
                     tplr.logger.info(f"UID {uid} became inactive at window {current_window} with score {self.final_moving_avg_scores[uid].item():.4f}")
             
             # Apply penalties to all inactive peers
-            for uid, (inactive_since, _) in list(self.inactive_scores.items()):
+            for uid, (_, _) in list(self.inactive_scores.items()):
                 # If peer became active again, remove from inactive tracking
                 if uid in self.eval_peers:
                     del self.inactive_scores[uid]
@@ -397,376 +396,41 @@ class Validator:
                     stale_retention=10
                 )
 
-                scoring_start = tplr.T()
                 if eval_result is not None and eval_result[0] is not None:
                     state_dict, _ = eval_result
-
-                    # Pull miner-sent pages info from metadata
-                    miner_pages = None
-                    if "metadata" in state_dict and "pages_info" in state_dict["metadata"]:
-                        miner_pages = state_dict["metadata"]["pages_info"]
-                    else:
-                        tplr.logger.warning(f"Missing pages info metadata from miner UID {eval_uid}")
-
-                    # Load pages_own exactly once from the dataset loader
-                    local_pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                        offset=self.sync_window,
-                        n_pages=self.hparams.pages_per_window,
-                        seed=eval_uid
+                    eval_payload = await tplr.evaluation.evaluate_peer(
+                        uid=eval_uid,
+                        state_dict=state_dict,
+                        sync_window=self.sync_window,
+                        hparams=self.hparams,
+                        tokenizer=self.tokenizer,
+                        config=self.config,
+                        model=self.model,
+                        transformer=self.transformer,
+                        compressor=self.compressor,
+                        xshapes=self.xshapes,
+                        totalks=self.totalks,
+                        device=self.config.device,
+                        lr=self.scheduler.get_last_lr()[0],
+                        optimizer=self.optimizer,
+                        scheduler=self.scheduler
                     )
-
-                    # Verify the pages_info from the miner matches our locally loaded pages.
-                    if miner_pages is not None:
-                        if local_pages != miner_pages:
-                            tplr.logger.warning(
-                                f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}"
-                            )
-                        else:
-                            tplr.logger.info(f"Pages verified for UID {eval_uid}: pages match.")
-                    else:
-                        tplr.logger.info(f"Using local pages for UID {eval_uid} as miner metadata is missing.")
-                    data_start = tplr.T()
-                    # Create the evaluation loader using the locally loaded pages.
-                    loader_own = await tplr.r2_dataset.R2DatasetLoader.create(
-                        batch_size=self.hparams.batch_size,
-                        sequence_length=self.hparams.sequence_length,
-                        pages_info=local_pages,
-                        tokenizer=self.tokenizer
-                    )
-                    tplr.logger.info(
-                        f'{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}'
-                    )
-
-                    state_dict, _ = eval_result
-                    model_own_data_eval = copy.deepcopy(self.model)
-                    # 8. Compute initial loss
-                    self.optimizer.zero_grad()
-                    model_own_data_eval.zero_grad()
-                    loss_before_own = 0.0
-                    n_batches = 0
-
-                    with torch.no_grad():
-                        model_own_data_eval.eval()
-                        batches_own = []
-                        for batch in loader_own:
-                            batches_own.append(batch)
-                        
-                        total_batches_own = len(batches_own)
-                        sample_size_own = max(1, int(total_batches_own * self.hparams.validator_sample_rate))
-                        sampled_indices_own = random.sample(range(total_batches_own), sample_size_own)
-                        sampled_indices_own = sorted(sampled_indices_own)  # Sort for sequential access
-                        
-                        tplr.logger.info(f"Evaluating {sample_size_own}/{total_batches_own} batches ({self.hparams.validator_sample_rate*100:.1f}%)")
-                        
-                        for i, batch in enumerate(batches_own):
-                            if i not in sampled_indices_own:
-                                continue
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(model_own_data_eval.device)
-                            labels = input_ids.clone()
-                            labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                            outputs = model_own_data_eval(input_ids=input_ids, labels=labels)
-                            loss_before_own += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
-
-                    self.loss_before_per_batch_own = loss_before_own / n_batches if n_batches > 0 else 0
-                    tplr.logger.debug(f'Loss before (own data): {self.loss_before_per_batch_own}')
-
-                    # 9. Apply gradient and compute loss after
-                    self.optimizer.zero_grad()
-                    model_own_data_eval.zero_grad()
-
-                    for n, p in model_own_data_eval.named_parameters():
-                        idxs_key = n + 'idxs'
-                        vals_key = n + 'vals'
-                        idxs = state_dict.get(idxs_key, None)
-                        vals = state_dict.get(vals_key, None)
-
-                        if idxs is not None and vals is not None:
-                            idxs = idxs.to(self.config.device)
-                            vals = vals.to(self.config.device)
-                            
-                            grad = self.transformer.decode(
-                                self.compressor.decompress(
-                                    p.to(self.config.device),
-                                    idxs,
-                                    vals,
-                                    self.xshapes[n],
-                                    self.totalks[n],
-                                )
-                            ).to(self.config.device)
-
-                            p.data.sub_(grad.sign(), alpha = self.scheduler.get_last_lr()[0] )
-
-                    # 10. Compute loss after gradient application        
-                    self.optimizer.zero_grad()
-                    model_own_data_eval.zero_grad()
-                    loss_after_own = 0.0
-                    n_batches = 0
-                    with torch.no_grad():
-                        model_own_data_eval.eval()
-                        for i, batch in enumerate(batches_own):
-                            if i not in sampled_indices_own:
-                                continue
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(model_own_data_eval.device)
-                            labels = input_ids.clone()
-                            labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                            outputs = model_own_data_eval(input_ids=input_ids, labels=labels)
-                            loss_after_own += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
-                    
-                    # Clean up stored batches
-                    del batches_own, local_pages, loader_own, model_own_data_eval
-                    torch.cuda.empty_cache()
-
-
-                    self.loss_after_per_batch_own = loss_after_own / n_batches if n_batches > 0 else 0
-                    tplr.logger.debug(f'Loss after (own data): {self.loss_after_per_batch_own}')
-
-                    # 11. Calculate improvements and update scores
-                    # Compute and assign the loss improvement to self
-                    self.loss_improvement_own = self.loss_before_per_batch_own - self.loss_after_per_batch_own
-                    tplr.logger.debug(f'Loss improvement (own data): {self.loss_improvement_own}')
-                    
-                    self.relative_improvement_own = (
-                        self.loss_improvement_own / self.loss_before_per_batch_own 
-                        if self.loss_before_per_batch_own > 0 else 0.0
-                    )
-                    tplr.logger.debug(f"Relative improvement (own data): {self.relative_improvement_own:.4f}")
-
-                    # 7. Load evaluation data from random page
-                    model_random_data_eval = copy.deepcopy(self.model)
-                    data_start = tplr.T()
-                    pages_random = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                        offset=self.sync_window,
-                        n_pages=self.hparams.pages_per_window,
-                        seed=random.randint(0, 10000)
-                    )
-                    loader_random = await tplr.r2_dataset.R2DatasetLoader.create(
-                        batch_size=self.hparams.batch_size,
-                        sequence_length=self.hparams.sequence_length,
-                        pages_info=pages_random,
-                        tokenizer=self.tokenizer
-                    )
-                    tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded random evaluation data')
-                    state_dict, _ = eval_result
-
-                    # 8. Compute initial loss
-                    self.optimizer.zero_grad()
-                    model_random_data_eval.zero_grad()
-                    loss_before_random = 0.0
-                    n_batches = 0
-
-                    with torch.no_grad():
-                        model_random_data_eval.eval()
-                        # Sample random batches from the loader
-                        batches_random = []
-                        for batch in loader_random:
-                            batches_random.append(batch)
-                        
-                        total_batches_random = len(batches_random)
-                        sample_size_random = max(1, int(total_batches_random * self.hparams.validator_sample_rate))
-                        sampled_indices_random = random.sample(range(total_batches_random), sample_size_random)
-                        sampled_indices_random = sorted(sampled_indices_random)  # Sort for sequential access
-                        
-                        tplr.logger.info(f"Evaluating {sample_size_random}/{total_batches_random} batches ({self.hparams.validator_sample_rate*100:.1f}%)")
-                        
-                        for idx in sampled_indices_random:
-                            batch = batches_random[idx]
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(model_random_data_eval.device)
-                            labels = input_ids.clone()
-                            labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                            outputs = model_random_data_eval(input_ids=input_ids, labels=labels)
-                            loss_before_random += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
-
-                    self.loss_before_per_batch_random = loss_before_random / n_batches if n_batches > 0 else 0
-                    tplr.logger.debug(f'Loss before (random data): {self.loss_before_per_batch_random}')
-
-                    # 9. Apply gradient and compute loss after
-                    self.optimizer.zero_grad()
-                    model_random_data_eval.zero_grad()
-
-                    for n, p in model_random_data_eval.named_parameters():
-                        idxs_key = n + 'idxs'
-                        vals_key = n + 'vals'
-                        idxs = state_dict.get(idxs_key, None)
-                        vals = state_dict.get(vals_key, None)
-
-                        if idxs is not None and vals is not None:
-                            idxs = idxs.to(self.config.device)
-                            vals = vals.to(self.config.device)
-                            
-                            grad = self.transformer.decode(
-                                self.compressor.decompress(
-                                    p.to(self.config.device),
-                                    idxs,
-                                    vals,
-                                    self.xshapes[n],
-                                    self.totalks[n],
-                                )
-                            ).to(self.config.device)
-
-                            p.data.sub_(grad.sign(), alpha = self.scheduler.get_last_lr()[0] )
-
-                    # 10. Compute loss after gradient application for random data       
-                    self.optimizer.zero_grad()
-                    model_random_data_eval.zero_grad()
-                    loss_after_random = 0.0
-                    n_batches = 0
-                    with torch.no_grad():
-                        model_random_data_eval.eval()
-                        for i, batch in enumerate(batches_random):
-                            if i not in sampled_indices_random:
-                                continue
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(model_random_data_eval.device)
-                            labels = input_ids.clone()
-                            labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-                            outputs = model_random_data_eval(input_ids=input_ids, labels=labels)
-                            loss_after_random += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
-                    
-                    # Clean up stored batches, loader & pages
-                    del batches_random, pages_random,loader_random, model_random_data_eval
-                    torch.cuda.empty_cache()
-
-                    self.loss_after_per_batch_random = loss_after_random / n_batches if n_batches > 0 else 0
-                    tplr.logger.info(f'Loss after (random data): {self.loss_after_per_batch_random}')
-
-                    # 11. Calculate improvements and update scores
-                    # Compute and assign the loss improvement to self
-                    self.loss_improvement_random = self.loss_before_per_batch_random - self.loss_after_per_batch_random
-                    tplr.logger.info(f'Loss improvement (random data): {self.loss_improvement_random}')
-                    
-                    self.relative_improvement_random = (
-                        self.loss_improvement_random / self.loss_before_per_batch_random 
-                        if self.loss_before_per_batch_random > 0 else 0.0
-                    )
-                    tplr.logger.debug(f"Relative improvement (random data): {self.relative_improvement_random}")
-
-                    # Calculate original performance score (gradient quality)
-                    self.gradient_scores[eval_uid] = (loss_before_own - loss_after_own) / loss_before_own if loss_before_own > 0 else 0
-                    tplr.logger.debug(f"Gradient Score: {self.gradient_scores[eval_uid]}")
-
-                    # Update exponential moving average of gradient scores with alpha=gradient_score_ma_alpha
-                    # New score = (1-alpha)*old_score + alpha*new_score
-                    self.gradient_moving_avg_scores[eval_uid] = (1 - self.hparams.gradient_score_ma_alpha) * self.gradient_moving_avg_scores[eval_uid] + self.hparams.gradient_score_ma_alpha * self.gradient_scores[eval_uid]
-                    tplr.logger.debug(f"Gradient moving average : {self.gradient_moving_avg_scores[eval_uid]}")
-
-                    # Calculate binary indicator for overfitting detection
-                    improvement_own = (loss_before_own - loss_after_own) / loss_before_own if loss_before_own > 0 else 0
-                    improvement_random = (loss_before_random - loss_after_random) / loss_before_random if loss_before_random > 0 else 0
-                    self.binary_indicator_scores[eval_uid] = 1 if improvement_own > improvement_random else -1
-                    tplr.logger.info(f"Binary Indicator Score : {self.binary_indicator_scores[eval_uid]}")
-                    
-                    # Update binary moving average using exponential moving average formula:
-                    # new_avg = (1-alpha) * old_avg + alpha * new_value
-                    # where alpha is binary_score_ma_alpha hyperparameter
-                    self.binary_moving_averages[eval_uid] = (1 - self.hparams.binary_score_ma_alpha) * self.binary_moving_averages[eval_uid] + self.hparams.binary_score_ma_alpha *self.binary_indicator_scores[eval_uid]
-                    tplr.logger.debug(f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}")
-                    
-                    # Normalize binary moving average to [0,1] range
-                    self.normalised_binary_moving_averages[eval_uid] = (self.binary_moving_averages[eval_uid]) / 2
-                    tplr.logger.debug(f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[eval_uid]}")
-                    # Calculate final score incorporating both metrics
-                    final_score = self.gradient_scores[eval_uid] * self.normalised_binary_moving_averages[eval_uid]
-                    tplr.logger.debug(f"Final Score : {self.final_moving_avg_scores[eval_uid]}")
-
-                    # Ensure moving average score is non-negative
-                    self.final_moving_avg_scores[eval_uid] = max(self.hparams.final_score_ma_alpha * self.final_moving_avg_scores[eval_uid] + (1 - self.hparams.final_score_ma_alpha) * final_score, 0.0)
-                    tplr.logger.debug(f"Final Moving Average Score : {self.final_moving_avg_scores[eval_uid]}")
-                
+                    self.gradient_scores[eval_uid] = eval_payload["gradient_score"]
+                    self.binary_indicator_scores[eval_uid] = eval_payload["binary_indicator"]
+                    self.loss_before_per_batch_own = eval_payload["loss_before_per_batch_own"]
+                    self.loss_after_per_batch_own  = eval_payload["loss_after_per_batch_own"]
+                    self.relative_improvement_own    = eval_payload["relative_improvement_own"]
+                    self.loss_before_per_batch_random = eval_payload["loss_before_per_batch_random"]
+                    self.loss_after_per_batch_random  = eval_payload["loss_after_per_batch_random"]
+                    self.relative_improvement_random    = eval_payload["relative_improvement_random"]
                     self.evaluated_uids.add(eval_uid)
-
-                    # 12. Calculate weights using min power norm
-                    self.weights = torch.zeros_like(self.final_moving_avg_scores)
-                    evaluated_mask = torch.zeros_like(self.final_moving_avg_scores, dtype=torch.bool)
-                    evaluated_mask[list(self.evaluated_uids)] = True
-                    positive_mask = (self.final_moving_avg_scores > 0) & evaluated_mask
-                    if positive_mask.any():
-                        self.weights[positive_mask] = min_power_normalization(
-                            self.final_moving_avg_scores[positive_mask], 
-                            power=self.hparams.power_normalisation
-                        )
-                        weight_sum = self.weights.sum().item()
-                        tplr.logger.debug(f"Weight sum: {weight_sum}")
-                        if abs(weight_sum - 1.0) > 1e-6:
-                            tplr.logger.warning(f"Weights sum to {weight_sum}, expected close to 1.0")
-                    else:
-                        tplr.logger.info("No positive scores found, all weights set to 0")
-                    # TODO: move out
-                    # 13. Log evaluation metrics once all evaluations are done
-                    evaluation_metrics = {
-                        "validator/loss/own/before": self.loss_before_per_batch_own,
-                        "validator/loss/own/after": self.loss_after_per_batch_own,
-                        "validator/loss/random/before": self.loss_before_per_batch_random,
-                        "validator/loss/random/after": self.loss_after_per_batch_random,
-                        "validator/loss/own/improvement": self.relative_improvement_own,
-                        "validator/loss/random/improvement": self.relative_improvement_random,
-                        "validator/network/block": self.current_block,
-                        "validator/network/window": self.sync_window,
-                        "validator/network/step": self.global_step,
-                        "validator/network/evaluated_uids": len(self.evaluated_uids),
-                        "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
-                        "validator/network/active_miners": len(self.valid_score_indices),
-                    }
-                    self.wandb.log(evaluation_metrics, step=self.global_step)
-                    tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation')
-                    
                 else:
                     tplr.logger.info(f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%.")
-                    # Reduce the moving average score by 50%
-                    old_score = self.final_moving_avg_scores[eval_uid].item()  # Get the actual value
-                    self.final_moving_avg_scores[eval_uid] *= 0.5  # Apply 50% reduction
-                    new_score = self.final_moving_avg_scores[eval_uid].item()  # Get new value for logging
-                    tplr.logger.info(f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient.")
-
-                    # Ensure the UID is included in evaluated_uids
+                    old_score = self.final_moving_avg_scores[eval_uid].item()
+                    self.final_moving_avg_scores[eval_uid] *= 0.5
+                    new_score = self.final_moving_avg_scores[eval_uid].item()
+                    tplr.logger.info(f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f}")
                     self.evaluated_uids.add(eval_uid)
-
-                    # Recalculate weights
-                    self.weights = torch.zeros_like(self.final_moving_avg_scores)
-                    evaluated_mask = torch.zeros_like(self.final_moving_avg_scores, dtype=torch.bool)
-                    evaluated_mask[list(self.evaluated_uids)] = True
-
-                    positive_mask = (self.final_moving_avg_scores > 0) & evaluated_mask
-
-                    if positive_mask.any():
-                        # Apply normalization to all positive scores at once
-                        self.weights[positive_mask] = min_power_normalization(
-                            self.final_moving_avg_scores[positive_mask], 
-                            power=self.hparams.power_normalisation
-                        )
-                        
-                        # Log warning if weights don't sum to 1
-                        weight_sum = self.weights.sum().item()
-                        tplr.logger.debug(f"Weight sum: {weight_sum}")
-                        if abs(weight_sum - 1.0) > 1e-6:
-                            tplr.logger.warning(f"Weights sum to {weight_sum}, expected close to 1.0")
-                    else:
-                        tplr.logger.info("No positive scores found, all weights set to 0")
-
-                    # Log updated scores
-                    tplr.logger.info('Updated scores for evaluated UIDs after slashing:')
-                    for uid in self.evaluated_uids:
-                        tplr.logger.info(f'UID {uid}:')
-                        tplr.logger.info(f'  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}')
-
-                    # Optionally, log to WandB
-                    self.wandb.log({
-                        f"validator/final_moving_avg_scores/{eval_uid}": self.final_moving_avg_scores[eval_uid].item(),
-                        f"validator/weights/{eval_uid}": self.weights[eval_uid].item(),
-                    }, step=self.global_step)
-                    tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights')
-                
-                tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation')
 
             # Log scores and metrics for evaluated UIDs
             tplr.logger.info('Updated scores for evaluated UIDs:')
@@ -827,7 +491,7 @@ class Validator:
                     )
                 )
             
-            # 16. Now, merge the gathered gradients into the model AFTER finishing evaluation
+            # 16. Merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
             self.optimizer.zero_grad()

@@ -226,8 +226,6 @@ class Miner:
             self.model.to(self.config.device)
 
 
-
-
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
 
@@ -243,19 +241,15 @@ class Miner:
             self.peers = self.comms.peers
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}')
 
-            # 2. Load training data for this window
+            # 2. Load training data for this window using the class method get_loader
             data_start = tplr.T()
-            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset = step_window,
-                n_pages = self.hparams.pages_per_window,
-                seed = self.uid #type: ignore
-            )            
-            loader = await tplr.r2_dataset.R2DatasetLoader.create(
-                batch_size = self.hparams.batch_size,
-                sequence_length = self.hparams.sequence_length,
-                pages_info = pages,
-                tokenizer = self.tokenizer
-            )   
+            loader, pages = await tplr.r2_dataset.R2DatasetLoader.get_loader(
+                window=step_window,
+                hparams=self.hparams,
+                tokenizer=self.tokenizer,
+                seed=self.uid,  # type: ignore
+                data_type="training"
+            )
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - data_start)} Loaded training data')
             tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}") #type: ignore
             

@@ -66,7 +66,17 @@ sed -i f's|80f15715bb0b882c9e967c13e677ed7d/|{$DATABUCKET}/|g' _shard_sizes.json
 rm ./.cache/tplr/*
 ```
 
-You are now ready to configure API keys for your dataset bucket to use in your miner.
+You are now ready to use the dataset for your miner and set your own  read only API keys for accessing the dataset bucket
+
+```bash
+#!/bin/bash
+
+export R2_DATASET_ACCOUNT_ID=$R2_ACCOUNT_ID
+export R2_DATASET_BUCKET_NAME=$DATABUCKET
+export R2_DATASET_READ_ACCESS_KEY_ID=
+export R2_DATASET_READ_SECRET_ACCESS_KEY=
+
+```
 
 ## Reference images
 

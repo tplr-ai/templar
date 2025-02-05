@@ -1,9 +1,7 @@
 """Unit tests for neuron functionality"""
 import pytest
-import torch
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
-from ..utils.assertions import assert_tensor_equal
+from unittest.mock import AsyncMock
 
 # Mark all tests as async
 pytestmark = pytest.mark.asyncio

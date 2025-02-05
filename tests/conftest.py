@@ -1,7 +1,5 @@
 """Global pytest fixtures"""
 import pytest
-import os
-from pathlib import Path
 from unittest.mock import patch
 from tests.mocks import (
     MockWallet,
@@ -9,9 +7,7 @@ from tests.mocks import (
     MockMetagraph,
     MockModel,
     MockTransformer,
-    MockCompressor,
-    MockOptimizer,
-    MockScheduler
+    MockCompressor
 )
 from tests.utils.env_setup import setup_test_environment
 from tests.mocks.bittensor import mock_bt

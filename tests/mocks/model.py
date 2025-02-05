@@ -6,6 +6,20 @@ from torch.optim.lr_scheduler import StepLR
 from unittest.mock import MagicMock
 from transformers import PretrainedConfig
 
+# DummyLoss/DummyOutput define a constant loss output (3.0) to be used for testing.
+class DummyLoss:
+    def __init__(self, value=3.0):
+        self.value = value
+    def item(self):
+        return self.value
+
+class DummyOutput:
+    def __init__(self, loss_value=3.0):
+        self._loss = DummyLoss(loss_value)
+    @property
+    def loss(self):
+        return self._loss
+
 class MockModelConfig(PretrainedConfig):
     """Mock config that inherits from PretrainedConfig"""
     model_type = "llama"
@@ -35,23 +49,51 @@ class MockLlamaForCausalLM(MagicMock):
         return self._parameters.values()
 
 class MockModel(BaseMock):
-    """Mock model with basic parameter operations"""
+    """Mock model with basic parameter operations and constant loss output for testing."""
     def __init__(self):
         super().__init__()
         self.params = {
             "layer1.weight": torch.nn.Parameter(torch.randn(10, 10)),
             "layer1.bias": torch.nn.Parameter(torch.randn(10))
         }
-        # Add forward method for loss computation
-        self.forward = MagicMock(return_value=torch.tensor(2.0))
-        # Add loss computation
-        self.loss_fn = MagicMock(return_value=torch.tensor(1.0))
+        # Use a consistent DummyOutput that always returns a loss of 3.0.
+        self.forward = MagicMock(return_value=DummyOutput())
         
     def named_parameters(self):
         return self.params.items()
         
     def parameters(self):
         return self.params.values()
+    
+    def eval(self):
+        """
+        Simulates switching the model to evaluation mode.
+        Returns self for chaining.
+        """
+        return self
+
+    def train(self):
+        """
+        Simulates switching the model to training mode.
+        Returns self for chaining.
+        """
+        return self
+
+    def __call__(self, *args, **kwargs):
+        """
+        Allows the model to be callable, mimicking torch.nn.Module behavior.
+        """
+        return self.forward(*args, **kwargs)
+    
+    def clone(self):
+        # Instead of using deep copy, create a new instance and copy only essential attributes.
+        new_instance = MockModel()
+        new_instance.forward = self.forward
+        # If there are additional attributes (e.g., parameters) needed by evaluate_peer, copy them here.
+        if hasattr(self, "params"):
+            # If params is a dict, perform a shallow copy.
+            new_instance.params = self.params.copy() if isinstance(self.params, dict) else self.params
+        return new_instance
 
 class MockOptimizer(SGD):
     """Mock optimizer with basic operations"""

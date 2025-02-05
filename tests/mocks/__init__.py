@@ -1,16 +1,21 @@
 """Mock components for testing"""
 from .base import BaseMock
-from .wallet import MockWallet, MockSubtensor
+from .wallet import MockWallet
 from .metagraph import MockMetagraph
 from .model import (
     MockModel,
     MockOptimizer,
     MockScheduler,
     MockTransformer,
-    MockCompressor
+    MockCompressor,
+    MockLlamaForCausalLM,
+    MockModelConfig
 )
 from .comms import MockComms
+from .loader import MockLoader
 from .bittensor import mock_bt
+from .subtensor import MockSubtensor
+from .r2_dataset import MockR2DatasetLoader
 
 __all__ = [
     'BaseMock',
@@ -23,5 +28,9 @@ __all__ = [
     'MockTransformer',
     'MockCompressor',
     'MockComms',
-    'mock_bt'
+    'mock_bt',
+    'MockLoader',
+    'MockLlamaForCausalLM',
+    'MockModelConfig',
+    'MockR2DatasetLoader'
 ] 

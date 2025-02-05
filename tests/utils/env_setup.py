@@ -1,6 +1,5 @@
 """Test environment setup utilities"""
 import os
-from pathlib import Path
 
 def setup_test_environment():
     """Setup test environment variables"""

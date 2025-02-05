@@ -1,7 +1,4 @@
 """Base mock classes and utilities"""
-import torch
-from unittest.mock import MagicMock, AsyncMock
-from types import SimpleNamespace
 
 class BaseMock:
     """Base class for all mocks with common utilities"""

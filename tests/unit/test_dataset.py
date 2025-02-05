@@ -2,7 +2,6 @@
 import pytest
 import torch
 import numpy as np
-from types import SimpleNamespace
 from ..utils.assertions import assert_tensor_equal
 from ..utils.env_setup import setup_test_environment
 

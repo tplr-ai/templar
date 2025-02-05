@@ -1,10 +1,9 @@
 """Unit tests for compression functionality"""
 import pytest
 import torch
-import numpy as np
 from ..utils.assertions import assert_tensor_equal
 
-from neurons.validator.compress import TransformDCT, CompressDCT
+from tplr.compress import TransformDCT, CompressDCT
 
 class TestTransformDCT:
     """Test DCT transformation functionality"""

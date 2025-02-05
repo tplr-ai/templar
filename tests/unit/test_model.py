@@ -3,7 +3,6 @@ import pytest
 import torch
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
-from ..utils.assertions import assert_tensor_equal
 
 class TestModelBasics:
     """Test basic model functionality"""

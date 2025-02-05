@@ -25,7 +25,7 @@ from .schemas import Bucket
 
 import tplr as tplr
 from .compress import TransformDCT, CompressDCT
-# from .hparams import HParams
+
 
 
 # Constants
@@ -65,10 +65,9 @@ class Comms(ChainManager):
             wallet=self.wallet,
             bucket=self.bucket,
         )
-
-        # Use the hotkey directly in the save_location
-        hotkey = self.wallet.hotkey.ss58_address
-        self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
+        # Save version for consistent filename formation
+        self.version = __version__
+        self.save_location = os.path.join("/tmp", f"hotkey_{self.wallet.hotkey.ss58_address}")
         os.makedirs(self.save_location, exist_ok=True)
         self.key_prefix = key_prefix
         self.session = get_session()
@@ -658,7 +657,8 @@ class Comms(ChainManager):
         stale_retention: int = 10,
     ):
         """PUT operation: Store the state_dict and global_step."""
-        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        # Use self.version here for the filename
+        filename = f"{key}-{window}-{uid}-v{self.version}.pt"
         tplr.logger.debug(f"PUT {filename} -->")
 
         # Create per-uid temp directory
@@ -700,7 +700,6 @@ class Comms(ChainManager):
                 os.remove(temp_file_path)
 
         tplr.logger.debug(f"PUT {filename} <--")
-
     async def get(
         self,
         uid: str,
@@ -711,7 +710,7 @@ class Comms(ChainManager):
         stale_retention: int = 10,
     ) -> Optional[tuple[dict, int]]:
         """GET operation."""
-        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        filename = f"{key}-{window}-{uid}-v{self.version}.pt"
         tplr.logger.debug(f"GET {filename} -->")
 
         try:
@@ -720,42 +719,40 @@ class Comms(ChainManager):
                 await self.cleanup_local_data(
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
-                local_path = os.path.join(
-                    LOCAL_TMP_DIR, str(uid), str(window), filename
-                )
+                local_path = os.path.join(LOCAL_TMP_DIR, str(uid), str(window), filename)
                 if not os.path.exists(local_path):
                     tplr.logger.debug(f"Local file not found: {local_path}")
-                    return None
-                loaded_data = torch.load(local_path, weights_only=True)
-                if key == "checkpoint":
-                    return loaded_data, None
-                state_dict = loaded_data.get("state_dict")
-                global_step = loaded_data.get("global_step", 0)
-                return state_dict, global_step
+                    return None, 0
+                loaded_data = torch.load(local_path, map_location=self.config.device)
+                # If checkpoint is stored as a nested dict, unwrap it.
+                if isinstance(loaded_data, dict) and "state_dict" in loaded_data and "global_step" in loaded_data:
+                    return loaded_data["state_dict"], loaded_data["global_step"]
+                return loaded_data, 0
 
             # Remote storage logic
             peer_bucket = self.commitments.get(int(uid))
             tplr.logger.debug(f"Peer bucket : {peer_bucket}")
             if not peer_bucket:
-                return None
+                return None, 0
 
             loaded_data = await self.s3_get_object(
                 key=filename, bucket=peer_bucket, timeout=timeout
             )
 
             if loaded_data is None:
-                return None
+                return None, 0
 
             if key == "checkpoint":
-                return loaded_data, None
+                # Unwrap checkpoint if stored as nested dict.
+                if isinstance(loaded_data, dict) and "state_dict" in loaded_data and "global_step" in loaded_data:
+                    return loaded_data["state_dict"], loaded_data["global_step"]
+                return loaded_data, 0
 
-            state_dict = loaded_data.get("state_dict")
-            global_step = loaded_data.get("global_step", 0)
-            return state_dict, global_step
+            return loaded_data, 0
 
         except Exception as e:
             tplr.logger.debug(f"GET error {filename}: {e}")
-            return None
+            return None, 0
 
         finally:
             tplr.logger.debug(f"GET {filename} <--")
@@ -976,12 +973,8 @@ class Comms(ChainManager):
                                 else:
                                     if param_name not in aggregated_state_dict:
                                         aggregated_state_dict[param_name] = []
-                                    aggregated_state_dict[param_name].append(
-                                        tensor.to(device)
-                                    )
-                                metrics["download_bytes"] += (
-                                    tensor.element_size() * tensor.nelement()
-                                )
+                                    aggregated_state_dict[param_name].append(tensor.to(device))
+                                    metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
 
                         valid_uids.append(uid)
                         global_steps.append(global_step_resp)
@@ -1102,7 +1095,7 @@ class Comms(ChainManager):
                 for window in range(
                     current_window - recent_windows, current_window + 1
                 ):
-                    filename = f"gradient-{window}-{uid}-v{__version__}.pt"
+                    filename = f"gradient-{window}-{uid}-v{self.version}.pt"
                     tplr.logger.debug(
                         f"Checking for {filename} in bucket {peer_bucket.name}"
                     )
@@ -1219,7 +1212,7 @@ class Comms(ChainManager):
     def _load_latest_local_checkpoint(self):
         try:
             local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
-            pattern = rf"checkpoint-(\d+)-{self.uid}-v{__version__}\.pt$"
+            pattern = rf"checkpoint-(\d+)-{self.uid}-v{self.version}\.pt$"
 
             if not os.path.exists(local_dir):
                 return None
@@ -1247,7 +1240,7 @@ class Comms(ChainManager):
             if checkpoints:
                 # choose the last modified checkpoint
                 latest = max(checkpoints, key=lambda x: x["modified"])
-                checkpoint_data = torch.load(latest["path"])
+                checkpoint_data = torch.load(latest["path"], weights_only=True)
                 return checkpoint_data, latest["window"]
             else:
                 return None
@@ -1265,7 +1258,7 @@ class Comms(ChainManager):
             aws_access_key_id=bucket.access_key_id,
             aws_secret_access_key=bucket.secret_access_key,
         ) as s3_client:
-            pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{__version__}\.pt$")
+            pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{self.version}\.pt$")
 
             response = await s3_client.list_objects_v2(
                 Bucket=bucket.name, Prefix="checkpoint", MaxKeys=1000
@@ -1474,7 +1467,7 @@ class Comms(ChainManager):
 
     async def post_start_window(self, start_window: int):
         """Upload the start window as a JSON object to the node's R2 bucket."""
-        key = f"start_window_v{__version__}.json"
+        key = f"start_window_v{self.version}.json"
         start_window_data = {"start_window": start_window}
 
         # Create temporary JSON file
@@ -1508,7 +1501,7 @@ class Comms(ChainManager):
 
                 # Fetch 'start_window.json' using s3_get_object
                 start_window_data = await self.s3_get_object(
-                    key=f"start_window_v{__version__}.json", bucket=validator_bucket
+                    key=f"start_window_v{self.version}.json", bucket=validator_bucket
                 )
                 if start_window_data is not None:
                     # Check if start_window_data is already a dict

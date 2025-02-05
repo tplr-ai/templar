@@ -173,7 +173,7 @@ async def benchmark_iteration(comms_instance, iteration):
                 propagation_delay = time.time() - upload_end
                 print(f"Iteration {iteration}: Object available after {propagation_delay:.2f} seconds.")
                 break
-            except Exception as e:
+            except Exception:
                 await asyncio.sleep(POLL_INTERVAL)
     if propagation_delay is None:
         print(f"Iteration {iteration}: Timeout; object not available after {MAX_POLL_TIME} seconds.")

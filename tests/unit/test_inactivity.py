@@ -2,7 +2,6 @@
 import pytest
 import torch
 from types import SimpleNamespace
-from ..utils.assertions import assert_tensor_equal
 
 # Mark all tests as async
 pytestmark = pytest.mark.asyncio

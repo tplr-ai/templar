@@ -2,7 +2,8 @@
 from unittest.mock import MagicMock
 import sys
 from types import ModuleType
-from .wallet import MockWallet, MockSubtensor
+from .wallet import MockWallet
+from .subtensor import MockSubtensor
 from .metagraph import MockMetagraph
 
 class MockBittensor(ModuleType):

@@ -1,9 +1,6 @@
 """Unit tests for R2 dataset loader functionality"""
 import pytest
-import os
-from pathlib import Path
 from ..utils.env_setup import setup_test_environment
-from ..utils.assertions import assert_tensor_equal
 
 # Setup environment before imports
 setup_test_environment()

@@ -20,13 +20,14 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "0.2.21"
+__version__ = "0.2.22_test"
 
 # Import package.
 from .chain import *
 from .comms import *
 from .compress import *
 from .dataset import *
+from .evaluation import *
 from .neurons import *
 from .r2_dataset import *
 from .hparams import *

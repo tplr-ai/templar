@@ -225,14 +225,12 @@ class Validator:
 
         # Initialize peers
         self.peers = []
-        self.eval_peers = []
+        # Weighted selection counters for fair picking of eval peers
+        self.eval_peers = defaultdict(int)
 
         # Track inactive peer scores
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
-
-        # Weighted selection counters for fair picking of eval peers
-        self.eval_candidates_counter = defaultdict(int)
 
     async def run(self):
         # Start background block listener
@@ -341,6 +339,11 @@ class Validator:
             tplr.logger.info(f"Current gather peers: {self.peers}")
             tplr.logger.info(f"Current evaluation peers: {self.eval_peers}")
 
+            tplr.logger.info(f"Current gather peers: {self.peers}")
+            tplr.logger.info(
+                f"Current evaluation peers: {list(self.eval_peers.keys())}"
+            )
+
             newly_inactive = self.comms.inactive_peers
             current_window = self.sync_window
 
@@ -358,7 +361,7 @@ class Validator:
             # Apply penalties to all inactive peers
             for uid, (inactive_since, _) in list(self.inactive_scores.items()):
                 # If peer became active again, remove from inactive tracking
-                if uid in self.eval_peers:
+                if uid in self.eval_peers.keys():
                     del self.inactive_scores[uid]
                     tplr.logger.info(f"UID {uid} became active again")
                     continue
@@ -408,32 +411,24 @@ class Validator:
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
 
-            # Sample a random subset of evaluation peers based on hparam uids_per_window
-            # 1) Add new active peers if they're missing from eval_candidates_counter
-            for uid in self.eval_peers:
-                if uid not in self.eval_candidates_counter:
-                    self.eval_candidates_counter[uid] = 1
-
-            # 2) Remove peers that are no longer active from the counter
-            for uid in list(self.eval_candidates_counter.keys()):
-                if uid not in self.eval_peers:
-                    del self.eval_candidates_counter[uid]
-
-            candidate_uids = list(self.eval_candidates_counter.keys())
+            candidate_uids = list(self.eval_peers.keys())
             candidate_weights = [
                 self.eval_candidates_counter[uid] for uid in candidate_uids
             ]
             k = min(self.hparams.uids_per_window, len(candidate_uids))
-            evaluation_uids = self.comms.weighted_random_sample_no_replacement(candidate_uids, candidate_weights, k)
+            evaluation_uids = self.comms.weighted_random_sample_no_replacement(
+                candidate_uids, candidate_weights, k
+            )
 
             # Reset counters for chosen peers
             for uid in evaluation_uids:
-                self.eval_candidates_counter[uid] = 0
+                self.eval_peers[uid] = 0
 
             # Increment counters for not chosen peers
             for uid in candidate_uids:
                 if uid not in evaluation_uids:
-                    self.eval_candidates_counter[uid] += 1
+                    self.eval_peers[uid] += 1
+            self.comms.eval_peers = self.eval_peers
 
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
 
@@ -1240,6 +1235,7 @@ def min_power_normalization(logits, power=2.0, epsilon=1e-8):
         probabilities = torch.zeros_like(powered_logits)
 
     return probabilities
+
 
 if __name__ == "__main__":
     asyncio.run(Validator().run())

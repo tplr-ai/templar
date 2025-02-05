@@ -1,5 +1,4 @@
 import random
-import torch
 from tests.mocks.loader import MockLoader
 
 class MockR2DatasetLoader:

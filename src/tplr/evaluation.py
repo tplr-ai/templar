@@ -3,6 +3,9 @@ import random
 from tplr.logging import logger
 import tplr
 from .r2_dataset import R2DatasetLoader
+import asyncio
+import random
+import copy
 
 
 def evaluate_model_loss(model, loader, tokenizer, device):
@@ -148,58 +151,58 @@ def compute_improvement_metrics(loss_before_own, loss_after_own, loss_before_ran
 
 async def evaluate_peer(uid, state_dict, sync_window, hparams, tokenizer,
                         config, model, transformer, compressor, xshapes, totalks,
-                        device, lr, optimizer, scheduler):
+                        device, lr, optimizer, scheduler, random_batches, random_pages):
     """
-    Evaluates a peer's gradient by comparing loss improvements on "own" and "random" evaluation data.
-    This function uses helper functions to break down responsibilities:
-      - evaluate_loss_change: to compute loss before/after gradient application.
-      - compute_improvement_metrics: to compute relative improvements and gradient score.
-      - load_and_compare_pages: to load and verify page consistency.
+    Evaluates a peer's gradient by comparing loss improvements on "own" and shared "random" evaluation data.
+    Uses:
+      - evaluate_loss_change: computes loss before/after gradient application.
+      - compute_improvement_metrics: computes relative improvements and gradient score.
+      - load_and_compare_pages: verifies data consistency.
     Returns:
-      A result dictionary with evaluation metrics.
+      A dictionary with evaluation metrics.
     """
     start_time = tplr.T()
 
-    # Evaluate on own data
+    ## OWN EVALUATION (using uid-specific seed)
     loader_own, _ = await R2DatasetLoader.get_loader(
         window=sync_window, hparams=hparams, tokenizer=tokenizer,
-        data_type="own", pack_samples=True
+        data_type="own", seed=uid
     )
     batches_own = [batch for batch in loader_own]
-    model_own_eval = model.clone()
+    model_own_eval = await asyncio.to_thread(copy.deepcopy, model)
+    own_task = asyncio.to_thread(
+        evaluate_loss_change,
+        model_own_eval, batches_own, tokenizer, device,
+        hparams.validator_sample_rate, state_dict, transformer, compressor,
+        xshapes, totalks, lr, optimizer
+    )
+
+    ## RANDOM EVALUATION (shared among all UIDs)
+    model_random_eval = await asyncio.to_thread(copy.deepcopy, model)
+    random_task = asyncio.to_thread(
+        evaluate_loss_change,
+        model_random_eval, random_batches, tokenizer, device,
+        hparams.validator_sample_rate, state_dict, transformer, compressor,
+        xshapes, totalks, lr, optimizer
+    )
+
     (loss_before_own, loss_after_own,
      count_before_own, count_after_own,
-     sampled_indices_own, total_batches_own) = evaluate_loss_change(
-         model_own_eval, batches_own, tokenizer, device,
-         hparams.validator_sample_rate, state_dict,
-         transformer, compressor, xshapes, totalks, lr, optimizer
-    )
+     sampled_indices_own, total_batches_own) = await own_task
     logger.info(f"UID {uid}: Own data evaluation completed. Loss before: {loss_before_own}, after: {loss_after_own}")
 
-    # Evaluate on random data
-    loader_random, random_pages = await R2DatasetLoader.get_loader(
-        window=sync_window, hparams=hparams, tokenizer=tokenizer,
-        data_type="random", pack_samples=True
-    )
-    batches_random = [batch for batch in loader_random]
-    model_random_eval = model.clone()
     (loss_before_random, loss_after_random,
      count_before_random, count_after_random,
-     sampled_indices_random, total_batches_random) = evaluate_loss_change(
-         model_random_eval, batches_random, tokenizer, device,
-         hparams.validator_sample_rate, state_dict,
-         transformer, compressor, xshapes, totalks, lr, optimizer
-    )
+     sampled_indices_random, total_batches_random) = await random_task
     logger.info(f"UID {uid}: Random data evaluation completed. Loss before: {loss_before_random}, after: {loss_after_random}")
 
-    # Compute improvement metrics
     (relative_improvement_own, relative_improvement_random,
      gradient_score, binary_indicator) = compute_improvement_metrics(
          loss_before_own, loss_after_own, loss_before_random, loss_after_random
     )
     logger.info(f"UID {uid}: Gradient score: {gradient_score}, Binary indicator: {binary_indicator}")
 
-    # Load and verify pages
+    # Load and verify pages.
     miner_pages, local_pages = await load_and_compare_pages(uid, sync_window, hparams, tokenizer, state_dict)
 
     total_time = tplr.T() - start_time
@@ -220,3 +223,75 @@ async def evaluate_peer(uid, state_dict, sync_window, hparams, tokenizer,
         "pages_random": random_pages,
     }
     return result
+
+async def evaluate_peers_parallel(
+    evaluation_uids, 
+    comms, 
+    sync_window, 
+    hparams, 
+    tokenizer, 
+    config, 
+    model, 
+    transformer, 
+    compressor, 
+    xshapes, 
+    totalks, 
+    device, 
+    lr, 
+    optimizer, 
+    scheduler
+):
+    """
+    Evaluates multiple peers concurrently.
+    Loads the "random" evaluation data only once for the current sync window,
+    and then passes it to each evaluation of the given UIDs.
+    
+    Returns:
+        dict: Mapping from uid -> evaluation result (or None if no gradient received).
+    """
+    # Load random evaluation data once.
+    random_loader, random_pages = await R2DatasetLoader.get_loader(
+        window=sync_window, hparams=hparams, tokenizer=tokenizer,
+        data_type="random"
+    )
+    common_random_batches = [batch for batch in random_loader]
+
+    async def evaluate_uid(uid):
+        tplr.logger.info(f"Evaluating uid: {uid}")
+        eval_result = await comms.get(
+            uid=str(uid),
+            window=sync_window,
+            key='gradient',
+            timeout=30,
+            local=False,
+            stale_retention=10
+        )
+        if eval_result is not None and eval_result[0] is not None:
+            state_dict, _ = eval_result
+            eval_payload = await evaluate_peer(
+                uid,
+                state_dict,
+                sync_window,
+                hparams,
+                tokenizer,
+                config,
+                model,
+                transformer,
+                compressor,
+                xshapes,
+                totalks,
+                device,
+                lr,
+                optimizer,
+                scheduler,
+                common_random_batches,
+                random_pages
+            )
+            return uid, eval_payload
+        else:
+            tplr.logger.info(f"No gradient received from UID {uid}. Penalizing score.")
+            return uid, None
+
+    tasks = [asyncio.create_task(evaluate_uid(uid)) for uid in evaluation_uids]
+    results = await asyncio.gather(*tasks)
+    return {uid: result for uid, result in results}

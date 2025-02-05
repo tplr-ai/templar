@@ -6,10 +6,12 @@ import numpy as np
 from pathlib import Path
 import pyarrow.parquet as pq
 from functools import lru_cache
+import random
 
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
+from tplr.logging import T, P  # Use timing utilities
 
 
 class R2DatasetLoader(DatasetLoader):
@@ -58,7 +60,7 @@ class R2DatasetLoader(DatasetLoader):
 
     # Static configuration
     PREFETCH_SIZE = 3  # Number of pages to prefetch
-    MAX_CONCURRENT_REQUESTS = 8  # Increased from 4
+    MAX_CONCURRENT_REQUESTS = 20  
     BATCH_SIZE = 128  # Increased batch size for tokenization
     READ_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB read buffer
 
@@ -535,8 +537,8 @@ class R2DatasetLoader(DatasetLoader):
         Returns:
             tuple: (loader, pages_info)
         """
-
-        seed_val = seed if seed is not None else random.randint(0, 10000)
+        seed_val = seed if seed is not None else np.random.randint(0, 10000)
+        start_time = T()
         pages = await cls.next_pages(
             offset=window,
             n_pages=hparams.pages_per_window,
@@ -549,5 +551,6 @@ class R2DatasetLoader(DatasetLoader):
             tokenizer=tokenizer,
             pack_samples=pack_samples
         )
-        logger.info(f"Loaded {data_type} data for window {window} with seed: {seed_val}")
+        elapsed = T() - start_time
+        logger.info(f"Loaded {data_type} data for window {window} with seed: {seed_val} " + P(window, elapsed))
         return loader, pages

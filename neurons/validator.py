@@ -18,14 +18,18 @@
 #type: ignore
 
 # Standard library
+import os
 import sys
 import time
 import random
 import asyncio
 import argparse
 import threading
-from contextlib import contextmanager
+from io import StringIO
+from rich.table import Table 
 from time import perf_counter
+from rich.console import Console
+from contextlib import contextmanager
 
 # Third party
 import torch
@@ -376,72 +380,199 @@ class Validator:
                 self.global_step += 1
                 continue
 
-            # 5. Save original model state for evaluation
+            # 5. Start Evaluation
             eval_start = tplr.T()
             # Sample a random subset of evaluation peers based on hparam uids_per_window
             evaluation_uids = random.sample(
                 self.eval_peers,
                 min(self.hparams.uids_per_window, len(self.eval_peers))
             )
-            tplr.logger.info(f'Evaluating random subset of peers: {evaluation_uids}')
-            for eval_uid in evaluation_uids:
-                tplr.logger.info(f'Evaluating uid: {eval_uid}')
-
-                eval_result = await self.comms.get(
-                    uid=str(eval_uid),
-                    window=self.sync_window,
-                    key='gradient',
-                    timeout=30,
-                    local=False,
-                    stale_retention=10
-                )
-
-                if eval_result is not None and eval_result[0] is not None:
-                    state_dict, _ = eval_result
-                    eval_payload = await tplr.evaluation.evaluate_peer(
-                        uid=eval_uid,
-                        state_dict=state_dict,
-                        sync_window=self.sync_window,
-                        hparams=self.hparams,
-                        tokenizer=self.tokenizer,
-                        config=self.config,
-                        model=self.model,
-                        transformer=self.transformer,
-                        compressor=self.compressor,
-                        xshapes=self.xshapes,
-                        totalks=self.totalks,
-                        device=self.config.device,
-                        lr=self.scheduler.get_last_lr()[0],
-                        optimizer=self.optimizer,
-                        scheduler=self.scheduler
+            tplr.logger.info(f'Evaluating random subset of peers concurrently: {evaluation_uids}')
+            
+            results = await tplr.evaluation.evaluate_peers_parallel(
+                evaluation_uids,
+                self.comms,
+                self.sync_window,
+                self.hparams,
+                self.tokenizer,
+                self.config,
+                self.model,
+                self.transformer,
+                self.compressor,
+                self.xshapes,
+                self.totalks,
+                self.config.device,
+                self.scheduler.get_last_lr()[0],
+                self.optimizer,
+                self.scheduler
+            )
+            
+            # --- Aggregate and log evaluation metrics ---
+            loss_before_own_list = []
+            loss_after_own_list = []
+            loss_before_random_list = []
+            loss_after_random_list = []
+            relative_improvement_own_list = []
+            relative_improvement_random_list = []
+            
+            for uid, eval_payload in results.items():
+                if eval_payload is not None:
+                    # Extract losses for clarity
+                    loss_before_own = eval_payload["loss_before_per_batch_own"]
+                    loss_after_own = eval_payload["loss_after_per_batch_own"]
+                    loss_before_random = eval_payload["loss_before_per_batch_random"]
+                    loss_after_random = eval_payload["loss_after_per_batch_random"]
+                    
+                    # Use the evaluated gradient score and binary indicator from the payload
+                    self.gradient_scores[uid] = eval_payload["gradient_score"]
+                    self.binary_indicator_scores[uid] = eval_payload["binary_indicator"]
+                    
+                    # Update exponential moving average of gradient scores with alpha=gradient_score_ma_alpha
+                    self.gradient_moving_avg_scores[uid] = (
+                        (1 - self.hparams.gradient_score_ma_alpha) * self.gradient_moving_avg_scores[uid]
+                        + self.hparams.gradient_score_ma_alpha * self.gradient_scores[uid]
                     )
-                    self.gradient_scores[eval_uid] = eval_payload["gradient_score"]
-                    self.binary_indicator_scores[eval_uid] = eval_payload["binary_indicator"]
-                    self.loss_before_per_batch_own = eval_payload["loss_before_per_batch_own"]
-                    self.loss_after_per_batch_own  = eval_payload["loss_after_per_batch_own"]
-                    self.relative_improvement_own    = eval_payload["relative_improvement_own"]
-                    self.loss_before_per_batch_random = eval_payload["loss_before_per_batch_random"]
-                    self.loss_after_per_batch_random  = eval_payload["loss_after_per_batch_random"]
-                    self.relative_improvement_random    = eval_payload["relative_improvement_random"]
-                    self.evaluated_uids.add(eval_uid)
-                else:
-                    tplr.logger.info(f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%.")
-                    old_score = self.final_moving_avg_scores[eval_uid].item()
-                    self.final_moving_avg_scores[eval_uid] *= 0.5
-                    new_score = self.final_moving_avg_scores[eval_uid].item()
-                    tplr.logger.info(f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f}")
-                    self.evaluated_uids.add(eval_uid)
+                    tplr.logger.debug(f"UID {uid} - Gradient moving average: {self.gradient_moving_avg_scores[uid]}")
+                    
+                    # Update binary moving average using alpha=binary_score_ma_alpha
+                    self.binary_moving_averages[uid] = (
+                        (1 - self.hparams.binary_score_ma_alpha) * self.binary_moving_averages[uid]
+                        + self.hparams.binary_score_ma_alpha * self.binary_indicator_scores[uid]
+                    )
+                    tplr.logger.debug(f"UID {uid} - Binary Moving Average: {self.binary_moving_averages[uid]}")
+                    
+                    # Normalize binary moving average to [0, 1] range
+                    self.normalised_binary_moving_averages[uid] = self.binary_moving_averages[uid] / 2
+                    tplr.logger.debug(f"UID {uid} - Normalised Binary Moving Average: {self.normalised_binary_moving_averages[uid]}")
+                    
+                    # Calculate final score incorporating both metrics and update final moving average score
+                    final_score = self.gradient_scores[uid] * self.normalised_binary_moving_averages[uid]
+                    self.final_moving_avg_scores[uid] = max(
+                        self.hparams.final_score_ma_alpha * self.final_moving_avg_scores[uid]
+                        + (1 - self.hparams.final_score_ma_alpha) * final_score,
+                        0.0
+                    )
+                    tplr.logger.debug(f"UID {uid} - Final Moving Average Score: {self.final_moving_avg_scores[uid]}")
+                    
+                    # Append losses for further aggregated logging if needed
+                    loss_before_own_list.append(loss_before_own)
+                    loss_after_own_list.append(loss_after_own)
+                    loss_before_random_list.append(loss_before_random)
+                    loss_after_random_list.append(loss_after_random)
+                    relative_improvement_own_list.append(eval_payload["relative_improvement_own"])
+                    relative_improvement_random_list.append(eval_payload["relative_improvement_random"])
+                self.evaluated_uids.add(uid)
+            
+            # Calculate weights using min power normalization over evaluated peers with positive final scores
+            self.weights = torch.zeros_like(self.final_moving_avg_scores)
+            evaluated_mask = torch.zeros_like(self.final_moving_avg_scores, dtype=torch.bool)
+            evaluated_mask[list(self.evaluated_uids)] = True
+            positive_mask = (self.final_moving_avg_scores > 0) & evaluated_mask
+            if positive_mask.any():
+                self.weights[positive_mask] = min_power_normalization(
+                    self.final_moving_avg_scores[positive_mask], 
+                    power=self.hparams.power_normalisation
+                )
+                weight_sum = self.weights.sum().item()
+                tplr.logger.debug(f"Weight sum: {weight_sum}")
+                if abs(weight_sum - 1.0) > 1e-6:
+                    tplr.logger.warning(f"Weights sum to {weight_sum}, expected close to 1.0")
+            else:
+                tplr.logger.info("No positive scores found, all weights set to 0")
+            
+            avg_loss_before_own = (
+                sum(loss_before_own_list) / len(loss_before_own_list)
+                if loss_before_own_list
+                else 0.0
+            )
+            avg_loss_after_own = (
+                sum(loss_after_own_list) / len(loss_after_own_list)
+                if loss_after_own_list
+                else 0.0
+            )
+            avg_loss_before_random = (
+                sum(loss_before_random_list) / len(loss_before_random_list)
+                if loss_before_random_list
+                else 0.0
+            )
+            avg_loss_after_random = (
+                sum(loss_after_random_list) / len(loss_after_random_list)
+                if loss_after_random_list
+                else 0.0
+            )
+            avg_rel_improvement_own = (
+                sum(relative_improvement_own_list) / len(relative_improvement_own_list)
+                if relative_improvement_own_list
+                else 0.0
+            )
+            avg_rel_improvement_random = (
+                sum(relative_improvement_random_list) / len(relative_improvement_random_list)
+                if relative_improvement_random_list
+                else 0.0
+            )
+            
+            evaluation_metrics = {
+                "validator/loss/own/before": avg_loss_before_own,
+                "validator/loss/own/after": avg_loss_after_own,
+                "validator/loss/random/before": avg_loss_before_random,
+                "validator/loss/random/after": avg_loss_after_random,
+                "validator/loss/own/improvement": avg_rel_improvement_own,
+                "validator/loss/random/improvement": avg_rel_improvement_random,
+                "validator/network/block": self.current_block,
+                "validator/network/window": self.sync_window,
+                "validator/network/step": self.global_step,
+                "validator/network/evaluated_uids": len(self.evaluated_uids),
+                "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
+                "validator/network/active_miners": len(self.valid_score_indices),
+            }
+            self.wandb.log(evaluation_metrics, step=self.global_step)
 
             # Log scores and metrics for evaluated UIDs
-            tplr.logger.info('Updated scores for evaluated UIDs:')
-            for uid in self.evaluated_uids:
-                tplr.logger.info(f'UID {uid}:')
-                tplr.logger.info(f'  - Last score: {self.gradient_scores[uid]}')
-                tplr.logger.info(f'  - Binary indicator: {self.binary_indicator_scores[uid]:.4f}')
-                tplr.logger.info(f'  - Binary moving avg: {self.binary_moving_averages[uid]:.4f}')
-                tplr.logger.info(f'  - Normalised binary score: {self.normalised_binary_moving_averages[uid]:.4f}')
-                tplr.logger.info(f'  - Final Moving avg score: {self.final_moving_avg_scores[uid]:.4f}')
-                tplr.logger.info(f'  - Weight: {self.weights[uid]:.4f}')
+            # Build a table with headers and one row per evaluated UID
+            headers = ["UID", "Last Score", "Binary Indicator", "Binary Moving Avg", "Norm Binary Score", "Final Moving Avg", "Weight"]
+            table = [headers]
+            for uid in sorted(self.evaluated_uids):
+                row = [
+                    str(uid),
+                    f"{self.gradient_scores[uid]:.4f}",
+                    f"{self.binary_indicator_scores[uid]:.4f}",
+                    f"{self.binary_moving_averages[uid]:.4f}",
+                    f"{self.normalised_binary_moving_averages[uid]:.4f}",
+                    f"{self.final_moving_avg_scores[uid]:.4f}",
+                    f"{self.weights[uid]:.4f}",
+                ]
+                table.append(row)
+
+            # Format the table using Rich for better visual appearance in PM2 logs.
+            try:
+                try:
+                    width = os.get_terminal_size().columns
+                except Exception:
+                    width = 0
+                os.environ['COLUMNS'] = str(max(200, width))
+                
+
+                rich_table = Table(title="Updated scores for evaluated UIDs")
+                for header in headers:
+                    rich_table.add_column(header)
+                for row in table[1:]:
+                    rich_table.add_row(*row)
+                sio = StringIO()
+                console = Console(file=sio, width=int(os.environ['COLUMNS']))
+                console.print(rich_table)
+                table_str = sio.getvalue()
+            except ImportError:
+                tplr.logger.warning("rich module not found; falling back to basic formatting.")
+                col_widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
+                lines = []
+                for i, row in enumerate(table):
+                    line = " | ".join(row[j].ljust(col_widths[j]) for j in range(len(row)))
+                    lines.append(line)
+                    if i == 0:
+                        separator = "-+-".join("-" * col_widths[j] for j in range(len(headers)))
+                        lines.append(separator)
+                table_str = "\n".join(lines)
+            tplr.logger.info("Updated scores for evaluated UIDs:\n" + table_str)
             
             # Log WandB metrics per UID
             for uid in sorted(self.evaluated_uids):

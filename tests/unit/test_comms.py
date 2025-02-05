@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
 from ..utils.assertions import assert_tensor_equal
 import asyncio
-from tplr import __version__
 
 # Mark all tests as async
 pytestmark = pytest.mark.asyncio

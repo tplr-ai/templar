@@ -2,10 +2,9 @@ import torch
 from unittest.mock import MagicMock
 import pytest
 from types import SimpleNamespace
-import random
 
 from tplr.evaluation import *
-from tests.mocks.model import MockModel, DummyOutput, MockTransformer, MockCompressor, MockOptimizer, MockScheduler
+from tests.mocks.model import MockModel, MockTransformer, MockCompressor, MockOptimizer, MockScheduler
 from tests.mocks.loader import MockLoader
 from tplr import logger
 from tplr.r2_dataset import R2DatasetLoader
@@ -506,17 +505,16 @@ async def test_evaluate_peer_success(monkeypatch):
         # Dummy gradient keys can be omitted since apply_compressed_gradient will log missing data.
     }
 
-    # Fake compute_average_loss to simulate loss before and after gradient application.
-    # The order of calls in evaluate_peer:
-    # 1. Own before gradient -> (4.0, 1, [0], 1)
-    # 2. Own after gradient -> (2.0, 1, [0], 1)
-    # 3. Random before gradient -> (5.0, 1, [0], 1)
-    # 4. Random after gradient -> (5.0, 1, [0], 1)
+    # Patch compute_average_loss to yield predictable losses:
     fake_results = iter([
-         (4.0, 1, [0], 1),
-         (2.0, 1, [0], 1),
-         (5.0, 1, [0], 1),
-         (5.0, 1, [0], 1)
+         (4.0, 1, [0], 1),  # UID1: Own before gradient
+         (2.0, 1, [0], 1),  # UID1: Own after gradient
+         (5.0, 1, [0], 1),  # UID1: Random before gradient
+         (5.0, 1, [0], 1),  # UID1: Random after gradient
+         (4.0, 1, [0], 1),  # UID2: Own before gradient
+         (2.0, 1, [0], 1),  # UID2: Own after gradient
+         (5.0, 1, [0], 1),  # UID2: Random before gradient
+         (5.0, 1, [0], 1)   # UID2: Random after gradient
     ])
     def fake_compute_average_loss(model_inst, batches, tokenizer_inst, device, sample_rate):
          return next(fake_results)
@@ -652,4 +650,108 @@ async def test_evaluate_peer_division_by_zero(monkeypatch):
     assert result["miner_pages"] == [("dummy", 1, "A")]
     assert result["local_pages"] == [("dummy", 1, "A")]
     assert result["pages_random"] == [("dummy_random", 1, "B")]
+
+
+#############################################
+# Test X: test_evaluate_peers_parallel_success
+#############################################
+@pytest.mark.asyncio
+async def test_evaluate_peers_parallel_success(monkeypatch):
+    """
+    Verify that evaluate_peers_parallel concurrently evaluates a list of UIDs and returns,
+    for each, a dictionary with the expected evaluation keys.
+    """
+    # Setup dummy comms with a fake get() method returning a dummy state_dict.
+    async def fake_get(uid, window, key, timeout, local, stale_retention):
+        dummy_state = {"metadata": {"pages_info": [("dummy", 1, "A")]}}
+        return (dummy_state, None)
+    fake_comms = SimpleNamespace(get=fake_get)
+
+    # Patch R2DatasetLoader.get_loader for both "own" and "random" evaluation.
+    async def fake_get_loader(window, hparams, tokenizer, seed=None, data_type="own", pack_samples=True):
+        if data_type == "random":
+            return (iter([[4, 5, 6]]), [("dummy_random", 1, "B")])
+        else:
+            return (iter([[1, 2, 3]]), [("dummy", 1, "A")])
+    from tplr.r2_dataset import R2DatasetLoader
+    monkeypatch.setattr(R2DatasetLoader, "get_loader", fake_get_loader)
+
+    # Patch R2DatasetLoader.next_pages to return a fixed pages value.
+    async def fake_next_pages(offset, n_pages, seed):
+        return [("dummy", 1, "A")]
+    monkeypatch.setattr(R2DatasetLoader, "next_pages", fake_next_pages)
+
+    # Patch compute_average_loss to yield predictable losses:
+    fake_results = iter([
+         (4.0, 1, [0], 1),  # UID1: Own before gradient
+         (2.0, 1, [0], 1),  # UID1: Own after gradient
+         (5.0, 1, [0], 1),  # UID1: Random before gradient
+         (5.0, 1, [0], 1),  # UID1: Random after gradient
+         (4.0, 1, [0], 1),  # UID2: Own before gradient
+         (2.0, 1, [0], 1),  # UID2: Own after gradient
+         (5.0, 1, [0], 1),  # UID2: Random before gradient
+         (5.0, 1, [0], 1)   # UID2: Random after gradient
+    ])
+    import tplr.evaluation as evaluation_mod
+    monkeypatch.setattr(evaluation_mod, "compute_average_loss", 
+                            lambda model, batches, tokenizer, device, sample_rate: next(fake_results))
+    
+    # Define other required dummy variables.
+    uids = ["uid1", "uid2"]
+    sync_window = 0
+    hparams = SimpleNamespace(batch_size=2, sequence_length=10, pages_per_window=1, validator_sample_rate=1.0)
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+    config = {}
+    model = MockModel()
+    optimizer = MockOptimizer(list(model.parameters()), lr=0.1)
+    scheduler = MockScheduler(optimizer, step_size=10)
+    transformer = MockTransformer()
+    compressor = MockCompressor()
+    xshapes = {"layer1.weight": (10, 10), "layer1.bias": (10,)}
+    totalks = {"layer1.weight": 50, "layer1.bias": 5}
+    device = "cpu"
+    lr = 0.1
+
+    # Call evaluate_peers_parallel.
+    results = await evaluation_mod.evaluate_peers_parallel(
+          evaluation_uids=uids,
+          comms=fake_comms,
+          sync_window=sync_window,
+          hparams=hparams,
+          tokenizer=tokenizer,
+          config=config,
+          model=model,
+          transformer=transformer,
+          compressor=compressor,
+          xshapes=xshapes,
+          totalks=totalks,
+          device=device,
+          lr=lr,
+          optimizer=optimizer,
+          scheduler=scheduler
+    )
+    
+    # Expected keys in each evaluation payload.
+    expected_keys = {
+         "uid",
+         "loss_before_per_batch_own",
+         "loss_after_per_batch_own",
+         "relative_improvement_own",
+         "loss_before_per_batch_random",
+         "loss_after_per_batch_random",
+         "relative_improvement_random",
+         "gradient_score",
+         "binary_indicator",
+         "miner_pages",
+         "local_pages",
+         "pages_random",
+    }
+    
+    # Check that results is a dict mapping each UID to a valid payload.
+    assert set(results.keys()) == set(uids)
+    for uid, res in results.items():
+         assert res is not None, f"Result for {uid} should not be None."
+         missing = expected_keys - set(res.keys())
+         assert not missing, f"Missing keys in result for {uid}: {missing}"
 

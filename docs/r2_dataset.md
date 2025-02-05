@@ -24,8 +24,6 @@ cd HuggingFaceModelDownloader
 # create local .env file for R2 account creds
 tee .env << 'EOF'
 R2_ACCOUNT_ID=
-R2_READ_ACCESS_KEY_ID=
-R2_READ_SECRET_ACCESS_KEY=
 R2_WRITE_ACCESS_KEY_ID=
 R2_WRITE_SECRET_ACCESS_KEY=
 EOF

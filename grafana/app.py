@@ -123,7 +123,9 @@ def sync_neurons(metagraph_info):
 
 def insert_dummy_validator_eval_info(window_id, version):
     api = wandb.Api()
-
+    runs = api.runs(f"tplr/templar")
+    for run in runs:
+        tplr.logger.info(f"\nWandb run.id {run.id} run.name {run.name}")
     run = api.run(f"tplr/templar/v{version}")
     tplr.logger.info(f"\nWandb run.state {run.state}")
     if run.state == "finished":

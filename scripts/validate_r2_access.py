@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The MIT License (MIT)
-# © 2024 templar.tech
+# © 2025 tplr.ai
 
 # ruff: noqa
 # type: ignore

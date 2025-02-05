@@ -26,6 +26,7 @@ import bittensor as bt
 from bittensor import Wallet
 from typing import Dict, Optional
 from pydantic import ValidationError
+from collections import defaultdict
 
 # Local imports
 from .logging import logger
@@ -76,7 +77,7 @@ class ChainManager:
         # Initialize bucket storage
         self.commitments = {}
         self.peers = []
-        self.eval_peers = []
+        self.eval_peers = defaultdict(int)
         self.fetch_interval = fetch_interval
         self._fetch_task = None
 
@@ -457,12 +458,12 @@ class ChainManager:
 
         # Get currently active peers
         active_peers = set(int(uid) for uid in self.active_peers)
-        
+
         # Track inactive peers (previously active peers that are no longer active)
-        previously_active = set(self.eval_peers)
+        previously_active = set(self.eval_peers.keys())  # since self.eval_peers is now a dict
         newly_inactive = previously_active - active_peers
         self.inactive_peers = newly_inactive
-        
+
         logger.debug(f"Active peers: {active_peers}")
         logger.info(f"Newly inactive peers: {newly_inactive}")
         logger.debug(f"Stakes: {uid_to_stake}")
@@ -471,20 +472,24 @@ class ChainManager:
             logger.warning("No active peers found. Skipping update.")
             return
 
-        # Filter active miners with buckets (stake <= 1000)
-        self.eval_peers = [
-            int(uid) for uid in active_peers
+        # ---------------------------------------------------------------
+        # Convert self.eval_peers into a dict while retaining old counts
+        # for peers still active with stake <= 1000.
+        # ---------------------------------------------------------------
+        self.eval_peers = {
+            int(uid): self.eval_peers.get(int(uid), 1)
+            for uid in active_peers
             if uid in uid_to_stake and uid_to_stake[uid] <= 1000
-        ]
-        
-        logger.debug(f"Filtered eval peers: {self.eval_peers}")
+        }
 
-        # If total miners is less than minimum_peers, use all miners for both lists
+        logger.debug(f"Filtered eval peers: {list(self.eval_peers.keys())}")
+
+        # If total miners is less than minimum_peers, use all for aggregator
         if len(self.eval_peers) < self.hparams.minimum_peers:
-            self.peers = list(self.eval_peers)
+            self.peers = list(self.eval_peers.keys())  # aggregator uses all
             logger.warning(
-                f"Total active miners ({len(self.eval_peers)}) below minimum_peers ({self.hparams.minimum_peers}). "
-                f"Using all available miners as peers."
+                f"Total active miners ({len(self.eval_peers)}) below minimum_peers "
+                f"({self.hparams.minimum_peers}). Using all available miners as peers."
             )
             return
 
@@ -502,7 +507,8 @@ class ChainManager:
         self.peers = [uid for uid, _ in miner_incentives[:n_peers]]
 
         logger.info(
-            f"Updated gather peers (top {self.hparams.topk_peers}% or minimum {self.hparams.minimum_peers}): {self.peers}"
+            f"Updated gather peers (top {self.hparams.topk_peers}% or "
+            f"minimum {self.hparams.minimum_peers}): {self.peers}"
         )
         logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
         logger.info(f"Total inactive peers: {len(self.inactive_peers)}")

@@ -55,6 +55,7 @@ go run main.go -d "HuggingFaceFW/fineweb-edu-score-2" --r2 --skip-local -c $CPUC
 ### final config for shard and metadata files
 
 ```bash
+#!/bin/bash
 # Return to the templar repo
 cd ~/templar
 

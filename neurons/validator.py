@@ -362,7 +362,7 @@ class Validator:
                 uids=self.peers,
                 window=self.sync_window,
                 key='gradient',
-                timeout=5,
+                timeout=30,
                 device=self.config.device,
                 local=False,
                 stale_retention=100,

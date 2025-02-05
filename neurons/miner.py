@@ -401,7 +401,6 @@ class Miner:
                 "miner/timing/compression": tplr.T() - compress_start,
                 "miner/timing/gather": tplr.T() - gather_start,
                 "miner/timing/model_update": tplr.T() - update_start,
-                # Existing metrics
                 "miner/loss": total_loss/(i+1),
                 "miner/tokens_per_sec": ((i+1) * self.hparams.batch_size * self.hparams.sequence_length)/duration,
                 "miner/total_tokens": self.total_tokens_processed,

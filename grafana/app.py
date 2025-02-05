@@ -16,6 +16,7 @@ from classes.grafana_tools import Grafana, WINDOW_OFFSET
 import tplr
 from tplr import __version__
 from dotenv import load_dotenv
+import wandb
 
 # Load environment variables from .env file
 load_dotenv()
@@ -121,6 +122,13 @@ def sync_neurons(metagraph_info):
     # Consider to add tbl_neuron_third_party table
 
 def insert_dummy_validator_eval_info(window_id):
+    api = wandb.Api()
+
+    run = api.run("tplr/templar/latest")
+    tplr.logger.info(f"\nWandb run.state {run.state}")
+    if run.state == "finished":
+        for i, row in run.history().iterrows():
+            tplr.logger.info(f"\nWandb loss {row['validator/loss/before']}, {row['validator/loss/after']}")
     # Create a dummy validator eval info record
     new_validator_eval_info = ValidatorEvalInfo(
         window_id=window_id,

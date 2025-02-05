@@ -1351,6 +1351,9 @@ class Comms(ChainManager):
 
             window_difference = current_window - checkpoint_current_window
             global_step = current_window - checkpoint_start_window
+            
+            if checkpoint_data.get("transformer_state"):
+                transformer.load_state_dict(checkpoint_data["transformer_state"])
 
             tplr.logger.info(
                 f"Checkpoint windows (start={checkpoint_start_window}, checkpoint_current={checkpoint_current_window}), "
@@ -1547,6 +1550,7 @@ class Comms(ChainManager):
             "model_state_dict": {
                 k: v.cpu().clone() for k, v in model.state_dict().items()
             },
+            "transformer_state": transformer.state_dict(),
             "optimizer_state_dict": {
                 k: v.cpu().clone() if torch.is_tensor(v) else v
                 for k, v in optimizer.state_dict().items()

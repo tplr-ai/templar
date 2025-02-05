@@ -1,5 +1,5 @@
 # The MIT License (MIT)
-# © 2024 templar.tech
+# © 2025 tplr.ai
 
 import os
 import wandb

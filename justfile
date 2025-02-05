@@ -12,7 +12,7 @@ fix: lint
 
 # Run the application and monitor with PM2
 test-run:
-    ./scripts/start.sh && pm2 monit
+    ./scripts/start.sh
 
 # Install package in development mode using uv package manager
 dev:
@@ -39,3 +39,6 @@ test-parallel:
 # Run tests matching a specific pattern
 test-k pattern:
     uv run pytest -sv -k "{{pattern}}"
+
+bistro:
+    ps aux | grep Bistro

@@ -1,5 +1,5 @@
 # The MIT License (MIT)
-# © 2024 templar.tech
+# © 2025 tplr.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the "Software"), to deal in the Software without restriction, including without limitation
@@ -20,13 +20,14 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "0.2.20"
+__version__ = "0.2.21"
 
 # Import package.
 from .chain import *
 from .comms import *
 from .compress import *
 from .dataset import *
+from .neurons import *
 from .r2_dataset import *
 from .hparams import *
 from .logging import *

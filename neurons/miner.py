@@ -1,5 +1,5 @@
 # The MIT License (MIT)
-# © 2024 templar.tech
+# © 2025 tplr.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the "Software"), to deal in the Software without restriction, including without limitation
@@ -169,6 +169,14 @@ class Miner:
 
     # Main training loop.
     async def run(self):
+        # Start background block listener
+        self.loop = asyncio.get_running_loop()
+        self.listener = threading.Thread(
+            target=self.block_listener,
+            args=(self.loop,),
+            daemon=True,
+        )
+        self.listener.start()  # 
         # Load Peers
         if not self.config.peers:
             self.peers = self.comms.peers
@@ -180,11 +188,12 @@ class Miner:
 
         self.comms.commitments = self.comms.get_commitments_sync()
         self.comms.update_peers_with_buckets()
-        tplr.logger.info(f"Loaded commitments: {self.comms.commitments.keys()}")
+        tplr.logger.info("Loaded commitments")
 
         # Fetch start_window from highest stake validator
         self.start_window = await self.comms.get_start_window()
         tplr.logger.info(f"Using start_window: {self.start_window}")
+
 
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
@@ -216,14 +225,9 @@ class Miner:
             self.momentum = {n: torch.zeros_like(p) for n, p in self.model.named_parameters()}
             self.model.to(self.config.device)
 
-        # Start background block listener
-        self.loop = asyncio.get_running_loop()
-        self.listener = threading.Thread(
-            target=self.block_listener,
-            args=(self.loop,),
-            daemon=True,
-        )
-        self.listener.start()  # 
+
+
+
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
 
@@ -244,7 +248,7 @@ class Miner:
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
                 offset = step_window,
                 n_pages = self.hparams.pages_per_window,
-                seed = self.metagraph.hotkeys[self.uid] #type: ignore
+                seed = self.uid #type: ignore
             )            
             loader = await tplr.r2_dataset.R2DatasetLoader.create(
                 batch_size = self.hparams.batch_size,
@@ -326,36 +330,8 @@ class Miner:
 
             # 6. Prepare gradients for sharing using DeMo compression
             compress_start = tplr.T()
-            gradient = {}
-            xshapes = {}
-            totalks = {}
-            transmitted = {}
-            for n, p in self.model.named_parameters():
-                # Step-Weight decay
-                p.data.mul_(1.0 - self.scheduler.get_last_lr()[0] * self.hparams.weight_decay)
-                # Momentum decay
-                self.momentum[n].mul_(self.hparams.momentum_decay)
-                # Add the grad to the momentum
-                self.momentum[n].add_(p.grad, alpha=self.scheduler.get_last_lr()[0])
-                # Compress gradient
-                idxs, vals, xshape, totalk = self.compressor.compress(
-                    self.transformer.encode(self.momentum[n]), 
-                    self.hparams.topk_compression
-                )
-                # Estimate transmitted gradient
-                transmit_grad = self.transformer.decode(
-                    self.compressor.decompress(p, idxs, vals, xshape, totalk)
-                )
-                # Remove transmitted from delta
-                self.momentum[n].sub_(transmit_grad)
-                # Add to share_state
-                transmitted[n] = transmit_grad
-                gradient[n + 'idxs'] = idxs
-                gradient[n + 'vals'] = vals
-                xshapes[n] = xshape
-                totalks[n] = totalk
+            gradient, xshapes, totalks, _ = tplr.prepare_gradient_dict(self, pages, step_window)
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - compress_start)} Compressed gradients')
-
             # 7. Gather and process peer gradients
             gather_start = tplr.T()
             tplr.logger.info(f"Start gather: {self.peers}")
@@ -403,13 +379,7 @@ class Miner:
                             totalks[n],
                         )
                     )
-                    # Set recomputed gathered gradient.
-                    if p.grad is None:
-                        p.grad = new_grad
-                    else:
-                        p.grad.copy_(new_grad)
-                    # Sign-SGD 
-                    p.grad.sign_()
+                    p.data.sub_(new_grad.sign(), alpha = self.scheduler.get_last_lr()[0] )
                 else:
                     tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - update_start)} Updated model')

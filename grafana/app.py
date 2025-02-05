@@ -134,7 +134,7 @@ def insert_dummy_validator_eval_info(window_id, version):
     tplr.logger.info(f"\nWandb run {run_id}")
     tplr.logger.info(f"\nWandb run.state {run.state}")
     # tplr.logger.info(f"\nWandb run.history {history}")
-    for row, index in history:
+    for index, row in enumerate(history):
         for key, value in row.items():
             if "latest/validator/loss" in key:
                 tplr.logger.info(f"\nWandb {index} key {key}, value {value}")

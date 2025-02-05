@@ -121,10 +121,10 @@ def sync_neurons(metagraph_info):
     db.session.commit()
     # Consider to add tbl_neuron_third_party table
 
-def insert_dummy_validator_eval_info(window_id):
+def insert_dummy_validator_eval_info(window_id, version):
     api = wandb.Api()
 
-    run = api.run("tplr/templar/latest")
+    run = api.run(f"tplr/templar/v{version}")
     tplr.logger.info(f"\nWandb run.state {run.state}")
     if run.state == "finished":
         for i, row in run.history().iterrows():
@@ -214,7 +214,7 @@ async def run_grafana():
 
             # Insert validator eval info & eval info detail
             # We will get this via wandb log and data, and insert into tbl_validator_eval_info, tbl_eval_info_detail tables
-            insert_dummy_validator_eval_info(window_id)
+            insert_dummy_validator_eval_info(window_id, version)
             tplr.logger.info(f"\nInserted validator eval info {step_window}")
             insert_dummy_eval_info_detail(window_id)
             tplr.logger.info(f"\nInserted eval info detail {step_window}")

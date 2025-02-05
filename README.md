@@ -278,7 +278,8 @@ The incentive mechanism in **τemplar** aims to:
 
 Miners aim to maximize their expected reward, which is proportional to their assigned weight $w_i$:
 
-$\max\limits_{\delta_i} \quad w_i = \frac{e^{\bar{s}_i}}{\sum\limits_{j \in \mathcal{M}} e^{\bar{s}_j}}$
+$$\max_{\delta_i} \quad w_i = \frac{e^{\bar{s}i}}{\sum{j \in \mathcal{M}} e^{\bar{s}_j}}$$
+
 
 Subject to:
 

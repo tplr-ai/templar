@@ -133,22 +133,22 @@ def insert_dummy_validator_eval_info(window_id, version):
     history = run.history(pandas=False)
     tplr.logger.info(f"\nWandb run {run_id}")
     tplr.logger.info(f"\nWandb run.state {run.state}")
-    # tplr.logger.info(f"\nWandb run.history {history}")
+    tplr.logger.info(f"\nWandb run.history {len(history)}")
     for index, row in enumerate(history):
         for key, value in row.items():
             if "latest/validator/loss" in key:
                 tplr.logger.info(f"\nWandb {index} key {key}, value {value}")
-            if "validator/network/evaluated_uids" in key:
+            if "latest/validator/network/evaluated_uids" in key:
                 tplr.logger.info(f"\nWandb {index} key {key}, value {value}")
-            if "validator/scores/mean" in key:
+            if "latest/validator/scores/mean" in key:
                 tplr.logger.info(f"\nWandb {index} key {key}, value {value}")
-            if "validator/moving_avg_scores/mean" in key:
+            if "latest/validator/moving_avg_scores/mean" in key:
                 tplr.logger.info(f"\nWandb {index} key {key}, value {value}")
-            if "validator/scores/" in key:
+            if "latest/validator/scores/" in key:
                 tplr.logger.info(f"\nWandb {index} key {key}, value {value}")
-            if "validator/moving_avg_scores/" in key:
+            if "latest/validator/moving_avg_scores/" in key:
                 tplr.logger.info(f"\nWandb {index} key {key}, value {value}")
-            if "validator/weights/" in key:
+            if "latest/validator/weights/" in key:
                 tplr.logger.info(f"\nWandb {index} key {key}, value {value}")
     # Create a dummy validator eval info record
     new_validator_eval_info = ValidatorEvalInfo(

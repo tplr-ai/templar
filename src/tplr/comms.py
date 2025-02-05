@@ -1431,7 +1431,10 @@ class Comms(ChainManager):
                             # Calculate xshape and totalk based on parameter dimensions
                             if len(p.shape) > 1:
                                 # For 2D weights, get block sizes for rows and columns
-                                xshape = (transformer.shape_dict[p.shape[0]], transformer.shape_dict[p.shape[1]])
+                                xshape = (
+                                    transformer.shape_dict[p.shape[0]],
+                                    transformer.shape_dict[p.shape[1]],
+                                )
                                 totalk = xshape[0] * xshape[1]
                             else:
                                 # For 1D weights
@@ -1440,11 +1443,7 @@ class Comms(ChainManager):
                             # Decompress and decode to get gradients, then take sign as update
                             new_grad = transformer.decode(
                                 compressor.batch_decompress(
-                                    p.to(device),
-                                    idxs,
-                                    vals,
-                                    xshape,
-                                    totalk
+                                    p.to(device), idxs, vals, xshape, totalk
                                 )
                             )
                             param_updates[n] = new_grad.sign_()

@@ -1351,9 +1351,6 @@ class Comms(ChainManager):
 
             window_difference = current_window - checkpoint_current_window
             global_step = current_window - checkpoint_start_window
-            
-            if checkpoint_data.get("transformer_state"):
-                transformer.load_state_dict(checkpoint_data["transformer_state"])
 
             tplr.logger.info(
                 f"Checkpoint windows (start={checkpoint_start_window}, checkpoint_current={checkpoint_current_window}), "
@@ -1427,20 +1424,27 @@ class Comms(ChainManager):
                         idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
                         vals = getattr(gather_result.state_dict, f"{n}vals", None)
                         if idxs is not None and vals is not None:
-                            # Convert to lists if necessary
                             if not isinstance(idxs, (list, tuple)):
                                 idxs = [idxs]
                             if not isinstance(vals, (list, tuple)):
                                 vals = [vals]
-
-                            # Decode + decompress + sign
+                            # Calculate xshape and totalk based on parameter dimensions
+                            if len(p.shape) > 1:
+                                # For 2D weights, get block sizes for rows and columns
+                                xshape = (transformer.shape_dict[p.shape[0]], transformer.shape_dict[p.shape[1]])
+                                totalk = xshape[0] * xshape[1]
+                            else:
+                                # For 1D weights
+                                xshape = transformer.shape_dict[p.shape[0]]
+                                totalk = xshape
+                            # Decompress and decode to get gradients, then take sign as update
                             new_grad = transformer.decode(
                                 compressor.batch_decompress(
                                     p.to(device),
                                     idxs,
                                     vals,
-                                    transformer.shapes[n],
-                                    transformer.totalks[n],
+                                    xshape,
+                                    totalk
                                 )
                             )
                             param_updates[n] = new_grad.sign_()
@@ -1550,7 +1554,6 @@ class Comms(ChainManager):
             "model_state_dict": {
                 k: v.cpu().clone() for k, v in model.state_dict().items()
             },
-            "transformer_state": transformer.state_dict(),
             "optimizer_state_dict": {
                 k: v.cpu().clone() if torch.is_tensor(v) else v
                 for k, v in optimizer.state_dict().items()

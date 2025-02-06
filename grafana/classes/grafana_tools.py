@@ -253,6 +253,8 @@ class Grafana:
             "dividends": self.metagraph.dividends,
             "block": self.metagraph.block,
             "active": self.metagraph.active,
+            "hotkeys": self.metagraph.hotkeys,
+            "coldkeys": self.metagraph.coldkeys,
         }
 
         return metagraph_info

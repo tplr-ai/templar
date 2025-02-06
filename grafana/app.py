@@ -121,7 +121,7 @@ def sync_neurons(metagraph_info):
     db.session.commit()
     # Consider to add tbl_neuron_third_party table
 
-def insert_dummy_validator_eval_info(window_id, version):
+def insert_validator_eval_info(window_id):
     api = wandb.Api()
     runs = api.runs(f"tplr/templar")
     run_id = "hvf4v9fp" # Run ID for V1
@@ -135,51 +135,73 @@ def insert_dummy_validator_eval_info(window_id, version):
     tplr.logger.info(f"\nWandb run.state {run.state}")
     tplr.logger.info(f"\nWandb run.history {len(history)}")
     if history:
+        eval_info = {}
+        eval_info_detail = {}
         last_row = history[-1]  # Get the last row
         for key, value in last_row.items():
-            if "latest/validator/loss" in key:
+            if "latest/validator/loss/before" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
-            if "latest/validator/network/evaluated_uids" in key:
+                eval_info["loss_before"] = value
+            elif "latest/validator/loss/after" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
-            if "latest/validator/scores/mean" in key:
+                eval_info["loss_after"] = value
+            elif "latest/validator/loss/improvement" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
-            if "latest/validator/moving_avg_scores/mean" in key:
+                eval_info["loss_improvement"] = value
+            elif "latest/validator/network/evaluated_uids" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
-            if "latest/validator/scores/" in key:
+                eval_info["eval_uids"] = value
+            elif "latest/validator/scores/mean" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
-            if "latest/validator/moving_avg_scores/" in key:
+                eval_info["mean_scores"] = value
+            elif "latest/validator/moving_avg_scores/mean" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
-            if "latest/validator/weights/" in key:
-                tplr.logger.info(f"\nWandb key {key}, value {value}")
-    # Create a dummy validator eval info record
-    new_validator_eval_info = ValidatorEvalInfo(
-        window_id=window_id,
-        neuron_id=1,
-        loss_before=0.4,
-        loss_after=0.5,
-        loss_improvement=0.2,
-        current_eval_uid="10",
-        eval_uids="10,11",
-        mean_scores=1.45,
-        mean_moving_avg_scores=1.57
-    )
+                eval_info["mean_moving_avg_scores"] = value
+            elif "latest/validator/scores/" in key or \
+                 "latest/validator/moving_avg_scores/" in key  or \
+                 "latest/validator/weights/" in key:
 
-    # Add the new record to the session
-    db.session.add(new_validator_eval_info)
-   
-def insert_dummy_eval_info_detail(window_id):
-    # Create dummy eval info detail record
-    new_eval_info_detail = EvalInfoDetail(
-        window_id=window_id,
-        vali_id=1,
-        miner_id=10,
-        score=1.54,
-        moving_avg_score=1.57,
-        weight=0.65
-    )
+                tplr.logger.info(f"\nWandb key {key}, value {value}")
+                try:
+                    uid = int(key.split("/")[-1])  # Extract miner ID
+                    field = key.split("/")[-2]  # Extract field type
 
-    # Add the new record to the session
-    db.session.add(new_eval_info_detail)
+                    if uid not in eval_info_detail:
+                        eval_info_detail[uid] = {}
+
+                    eval_info_detail[uid][field] = value
+
+                except ValueError as e:
+                    tplr.logger.error(f"Error parsing key: {key} - {e}")
+
+        # Create a dummy validator eval info record
+        new_validator_eval_info = ValidatorEvalInfo(
+            window_id=window_id,
+            neuron_id=1,
+            loss_before=eval_info["loss_before"],
+            loss_after=eval_info["loss_after"],
+            loss_improvement=eval_info["loss_improvement"],
+            # current_eval_uid="10",
+            eval_uids=eval_info["eval_uids"],
+            mean_scores=eval_info["mean_scores"],
+            mean_moving_avg_scores=eval_info["mean_moving_avg_scores"]
+        )
+
+        # Add the new record to the session
+        db.session.add(new_validator_eval_info)
+
+        for uid, details in eval_info_detail:
+            new_eval_info_detail = EvalInfoDetail(
+                window_id=window_id,
+                vali_id=1,
+                miner_id=uid,
+                score=details.get("scores", 0),
+                moving_avg_score=details.get("moving_avg_scores", 0),
+                weight=details.get("weights", 0)
+            )
+
+            # Add the new record to the session
+            db.session.add(new_eval_info_detail)
 
 def insert_gradients(window_id, active_miners):
     for item in active_miners:
@@ -235,11 +257,8 @@ async def run_grafana():
             tplr.logger.info(f"\nInserted active miners {step_window}")
 
             # Insert validator eval info & eval info detail
-            # We will get this via wandb log and data, and insert into tbl_validator_eval_info, tbl_eval_info_detail tables
-            insert_dummy_validator_eval_info(window_id, version)
+            insert_validator_eval_info(window_id)
             tplr.logger.info(f"\nInserted validator eval info {step_window}")
-            insert_dummy_eval_info_detail(window_id)
-            tplr.logger.info(f"\nInserted eval info detail {step_window}")
 
             # Insert gradients
             insert_gradients(window_id, active_miners)

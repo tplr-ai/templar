@@ -1424,20 +1424,26 @@ class Comms(ChainManager):
                         idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
                         vals = getattr(gather_result.state_dict, f"{n}vals", None)
                         if idxs is not None and vals is not None:
-                            # Convert to lists if necessary
                             if not isinstance(idxs, (list, tuple)):
                                 idxs = [idxs]
                             if not isinstance(vals, (list, tuple)):
                                 vals = [vals]
-
-                            # Decode + decompress + sign
+                            # Calculate xshape and totalk based on parameter dimensions
+                            if len(p.shape) > 1:
+                                # For 2D weights, get block sizes for rows and columns
+                                xshape = (
+                                    transformer.shape_dict[p.shape[0]],
+                                    transformer.shape_dict[p.shape[1]],
+                                )
+                                totalk = xshape[0] * xshape[1]
+                            else:
+                                # For 1D weights
+                                xshape = transformer.shape_dict[p.shape[0]]
+                                totalk = xshape
+                            # Decompress and decode to get gradients, then take sign as update
                             new_grad = transformer.decode(
                                 compressor.batch_decompress(
-                                    p.to(device),
-                                    idxs,
-                                    vals,
-                                    transformer.shapes[n],
-                                    transformer.totalks[n],
+                                    p.to(device), idxs, vals, xshape, totalk
                                 )
                             )
                             param_updates[n] = new_grad.sign_()

@@ -73,3 +73,4 @@ good/
 rogue/
 test_output.txt
 neurons/validator_old.py
+model_state.pt

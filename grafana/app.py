@@ -162,11 +162,10 @@ def insert_validator_eval_info(window_id):
             elif "latest/validator/scores/" in key or \
                  "latest/validator/moving_avg_scores/" in key  or \
                  "latest/validator/weights/" in key:
-
-                tplr.logger.info(f"\nWandb key {key}, value {value}")
                 try:
                     uid = int(key.split("/")[-1])  # Extract miner ID
                     field = key.split("/")[-2]  # Extract field type
+                    tplr.logger.info(f"\nWandb uid {uid}, field {field}")
 
                     if uid not in eval_info_detail:
                         eval_info_detail[uid] = {}

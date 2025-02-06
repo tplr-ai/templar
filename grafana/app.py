@@ -180,13 +180,13 @@ def insert_validator_eval_info(window_id):
         new_validator_eval_info = ValidatorEvalInfo(
             window_id=window_id,
             neuron_id=1,
-            loss_before=eval_info["loss_before"],
-            loss_after=eval_info["loss_after"],
-            loss_improvement=eval_info["loss_improvement"],
+            loss_before=eval_info.get("loss_before", 0),
+            loss_after=eval_info.get("loss_after", 0),
+            loss_improvement=eval_info.get("loss_improvement", 0),
             # current_eval_uid="10",
-            eval_uids=eval_info["eval_uids"],
-            mean_scores=eval_info["mean_scores"],
-            mean_moving_avg_scores=eval_info["mean_moving_avg_scores"]
+            eval_uids=eval_info.get("eval_uids", 0),
+            mean_scores=eval_info.get("mean_scores", 0),
+            mean_moving_avg_scores=eval_info.get("mean_moving_avg_scores", 0)
         )
 
         # Add the new record to the session

@@ -207,7 +207,6 @@ def insert_validator_eval_info(window_id):
 
 def insert_gradients(window_id, active_miners):
     for item in active_miners:
-        tplr.logger.info(f"\n item: {item}")
         # Create a new gradient record
         new_gradient = Gradients(
             window_id=window_id,

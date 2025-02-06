@@ -17,6 +17,9 @@ Estimated Download Time: 12–18 hours
 ```bash
 #!/bin/bash
 
+# Configure dataset bucket name to use.
+export DATABUCKET="dataset"
+
 # clone repo
 git clone https://github.com/distributedstatemachine/HuggingFaceModelDownloader
 cd HuggingFaceModelDownloader
@@ -51,6 +54,8 @@ go run main.go -d "HuggingFaceFW/fineweb-edu-score-2" --r2 --cleanup-corrupted -
 # if needed, re-transfer
 go run main.go -d "HuggingFaceFW/fineweb-edu-score-2" --r2 --skip-local -c $CPUCOUNT --r2-bucket $DATABUCKET
 ```
+
+
 
 ### final config for shard and metadata files
 

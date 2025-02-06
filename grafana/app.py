@@ -211,11 +211,11 @@ def insert_gradients(window_id, active_miners):
         # Create a new gradient record
         new_gradient = Gradients(
             window_id=window_id,
-            neuron_id=item.uid,
-            r2_bucketname=item.bucket_name,
-            gradient_filename=item.filename,
-            gradient_filesize=item.content_length,
-            gradient_timestamp=item.timestamp
+            neuron_id=item["uid"],
+            r2_bucketname=item["bucket_name"],
+            gradient_filename=item["filename"],
+            gradient_filesize=item["content_length"],
+            gradient_timestamp=item["timestamp"]
         )
 
         # Add the new record to the session

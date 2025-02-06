@@ -139,15 +139,13 @@ def insert_validator_eval_info(window_id):
         eval_info_detail = {}
         last_row = history[-1]  # Get the last row
         for key, value in last_row.items():
-            if "latest/validator/loss" in key:
-                tplr.logger.info(f"\nWandb key {key}, value {value}")
-            if "latest/validator/loss/before" in key:
+            if "latest/validator/loss/own/before" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
                 eval_info["loss_before"] = value
-            elif "latest/validator/loss/after" in key:
+            elif "latest/validator/loss/own/after" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
                 eval_info["loss_after"] = value
-            elif "latest/validator/loss/improvement" in key:
+            elif "latest/validator/loss/own/improvement" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
                 eval_info["loss_improvement"] = value
             elif "latest/validator/network/evaluated_uids" in key:
@@ -159,13 +157,12 @@ def insert_validator_eval_info(window_id):
             elif "latest/validator/moving_avg_scores/mean" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
                 eval_info["mean_moving_avg_scores"] = value
-            elif "latest/validator/scores/" in key or \
-                 "latest/validator/moving_avg_scores/" in key  or \
+            elif "latest/validator/gradient_scores/" in key or \
+                 "latest/validator/final_moving_avg_scores/" in key  or \
                  "latest/validator/weights/" in key:
                 try:
                     uid = int(key.split("/")[-1])  # Extract miner ID
                     field = key.split("/")[-2]  # Extract field type
-                    tplr.logger.info(f"\nWandb uid {uid}, field {field}")
 
                     if uid not in eval_info_detail:
                         eval_info_detail[uid] = {}
@@ -197,8 +194,8 @@ def insert_validator_eval_info(window_id):
                 window_id=window_id,
                 vali_id=1,
                 miner_id=uid,
-                score=details.get("scores", 0),
-                moving_avg_score=details.get("moving_avg_scores", 0),
+                score=details.get("gradient_scores", 0),
+                moving_avg_score=details.get("final_moving_avg_scores", 0),
                 weight=details.get("weights", 0)
             )
 
@@ -234,7 +231,6 @@ async def run_grafana():
 
     while True:
         if step_window != grafana.current_window - WINDOW_OFFSET:
-            print(f"window: {step_window}, Active list: {grafana.grad_dict.get(step_window, [])}")
             step_window = grafana.current_window - WINDOW_OFFSET
             tplr.logger.info(f"\n{'-' * 20} Window: {step_window} {'-' * 20}")
             grafana.comms.update_peers_with_buckets()

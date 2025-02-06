@@ -190,7 +190,8 @@ def insert_validator_eval_info(window_id):
 
         # Add the new record to the session
         db.session.add(new_validator_eval_info)
-
+        
+        tplr.logger.info(f"\nWandb eval_info_detail {eval_info_detail}")
         for uid, details in eval_info_detail:
             new_eval_info_detail = EvalInfoDetail(
                 window_id=window_id,

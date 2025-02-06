@@ -27,9 +27,43 @@ dependencies = [
     "Flask-Migrate==3.1.0",
     "asyncio==3.4.3",
     "werkzeug==2.2.3",
+    "s3fs",
+    "pyarrow",
+    "scipy"
+
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio",
+    "ipykernel",
+    "ipython",
+    "pandas",
     "matplotlib",
-    "seaborn"
+    "seaborn",
+    "pytest-asyncio",
+    "ruff",
+    "pytest-xdist"
+
 ]
 
 [tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v -s --capture=no --log-cli-level=INFO"
 asyncio_mode = "auto"
+markers = [
+    "asyncio: mark test as async",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+    "ignore::FutureWarning",
+    "ignore::pytest_asyncio.plugin.PytestDeprecationWarning",
+    # Keep other warnings
+    "default::RuntimeWarning",
+    "default::UserWarning",
+]

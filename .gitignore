@@ -24,6 +24,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.coverage
+coverage.xml
 
 # UV specific
 .uv/
@@ -67,3 +69,10 @@ wandb
 lm-evaluation-harness/
 models/
 TODO.md
+.cursorrules
+good/
+rogue/
+test_output.txt
+neurons/validator_old.py
+model_state.pt
+.github

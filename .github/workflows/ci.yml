@@ -6,21 +6,48 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     env:
-      ACCOUNT_ID: ${{ secrets.ACCOUNT_ID }}
-      READ_ACCESS_KEY_ID: ${{ secrets.READ_ACCESS_KEY_ID }}
-      READ_SECRET_ACCESS_KEY: ${{ secrets.READ_SECRET_ACCESS_KEY }}
-      WRITE_ACCESS_KEY_ID: ${{ secrets.WRITE_ACCESS_KEY_ID }}
-      WRITE_SECRET_ACCESS_KEY: ${{ secrets.WRITE_SECRET_ACCESS_KEY }}
+      R2_GRADIENTS_ACCOUNT_ID: ${{ secrets.R2_GRADIENTS_ACCOUNT_ID }}
+      R2_GRADIENTS_BUCKET_NAME: ${{ secrets.R2_GRADIENTS_BUCKET_NAME }}
+      R2_GRADIENTS_READ_ACCESS_KEY_ID: ${{ secrets.R2_GRADIENTS_READ_ACCESS_KEY_ID }}
+      R2_GRADIENTS_READ_SECRET_ACCESS_KEY: ${{ secrets.R2_GRADIENTS_READ_SECRET_ACCESS_KEY }}
+      R2_GRADIENTS_WRITE_ACCESS_KEY_ID: ${{ secrets.R2_GRADIENTS_WRITE_ACCESS_KEY_ID }}
+      R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY: ${{ secrets.R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY }}
+      R2_DATASET_ACCOUNT_ID: ${{ secrets.R2_DATASET_ACCOUNT_ID }}
+      R2_DATASET_BUCKET_NAME: ${{ secrets.R2_DATASET_BUCKET_NAME }}
+      R2_DATASET_READ_ACCESS_KEY_ID: ${{ secrets.R2_DATASET_READ_ACCESS_KEY_ID }}
+      R2_DATASET_READ_SECRET_ACCESS_KEY: ${{ secrets.R2_DATASET_READ_SECRET_ACCESS_KEY }}
+      R2_DATASET_WRITE_ACCESS_KEY_ID: ${{ secrets.R2_DATASET_WRITE_ACCESS_KEY_ID }}
+      R2_DATASET_WRITE_SECRET_ACCESS_KEY: ${{ secrets.R2_DATASET_WRITE_SECRET_ACCESS_KEY }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Set up UV
-        uses: astral-sh/setup-uv@v4
+      - name: Create .env file
+        run: |
+          cat << EOF > .env
+          # Cloudflare R2 Credentials
+          R2_GRADIENTS_ACCOUNT_ID=${{ secrets.R2_GRADIENTS_ACCOUNT_ID }}
+          R2_GRADIENTS_BUCKET_NAME=${{ secrets.R2_GRADIENTS_BUCKET_NAME }}
+          R2_GRADIENTS_READ_ACCESS_KEY_ID=${{ secrets.R2_GRADIENTS_READ_ACCESS_KEY_ID }}
+          R2_GRADIENTS_READ_SECRET_ACCESS_KEY=${{ secrets.R2_GRADIENTS_READ_SECRET_ACCESS_KEY }}
+          R2_GRADIENTS_WRITE_ACCESS_KEY_ID=${{ secrets.R2_GRADIENTS_WRITE_ACCESS_KEY_ID }}
+          R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=${{ secrets.R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY }}
+
+          R2_DATASET_ACCOUNT_ID=${{ secrets.R2_DATASET_ACCOUNT_ID }}
+          R2_DATASET_BUCKET_NAME=${{ secrets.R2_DATASET_BUCKET_NAME }}
+          R2_DATASET_READ_ACCESS_KEY_ID=${{ secrets.R2_DATASET_READ_ACCESS_KEY_ID }}
+          R2_DATASET_READ_SECRET_ACCESS_KEY=${{ secrets.R2_DATASET_READ_SECRET_ACCESS_KEY }}
+          R2_DATASET_WRITE_ACCESS_KEY_ID=${{ secrets.R2_DATASET_WRITE_ACCESS_KEY_ID }}
+          R2_DATASET_WRITE_SECRET_ACCESS_KEY=${{ secrets.R2_DATASET_WRITE_SECRET_ACCESS_KEY }}
+          EOF
+
+      - name: Install uv and set the python version
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: '3.11'
+          python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
-        run: uv sync --extra all
+      - name: Install the project
+        run: uv sync --all-extras --dev
 
       - name: Run Ruff Lint
         uses: astral-sh/ruff-action@v1
@@ -31,3 +58,14 @@ jobs:
         uses: astral-sh/ruff-action@v1
         with:
           args: format --check
+
+      - name: Run Tests with Coverage
+        run: |
+          uv run pytest tests/ -v --cov=src --cov-report=xml --cov-report=term
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          fail_ci_if_error: true

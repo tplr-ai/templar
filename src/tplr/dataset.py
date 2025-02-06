@@ -1,5 +1,5 @@
 # The MIT License (MIT)
-# © 2024 templar.tech
+# © 2025 tplr.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the "Software"), to deal in the Software without restriction, including without limitation
@@ -15,6 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 # fmt: off
+#type: ignore
 
 # Global imports
 import random
@@ -184,7 +185,7 @@ class SubsetLoader(IterableDataset):
 
 
 class DatasetLoader(SubsetLoader):
-    name: str = "airtrain-ai/fineweb-edu-fortified"
+    name: str = "HuggingFaceFW/fineweb-edu-score-2"
     rows_base_url: str = "https://datasets-server.huggingface.co/rows"
     size_base_url: str = "https://datasets-server.huggingface.co/size"
 

@@ -1,27 +1,39 @@
+# type: ignore
 import os
 import re
+import math
+import json
 import time
 import torch
 import asyncio
 import aiofiles
+import botocore
 import bittensor as bt
-from typing import List, Dict, Optional
+from torch.optim import SGD
+from transformers import LlamaForCausalLM
+from torch.optim.lr_scheduler import SequentialLR
+
+from tqdm import tqdm as std_tqdm
 from types import SimpleNamespace
+from typing import List, Dict, Optional, TypeVar, Any, Tuple
 from aiobotocore.session import get_session
+
 from . import __version__
 from .config import client_config, BUCKET_SECRETS
 from .chain import ChainManager
 from .schemas import Bucket
 
 import tplr as tplr
-import botocore
-from tqdm import tqdm as std_tqdm
+from .compress import TransformDCT, CompressDCT
+# from .hparams import HParams
 
-import math
 
 # Constants
 CF_REGION_NAME: str = "enam"
 LOCAL_TMP_DIR = "/tmp/local_store"
+
+T = TypeVar("T", bound=Any)
+FixtureFunction = TypeVar("FixtureFunction", bound=Any)
 
 
 class Comms(ChainManager):
@@ -43,7 +55,7 @@ class Comms(ChainManager):
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
         os.makedirs(self.temp_dir, exist_ok=True)
         # Get the bucket directly
-        self.bucket = self.get_own_bucket()
+        self.bucket = self.get_own_bucket("gradients", "write")
         # Now initialize ChainManager with the bucket
         super().__init__(
             config=config,
@@ -69,22 +81,50 @@ class Comms(ChainManager):
             self.hparams.recent_windows
         )  # Number of recent windows to check
 
+        # Add connection management
+        self.client_semaphore = asyncio.Semaphore(30)  # Limit concurrent connections
+        self.retry_config = {"max_attempts": 3, "backoff_base": 1.5}
+
     def start_background_tasks(self):
         self.loop = asyncio.get_running_loop()
         # Start background tasks
         self.loop.create_task(self.track_active_peers())
 
-    def get_own_bucket(self) -> Bucket:
-        """Gets bucket configuration from environment variables via config.BUCKET_SECRETS."""
+    def get_own_bucket(self, bucket_type, access_type=None) -> Bucket:
+        """Gets bucket configuration from environment variables via config.BUCKET_SECRETS.
+
+        Args:
+            bucket_type: Either "gradients" or "dataset" to determine which bucket to use
+            access_type: For gradients bucket, either "read" or "write" to determine access level
+        """
         try:
-            # Create a Bucket object using write credentials from BUCKET_SECRETS
+            if bucket_type not in ["gradients", "dataset"]:
+                raise ValueError("bucket_type must be either 'gradients' or 'dataset'")
+
+            if bucket_type == "gradients":
+                if access_type not in ["read", "write"]:
+                    raise ValueError(
+                        "For gradients bucket, access_type must be either 'read' or 'write'"
+                    )
+
+                bucket_config = BUCKET_SECRETS["gradients"]
+                credentials = bucket_config["credentials"][access_type]  # type: ignore
+            else:  # dataset bucket
+                bucket_config = BUCKET_SECRETS["dataset"]
+                # For dataset, we'll use read credentials by default
+                credentials = bucket_config["credentials"]["read"]  # type: ignore
+
+            # Create a Bucket object using specified credentials
             bucket = Bucket(
-                name=BUCKET_SECRETS["account_id"],
-                account_id=BUCKET_SECRETS["account_id"],
-                access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-                secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+                name=bucket_config["name"],
+                account_id=bucket_config["account_id"],
+                access_key_id=credentials["access_key_id"],
+                secret_access_key=credentials["secret_access_key"],
             )
-            tplr.logger.debug(f"Created bucket from environment: {bucket}")
+
+            tplr.logger.debug(
+                f"Created {bucket_type} bucket with {'read/write' if bucket_type == 'dataset' else access_type} access: {bucket}"
+            )
             return bucket
 
         except KeyError as e:
@@ -142,17 +182,21 @@ class Comms(ChainManager):
         session = get_session()
         async with session.create_client(
             "s3",
-            endpoint_url=self.get_base_url(BUCKET_SECRETS["account_id"]),
+            endpoint_url=self.get_base_url(BUCKET_SECRETS["gradients"]["account_id"]),
             region_name=CF_REGION_NAME,
             config=client_config,
-            aws_access_key_id=BUCKET_SECRETS["write"]["access_key_id"],
-            aws_secret_access_key=BUCKET_SECRETS["write"]["secret_access_key"],
+            aws_access_key_id=BUCKET_SECRETS["gradients"]["credentials"]["write"][  # type: ignore
+                "access_key_id"
+            ],
+            aws_secret_access_key=BUCKET_SECRETS["gradients"]["credentials"]["write"][  # type: ignore
+                "secret_access_key"
+            ],
         ) as s3_client:
             continuation_token = None
 
             while True:
                 list_args = {
-                    "Bucket": BUCKET_SECRETS["bucket_name"],
+                    "Bucket": BUCKET_SECRETS["gradients"]["name"],
                     "Prefix": prefix,
                     "MaxKeys": 1000,
                 }
@@ -165,7 +209,7 @@ class Comms(ChainManager):
                 # Identify stale objects to delete
                 stale_objects = []
                 for obj in contents:
-                    key = obj["Key"]
+                    key: str = obj["Key"]  # type: ignore
                     # Key format: uid/window/key
                     parts = key.split("/")
                     if len(parts) < 2:
@@ -184,7 +228,7 @@ class Comms(ChainManager):
                         f"Removing stale S3 objects for {uid}: {stale_objects}"
                     )
                     await s3_client.delete_objects(
-                        Bucket=BUCKET_SECRETS["bucket_name"],
+                        Bucket=BUCKET_SECRETS["gradients"]["name"],
                         Delete={"Objects": stale_objects},
                     )
 
@@ -193,31 +237,62 @@ class Comms(ChainManager):
                 else:
                     break
 
-    async def s3_put_object(self, key: str, file_path: str):
-        """Upload object to S3 using asynchronous streaming to prevent blocking.
+    async def s3_put_object(
+        self,
+        key: str,
+        file_path: Optional[str] = None,
+    ):
+        """
+        Puts an object into S3 storage, handling different file types appropriately.
 
         Args:
-            key (str): The S3 object key.
-            file_path (str): The local file path to upload.
+            key (str): The key/path to store the data under
+            file_path (str, optional): The local file path to upload
+            bucket (Bucket, optional): The bucket to use. Defaults to self.bucket
         """
         try:
+            bucket = self.bucket
+
+            # Handle JSON files
+            if key.endswith(".json") or "start_window" in key:
+                if file_path:
+                    async with aiofiles.open(file_path, "r") as f:
+                        data = await f.read()
+                        data_bytes = json.dumps(json.loads(data)).encode("utf-8")
+                else:
+                    raise ValueError(f"file_path required for JSON file: {key}")
+
+                async with self.session.create_client(
+                    "s3",
+                    endpoint_url=self.get_base_url(bucket.account_id),
+                    region_name=CF_REGION_NAME,
+                    config=client_config,
+                    aws_access_key_id=bucket.access_key_id,
+                    aws_secret_access_key=bucket.secret_access_key,
+                ) as s3_client:
+                    await s3_client.put_object(
+                        Bucket=bucket.name, Key=key, Body=data_bytes
+                    )
+                return
+
+            # Handle PyTorch files
             file_size = os.path.getsize(file_path)
-            multipart_threshold = 64 * 1024 * 1024  # 64MB
+            multipart_threshold = 500 * 1024 * 1024  # 500MB
 
             async with self.session.create_client(
                 "s3",
-                endpoint_url=self.get_base_url(self.bucket.account_id),
+                endpoint_url=self.get_base_url(bucket.account_id),
                 region_name=CF_REGION_NAME,
                 config=client_config,
-                aws_access_key_id=self.bucket.access_key_id,
-                aws_secret_access_key=self.bucket.secret_access_key,
+                aws_access_key_id=bucket.access_key_id,
+                aws_secret_access_key=bucket.secret_access_key,
             ) as s3_client:
                 if file_size <= multipart_threshold:
                     # Simple upload for small files
                     async with aiofiles.open(file_path, "rb") as f:
                         data = await f.read()
                         await s3_client.put_object(
-                            Bucket=self.bucket.name, Key=key, Body=data
+                            Bucket=bucket.name, Key=key, Body=data
                         )
                 else:
                     # Multipart upload for large files
@@ -227,118 +302,30 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error uploading {key} to S3: {e}")
             raise
 
-    async def upload_large_file(self, file_path: str, key: str, s3_client):
-        """Uploads a large file to S3 using asynchronous multipart upload."""
-        try:
-            # Initiate multipart upload
-            response = await s3_client.create_multipart_upload(
-                Bucket=self.bucket.name, Key=key
-            )
-            upload_id = response["UploadId"]
-
-            # Define part size (e.g., 64MB)
-            part_size = 64 * 1024 * 1024  # 64MB
-            file_size = os.path.getsize(file_path)
-            total_parts = math.ceil(file_size / part_size)
-
-            semaphore = asyncio.Semaphore(8)  # Limit concurrency
-
-            # Queue to hold part numbers
-            part_queue = asyncio.Queue()
-
-            for part_number in range(1, total_parts + 1):
-                part_queue.put_nowait(part_number)
-
-            parts = []
-
-            async def upload_part():
-                part_results = []
-                while not part_queue.empty():
-                    part_number = await part_queue.get()
-                    byte_range_start = (part_number - 1) * part_size
-                    byte_range_end = min(byte_range_start + part_size, file_size)
-                    async with semaphore:
-                        async with aiofiles.open(file_path, "rb") as f:
-                            await f.seek(byte_range_start)
-                            data = await f.read(byte_range_end - byte_range_start)
-
-                            response = await s3_client.upload_part(
-                                Bucket=self.bucket.name,
-                                Key=key,
-                                PartNumber=part_number,
-                                UploadId=upload_id,
-                                Body=data,
-                            )
-                            part_results.append(
-                                {"ETag": response["ETag"], "PartNumber": part_number}
-                            )
-                    part_queue.task_done()
-                return part_results
-
-            # Start worker tasks
-            workers = [upload_part() for _ in range(min(8, total_parts))]
-            results_nested = await asyncio.gather(*workers)
-
-            # Flatten the results
-            parts = [item for sublist in results_nested for item in sublist]
-            parts.sort(key=lambda x: x["PartNumber"])
-
-            # Complete multipart upload
-            await s3_client.complete_multipart_upload(
-                Bucket=self.bucket.name,
-                Key=key,
-                UploadId=upload_id,
-                MultipartUpload={"Parts": parts},
-            )
-
-            tplr.logger.info(f"Successfully uploaded {key}")
-
-        except Exception as e:
-            tplr.logger.error(f"Error during multipart upload of {key}: {e}")
-            # Abort the multipart upload in case of error
-            await s3_client.abort_multipart_upload(
-                Bucket=self.bucket.name, Key=key, UploadId=upload_id
-            )
-            raise
-
     async def s3_get_object(
         self,
         key: str,
         bucket: Bucket = None,
-        bucket_secrets: dict = None,
         timeout: int = 5,
     ):
         """Download object from S3 using asynchronous streaming."""
+        temp_file_path = None
         try:
-            # Setup bucket credentials
-            if bucket_secrets:
-                access_key = bucket_secrets["write"]["access_key_id"]
-                secret_key = bucket_secrets["write"]["secret_access_key"]
-                account_id = bucket_secrets["account_id"]
-                bucket_name = bucket_secrets["bucket_name"]
-            elif bucket:
-                access_key = bucket.access_key_id
-                secret_key = bucket.secret_access_key
-                account_id = bucket.account_id
-                bucket_name = bucket.name
-            else:
-                raise ValueError("Either bucket or bucket_secrets must be provided")
-
             # Create temp directory if it doesn't exist
             os.makedirs(self.temp_dir, exist_ok=True)
             temp_file_path = os.path.join(self.temp_dir, f"temp_{key}")
 
             async with self.session.create_client(
                 "s3",
-                endpoint_url=self.get_base_url(account_id),
+                endpoint_url=self.get_base_url(bucket.name),
                 region_name=CF_REGION_NAME,
                 config=client_config,
-                aws_access_key_id=access_key,
-                aws_secret_access_key=secret_key,
+                aws_access_key_id=bucket.access_key_id,
+                aws_secret_access_key=bucket.secret_access_key,
             ) as s3_client:
                 try:
                     response = await asyncio.wait_for(
-                        s3_client.head_object(Bucket=bucket_name, Key=key),
+                        s3_client.head_object(Bucket=bucket.name, Key=key),
                         timeout=timeout,
                     )
                 except asyncio.TimeoutError:
@@ -347,21 +334,23 @@ class Comms(ChainManager):
                 except Exception as e:
                     if "404" in str(e):
                         tplr.logger.debug(
-                            f"Object {key} not found in bucket {bucket_name}"
+                            f"Object {key} not found in bucket {bucket.name}"
                         )
                         return None
                     raise
 
-                file_size = response["ContentLength"]
+                file_size = response["ContentLength"]  # type: ignore
 
                 try:
-                    if file_size <= 5 * 1024 * 1024 * 1024:  # 5GB threshold
+                    if (
+                        file_size <= 5 * 1024 * 1024 * 1024
+                    ):  # 5GB threshold (i.e. gradient)
                         response = await asyncio.wait_for(
-                            s3_client.get_object(Bucket=bucket_name, Key=key),
+                            s3_client.get_object(Bucket=bucket.name, Key=key),
                             timeout=timeout,
                         )
                         async with aiofiles.open(temp_file_path, "wb") as f:
-                            async with response["Body"] as stream:
+                            async with response["Body"] as stream:  # type: ignore
                                 data = await asyncio.wait_for(
                                     stream.read(), timeout=timeout
                                 )
@@ -369,7 +358,7 @@ class Comms(ChainManager):
                     else:
                         success = await self.download_large_file(
                             s3_client=s3_client,
-                            bucket_name=bucket_name,
+                            bucket_name=bucket.name,
                             key=key,
                             file_size=file_size,
                             temp_file_path=temp_file_path,
@@ -377,12 +366,19 @@ class Comms(ChainManager):
                         if not success:
                             return None
 
-                    # Load data and return raw state dict
-                    loaded_data = torch.load(
-                        temp_file_path,
-                        map_location=self.config.device,
-                        weights_only=True,
-                    )
+                    # Load data based on file type
+                    if key.endswith(".json") or "start_window" in key:
+                        # For JSON files
+                        async with aiofiles.open(temp_file_path, "r") as f:
+                            data = await f.read()
+                            loaded_data = json.loads(data)
+                    else:
+                        # For PyTorch checkpoint files
+                        loaded_data = torch.load(
+                            temp_file_path,
+                            map_location=self.config.device,
+                            weights_only=True,
+                        )
                     return loaded_data
 
                 except asyncio.TimeoutError:
@@ -393,8 +389,139 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error in s3_get_object for {key}: {e}")
             return None
         finally:
-            if os.path.exists(temp_file_path):
+            if temp_file_path and os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
+
+    #  Large File Operations
+
+    async def upload_large_file(self, file_path: str, key: str, s3_client):
+        """Uploads a large file to S3 using asynchronous multipart upload with improved connection handling."""
+        upload_id = None
+        MAX_RETRIES = 3
+        PART_SIZE = 50 * 1024 * 1024  # 50MB chunks for better throughput
+        MAX_CONCURRENT_PARTS = 5  # Reduced from 8 to prevent connection issues
+
+        try:
+            async with self.client_semaphore:  # Use existing connection semaphore
+                # Initiate multipart upload with retry
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        response = await s3_client.create_multipart_upload(
+                            Bucket=self.bucket.name, Key=key
+                        )
+                        upload_id = response["UploadId"]
+                        break
+                    except Exception:
+                        if attempt == MAX_RETRIES - 1:
+                            raise
+                        await asyncio.sleep(2**attempt)
+
+                file_size = os.path.getsize(file_path)
+                total_parts = math.ceil(file_size / PART_SIZE)
+
+                # Process parts in smaller batches
+                parts = []
+                for batch_start in range(1, total_parts + 1, MAX_CONCURRENT_PARTS):
+                    batch_end = min(batch_start + MAX_CONCURRENT_PARTS, total_parts + 1)
+                    batch_parts = range(batch_start, batch_end)
+
+                    # Create queue for this batch
+                    part_queue = asyncio.Queue()
+                    for part_number in batch_parts:
+                        part_queue.put_nowait(part_number)
+
+                    async def upload_part():
+                        part_results = []
+                        while not part_queue.empty():
+                            part_number = await part_queue.get()
+                            byte_range_start = (part_number - 1) * PART_SIZE
+                            byte_range_end = min(
+                                byte_range_start + PART_SIZE, file_size
+                            )
+
+                            # Retry logic for each part
+                            for attempt in range(MAX_RETRIES):
+                                try:
+                                    async with aiofiles.open(file_path, "rb") as f:
+                                        await f.seek(byte_range_start)
+                                        data = await f.read(
+                                            byte_range_end - byte_range_start
+                                        )
+
+                                        response = await s3_client.upload_part(
+                                            Bucket=self.bucket.name,
+                                            Key=key,
+                                            PartNumber=part_number,
+                                            UploadId=upload_id,
+                                            Body=data,
+                                        )
+                                        part_results.append(
+                                            {
+                                                "ETag": response["ETag"],
+                                                "PartNumber": part_number,
+                                            }
+                                        )
+                                        break
+                                except Exception as e:
+                                    if attempt == MAX_RETRIES - 1:
+                                        tplr.logger.error(
+                                            f"Failed to upload part {part_number} after {MAX_RETRIES} attempts: {e}"
+                                        )
+                                        raise
+                                    await asyncio.sleep(2**attempt)
+
+                            part_queue.task_done()
+                        return part_results
+
+                    # Start workers for this batch
+                    workers = [
+                        upload_part()
+                        for _ in range(min(MAX_CONCURRENT_PARTS, len(batch_parts)))
+                    ]
+                    try:
+                        batch_results = await asyncio.gather(*workers)
+                        # Add successful parts from this batch
+                        parts.extend(
+                            [item for sublist in batch_results for item in sublist]
+                        )
+                    except Exception as e:
+                        tplr.logger.error(
+                            f"Batch upload failed for parts {batch_start}-{batch_end - 1}: {e}"
+                        )
+                        raise
+
+                    # Small delay between batches
+                    await asyncio.sleep(0.1)
+
+                # Sort parts by part number
+                parts.sort(key=lambda x: x["PartNumber"])
+
+                # Complete multipart upload with retry
+                for attempt in range(MAX_RETRIES):
+                    try:
+                        await s3_client.complete_multipart_upload(
+                            Bucket=self.bucket.name,
+                            Key=key,
+                            UploadId=upload_id,
+                            MultipartUpload={"Parts": parts},
+                        )
+                        tplr.logger.info(f"Successfully uploaded {key}")
+                        break
+                    except Exception:
+                        if attempt == MAX_RETRIES - 1:
+                            raise
+                        await asyncio.sleep(2**attempt)
+
+        except Exception as e:
+            tplr.logger.error(f"Error during multipart upload of {key}: {e}")
+            if upload_id:
+                try:
+                    await s3_client.abort_multipart_upload(
+                        Bucket=self.bucket.name, Key=key, UploadId=upload_id
+                    )
+                except Exception as abort_e:
+                    tplr.logger.error(f"Failed to abort multipart upload: {abort_e}")
+            raise
 
     async def download_large_file(
         self, s3_client, bucket_name: str, key: str, file_size: int, temp_file_path: str
@@ -456,7 +583,7 @@ class Comms(ChainManager):
                                 Range=f"bytes={start}-{end}",
                             )
 
-                            async with response["Body"] as stream:
+                            async with response["Body"] as stream:  # type: ignore
                                 chunk_data = await stream.read()
 
                             # Verify chunk size matches expected
@@ -503,7 +630,8 @@ class Comms(ChainManager):
                     raise Exception(f"Missing chunks: {missing_chunks}")
 
                 downloaded_size = sum(
-                    chunk["size"] for chunk in downloaded_chunks.values()
+                    chunk["size"]
+                    for chunk in downloaded_chunks.values()  # type: ignore
                 )
                 if downloaded_size != file_size:
                     raise Exception(
@@ -607,7 +735,7 @@ class Comms(ChainManager):
 
             # Remote storage logic
             peer_bucket = self.commitments.get(int(uid))
-            tplr.logger.info(f"Peer bucket : {peer_bucket}")
+            tplr.logger.debug(f"Peer bucket : {peer_bucket}")
             if not peer_bucket:
                 return None
 
@@ -663,6 +791,58 @@ class Comms(ChainManager):
             # Retry after a short delay
             await asyncio.sleep(0.1)
 
+    # async def _store_gradient_data(
+    #     self,
+    #     uid: str,
+    #     window: int,
+    #     global_step: int,
+    #     state_dict_resp: dict,
+    #     global_step_resp: int,
+    # ):
+    #     """Separate async function to handle gradient storage"""
+    #     try:
+    #         stored_state_dict = {}
+    #         for key, value in state_dict_resp.items():
+    #             if isinstance(value, torch.Tensor):
+    #                 stored_state_dict[key] = value.cpu()
+    #             else:
+    #                 stored_state_dict[key] = value
+
+    #         gradient_data = {
+    #             "state_dict": stored_state_dict,
+    #             "metadata": {
+    #                 "uid": uid,
+    #                 "window": window,
+    #                 "global_step": global_step_resp,
+    #                 "timestamp": time.time(),
+    #                 "version": __version__,
+    #             },
+    #         }
+
+    #         # Create temporary file
+    #         temp_file = os.path.join(
+    #             self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
+    #         )
+
+    #         np.savez_compressed(temp_file, **gradient_data)
+    #         key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
+
+    #         # Create separate tasks for upload and cleanup
+    #         upload_task = asyncio.create_task(
+    #             self.s3_put_object(key=key, file_path=temp_file)
+    #         )
+
+    #         # Schedule cleanup to run after upload completes
+    #         upload_task.add_done_callback(
+    #             lambda _: asyncio.create_task(self._cleanup_temp_file(temp_file))
+    #         )
+
+    #     except Exception as e:
+    #         tplr.logger.warning(f"Failed to store gradient from UID {uid}: {e}")
+    #         # Ensure cleanup happens even on error
+    #         if "temp_file" in locals():
+    #             asyncio.create_task(self._cleanup_temp_file(temp_file))
+
     async def gather(
         self,
         state_dict: Optional[Dict[str, torch.Tensor]],
@@ -675,15 +855,28 @@ class Comms(ChainManager):
         global_step: int,
         local: bool = True,
         stale_retention: int = 10,
+        store_gathers: bool = False,  # Parameter for storing gathered gradients
     ) -> Optional[SimpleNamespace]:
-        """Gather operation."""
+        """Gather operation with individual gradient normalization and connection management."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
+        tplr.logger.debug(
+            f"Starting gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
+        )
+        tplr.logger.debug(f"Target UIDs for gathering: {uids}")
+
         # Put own state if provided
-        if my_uid is not None and state_dict is not None:
+        if state_dict is not None:
+            tplr.logger.debug(f"Putting own state dict for UID {my_uid}")
+            processed_state_dict = {}
+            for k, v in state_dict.items():
+                if isinstance(v, torch.Tensor):
+                    processed_state_dict[k] = v.to(device)
+                else:
+                    processed_state_dict[k] = v
             await self.put(
-                state_dict=state_dict,
+                state_dict=processed_state_dict,
                 uid=str(my_uid),
                 window=window,
                 key=key,
@@ -691,71 +884,130 @@ class Comms(ChainManager):
                 local=local,
                 stale_retention=stale_retention,
             )
-            metrics["upload_bytes"] += sum(
+            upload_size = sum(
                 tensor.element_size() * tensor.nelement()
-                for tensor in state_dict.values()
+                for tensor in processed_state_dict.values()
+                if isinstance(tensor, torch.Tensor)
             )
+            metrics["upload_bytes"] += upload_size
+            tplr.logger.debug(f"Uploaded {upload_size} bytes of own state")
 
-        # Small delay to ensure data propagation
         await asyncio.sleep(0.1)
-
-        # Prepare gather tasks
-        gather_tasks = [
-            self.get_with_retry(
-                uid=uid,
-                window=window,
-                key=key,
-                timeout=timeout,
-                local=local,
-                stale_retention=stale_retention,
-            )
-            for uid in uids
-        ]
 
         # Initialize variables
         aggregated_state_dict = {}
         valid_uids = []
         global_steps = []
 
-        # Process responses
-        responses = await asyncio.gather(*gather_tasks)
-        for idx, response in enumerate(responses):
-            uid = uids[idx]
+        # Process UIDs in batches to manage connections
+        BATCH_SIZE = 20
+        for i in range(0, len(uids), BATCH_SIZE):
+            batch_uids = uids[i : i + BATCH_SIZE]
 
-            # Skip if no response
-            if response is None:
-                tplr.logger.debug(f"No data received from UID {uid}")
-                continue
+            async with self.client_semaphore:
+                # Prepare gather tasks for batch
+                batch_tasks = [
+                    self.get_with_retry(
+                        uid=uid,
+                        window=window,
+                        key=key,
+                        timeout=timeout
+                        // (len(uids) // BATCH_SIZE + 1),  # Adjust timeout per batch
+                        local=local,
+                        stale_retention=stale_retention,
+                    )
+                    for uid in batch_uids
+                ]
 
-            try:
-                state_dict_resp, global_step_resp = response
-            except (TypeError, ValueError) as e:
-                tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
-                continue
+                # Process batch responses
+                try:
+                    batch_responses = await asyncio.gather(
+                        *batch_tasks, return_exceptions=True
+                    )
 
-            # Skip if no state dict
-            if state_dict_resp is None:
-                tplr.logger.debug(f"Empty state dict from UID {uid}")
-                continue
+                    for uid, response in zip(batch_uids, batch_responses):
+                        if isinstance(response, Exception):
+                            tplr.logger.debug(
+                                f"Error getting response from UID {uid}: {str(response)}"
+                            )
+                            continue
 
-            valid_uids.append(uid)
-            global_steps.append(global_step_resp)
+                        if response is None:
+                            tplr.logger.debug(f"No data received from UID {uid}")
+                            continue
 
-            # Add tensors to aggregated_state_dict
-            for param_name, tensor in state_dict_resp.items():
-                if param_name not in aggregated_state_dict:
-                    aggregated_state_dict[param_name] = []
-                aggregated_state_dict[param_name].append(tensor.to(device))
-                metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
+                        try:
+                            state_dict_resp, global_step_resp = response
+                            tplr.logger.debug(
+                                f"Received state dict and global step {global_step_resp} from UID {uid}"
+                            )
+                        except (TypeError, ValueError) as e:
+                            tplr.logger.debug(
+                                f"Invalid response format from UID {uid}: {e}"
+                            )
+                            continue
+
+                        if state_dict_resp is None:
+                            tplr.logger.debug(f"Empty state dict from UID {uid}")
+                            continue
+
+                        # # Store raw gradients if enabled
+                        # if store_gathers:
+                        #     asyncio.create_task(
+                        #         self._store_gradient_data(
+                        #             uid=uid,
+                        #             window=window,
+                        #             global_step=global_step,
+                        #             state_dict_resp=state_dict_resp,
+                        #             global_step_resp=global_step_resp,
+                        #         )
+                        #     )
+
+                        # Process tensors (keeping existing normalization logic)
+                        for param_name, tensor in state_dict_resp.items():
+                            if isinstance(tensor, torch.Tensor):
+                                if param_name.endswith("vals"):
+                                    tensor = tensor.to(device)
+                                    norm = torch.norm(tensor)
+                                    normalized = tensor / (norm + 1e-8)
+                                    if param_name not in aggregated_state_dict:
+                                        aggregated_state_dict[param_name] = []
+                                    aggregated_state_dict[param_name].append(normalized)
+                                else:
+                                    if param_name not in aggregated_state_dict:
+                                        aggregated_state_dict[param_name] = []
+                                    aggregated_state_dict[param_name].append(
+                                        tensor.to(device)
+                                    )
+                                metrics["download_bytes"] += (
+                                    tensor.element_size() * tensor.nelement()
+                                )
+
+                        valid_uids.append(uid)
+                        global_steps.append(global_step_resp)
+
+                except Exception as e:
+                    tplr.logger.error(
+                        f"Error processing batch {i}-{i + BATCH_SIZE}: {str(e)}"
+                    )
+                    continue
 
         # If no valid responses, return None
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")
             return None
 
+        total_time = time.time() - start_time
+        tplr.logger.debug(
+            f"Gather operation completed in {total_time:.2f}s. "
+            f"Success rate: {len(valid_uids)}/{len(uids)}, "
+            f"Upload: {metrics['upload_bytes']} bytes, "
+            f"Download: {metrics['download_bytes']} bytes"
+        )
+
         # Create result namespace
         result = SimpleNamespace(
-            time=time.time() - start_time,
+            time=total_time,
             upload_bytes=metrics["upload_bytes"],
             download_bytes=metrics["download_bytes"],
             success_rate=len(valid_uids) / len(uids),
@@ -764,8 +1016,16 @@ class Comms(ChainManager):
             global_steps=global_steps,
         )
 
-        tplr.logger.debug(f"Successfully gathered from UIDs: {valid_uids}")
         return result
+
+    async def _cleanup_temp_file(self, file_path: str):
+        """Helper to cleanup temporary files asynchronously"""
+        try:
+            await asyncio.sleep(1)  # Give time for upload to complete
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception as e:
+            tplr.logger.warning(f"Failed to cleanup temp file {file_path}: {str(e)}")
 
     async def cleanup_old_checkpoints(self, keep_last: int = 3):
         """
@@ -791,23 +1051,25 @@ class Comms(ChainManager):
                     Bucket=self.bucket.name, Prefix="checkpoint"
                 ):
                     for obj in page.get("Contents", []):
-                        if obj["Key"].startswith("checkpoint"):
+                        if obj["Key"].startswith("checkpoint"):  # type: ignore
                             checkpoint_files.append(obj)
 
                 # Sort by last modified time
-                checkpoint_files.sort(key=lambda x: x["LastModified"], reverse=True)
+                checkpoint_files.sort(key=lambda x: x["LastModified"], reverse=True)  # type: ignore
 
                 # Delete older checkpoints
                 if len(checkpoint_files) > keep_last:
                     to_delete = checkpoint_files[keep_last:]
                     await s3_client.delete_objects(
                         Bucket=self.bucket.name,
-                        Delete={"Objects": [{"Key": obj["Key"]} for obj in to_delete]},
+                        Delete={"Objects": [{"Key": obj["Key"]} for obj in to_delete]},  # type: ignore
                     )
                     tplr.logger.info(f"Deleted {len(to_delete)} old checkpoints")
 
         except Exception as e:
             tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
+
+    ## Peer Management
 
     async def is_miner_active(self, uid: int, recent_windows: int = 3) -> bool:
         """Check if the miner has uploaded gradients in the last few windows."""
@@ -851,7 +1113,7 @@ class Comms(ChainManager):
                         tplr.logger.debug(f"Found {filename} for UID {uid}")
                         return True
                     except botocore.exceptions.ClientError as e:
-                        if e.response["Error"]["Code"] not in ["404", "403"]:
+                        if e.response["Error"]["Code"] not in ["404", "403", "401"]:  # type: ignore
                             tplr.logger.error(
                                 f"Error checking activity for UID {uid}: {e}"
                             )
@@ -892,86 +1154,145 @@ class Comms(ChainManager):
 
             await asyncio.sleep(self.active_check_interval)
 
+    # Checkpoint Operations
+
+    async def _get_highest_stake_validator_bucket(self):
+        """Get the bucket for the validator with highest stake."""
+        # Get validator with highest stake
+        validator_uid = self.metagraph.S.argmax().item()
+        tplr.logger.info(f"Found validator with highest stake: {validator_uid}")
+
+        if validator_uid is None:
+            tplr.logger.info("No active validators found")
+            return None, None
+
+        validator_bucket = self.commitments.get(int(validator_uid))
+        if not validator_bucket:
+            return None, None
+
+        tplr.logger.info(f"Validator Bucket: {validator_bucket}")
+        return validator_bucket, validator_uid
+
     async def get_latest_checkpoint(self):
-        """Get the latest checkpoint: Returns (checkpoint_data, window) tuple."""
+        """
+        Sequentially check:
+        1. Whether the highest-staked validator has a checkpoint.
+        2. Whether the R2 bucket of this instance has a checkpoint.
+        3. Whether a checkpoint exists locally.
+        If none are found, return None.
+        """
         try:
-            # Get validator with highest stake
-            validator_uid = self.metagraph.S.argmax().item()
-            tplr.logger.info(f"Found validator with highest stake: {validator_uid}")
-
-            if validator_uid is None:
-                tplr.logger.info("No active validators found")
-                return None
-            validator_bucket = self.commitments.get(int(validator_uid))
-
-            if not validator_bucket:
-                return None
-
-            tplr.logger.info(f"Validator Bucket: {validator_bucket}")
-            # List checkpoint files from validator's bucket
-            checkpoint_files = []
-            async with self.session.create_client(
-                "s3",
-                endpoint_url=self.get_base_url(validator_bucket.account_id),
-                region_name=CF_REGION_NAME,
-                config=client_config,
-                aws_access_key_id=validator_bucket.access_key_id,
-                aws_secret_access_key=validator_bucket.secret_access_key,
-            ) as s3_client:
-                # Use regex pattern to match checkpoint files
-                pattern = re.compile(
-                    rf"^checkpoint-(\d+)-{validator_uid}-v{__version__}\.pt$"
+            # 1. Check validator bucket
+            (
+                validator_bucket,
+                validator_uid,
+            ) = await self._get_highest_stake_validator_bucket()
+            if validator_bucket:
+                result = await self._get_bucket_checkpoint(
+                    validator_bucket, validator_uid
                 )
+                if result:
+                    # If successfully retrieved, return immediately.
+                    return result
 
-                paginator = s3_client.get_paginator("list_objects_v2")
-                async for page in paginator.paginate(
-                    Bucket=self.bucket.name, Prefix="checkpoint"
-                ):
-                    for obj in page.get("Contents", []):
-                        key = obj["Key"]
-                        match = pattern.match(key)
-                        if match:
-                            window = int(match.group(1))
-                            checkpoint_files.append(
-                                {
-                                    "key": key,
-                                    "window": window,
-                                    "size": obj["Size"],
-                                    "last_modified": obj["LastModified"],
-                                }
-                            )
+            # 2. Check self R2 bucket
+            self_bucket = self.bucket  # Use self.bucket saved in __init__
+            if self_bucket:
+                result = await self._get_bucket_checkpoint(self_bucket, self.uid)
+                if result:
+                    return result
 
-            if not checkpoint_files:
-                tplr.logger.info("No checkpoint files found")
-                return None
+            # 3. Check local storage
+            local_result = self._load_latest_local_checkpoint()
+            if local_result:
+                return local_result
 
-            # Sort by last_modified timestamp (descending) and get latest
-            latest = max(checkpoint_files, key=lambda x: x["last_modified"])
             tplr.logger.info(
-                f"Found latest checkpoint: {latest['key']} from window {latest['window']}, modified at {latest['last_modified']}"
+                "No checkpoint found in validator / self R2 / local storage"
             )
-
-            # Get the checkpoint data using the window from the latest checkpoint
-            loaded_data = await self.s3_get_object(
-                key=latest["key"],
-                bucket_secrets={
-                    "account_id": validator_bucket.account_id,
-                    "bucket_name": validator_bucket.name,
-                    "write": {
-                        "access_key_id": validator_bucket.access_key_id,
-                        "secret_access_key": validator_bucket.secret_access_key,
-                    },
-                },
-            )
-
-            if loaded_data is None:
-                tplr.logger.error(f"Failed to download checkpoint {latest['key']}")
-                return None
-
-            return loaded_data, latest["window"]
+            return None
 
         except Exception as e:
             tplr.logger.error(f"Error getting latest checkpoint: {e}")
+            return None
+
+    def _load_latest_local_checkpoint(self):
+        try:
+            local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
+            pattern = rf"checkpoint-(\d+)-{self.uid}-v{__version__}\.pt$"
+
+            if not os.path.exists(local_dir):
+                return None
+
+            checkpoints = []
+            for window_dir in os.listdir(local_dir):
+                path = os.path.join(local_dir, window_dir)
+                if not os.path.isdir(path):
+                    continue
+
+                for file in os.listdir(path):
+                    match = re.match(pattern, file)
+                    if match:
+                        # window number comes from match.group(1)
+                        w = int(match.group(1))
+                        file_path = os.path.join(path, file)
+                        checkpoints.append(
+                            {
+                                "path": file_path,
+                                "window": w,
+                                "modified": os.path.getmtime(file_path),
+                            }
+                        )
+
+            if checkpoints:
+                # choose the last modified checkpoint
+                latest = max(checkpoints, key=lambda x: x["modified"])
+                checkpoint_data = torch.load(latest["path"])
+                return checkpoint_data, latest["window"]
+            else:
+                return None
+        except Exception as e:
+            tplr.logger.error(f"Error in local checkpoint loading: {e}")
+            return None
+
+    async def _get_bucket_checkpoint(self, bucket, uid):
+        """Helper to get checkpoint from a specific bucket."""
+        async with self.session.create_client(
+            "s3",
+            endpoint_url=self.get_base_url(bucket.account_id),
+            region_name=CF_REGION_NAME,
+            config=client_config,
+            aws_access_key_id=bucket.access_key_id,
+            aws_secret_access_key=bucket.secret_access_key,
+        ) as s3_client:
+            pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{__version__}\.pt$")
+
+            response = await s3_client.list_objects_v2(
+                Bucket=bucket.name, Prefix="checkpoint", MaxKeys=1000
+            )
+
+            if not response.get("Contents"):
+                return None
+
+            valid_checkpoints = []
+            for obj in response.get("Contents", []):
+                key = obj.get("Key", "")
+                match = pattern.match(key)
+                if match:
+                    valid_checkpoints.append(
+                        {
+                            "key": key,
+                            "window": int(match.group(1)),
+                            "last_modified": obj["LastModified"],
+                        }
+                    )
+
+            if valid_checkpoints:
+                latest = max(valid_checkpoints, key=lambda x: int(x["window"]))
+                loaded_data = await self.s3_get_object(key=latest["key"], bucket=bucket)
+                if loaded_data:
+                    return loaded_data, latest["window"]
+
             return None
 
     async def load_checkpoint(
@@ -985,21 +1306,24 @@ class Comms(ChainManager):
         device: str,
         peers: list,
         uid: str,
-    ) -> tuple[bool, dict, int]:
+    ) -> tuple[
+        bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
+    ]:
         """
-        Load latest checkpoint and catch up through missed windows.
+        Loads the latest checkpoint and catches up across missed windows.
+        In this version, we parallelize gathers but still apply updates strictly in ascending window order.
 
         Returns:
-            tuple: (success: bool, momentum: dict, global_step: int)
+            tuple: (success: bool, momentum: dict, global_step: int, optimizer: Optimizer, scheduler: LRScheduler)
         """
         result = await self.get_latest_checkpoint()
         if not result:
             tplr.logger.info("No valid checkpoints found")
-            return False, {}, 0
+            return False, {}, 0, optimizer, scheduler
 
-        checkpoint_data, window = result
+        checkpoint_data, checkpoint_window = result
         try:
-            # Load model state
+            # 1) Load checkpoint data
             model.load_state_dict(
                 {
                     k: v.to(device)
@@ -1008,54 +1332,270 @@ class Comms(ChainManager):
             )
             model.to(device)
 
-            # Load optimizer state
             for state in optimizer.state.values():
                 for k, v in state.items():
                     if torch.is_tensor(v):
                         state[k] = v.to(device)
             optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
 
-            # Load scheduler state
             scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
-
-            # Get checkpoint metadata
             momentum = checkpoint_data["momentum"]
-            global_step = checkpoint_data["global_step"]
-            checkpoint_window = checkpoint_data.get("checkpoint_window")
 
-            if not checkpoint_window:
+            checkpoint_start_window = checkpoint_data.get("start_window")
+            checkpoint_current_window = checkpoint_data.get("current_window")
+            if checkpoint_start_window is None or checkpoint_current_window is None:
                 tplr.logger.warning(
-                    "Checkpoint missing window info, cannot catch up properly"
+                    "Checkpoint missing start_window or current_window info"
                 )
-                return False, {}, 0
+                return False, {}, 0, optimizer, scheduler
 
-            window_difference = current_window - checkpoint_window
+            window_difference = current_window - checkpoint_current_window
+            global_step = current_window - checkpoint_start_window
+
             tplr.logger.info(
-                f"Current window: {current_window}, Checkpoint window: {checkpoint_window}, Difference: {window_difference}"
+                f"Checkpoint windows (start={checkpoint_start_window}, checkpoint_current={checkpoint_current_window}), "
+                f"local_current={current_window}, window_diff={window_difference}, global_step={global_step}"
             )
 
+            # 2) Sync scheduler with global_step if needed
+            steps_needed = global_step - scheduler.last_epoch
+            if steps_needed > 0:
+                tplr.logger.info(
+                    f"Syncing optimizer/scheduler by stepping {steps_needed} times…"
+                )
+                for _ in range(steps_needed):
+                    optimizer.step()
+                    scheduler.step()
+
+            # 3) Return early if no catch-up or behind
             if window_difference < 0:
                 tplr.logger.warning(
-                    f"Current window ({current_window}) is behind checkpoint window ({checkpoint_window})"
+                    "Local current_window is behind checkpoint; using checkpoint without catch-up."
                 )
-                return True, momentum, global_step
-            elif window_difference == 0:
-                tplr.logger.info("No catch up needed - at same window")
-                return True, momentum, global_step
+                return True, momentum, global_step, optimizer, scheduler
+            if window_difference == 0:
+                tplr.logger.info("No catch-up needed — aligned with checkpoint.")
+                return True, momentum, global_step, optimizer, scheduler
 
-            tplr.logger.info(f"Need to catch up through {window_difference} windows...")
+            tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
 
-            # Catch up through missed windows
-            for catch_up_window in range(checkpoint_window + 1, current_window + 1):
+            # 4) Option: Parallel gather in batches, but apply in ascending order
+            BATCH_SIZE = 5  # tweak based on memory/time constraints
+            windows_to_catch_up = range(
+                checkpoint_current_window + 1, current_window + 1
+            )
+
+            for i in range(0, len(windows_to_catch_up), BATCH_SIZE):
+                batch_windows = list(windows_to_catch_up)[i : i + BATCH_SIZE]
+
+                # Launch gathers in parallel
+                tasks = [
+                    self.gather(
+                        state_dict={},
+                        my_uid=uid,
+                        uids=peers,
+                        window=w,
+                        key="gradient",
+                        timeout=30,
+                        device=device,
+                        local=False,
+                        stale_retention=100,
+                        global_step=global_step,
+                    )
+                    for w in batch_windows
+                ]
+                batch_results = await asyncio.gather(*tasks)
+
+                # Store results in dict so we can apply them in correct ascending order
+                gathered_data = dict(zip(batch_windows, batch_results))
+
+                # 5) Apply each window's updates in ascending order
+                for w in sorted(gathered_data.keys()):
+                    gather_result = gathered_data[w]
+                    if not gather_result:
+                        tplr.logger.info(
+                            f"No valid gather data for window {w}, skipping."
+                        )
+                        continue
+
+                    # Build param updates
+                    param_updates = {}
+                    for n, p in model.named_parameters():
+                        idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
+                        vals = getattr(gather_result.state_dict, f"{n}vals", None)
+                        if idxs is not None and vals is not None:
+                            if not isinstance(idxs, (list, tuple)):
+                                idxs = [idxs]
+                            if not isinstance(vals, (list, tuple)):
+                                vals = [vals]
+                            # Calculate xshape and totalk based on parameter dimensions
+                            if len(p.shape) > 1:
+                                # For 2D weights, get block sizes for rows and columns
+                                xshape = (
+                                    transformer.shape_dict[p.shape[0]],
+                                    transformer.shape_dict[p.shape[1]],
+                                )
+                                totalk = xshape[0] * xshape[1]
+                            else:
+                                # For 1D weights
+                                xshape = transformer.shape_dict[p.shape[0]]
+                                totalk = xshape
+                            # Decompress and decode to get gradients, then take sign as update
+                            new_grad = transformer.decode(
+                                compressor.batch_decompress(
+                                    p.to(device), idxs, vals, xshape, totalk
+                                )
+                            )
+                            param_updates[n] = new_grad.sign_()
+
+                    # Apply updates, step optimizer/scheduler
+                    with torch.no_grad():
+                        for n, p in model.named_parameters():
+                            if n in param_updates:
+                                p.grad = param_updates[n]
+
+                    optimizer.step()
+                    scheduler.step()
+                    global_step += 1
+                    tplr.logger.info(
+                        f"Caught up window {w}, global_step => {global_step}"
+                    )
+
+            return True, momentum, global_step, optimizer, scheduler
+
+        except KeyError as e:
+            tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
+            return False, {}, 0, optimizer, scheduler
+        except Exception as e:
+            tplr.logger.error(f"Failed to load checkpoint: {e}")
+            return False, {}, 0, optimizer, scheduler
+        # TODO: Add more robust error handling for large window_difference or gather failures.
+
+    # Start Window Operations
+
+    async def post_start_window(self, start_window: int):
+        """Upload the start window as a JSON object to the node's R2 bucket."""
+        key = f"start_window_v{__version__}.json"
+        start_window_data = {"start_window": start_window}
+
+        # Create temporary JSON file
+        temp_file = os.path.join(self.temp_dir, f"temp_{key}")
+        try:
+            async with aiofiles.open(temp_file, "w") as f:
+                await f.write(json.dumps(start_window_data))
+
+            await self.s3_put_object(key=key, file_path=temp_file)
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+    async def get_start_window(self) -> int:
+        while True:
+            try:
+                (
+                    validator_bucket,
+                    validator_uid,
+                ) = await self._get_highest_stake_validator_bucket()
+                if validator_bucket is None:
+                    tplr.logger.warning(
+                        "No highest staked validator bucket found. Retrying in 10 seconds."
+                    )
+                    await asyncio.sleep(10)
+                    continue
+
                 tplr.logger.info(
-                    f"Catching up window {catch_up_window} (Progress: {catch_up_window - checkpoint_window}/{window_difference})"
+                    f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name}"
                 )
-                # Gather gradients from peers for this historical window
-                gather_result = await self.gather(
-                    state_dict={},  # Empty dict since we're just catching up
+
+                # Fetch 'start_window.json' using s3_get_object
+                start_window_data = await self.s3_get_object(
+                    key=f"start_window_v{__version__}.json", bucket=validator_bucket
+                )
+                if start_window_data is not None:
+                    # Check if start_window_data is already a dict
+                    if isinstance(start_window_data, dict):
+                        start_window_json = start_window_data
+                    else:
+                        # If it's bytes, decode and load JSON
+                        start_window_json = json.loads(
+                            start_window_data.decode("utf-8")
+                        )
+
+                    start_window = start_window_json["start_window"]
+                    tplr.logger.info(f"Fetched start_window: {start_window}")
+                    return start_window
+
+                tplr.logger.warning(
+                    "start_window.json not found or empty. Retrying in 10 seconds."
+                )
+                await asyncio.sleep(10)
+            except Exception as e:
+                tplr.logger.error(f"Error fetching start_window: {e}")
+                await asyncio.sleep(10)
+
+    async def save_checkpoint(
+        self,
+        model,
+        optimizer,
+        scheduler,
+        momentum,
+        global_step,
+        current_window,
+        start_window,
+    ):
+        """Save checkpoint to R2 and local storage"""
+        checkpoint_data = {
+            "model_state_dict": {
+                k: v.cpu().clone() for k, v in model.state_dict().items()
+            },
+            "optimizer_state_dict": {
+                k: v.cpu().clone() if torch.is_tensor(v) else v
+                for k, v in optimizer.state_dict().items()
+            },
+            "scheduler_state_dict": scheduler.state_dict(),
+            "momentum": {k: v.cpu().clone() for k, v in momentum.items()},
+            "start_window": start_window,
+            "current_window": current_window,
+        }
+
+        # save locally
+        await self.put(
+            state_dict=checkpoint_data,
+            uid=str(self.uid),
+            window=current_window,
+            key="checkpoint",
+            global_step=global_step,
+            local=True,
+        )
+
+        # upload to R2
+        await self.put(
+            state_dict=checkpoint_data,
+            uid=str(self.uid),
+            window=current_window,
+            key="checkpoint",
+            global_step=global_step,
+            local=False,
+        )
+
+        return True
+
+    async def _gather_window_batch(
+        self,
+        batch_windows: List[int],
+        uid: str,
+        peers: List[int],
+        device: str,
+        global_step: int,
+    ) -> Dict[int, SimpleNamespace]:
+        """Gather gradients for multiple windows in parallel."""
+        try:
+            gather_tasks = [
+                self.gather(
+                    state_dict={},
                     my_uid=uid,
                     uids=peers,
-                    window=catch_up_window,
+                    window=w,
                     key="gradient",
                     timeout=30,
                     device=device,
@@ -1063,58 +1603,197 @@ class Comms(ChainManager):
                     stale_retention=100,
                     global_step=global_step,
                 )
+                for w in batch_windows
+            ]
 
-                if gather_result:
-                    # Apply gathered gradients
-                    for n, p in model.named_parameters():
-                        idxs_key = n + "idxs"
-                        vals_key = n + "vals"
-                        idxs = getattr(gather_result.state_dict, idxs_key, None)
-                        vals = getattr(gather_result.state_dict, vals_key, None)
+            # Wait for all gather tasks to complete
+            batch_results = await asyncio.gather(*gather_tasks, return_exceptions=True)
 
-                        if idxs is not None and vals is not None:
-                            if not isinstance(idxs, (list, tuple)):
-                                idxs = [idxs]
-                            if not isinstance(vals, (list, tuple)):
-                                vals = [vals]
+            # Filter out exceptions and create window->result mapping
+            result_dict = {w: None for w in batch_windows}  # Initialize with None
+            for window, result in zip(batch_windows, batch_results):
+                if not isinstance(result, Exception) and result is not None:
+                    result_dict[window] = result
 
-                            new_grad = transformer.decode(
-                                compressor.batch_decompress(
-                                    p.to(device),
-                                    idxs,
-                                    vals,
-                                    transformer.shapes[n],
-                                    transformer.totalks[n],
-                                )
-                            )
+            return result_dict
 
-                            if p.grad is None:
-                                p.grad = new_grad
-                            else:
-                                p.grad.copy_(new_grad)
-                            p.grad.sign_()
+        except Exception as e:
+            tplr.logger.error(
+                f"Failed to gather window batch {batch_windows}: {str(e)}"
+            )
+            return {
+                w: None for w in batch_windows
+            }  # Return dict with None values on failure
 
-                    # Step optimizer and scheduler
-                    optimizer.step()
-                    scheduler.step()
-                    global_step += 1
+    async def _apply_gathered_gradients(
+        self,
+        gather_result,
+        model: LlamaForCausalLM,
+        optimizer: SGD,
+        scheduler: SequentialLR,
+        transformer: TransformDCT,
+        compressor: CompressDCT,
+        device: str,
+        window: int,
+        global_step: int,
+    ) -> Tuple[bool, int]:
+        """Apply gathered gradients to model parameters.
 
-                    tplr.logger.info(
-                        f"Caught up window {catch_up_window}, global_step={global_step}"
+        Args:
+            gather_result: Gathered gradient data
+            model: The model to update
+            optimizer: SGD optimizer
+            scheduler: Learning rate scheduler
+            transformer: DCT transformer
+            compressor: Gradient compressor
+            device: Computing device
+            window: Current window number
+            global_step: Global step counter
+
+        Returns:
+            Tuple[bool, int]: (success, new_global_step)
+        """
+        try:
+            if not gather_result or not gather_result.state_dict:
+                return False, global_step
+
+            model.train()
+            optimizer.zero_grad()
+            model.zero_grad()
+
+            # Apply gradients
+            for n, p in model.named_parameters():
+                idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
+                vals = getattr(gather_result.state_dict, f"{n}vals", None)
+
+                if idxs is not None and vals is not None:
+                    if not isinstance(idxs, (list, tuple)):
+                        idxs = [idxs]
+                    if not isinstance(vals, (list, tuple)):
+                        vals = [vals]
+
+                    new_grad = transformer.decode(
+                        compressor.batch_decompress(
+                            p.to(device),
+                            idxs,
+                            vals,
+                            transformer.shapes[n],
+                            transformer.totalks[n],
+                        )
                     )
-                else:
-                    tplr.logger.warning(
-                        f"No gradients found for window {catch_up_window}"
-                    )
+                    if p.grad is None:
+                        p.grad = new_grad
+                    else:
+                        p.grad.copy_(new_grad)
+                    p.grad.sign_()
+
+            optimizer.step()
+            scheduler.step()
+            global_step += 1
 
             tplr.logger.info(
-                f"Successfully loaded checkpoint and caught up {window_difference} windows"
+                f"Applied gradients for window {window}, global_step => {global_step}"
             )
-            return True, momentum, global_step
+            return True, global_step
 
-        except KeyError as e:
-            tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
-            return False, {}, 0
         except Exception as e:
-            tplr.logger.error(f"Failed to load checkpoint: {e}")
-            return False, {}, 0
+            tplr.logger.error(
+                f"Failed to apply gradients for window {window}: {str(e)}"
+            )
+            return False, global_step
+
+    async def check_and_perform_catch_up(
+        self,
+        model: LlamaForCausalLM,
+        optimizer: SGD,
+        scheduler: SequentialLR,
+        transformer: TransformDCT,
+        compressor: CompressDCT,
+        current_window: int,
+        sync_window: int,
+        device: str,
+        peers: List[int],
+        uid: str,
+        global_step: int,
+        hparams,
+    ) -> Tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
+        window_gap = current_window - sync_window
+
+        if window_gap <= hparams.catch_up_threshold:
+            return False, global_step, optimizer, scheduler
+
+        if len(peers) < hparams.catch_up_min_peers:
+            tplr.logger.warning(f"Not enough peers ({len(peers)}) for catch-up")
+            return False, global_step, optimizer, scheduler
+
+        catch_up_start = time.time()
+        tplr.logger.info(f"Initiating catch-up for {window_gap} windows")
+
+        try:
+            # Process windows in batches
+            for i in range(
+                sync_window + 1, current_window + 1, hparams.catch_up_batch_size
+            ):
+                batch_end = min(i + hparams.catch_up_batch_size, current_window + 1)
+                batch_windows = list(range(i, batch_end))
+
+                # Check timeout
+                if time.time() - catch_up_start > hparams.catch_up_timeout:
+                    tplr.logger.warning("Catch-up exceeded maximum time")
+                    return False, global_step, optimizer, scheduler
+
+                try:
+                    # Use asyncio.wait_for to handle timeout for gather operation
+                    gathered_data = await asyncio.wait_for(
+                        self._gather_window_batch(
+                            batch_windows=batch_windows,
+                            uid=uid,
+                            peers=peers,
+                            device=device,
+                            global_step=global_step,
+                        ),
+                        timeout=max(
+                            0.1,
+                            hparams.catch_up_timeout - (time.time() - catch_up_start),
+                        ),
+                    )
+
+                    # Verify gathered_data is a dict
+                    if not isinstance(gathered_data, dict):
+                        raise TypeError(
+                            f"Expected dict from _gather_window_batch, got {type(gathered_data)}"
+                        )
+
+                    # Apply updates in order
+                    for w in sorted(gathered_data.keys()):
+                        success, new_global_step = await self._apply_gathered_gradients(
+                            gather_result=gathered_data[w],
+                            model=model,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            transformer=transformer,
+                            compressor=compressor,
+                            device=device,
+                            window=w,
+                            global_step=global_step,
+                        )
+
+                        if success:
+                            global_step = new_global_step
+
+                    torch.cuda.empty_cache()
+
+                except asyncio.TimeoutError:
+                    tplr.logger.warning(
+                        f"Timeout while gathering windows {batch_windows}"
+                    )
+                    return False, global_step, optimizer, scheduler
+                except (TypeError, AttributeError) as e:
+                    tplr.logger.error(f"Invalid data format during catch-up: {str(e)}")
+                    return False, global_step, optimizer, scheduler
+
+            return True, global_step, optimizer, scheduler
+
+        except Exception as e:
+            tplr.logger.error(f"Catch-up failed: {str(e)}")
+            return False, global_step, optimizer, scheduler

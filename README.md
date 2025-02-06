@@ -15,6 +15,24 @@ ___  _  _ _  _ | _  _
 <div align="center">
 Documentation: <a href="https://github.com/tplr-ai/templar/blob/main/docs/miner.md">Miner</a> • <a href="https://github.com/tplr-ai/templar/blob/main/docs/validator.md">Validator</a>
 </div>
+<p align="center">
+  <!-- CI Status -->
+  <a href="https://github.com/tplr-ai/templar/actions/workflows/ci.yml">
+    <img src="https://github.com/tplr-ai/templar/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  </a>
+  <!-- Code Coverage -->
+  <a href="https://codecov.io/gh/tplr-ai/templar">
+    <img src="https://codecov.io/gh/tplr-ai/templar/branch/main/graph/badge.svg" alt="Codecov" />
+  </a>
+  <!-- License -->
+  <a href="https://github.com/tplr-ai/templar/blob/main/LICENSE">
+    <img src="https://img.shields.io/github/license/tplr-ai/templar" alt="License" />
+  </a>
+  <!-- Last Commit -->
+  <a href="https://github.com/tplr-ai/templar/commits/main">
+    <img src="https://img.shields.io/github/last-commit/tplr-ai/templar" alt="Last Commit" />
+  </a>
+</p>
 
 ## Introduction
 
@@ -260,7 +278,8 @@ The incentive mechanism in **τemplar** aims to:
 
 Miners aim to maximize their expected reward, which is proportional to their assigned weight $w_i$:
 
-$\max_{\delta_i} \quad w_i = \frac{e^{\bar{s}_i}}{\sum\limits_{j \in \mathcal{M}} e^{\bar{s}_j}}$
+$$\max_{\delta_i} \quad w_i = \frac{e^{\bar{s}i}}{\sum{j \in \mathcal{M}} e^{\bar{s}_j}}$$
+
 
 Subject to:
 

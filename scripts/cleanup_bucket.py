@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
 # The MIT License (MIT)
-# © 2024 templar.tech
+# © 2025 tplr.ai
 
+# ruff: noqa
+# type: ignore
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+
+# Find and load the correct .env file
+env_path = Path(__file__).parent.parent / ".env"
+if not env_path.exists():
+    raise FileNotFoundError(f"Required .env file not found at {env_path}")
+
+# Load environment variables before any other imports
+load_dotenv(env_path, override=True)
+
+
 import sys
 import asyncio
 from dotenv import load_dotenv
@@ -15,15 +30,15 @@ import tplr
 
 
 async def cleanup_bucket():
-    """Delete all objects in the R2 bucket"""
+    """Delete objects in the R2 bucket that start with 'checkpoint', 'gradient', or 'start_window'"""
     # Load environment variables
     load_dotenv()
 
     # Validate required environment variables
     required_vars = [
-        "R2_ACCOUNT_ID",
-        "R2_WRITE_ACCESS_KEY_ID",
-        "R2_WRITE_SECRET_ACCESS_KEY",
+        "R2_GRADIENTS_ACCOUNT_ID",
+        "R2_GRADIENTS_WRITE_ACCESS_KEY_ID",
+        "R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY",
     ]
 
     missing_vars = [var for var in required_vars if not os.environ.get(var)]
@@ -34,9 +49,9 @@ async def cleanup_bucket():
         sys.exit(1)
 
     # Get credentials from environment
-    account_id = os.environ["R2_ACCOUNT_ID"]
-    access_key_id = os.environ["R2_WRITE_ACCESS_KEY_ID"]
-    secret_access_key = os.environ["R2_WRITE_SECRET_ACCESS_KEY"]
+    account_id = os.environ["R2_GRADIENTS_ACCOUNT_ID"]
+    access_key_id = os.environ["R2_GRADIENTS_WRITE_ACCESS_KEY_ID"]
+    secret_access_key = os.environ["R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"]
 
     # Initialize S3 client
     session = get_session()
@@ -57,13 +72,20 @@ async def cleanup_bucket():
         try:
             async for page in paginator.paginate(Bucket=account_id):
                 if "Contents" in page:
-                    # Collect objects for deletion
-                    objects_to_delete.extend(
-                        [{"Key": obj["Key"]} for obj in page["Contents"]]
-                    )
+                    # Filter objects that start with checkpoint, gradient, or start_window
+                    filtered_objects = [
+                        {"Key": obj["Key"]}
+                        for obj in page["Contents"]
+                        if obj["Key"].startswith(
+                            ("checkpoint", "gradient", "start_window")
+                        )
+                    ]
+                    objects_to_delete.extend(filtered_objects)
 
             if not objects_to_delete:
-                logger.info("Bucket is already empty")
+                logger.info(
+                    "No checkpoint, gradient, or start_window files found to delete"
+                )
                 return
 
             # Delete objects in batches of 1000 (S3 limit)
@@ -84,14 +106,14 @@ async def cleanup_bucket():
                         )
 
             logger.success(
-                f"Successfully deleted {len(objects_to_delete)} objects from bucket"
+                f"Successfully deleted {len(objects_to_delete)} checkpoint, gradient, and start_window files from bucket"
             )
 
         except Exception as e:
-            logger.error(f"Error cleaning bucket: {str(e)}")
+            logger.error(f"Error cleaning bucket: {e}")
             sys.exit(1)
 
 
 if __name__ == "__main__":
-    logger.info("Starting bucket cleanup...")
+    logger.info("Starting cleanup of checkpoint, gradient, and start_window files...")
     asyncio.run(cleanup_bucket())

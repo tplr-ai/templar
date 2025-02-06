@@ -1,5 +1,5 @@
 # The MIT License (MIT)
-# © 2024 templar.tech
+# © 2025 tplr.ai
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
 # documentation files (the "Software"), to deal in the Software without restriction, including without limitation
@@ -15,17 +15,16 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 # fmt: off
+#type: ignore
 
 # Global imports
-import os
 import time
-import yaml
 import torch
 import asyncio
 import numpy as np
 import bittensor as bt
-from typing import Dict, Optional
 from bittensor import Wallet
+from typing import Dict, Optional
 from pydantic import ValidationError
 
 # Local imports
@@ -451,15 +450,21 @@ class ChainManager:
             return None
 
     def update_peers_with_buckets(self):
-        """Updates both peers for gradient gathering and evaluation peers."""
+        """Updates peers for gradient gathering, evaluation peers, and tracks inactive peers."""
         # Create mappings
         uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
         uid_to_incentive = dict(zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist()))
 
-        active_peers = self.active_peers
-        active_peers = set(int(uid) for uid in active_peers)
-
+        # Get currently active peers
+        active_peers = set(int(uid) for uid in self.active_peers)
+        
+        # Track inactive peers (previously active peers that are no longer active)
+        previously_active = set(self.eval_peers)
+        newly_inactive = previously_active - active_peers
+        self.inactive_peers = newly_inactive
+        
         logger.debug(f"Active peers: {active_peers}")
+        logger.info(f"Newly inactive peers: {newly_inactive}")
         logger.debug(f"Stakes: {uid_to_stake}")
 
         if not active_peers:
@@ -500,35 +505,4 @@ class ChainManager:
             f"Updated gather peers (top {self.hparams.topk_peers}% or minimum {self.hparams.minimum_peers}): {self.peers}"
         )
         logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
-
-def get_own_bucket() -> Bucket:
-    """Parses the credentials from .env.yaml to create a Bucket object."""
-    env_file = ".env.yaml"
-    if not os.path.isfile(env_file):
-        logger.error(f"The {env_file} file was not found.")
-        raise FileNotFoundError(f"The {env_file} file was not found.")
-
-    try:
-        with open(env_file, "r") as file:
-            credentials = yaml.safe_load(file)
-    except yaml.YAMLError as e:
-        logger.error(f"Error parsing {env_file}: {e}")
-        raise e
-
-    try:
-        account_id = credentials["account_id"]
-        read_access_key_id = credentials["read"]["access_key_id"]
-        read_secret_access_key = credentials["read"]["secret_access_key"]
-
-        # Create a Bucket object
-        bucket = Bucket(
-            name=account_id,
-            account_id=account_id,
-            access_key_id=read_access_key_id,
-            secret_access_key=read_secret_access_key,
-        )
-        logger.debug(f"Parsed bucket from {env_file}: {bucket}")
-        return bucket
-    except KeyError as e:
-        logger.error(f"Missing key in {env_file}: {e}")
-        raise e
+        logger.info(f"Total inactive peers: {len(self.inactive_peers)}")

@@ -29,7 +29,7 @@
     "validator_offset": 1,
     "checkpoint_frequency": 50,
     "topk_peers": 20,
-    "minimum_peers": 5,
+    "minimum_peers": 10,
     "active_check_interval": 60,
     "recent_windows": 5,
     "power_normalisation": 2.0,
@@ -37,5 +37,5 @@
     "catch_up_threshold": 15,
     "catch_up_batch_size": 5,
     "catch_up_timeout": 300,
-    "uids_per_window": 2
+    "uids_per_window": 4
 }

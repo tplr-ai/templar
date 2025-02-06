@@ -656,7 +656,9 @@ class Validator:
                         p.grad.sign_()                        
                     else:
                         tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
-            tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - update_start)} Updated model')
+            # Free gather_result when done.
+            del gather_result
+            torch.cuda.empty_cache()
             
             self.optimizer.step()
             self.scheduler.step()

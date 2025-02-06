@@ -40,10 +40,15 @@ def apply_compressed_gradient(model, state_dict, transformer, compressor, xshape
         if idxs is not None and vals is not None:
             idxs = idxs.to(device)
             vals = vals.to(device)
-            grad = transformer.decode(
-                compressor.decompress(p.to(device), idxs, vals, xshapes[n], totalks[n])
-            ).to(device)
-            p.data.sub_(grad.sign(), alpha=lr)
+            decompressed = compressor.decompress(p.to(device), idxs, vals, xshapes[n], totalks[n])
+            # Remove temporary tensors for idxs/vals
+            del idxs, vals
+            grad_tensor = transformer.decode(decompressed).to(device)
+            del decompressed  # free decompressed tensor
+            # Apply sign-based update
+            p.data.sub_(grad_tensor.sign(), alpha=lr)
+            del grad_tensor
+            torch.cuda.empty_cache()  # allow fragmentation to be cleaned up
         else:
             logger.info(f"Gradient data missing for parameter {n}, skipping.")
     return model
@@ -110,22 +115,18 @@ def compute_average_loss(model, batches, tokenizer, device, sample_rate):
     return avg_loss, count, sampled_indices, total_batches
 
 def evaluate_loss_change(model, batches, tokenizer, device, sample_rate, 
-                         state_dict, transformer, compressor, xshapes, totalks, lr, optimizer):
-    """
-    Evaluates the model loss before and after applying the gradient from state_dict.
-    Returns a tuple:
-      (loss_before, loss_after, count_before, count_after, sampled_indices, total_batches)
-    """
-    optimizer.zero_grad()
+                         state_dict, transformer, compressor, xshapes, totalks, scheduler):
     model.eval()
     loss_before, count_before, sampled_indices, total_batches = compute_average_loss(
         model, batches, tokenizer, device, sample_rate
     )
     logger.info(f"Loss before gradient: {loss_before} on {count_before}/{total_batches} batches")
     
-    optimizer.zero_grad()
-    # Apply the compressed gradient
-    model_after = apply_compressed_gradient(model, state_dict, transformer, compressor, xshapes, totalks, device, lr)
+    # Use the current learning rate from scheduler (as in the old code)
+    current_lr = scheduler.get_last_lr()[0]
+    
+    # Apply the compressed gradient update to the model copy
+    model_after = apply_compressed_gradient(model, state_dict, transformer, compressor, xshapes, totalks, device, current_lr)
     loss_after, count_after, _, _ = compute_average_loss(
         model_after, batches, tokenizer, device, sample_rate
     )
@@ -153,61 +154,65 @@ async def evaluate_peer(uid, state_dict, sync_window, hparams, tokenizer,
                         config, model, transformer, compressor, xshapes, totalks,
                         device, lr, optimizer, scheduler, random_batches, random_pages):
     """
-    Evaluates a peer's gradient by comparing loss improvements on "own" and shared "random" evaluation data.
-    Uses:
-      - evaluate_loss_change: computes loss before/after gradient application.
-      - compute_improvement_metrics: computes relative improvements and gradient score.
-      - load_and_compare_pages: verifies data consistency.
-    Returns:
-      A dictionary with evaluation metrics.
+    Evaluates a peer's gradient and returns a dictionary containing evaluation metrics.
     """
     start_time = tplr.T()
-
-    ## OWN EVALUATION (using uid-specific seed)
+    
+    # OWN EVALUATION: load and prepare own evaluation batches.
     loader_own, _ = await R2DatasetLoader.get_loader(
         window=sync_window, hparams=hparams, tokenizer=tokenizer,
         data_type="own", seed=uid
     )
     batches_own = [batch for batch in loader_own]
+    del loader_own
+    torch.cuda.empty_cache()
+    
     model_own_eval = await asyncio.to_thread(copy.deepcopy, model)
     own_task = asyncio.to_thread(
         evaluate_loss_change,
         model_own_eval, batches_own, tokenizer, device,
         hparams.validator_sample_rate, state_dict, transformer, compressor,
-        xshapes, totalks, lr, optimizer
+        xshapes, totalks, scheduler
     )
-
-    ## RANDOM EVALUATION (shared among all UIDs)
+    
+    # RANDOM EVALUATION: use shared random batches.
     model_random_eval = await asyncio.to_thread(copy.deepcopy, model)
     random_task = asyncio.to_thread(
         evaluate_loss_change,
         model_random_eval, random_batches, tokenizer, device,
         hparams.validator_sample_rate, state_dict, transformer, compressor,
-        xshapes, totalks, lr, optimizer
+        xshapes, totalks, scheduler
     )
-
+    
     (loss_before_own, loss_after_own,
      count_before_own, count_after_own,
      sampled_indices_own, total_batches_own) = await own_task
     logger.info(f"UID {uid}: Own data evaluation completed. Loss before: {loss_before_own}, after: {loss_after_own}")
-
+    
+    # Free own-eval copy and batches.
+    del model_own_eval, own_task, batches_own
+    torch.cuda.empty_cache()
+    
     (loss_before_random, loss_after_random,
      count_before_random, count_after_random,
      sampled_indices_random, total_batches_random) = await random_task
     logger.info(f"UID {uid}: Random data evaluation completed. Loss before: {loss_before_random}, after: {loss_after_random}")
-
+    
+    # Free random-eval copy.
+    del model_random_eval, random_task
+    torch.cuda.empty_cache()
+    
     (relative_improvement_own, relative_improvement_random,
      gradient_score, binary_indicator) = compute_improvement_metrics(
-         loss_before_own, loss_after_own, loss_before_random, loss_after_random
+        loss_before_own, loss_after_own, loss_before_random, loss_after_random
     )
-    logger.info(f"UID {uid}: Gradient score: {gradient_score}, Binary indicator: {binary_indicator}")
-
+    
     # Load and verify pages.
     miner_pages, local_pages = await load_and_compare_pages(uid, sync_window, hparams, tokenizer, state_dict)
-
+    
     total_time = tplr.T() - start_time
     logger.info(f"UID {uid}: Completed evaluation in {total_time} seconds")
-
+    
     result = {
         "uid": uid,
         "loss_before_per_batch_own": loss_before_own,
@@ -222,6 +227,11 @@ async def evaluate_peer(uid, state_dict, sync_window, hparams, tokenizer,
         "local_pages": local_pages,
         "pages_random": random_pages,
     }
+    
+    # Further cleanup.
+    del loss_before_own, loss_after_own, loss_before_random, loss_after_random
+    torch.cuda.empty_cache()
+    
     return result
 
 async def evaluate_peers_parallel(
@@ -243,11 +253,7 @@ async def evaluate_peers_parallel(
 ):
     """
     Evaluates multiple peers concurrently.
-    Loads the "random" evaluation data only once for the current sync window,
-    and then passes it to each evaluation of the given UIDs.
-    
-    Returns:
-        dict: Mapping from uid -> evaluation result (or None if no gradient received).
+    Loads the "random" evaluation data only once for the current sync window.
     """
     # Load random evaluation data once.
     random_loader, random_pages = await R2DatasetLoader.get_loader(
@@ -255,7 +261,9 @@ async def evaluate_peers_parallel(
         data_type="random"
     )
     common_random_batches = [batch for batch in random_loader]
-
+    del random_loader
+    torch.cuda.empty_cache()
+    
     async def evaluate_uid(uid):
         tplr.logger.info(f"Evaluating uid: {uid}")
         eval_result = await comms.get(
@@ -294,4 +302,9 @@ async def evaluate_peers_parallel(
 
     tasks = [asyncio.create_task(evaluate_uid(uid)) for uid in evaluation_uids]
     results = await asyncio.gather(*tasks)
+    
+    # Clean up common random data.
+    del common_random_batches
+    torch.cuda.empty_cache()
+    
     return {uid: result for uid, result in results}

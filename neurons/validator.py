@@ -832,6 +832,10 @@ class Validator:
             update_start = tplr.T()
             self.optimizer.zero_grad()
             self.model.zero_grad()
+            lr = self.scheduler.get_last_lr()[0]
+            # Apply weight decay just like in the miner
+            for n, p in self.model.named_parameters():
+                p.data.mul_(1.0 - lr * self.hparams.weight_decay)
             if gather_result is not None and gather_result.state_dict is not None:
                 for n, p in self.model.named_parameters():
                     idxs_key = n + 'idxs'

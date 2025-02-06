@@ -26,7 +26,9 @@ dependencies = [
     "Flask-SQLAlchemy==2.5.1",
     "Flask-Migrate==3.1.0",
     "asyncio==3.4.3",
-    "werkzeug==2.2.3"
+    "werkzeug==2.2.3",
+    "matplotlib",
+    "seaborn"
 ]
 
 [tool.pytest.ini_options]

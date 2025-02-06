@@ -26,7 +26,7 @@ class Grafana:
     @staticmethod
     def config():
         parser = argparse.ArgumentParser(description='Miner script')
-        parser.add_argument('--netuid', type=int, default=268, help='Bittensor network UID.')
+        parser.add_argument('--netuid', type=int, default=3, help='Bittensor network UID.')
         parser.add_argument('--project', type=str, default='templar', help='Wandb project.')
         parser.add_argument('--device', type=str, default='cuda', help='Device to use for training')
         parser.add_argument('--debug', action='store_true', help='Enable debug logging')

@@ -1,6 +1,6 @@
 # System Requirements
 
-You will need to make sure you have adequate bandwidth. 17.1 TB of data (as of 1/31/2025) will be transferred through your machine but NOT be stored locally. The higher the internet speed and more workers/cores you can throw into the process, the faster the dataset will be finished. Consider that this process will take 12 or more hours, so use screen/tmux accordingly. Re-run the transfer command for the process to verify the files and pick up where it left off.
+You will need to make sure you have adequate bandwidth. 17.51 TB of data (as of 2/6/2025) will be transferred through your machine but NOT be stored locally. The higher the internet speed and more workers/cores you can throw into the process, the faster the dataset will be finished. Consider that this process will take 12 or more hours, so use screen/tmux accordingly. Re-run the transfer command for the process to verify the files and pick up where it left off.
 
 ## Recommend workhorse:
 

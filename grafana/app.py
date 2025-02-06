@@ -139,6 +139,8 @@ def insert_validator_eval_info(window_id):
         eval_info_detail = {}
         last_row = history[-1]  # Get the last row
         for key, value in last_row.items():
+            if "latest/validator/loss" in key:
+                tplr.logger.info(f"\nWandb key {key}, value {value}")
             if "latest/validator/loss/before" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
                 eval_info["loss_before"] = value

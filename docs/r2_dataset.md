@@ -59,7 +59,7 @@ go run main.go -d "HuggingFaceFW/fineweb-edu-score-2" --r2 --skip-local -c $CPUC
 # Return to the templar repo
 cd ~/templar
 
-# modify local shard_size.json using the $DATABUCKET we configured previously
+# modify local _shard_sizes.json using the $DATABUCKET we configured previously
 sed -i f's|80f15715bb0b882c9e967c13e677ed7d/|{$DATABUCKET}/|g' _shard_sizes.json
 
 # Finally clear any local cache from previous runs and prompt miner to request new data from the r2 dataset bucket on next run

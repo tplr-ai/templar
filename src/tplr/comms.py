@@ -706,7 +706,7 @@ class Comms(ChainManager):
         uid: str,
         window: int,
         key: str,
-        timeout: int = 5,
+        timeout: int = 10,
         local: bool = True,
         stale_retention: int = 10,
     ) -> Optional[tuple[dict, int]]:

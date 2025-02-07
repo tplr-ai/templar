@@ -250,7 +250,7 @@ class Miner:
                     uids=self.peers,
                     window=step_window - 1,
                     key="gradient",
-                    timeout=30,
+                    timeout=45,
                     device="cpu",
                     local=False,
                     stale_retention=100,

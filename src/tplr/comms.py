@@ -948,7 +948,7 @@ class Comms(ChainManager):
             return None
 
         total_time = time.time() - start_time
-        tplr.logger.debug(
+        tplr.logger.info(
             f"Gather operation completed in {total_time:.2f}s. "
             f"Success rate: {len(valid_uids)}/{len(uids)}, "
             f"Upload: {metrics['upload_bytes']} bytes, "

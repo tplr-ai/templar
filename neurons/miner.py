@@ -226,8 +226,6 @@ class Miner:
             self.model.to(self.config.device)
 
 
-
-
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
 
@@ -242,6 +240,21 @@ class Miner:
             self.comms.update_peers_with_buckets()
             self.peers = self.comms.peers
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}')
+
+            # Start the gather in the background:
+            gather_start = tplr.T()
+            gather_task = asyncio.create_task(
+                self.comms.gather(
+                    my_uid=self.uid,
+                    uids=self.peers,
+                    window=step_window - 1,
+                    key="gradient",
+                    timeout=45,
+                    device="cpu",
+                    local=False,
+                    stale_retention=100,
+                )
+            )
 
             # 2. Load training data for this window
             data_start = tplr.T()
@@ -284,6 +297,45 @@ class Miner:
                     tplr.logger.info('<Exhausted window>')
                     break
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - train_start)} Completed training')
+
+            compress_start = tplr.T()
+            gradient, xshapes, totalks, _ = tplr.prepare_gradient_dict(
+                self, pages, step_window
+            )
+            tplr.logger.info(
+                f"{tplr.P(step_window, tplr.T() - compress_start)} Compressed local gradients"
+            )
+            tplr.logger.debug(f"Putting own state dict for UID {self.uid}")
+
+            # Move everything to CPU before upload
+            processed_state_dict = {}
+            for k, v in gradient.items():
+                if isinstance(v, torch.Tensor):
+                    processed_state_dict[k] = v.to("cpu")
+                else:
+                    processed_state_dict[k] = v
+
+            # Launch the put operation as a background task
+            put_task = asyncio.create_task(
+                self.comms.put(
+                    state_dict=processed_state_dict,
+                    uid=str(self.uid),
+                    window=step_window,
+                    key="gradient",
+                    global_step=self.global_step,
+                    local=False,
+                    stale_retention=100,
+                )
+            )
+
+            upload_size = sum(
+                tensor.element_size() * tensor.nelement()
+                for tensor in processed_state_dict.values()
+                if isinstance(tensor, torch.Tensor)
+            )
+            tplr.logger.info(
+                f"Uploading {upload_size} bytes of own state for UID: {self.uid}"
+            )
 
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
@@ -328,27 +380,18 @@ class Miner:
                 "miner/mean_momentum_norm": sum(momentum_norms) / len(momentum_norms),
             }, step=self.global_step)
 
-            # 6. Prepare gradients for sharing using DeMo compression
-            compress_start = tplr.T()
-            gradient, xshapes, totalks, _ = tplr.prepare_gradient_dict(self, pages, step_window)
-            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - compress_start)} Compressed gradients')
-            # 7. Gather and process peer gradients
-            gather_start = tplr.T()
-            tplr.logger.info(f"Start gather: {self.peers}")
-            gather_result = await self.comms.gather(
-                state_dict=gradient,
-                my_uid=self.uid,
-                uids=self.peers,
-                window=step_window,
-                key='gradient',
-                timeout=30,
-                device=self.config.device,
-                local=False,
-                stale_retention=100,
-                global_step=self.global_step,
-                store_gathers=self.config.store_gathers
-            )
-            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - gather_start)} Gathered peer gradients')
+            # ---------------------------------------------------------------------
+            # 6. Await the gather task to be done
+            # ---------------------------------------------------------------------
+            tplr.logger.info("Waiting on background gather...")
+            gather_result = await gather_task
+            tplr.logger.info("Gather completed!")
+
+            # ---------------------------------------------------------------------
+            # 7. Await the put task to be done
+            # ---------------------------------------------------------------------
+            tplr.logger.info("Waiting for background gradient uploads to complete...")
+            await put_task
 
             if gather_result is None:
                 tplr.logger.error("Failed to gather gradients from peers. Waiting for next window.")

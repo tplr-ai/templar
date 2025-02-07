@@ -356,20 +356,18 @@ class Validator:
 
             # 3. Gather gradients from peers
             gather_start = tplr.T()
-            gather_result = await self.comms.gather(
-                state_dict=None,
-                my_uid=self.uid,
-                uids=self.peers,
-                window=self.sync_window,
-                key='gradient',
-                timeout=5,
-                device=self.config.device,
-                local=False,
-                stale_retention=100,
-                global_step=self.global_step,
-                store_gathers=self.config.store_gathers
+            gather_task = asyncio.create_task(
+                self.comms.gather(
+                    my_uid=self.uid,
+                    uids=self.peers,
+                    window=self.sync_window,
+                    key='gradient',
+                    timeout=30,
+                    device="cpu",
+                    local=False,
+                    stale_retention=100,
+                )
             )
-            tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers')
 
             # Add check for empty peers (evaluating all peer uids)
             if not self.peers:
@@ -836,6 +834,9 @@ class Validator:
             # Apply weight decay just like in the miner
             for n, p in self.model.named_parameters():
                 p.data.mul_(1.0 - lr * self.hparams.weight_decay)
+
+            gather_result = await gather_task
+            tplr.logger.info(f'{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers')
             if gather_result is not None and gather_result.state_dict is not None:
                 for n, p in self.model.named_parameters():
                     idxs_key = n + 'idxs'

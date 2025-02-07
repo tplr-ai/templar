@@ -845,7 +845,6 @@ class Comms(ChainManager):
 
     async def gather(
         self,
-        state_dict: Optional[Dict[str, torch.Tensor]],
         my_uid: str,
         uids: List[str],
         window: int,
@@ -865,34 +864,6 @@ class Comms(ChainManager):
             f"Starting gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
         )
         tplr.logger.debug(f"Target UIDs for gathering: {uids}")
-
-        # Put own state if provided
-        if state_dict is not None:
-            tplr.logger.debug(f"Putting own state dict for UID {my_uid}")
-            processed_state_dict = {}
-            for k, v in state_dict.items():
-                if isinstance(v, torch.Tensor):
-                    processed_state_dict[k] = v.to(device)
-                else:
-                    processed_state_dict[k] = v
-            await self.put(
-                state_dict=processed_state_dict,
-                uid=str(my_uid),
-                window=window,
-                key=key,
-                global_step=global_step,
-                local=local,
-                stale_retention=stale_retention,
-            )
-            upload_size = sum(
-                tensor.element_size() * tensor.nelement()
-                for tensor in processed_state_dict.values()
-                if isinstance(tensor, torch.Tensor)
-            )
-            metrics["upload_bytes"] += upload_size
-            tplr.logger.debug(f"Uploaded {upload_size} bytes of own state")
-
-        await asyncio.sleep(0.1)
 
         # Initialize variables
         aggregated_state_dict = {}

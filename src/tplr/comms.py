@@ -851,10 +851,8 @@ class Comms(ChainManager):
         key: str,
         timeout: int,
         device: str,
-        global_step: int,
         local: bool = True,
         stale_retention: int = 10,
-        store_gathers: bool = False,  # Parameter for storing gathered gradients
     ) -> Optional[SimpleNamespace]:
         """Gather operation with individual gradient normalization and connection management."""
         start_time = time.time()
@@ -915,18 +913,6 @@ class Comms(ChainManager):
                     if state_dict_resp is None:
                         tplr.logger.debug(f"Empty state dict from UID {uid}")
                         continue
-
-                    # # Store raw gradients if enabled
-                    # if store_gathers:
-                    #     asyncio.create_task(
-                    #         self._store_gradient_data(
-                    #             uid=uid,
-                    #             window=window,
-                    #             global_step=global_step,
-                    #             state_dict_resp=state_dict_resp,
-                    #             global_step_resp=global_step_resp,
-                    #         )
-                    #     )
 
                     # Process tensors (keeping existing normalization logic)
                     for param_name, tensor in state_dict_resp.items():
@@ -1355,7 +1341,6 @@ class Comms(ChainManager):
                 # Launch gathers in parallel
                 tasks = [
                     self.gather(
-                        state_dict={},
                         my_uid=uid,
                         uids=peers,
                         window=w,
@@ -1364,7 +1349,6 @@ class Comms(ChainManager):
                         device=device,
                         local=False,
                         stale_retention=100,
-                        global_step=global_step,
                     )
                     for w in batch_windows
                 ]
@@ -1556,7 +1540,6 @@ class Comms(ChainManager):
         try:
             gather_tasks = [
                 self.gather(
-                    state_dict={},
                     my_uid=uid,
                     uids=peers,
                     window=w,
@@ -1565,7 +1548,6 @@ class Comms(ChainManager):
                     device=device,
                     local=False,
                     stale_retention=100,
-                    global_step=global_step,
                 )
                 for w in batch_windows
             ]

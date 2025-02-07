@@ -245,7 +245,6 @@ class Miner:
             gather_start = tplr.T()
             gather_task = asyncio.create_task(
                 self.comms.gather(
-                    state_dict=None,
                     my_uid=self.uid,
                     uids=self.peers,
                     window=step_window - 1,
@@ -254,8 +253,6 @@ class Miner:
                     device="cpu",
                     local=False,
                     stale_retention=100,
-                    global_step=self.global_step,
-                    store_gathers=self.config.store_gathers,
                 )
             )
 

@@ -870,98 +870,91 @@ class Comms(ChainManager):
         valid_uids = []
         global_steps = []
 
-        # Process UIDs in batches to manage connections
-        BATCH_SIZE = 20
-        for i in range(0, len(uids), BATCH_SIZE):
-            batch_uids = uids[i : i + BATCH_SIZE]
+        async with self.client_semaphore:
+            # Prepare gather tasks for batch
+            batch_tasks = [
+                self.get_with_retry(
+                    uid=uid,
+                    window=window,
+                    key=key,
+                    timeout=timeout,
+                    local=local,
+                    stale_retention=stale_retention,
+                )
+                for uid in uids
+            ]
 
-            async with self.client_semaphore:
-                # Prepare gather tasks for batch
-                batch_tasks = [
-                    self.get_with_retry(
-                        uid=uid,
-                        window=window,
-                        key=key,
-                        timeout=timeout
-                        // (len(uids) // BATCH_SIZE + 1),  # Adjust timeout per batch
-                        local=local,
-                        stale_retention=stale_retention,
-                    )
-                    for uid in batch_uids
-                ]
+            # Process batch responses
+            try:
+                batch_responses = await asyncio.gather(
+                    *batch_tasks, return_exceptions=True
+                )
 
-                # Process batch responses
-                try:
-                    batch_responses = await asyncio.gather(
-                        *batch_tasks, return_exceptions=True
-                    )
+                for uid, response in zip(uids, batch_responses):
+                    if isinstance(response, Exception):
+                        tplr.logger.debug(
+                            f"Error getting response from UID {uid}: {str(response)}"
+                        )
+                        continue
 
-                    for uid, response in zip(batch_uids, batch_responses):
-                        if isinstance(response, Exception):
-                            tplr.logger.debug(
-                                f"Error getting response from UID {uid}: {str(response)}"
-                            )
-                            continue
+                    if response is None:
+                        tplr.logger.debug(f"No data received from UID {uid}")
+                        continue
 
-                        if response is None:
-                            tplr.logger.debug(f"No data received from UID {uid}")
-                            continue
+                    try:
+                        state_dict_resp, global_step_resp = response
+                        tplr.logger.debug(
+                            f"Received state dict and global step {global_step_resp} from UID {uid}"
+                        )
+                    except (TypeError, ValueError) as e:
+                        tplr.logger.debug(
+                            f"Invalid response format from UID {uid}: {e}"
+                        )
+                        continue
 
-                        try:
-                            state_dict_resp, global_step_resp = response
-                            tplr.logger.debug(
-                                f"Received state dict and global step {global_step_resp} from UID {uid}"
-                            )
-                        except (TypeError, ValueError) as e:
-                            tplr.logger.debug(
-                                f"Invalid response format from UID {uid}: {e}"
-                            )
-                            continue
+                    if state_dict_resp is None:
+                        tplr.logger.debug(f"Empty state dict from UID {uid}")
+                        continue
 
-                        if state_dict_resp is None:
-                            tplr.logger.debug(f"Empty state dict from UID {uid}")
-                            continue
+                    # # Store raw gradients if enabled
+                    # if store_gathers:
+                    #     asyncio.create_task(
+                    #         self._store_gradient_data(
+                    #             uid=uid,
+                    #             window=window,
+                    #             global_step=global_step,
+                    #             state_dict_resp=state_dict_resp,
+                    #             global_step_resp=global_step_resp,
+                    #         )
+                    #     )
 
-                        # # Store raw gradients if enabled
-                        # if store_gathers:
-                        #     asyncio.create_task(
-                        #         self._store_gradient_data(
-                        #             uid=uid,
-                        #             window=window,
-                        #             global_step=global_step,
-                        #             state_dict_resp=state_dict_resp,
-                        #             global_step_resp=global_step_resp,
-                        #         )
-                        #     )
-
-                        # Process tensors (keeping existing normalization logic)
-                        for param_name, tensor in state_dict_resp.items():
-                            if isinstance(tensor, torch.Tensor):
-                                if param_name.endswith("vals"):
-                                    tensor = tensor.to(device)
-                                    norm = torch.norm(tensor)
-                                    normalized = tensor / (norm + 1e-8)
-                                    if param_name not in aggregated_state_dict:
-                                        aggregated_state_dict[param_name] = []
-                                    aggregated_state_dict[param_name].append(normalized)
-                                else:
-                                    if param_name not in aggregated_state_dict:
-                                        aggregated_state_dict[param_name] = []
-                                    aggregated_state_dict[param_name].append(
-                                        tensor.to(device)
-                                    )
-                                metrics["download_bytes"] += (
-                                    tensor.element_size() * tensor.nelement()
+                    # Process tensors (keeping existing normalization logic)
+                    for param_name, tensor in state_dict_resp.items():
+                        if isinstance(tensor, torch.Tensor):
+                            if param_name.endswith("vals"):
+                                tensor = tensor.to(device)
+                                norm = torch.norm(tensor)
+                                normalized = tensor / (norm + 1e-8)
+                                if param_name not in aggregated_state_dict:
+                                    aggregated_state_dict[param_name] = []
+                                aggregated_state_dict[param_name].append(normalized)
+                            else:
+                                if param_name not in aggregated_state_dict:
+                                    aggregated_state_dict[param_name] = []
+                                aggregated_state_dict[param_name].append(
+                                    tensor.to(device)
                                 )
+                            metrics["download_bytes"] += (
+                                tensor.element_size() * tensor.nelement()
+                            )
 
-                        valid_uids.append(uid)
-                        global_steps.append(global_step_resp)
+                    valid_uids.append(uid)
+                    global_steps.append(global_step_resp)
 
-                except Exception as e:
-                    tplr.logger.error(
-                        f"Error processing batch {i}-{i + BATCH_SIZE}: {str(e)}"
-                    )
-                    continue
+            except Exception as e:
+                tplr.logger.error(
+                    f"Error processing uid batch: {str(e)}"
+                )
 
         # If no valid responses, return None
         if not valid_uids:

@@ -47,6 +47,7 @@ class Comms(ChainManager):
         metagraph=None,
         hparams=None,
         uid=None,
+        device=None,
         **kwargs,
     ):
         self.wallet = wallet
@@ -85,10 +86,18 @@ class Comms(ChainManager):
         self.client_semaphore = asyncio.Semaphore(30)  # Limit concurrent connections
         self.retry_config = {"max_attempts": 3, "backoff_base": 1.5}
 
+        # Gather-related stuff - will be defined in Miner each window
+        self.device = device
+        self.gather_result = None
+        self.state_dict = None
+        self.global_step = None
+        self.gather_start = None
+
     def start_background_tasks(self):
         self.loop = asyncio.get_running_loop()
         # Start background tasks
         self.loop.create_task(self.track_active_peers())
+        self.loop.create_task(self.gather_gradients())
 
     def get_own_bucket(self, bucket_type, access_type=None) -> Bucket:
         """Gets bucket configuration from environment variables via config.BUCKET_SECRETS.
@@ -1017,6 +1026,204 @@ class Comms(ChainManager):
         )
 
         return result
+
+    async def gather_gradients(
+        self,
+    ) -> Optional[SimpleNamespace]:
+        """Gather operation with individual gradient normalization and connection management."""
+        while True:
+            try:
+                self.gather_start = time.time()
+                offset = 2
+                window = self.current_window - offset
+                key = "gradient"
+                timeout = 50
+                stale_retention = 10
+                metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
+
+                tplr.logger.debug(
+                    f"Starting gather operation - my_uid: {self.uid}, window: {window}, key: {key}, timeout: {timeout}"
+                )
+                tplr.logger.debug(f"Target UIDs for gathering: {self.peers}")
+
+                # Put own state if provided
+                if self.state_dict is not None:
+                    tplr.logger.debug(f"Putting own state dict for UID {self.uid}")
+                    processed_state_dict = {}
+                    for k, v in self.state_dict.items():
+                        if isinstance(v, torch.Tensor):
+                            processed_state_dict[k] = v.to(self.device)
+                        else:
+                            processed_state_dict[k] = v
+                    await self.put(
+                        state_dict=processed_state_dict,
+                        uid=str(self.uid),
+                        window=window,
+                        key=key,
+                        global_step=self.global_step,
+                        local=False,
+                        stale_retention=stale_retention,
+                    )
+                    upload_size = sum(
+                        tensor.element_size() * tensor.nelement()
+                        for tensor in processed_state_dict.values()
+                        if isinstance(tensor, torch.Tensor)
+                    )
+                    metrics["upload_bytes"] += upload_size
+                    tplr.logger.debug(f"Uploaded {upload_size} bytes of own state")
+
+                await asyncio.sleep(0.1)
+
+                # Initialize variables
+                aggregated_state_dict = {}
+                valid_uids = []
+                global_steps = []
+
+                # Process UIDs in batches to manage connections
+                BATCH_SIZE = 20
+                for i in range(0, len(self.peers), BATCH_SIZE):
+                    batch_uids = self.peers[i : i + BATCH_SIZE]
+
+                    async with self.client_semaphore:
+                        # Prepare gather tasks for batch
+                        batch_tasks = [
+                            self.get_with_retry(
+                                uid=uid,
+                                window=window,
+                                key=key,
+                                timeout=timeout
+                                // (
+                                    len(self.peers) // BATCH_SIZE + 1
+                                ),  # Adjust timeout per batch
+                                local=False,
+                                stale_retention=stale_retention,
+                            )
+                            for uid in batch_uids
+                        ]
+
+                        # Process batch responses
+                        try:
+                            batch_responses = await asyncio.gather(
+                                *batch_tasks, return_exceptions=True
+                            )
+
+                            for uid, response in zip(batch_uids, batch_responses):
+                                if isinstance(response, Exception):
+                                    tplr.logger.debug(
+                                        f"Error getting response from UID {uid}: {str(response)}"
+                                    )
+                                    continue
+
+                                if response is None:
+                                    tplr.logger.debug(
+                                        f"No data received from UID {uid}"
+                                    )
+                                    continue
+
+                                try:
+                                    state_dict_resp, global_step_resp = response
+                                    tplr.logger.debug(
+                                        f"Received state dict and global step {global_step_resp} from UID {uid}"
+                                    )
+                                except (TypeError, ValueError) as e:
+                                    tplr.logger.debug(
+                                        f"Invalid response format from UID {uid}: {e}"
+                                    )
+                                    continue
+
+                                if state_dict_resp is None:
+                                    tplr.logger.debug(
+                                        f"Empty state dict from UID {uid}"
+                                    )
+                                    continue
+
+                                # # Store raw gradients if enabled
+                                # if store_gathers:
+                                #     asyncio.create_task(
+                                #         self._store_gradient_data(
+                                #             uid=uid,
+                                #             window=window,
+                                #             global_step=global_step,
+                                #             state_dict_resp=state_dict_resp,
+                                #             global_step_resp=global_step_resp,
+                                #         )
+                                #     )
+
+                                # Process tensors (keeping existing normalization logic)
+                                for param_name, tensor in state_dict_resp.items():
+                                    if isinstance(tensor, torch.Tensor):
+                                        if param_name.endswith("vals"):
+                                            tensor = tensor.to(self.device)
+                                            norm = torch.norm(tensor)
+                                            normalized = tensor / (norm + 1e-8)
+                                            if param_name not in aggregated_state_dict:
+                                                aggregated_state_dict[param_name] = []
+                                            aggregated_state_dict[param_name].append(
+                                                normalized
+                                            )
+                                        else:
+                                            if param_name not in aggregated_state_dict:
+                                                aggregated_state_dict[param_name] = []
+                                            aggregated_state_dict[param_name].append(
+                                                tensor.to(self.device)
+                                            )
+                                        metrics["download_bytes"] += (
+                                            tensor.element_size() * tensor.nelement()
+                                        )
+
+                                valid_uids.append(uid)
+                                global_steps.append(global_step_resp)
+
+                        except Exception as e:
+                            tplr.logger.error(
+                                f"Error processing batch {i}-{i + BATCH_SIZE}: {str(e)}"
+                            )
+                            continue
+
+                # If no valid responses, wait until window progression and continue
+                if not valid_uids:
+                    tplr.logger.debug(
+                        "No valid gradients received from any UID - waiting until window progression before continuing"
+                    )
+                    while self.current_window - offset == window:
+                        await asyncio.sleep(0.1)
+                    continue
+
+                total_time = time.time() - self.gather_start
+                tplr.logger.debug(
+                    f"Gather operation completed in {total_time:.2f}s. "
+                    f"Success rate: {len(valid_uids)}/{len(self.peers)}, "
+                    f"Upload: {metrics['upload_bytes']} bytes, "
+                    f"Download: {metrics['download_bytes']} bytes"
+                )
+
+                # Create result namespace
+                self.gather_result = SimpleNamespace(
+                    time=total_time,
+                    upload_bytes=metrics["upload_bytes"],
+                    download_bytes=metrics["download_bytes"],
+                    success_rate=len(valid_uids) / len(self.peers),
+                    state_dict=SimpleNamespace(**aggregated_state_dict),
+                    uids=valid_uids,
+                    global_steps=global_steps,
+                    window=window,
+                )
+
+            except Exception as e:
+                tplr.logger.error(
+                    f"Got exception while gathering gradients. Sleeping until window progression. Exception: {e}"
+                )
+                while self.current_window - offset == window:
+                    await asyncio.sleep(0.1)
+                continue
+
+            finally:
+                time_before_sleep = time.time()
+                while self.current_window - offset == window:
+                    await asyncio.sleep(0.1)
+                tplr.logger.info(
+                    f"Slept for {time.time() - time_before_sleep:.2f} s after downloading gradients."
+                )
 
     async def _cleanup_temp_file(self, file_path: str):
         """Helper to cleanup temporary files asynchronously"""

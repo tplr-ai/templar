@@ -136,6 +136,7 @@ class Miner:
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,  
+            device=self.config.device,
         )
 
         self.bucket = self.comms.get_own_bucket('gradients', 'read')
@@ -332,31 +333,18 @@ class Miner:
             compress_start = tplr.T()
             gradient, xshapes, totalks, _ = tplr.prepare_gradient_dict(self, pages, step_window)
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - compress_start)} Compressed gradients')
-            # 7. Gather and process peer gradients
-            gather_start = tplr.T()
-            tplr.logger.info(f"Start gather: {self.peers}")
-            gather_result = await self.comms.gather(
-                state_dict=gradient,
-                my_uid=self.uid,
-                uids=self.peers,
-                window=step_window,
-                key='gradient',
-                timeout=30,
-                device=self.config.device,
-                local=False,
-                stale_retention=100,
-                global_step=self.global_step,
-                store_gathers=self.config.store_gathers
-            )
-            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - gather_start)} Gathered peer gradients')
+            self.comms.state_dict = gradient
+            self.comms.device = self.config.device
+            self.comms.global_step = self.global_step
 
+            gather_result = self.comms.gather_result
             if gather_result is None:
                 tplr.logger.error("Failed to gather gradients from peers. Waiting for next window.")
                 while self.current_window == step_window:
                     await asyncio.sleep(0.1)
                 continue
 
-            # 8. Apply gathered gradients
+            # 7. Apply gathered gradients
             update_start = tplr.T()
             for n, p in self.model.named_parameters():
                 idxs_key = n + 'idxs'
@@ -384,7 +372,7 @@ class Miner:
                     tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - update_start)} Updated model')
 
-            # 10. Optimization step
+            # 8. Optimization step
             tplr.logger.info("Finish and step.")
             self.optimizer.step()
             self.scheduler.step()
@@ -399,7 +387,7 @@ class Miner:
                 "miner/timing/data_loading": tplr.T() - data_start,
                 "miner/timing/training": tplr.T() - train_start,
                 "miner/timing/compression": tplr.T() - compress_start,
-                "miner/timing/gather": tplr.T() - gather_start,
+                "miner/timing/gather": tplr.T() - self.comms.gather_start if self.comms.gather_start is not None else 0,
                 "miner/timing/model_update": tplr.T() - update_start,
                 # Existing metrics
                 "miner/loss": total_loss/(i+1),

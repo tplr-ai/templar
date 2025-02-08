@@ -905,28 +905,17 @@ class Comms(ChainManager):
                         and xshapes is not None
                         and totalks is not None
                     ):
-                        # Build reference state from ref_model.
-                        ref_state = {
-                            name: param for name, param in ref_model.named_parameters()
-                        }
-                        # For each parameter in the reference.
-                        for n, p in ref_state.items():
+                        # Iterate over the keys available in our xshapes / totalks dictionaries.
+                        for n in totalks.keys():
                             idxs_key = n + "idxs"
                             vals_key = n + "vals"
-                            if (
-                                idxs_key in state_dict_resp
-                                and vals_key in state_dict_resp
-                            ):
+                            if idxs_key in state_dict_resp and vals_key in state_dict_resp:
                                 idxs = state_dict_resp[idxs_key].to(device)
-                                vals = state_dict_resp[vals_key].to(device)
-                                # Wrap into lists if they're not already
+                                # Wrap into lists if not already
                                 if not isinstance(idxs, (list, tuple)):
                                     idxs = [idxs]
-                                if not isinstance(vals, (list, tuple)):
-                                    vals = [vals]
                                 try:
-                                    # Validate: check that we have no more than allowed topk indices
-                                    # and that none of the indices exceed the total positions for this param.
+                                    # Validate indices using the pre-computed totalk value.
                                     check_compressed_indices(
                                         param_name=n,
                                         idxs=idxs,

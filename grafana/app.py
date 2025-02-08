@@ -140,16 +140,12 @@ def insert_validator_eval_info(window_id):
         last_row = history[-1]  # Get the last row
         for key, value in last_row.items():
             if "latest/validator/loss/own/before" in key:
-                tplr.logger.info(f"\nWandb key {key}, value {value}")
                 eval_info["loss_before"] = value
             elif "latest/validator/loss/own/after" in key:
-                tplr.logger.info(f"\nWandb key {key}, value {value}")
                 eval_info["loss_after"] = value
             elif "latest/validator/loss/own/improvement" in key:
-                tplr.logger.info(f"\nWandb key {key}, value {value}")
                 eval_info["loss_improvement"] = value
             elif "latest/validator/network/evaluated_uids" in key:
-                tplr.logger.info(f"\nWandb key {key}, value {value}")
                 eval_info["eval_uids"] = value
             elif "latest/validator/scores/mean" in key:
                 tplr.logger.info(f"\nWandb key {key}, value {value}")
@@ -188,7 +184,6 @@ def insert_validator_eval_info(window_id):
         # Add the new record to the session
         db.session.add(new_validator_eval_info)
         
-        tplr.logger.info(f"\nWandb eval_info_detail {eval_info_detail}")
         for uid, details in eval_info_detail.items():
             new_eval_info_detail = EvalInfoDetail(
                 window_id=window_id,
@@ -241,7 +236,8 @@ async def run_grafana():
                 update_current_version(version, version_record)
                 tplr.logger.info(f"\nUpdated version {version}")
             # Insert a new window
-            window_id = insert_window(step_window, grafana.global_step, grafana.hparams.learning_rate)
+            global_step = step_window - grafana.start_window
+            window_id = insert_window(step_window, global_step, grafana.hparams.learning_rate)
             tplr.logger.info(f"\nInserted a new window {step_window}, window_id {window_id}")
             # Insert a run metadata
             insert_run_metadata(window_id, grafana.hparams.blocks_per_window, 100)

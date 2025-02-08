@@ -147,8 +147,6 @@ class Miner:
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
-            transformer=self.transformer,
-            compressor=self.compressor,
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
@@ -264,21 +262,6 @@ class Miner:
             self.peers = self.comms.peers
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}"
-            )
-
-            # Start the gather in the background:
-            gather_start = tplr.T()
-            gather_task = asyncio.create_task(
-                self.comms.gather(
-                    my_uid=self.uid,
-                    uids=self.peers,
-                    window=step_window - 1,
-                    key="gradient",
-                    timeout=45,
-                    device="cpu",
-                    local=False,
-                    stale_retention=100,
-                )
             )
 
             # 2. Load training data for this window
@@ -432,17 +415,29 @@ class Miner:
             )
 
             # ---------------------------------------------------------------------
-            # 6. Await the gather task to be done
+            # 6. Await both gather and put tasks concurrently
             # ---------------------------------------------------------------------
-            tplr.logger.info("Waiting on background gather...")
-            gather_result = await gather_task
-            tplr.logger.info("Gather completed!")
 
-            # ---------------------------------------------------------------------
-            # 7. Await the put task to be done
-            # ---------------------------------------------------------------------
-            tplr.logger.info("Waiting for background gradient uploads to complete...")
-            await put_task
+            # Start the gather in the background:
+            gather_start = tplr.T()
+            gather_task = asyncio.create_task(
+                self.comms.gather(
+                    my_uid=self.uid,
+                    uids=self.peers,
+                    window=step_window,
+                    key="gradient",
+                    timeout=45,
+                    device="cpu",
+                    local=False,
+                    stale_retention=100,
+                    totalks=totalks 
+                )
+            )
+
+
+            tplr.logger.info("Waiting on background tasks...")
+            gather_result, _ = await asyncio.gather(gather_task, put_task)
+            tplr.logger.info("Background tasks completed!")
 
             if gather_result is None:
                 tplr.logger.error(

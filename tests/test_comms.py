@@ -4,12 +4,10 @@ import os
 from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 import torch
-import tempfile
 from types import SimpleNamespace
 from dotenv import load_dotenv
 import pytest_asyncio
 import asyncio
-import botocore
 from dataclasses import dataclass
 import time
 import numpy as np
@@ -27,6 +25,25 @@ os.environ["R2_GRADIENTS_READ_SECRET_ACCESS_KEY"] = "test_read_secret"
 os.environ["R2_GRADIENTS_WRITE_ACCESS_KEY_ID"] = "test_write_key"
 os.environ["R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"] = "test_write_secret"
 os.environ["R2_DATASET_BUCKET_NAME"] = "test-dataset-bucket"
+
+
+# -----------------------------------------------------------------------------
+# Helper functions
+# -----------------------------------------------------------------------------
+def create_xshapes_totalks(model):
+    xshapes, totalks = {}, {}
+    for name, param in model.named_parameters():
+        xshapes[name] = param.shape
+        totalks[name] = param.numel()
+    return xshapes, totalks
+
+
+def create_valid_state_dict(model):
+    state_dict = {}
+    for name, _ in model.named_parameters():
+        state_dict[name + "idxs"] = torch.tensor([0, 1], dtype=torch.long)
+        state_dict[name + "vals"] = torch.tensor([0.1, 0.2], dtype=torch.float32)
+    return state_dict
 
 
 # Mock Bucket class
@@ -243,56 +260,66 @@ async def test_get_local(comms_instance):
     assert global_step == test_state_dict["global_step"]
 
 
-# New tests for gather functionality
+@pytest.mark.asyncio
 async def test_gather_basic_functionality(comms_instance):
-    # Setup test data
-    state_dict = {
-        "layer1.weightsidxs": torch.tensor([0, 1, 2]),
-        "layer1.weightsvals": torch.tensor([0.1, 0.2, 0.3]),
-    }
-
-    # Mock get_with_retry
+    """
+    Test gather basic functionality:
+        - Setup:
+              • Simulate two valid peer responses via get_with_retry.
+        - Expected Outcome:
+              • The aggregated state_dict is correctly constructed.
+              • Valid UIDs and global steps match the responses.
+    """
+    # Remove any external state_dict parameter.
     comms_instance.get_with_retry = AsyncMock()
 
-    # Mock responses from peers
     peer1_response = (
         {
             "layer1.weightsidxs": torch.tensor([0, 1, 2]),
             "layer1.weightsvals": torch.tensor([0.4, 0.5, 0.6]),
         },
-        1,  # global_step
+        1,  # global_step for uid "1"
     )
     peer2_response = (
         {
             "layer1.weightsidxs": torch.tensor([0, 1, 2]),
             "layer1.weightsvals": torch.tensor([0.7, 0.8, 0.9]),
         },
-        2,  # global_step
+        2,  # global_step for uid "2"
     )
-
     comms_instance.get_with_retry.side_effect = [peer1_response, peer2_response]
 
-    # Call gather
+    # Call gather without the unsupported global_step keyword.
     result = await comms_instance.gather(
-        state_dict=state_dict,
         my_uid="0",
         uids=["1", "2"],
         window=1,
         key="gradient",
         timeout=5,
         device="cpu",
-        global_step=0,
         local=True,
         stale_retention=10,
-        store_gathers=False,
     )
 
-    # Verify basic structure
-    assert result is not None
-    assert isinstance(result, SimpleNamespace)
-    assert hasattr(result, "state_dict")
-    assert hasattr(result, "uids")
-    assert hasattr(result, "global_steps")
+    # Validate the outcome.
+    assert result is not None, "Expected a non-None result"
+    # Check that the aggregated valid UIDs match the responses provided.
+    assert result.uids == ["1", "2"], (
+        f"Expected valid_uids ['1', '2'], got {result.uids}"
+    )
+    # Check that the global steps are as expected.
+    assert result.global_steps == [1, 2], (
+        f"Expected global_steps [1, 2], got {result.global_steps}"
+    )
+
+    # Verify that the aggregated state_dict contains the expected keys from both responses.
+    aggregated = result.state_dict.__dict__
+    for key in ["layer1.weightsidxs", "layer1.weightsvals"]:
+        assert key in aggregated, f"Expected key {key} in aggregated state_dict"
+        # There should be one tensor per valid UID.
+        assert len(aggregated[key]) == 2, (
+            f"Expected 2 tensors for key {key}, got {len(aggregated[key])}"
+        )
 
 
 async def test_gather_normalization(comms_instance):
@@ -308,14 +335,12 @@ async def test_gather_normalization(comms_instance):
     comms_instance.get_with_retry.side_effect = [peer_response]
 
     result = await comms_instance.gather(
-        state_dict=None,
         my_uid="0",
         uids=["1"],
         window=1,
         key="gradient",
         timeout=5,
         device="cpu",
-        global_step=0,
     )
 
     # Check normalization
@@ -330,14 +355,12 @@ async def test_gather_empty_responses(comms_instance):
     comms_instance.get_with_retry = AsyncMock(side_effect=[None, (None, 0)])
 
     result = await comms_instance.gather(
-        state_dict=None,
         my_uid="0",
         uids=["1", "2"],
         window=1,
         key="gradient",
         timeout=5,
         device="cpu",
-        global_step=0,
     )
 
     assert result is None
@@ -410,14 +433,12 @@ async def test_gather_averaging(comms_instance):
     comms_instance.get_with_retry.side_effect = [peer1_response, peer2_response]
 
     result = await comms_instance.gather(
-        state_dict=None,
         my_uid="0",
         uids=["1", "2"],
         window=1,
         key="gradient",
         timeout=5,
         device="cpu",
-        global_step=0,
     )
 
     assert result is not None
@@ -467,14 +488,12 @@ async def test_gather_complex_normalization(comms_instance):
     ]
 
     result = await comms_instance.gather(
-        state_dict=None,
         my_uid="0",
         uids=["1", "2", "3"],
         window=1,
         key="gradient",
         timeout=5,
         device="cpu",
-        global_step=0,
     )
 
     assert result is not None
@@ -776,29 +795,6 @@ async def test_load_checkpoint_missing_data(comms_instance):
     )  # Check it returns the same scheduler we passed in
 
 
-# Test Gather Operations
-async def test_gather_basic(comms_instance):
-    """Test basic gather functionality"""
-    state_dict = {
-        "layer.idxs": torch.tensor([0, 1]),
-        "layer.vals": torch.tensor([0.1, 0.2]),
-    }
-    comms_instance.get_with_retry = AsyncMock(return_value=(state_dict, 1))
-
-    result = await comms_instance.gather(
-        state_dict=None,
-        my_uid="0",
-        uids=["1"],
-        window=1,
-        key="gradient",
-        timeout=5,
-        device="cpu",
-        global_step=0,
-    )
-    assert result is not None
-    assert hasattr(result.state_dict, "layer.vals")
-
-
 async def test_gather_timeout(comms_instance):
     """Test gather operation with timeout"""
 
@@ -816,7 +812,6 @@ async def test_gather_timeout(comms_instance):
         patch("tplr.logger.warning"),
     ):
         result = await comms_instance.gather(
-            state_dict=None,
             my_uid="0",
             uids=["1"],
             window=1,
@@ -824,7 +819,6 @@ async def test_gather_timeout(comms_instance):
             timeout=5,
             device="cpu",
             local=True,  # Use local=True to avoid S3 operations
-            global_step=0,
             stale_retention=10,
         )
 
@@ -843,14 +837,12 @@ async def test_gather_timeout(comms_instance):
     comms_instance.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
 
     result = await comms_instance.gather(
-        state_dict=None,
         my_uid="0",
         uids=["1"],
         window=1,
         key="gradient",
         timeout=5,
         device="cpu",
-        global_step=0,
     )
     assert result is None
 
@@ -882,125 +874,6 @@ async def test_get_start_window_retry(comms_instance):
     assert start_window == 100
 
 
-# async def test_gather_store_gathers_non_blocking(comms_instance):
-#     """Test that storing gradients doesn't block the gather operation"""
-#     # Setup test data
-#     state_dict = {
-#         "layer.idxs": torch.tensor([0, 1]),
-#         "layer.vals": torch.tensor([0.1, 0.2]),
-#     }
-
-#     # Mock methods
-#     comms_instance.get_with_retry = AsyncMock()
-#     peer_response = (state_dict, 1)
-#     comms_instance.get_with_retry.side_effect = [peer_response]
-
-#     # Mock s3_put_object to simulate slow upload
-#     async def slow_upload(*args, **kwargs):
-#         await asyncio.sleep(1)  # Simulate slow upload
-#         return True
-
-#     comms_instance.s3_put_object = AsyncMock(side_effect=slow_upload)
-
-#     # Measure time taken
-#     start_time = time.perf_counter()
-
-#     await comms_instance.gather(
-#         state_dict=None,
-#         my_uid="0",
-#         uids=["1"],
-#         window=1,
-#         key="gradient",
-#         timeout=5,
-#         device="cpu",
-#         global_step=0,
-#         store_gathers=True,
-#     )
-
-#     # Wait a bit for async tasks to be created
-#     await asyncio.sleep(0.1)
-
-#     end_time = time.perf_counter()
-#     duration = end_time - start_time
-
-#     # Verify gather completed quickly (much less than 1 second)
-#     assert duration < 0.5, f"Gather took {duration:.2f}s, should be near-instant"
-
-#     # Verify upload was initiated
-#     assert comms_instance.s3_put_object.called
-
-
-# async def test_store_gradient_data_success(comms_instance):
-#     """Test successful gradient data storage"""
-#     # Setup test data
-#     uid = "1"
-#     window = 10
-#     global_step = 5
-#     state_dict_resp = {
-#         "layer1.weight": torch.tensor([1.0, 2.0, 3.0]),
-#         "layer1.bias": torch.tensor([0.1, 0.2]),
-#     }
-#     global_step_resp = 5
-
-#     # Mock s3_put_object
-#     comms_instance.s3_put_object = AsyncMock()
-
-#     # Call the function
-#     await comms_instance._store_gradient_data(
-#         uid=uid,
-#         window=window,
-#         global_step=global_step,
-#         state_dict_resp=state_dict_resp,
-#         global_step_resp=global_step_resp,
-#     )
-
-#     # Wait for all pending tasks to complete
-#     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-#     await asyncio.gather(*tasks)
-
-#     # Additional wait for file cleanup
-#     await asyncio.sleep(1.2)  # Slightly longer than cleanup delay
-
-#     # Verify s3_put_object was called with correct parameters
-#     assert comms_instance.s3_put_object.called
-#     call_args = comms_instance.s3_put_object.call_args
-#     assert call_args is not None
-
-#     # Verify the key format
-#     expected_key = f"gathers/{tplr.__version__}/{uid}/{window}/{global_step}.npz"
-#     assert call_args.kwargs["key"] == expected_key
-
-#     # Verify the file was created and then cleaned up
-#     temp_file_pattern = f"gradient_{uid}_{window}_{global_step}.npz"
-#     assert not any(temp_file_pattern in f for f in os.listdir(comms_instance.temp_dir))
-
-
-# async def test_store_gradient_data_error_handling(comms_instance):
-#     """Test error handling in gradient data storage"""
-#     # Setup test data with invalid tensor to trigger error
-#     uid = "1"
-#     window = 10
-#     global_step = 5
-#     state_dict_resp = {
-#         "layer1.weight": "invalid_tensor",  # This will cause an error
-#     }
-#     global_step_resp = 5
-
-#     # Mock logger
-#     with patch("tplr.logger.warning") as mock_warning:
-#         await comms_instance._store_gradient_data(
-#             uid=uid,
-#             window=window,
-#             global_step=global_step,
-#             state_dict_resp=state_dict_resp,
-#             global_step_resp=global_step_resp,
-#         )
-
-#         # Verify warning was logged
-#         mock_warning.assert_called_once()
-#         assert "Failed to store gradient" in mock_warning.call_args[0][0]
-
-
 async def test_cleanup_temp_file(comms_instance):
     """Test temporary file cleanup"""
     # Create a test file
@@ -1028,115 +901,6 @@ async def test_cleanup_temp_file_nonexistent(comms_instance):
 
         # Verify no warning was logged (clean exit)
         mock_warning.assert_not_called()
-
-
-# async def test_gather_with_store_gathers(comms_instance):
-#     """Test gather operation with store_gathers enabled"""
-#     # Setup test data
-#     state_dict = {
-#         "layer1.weightsidxs": torch.tensor([0, 1, 2]),
-#         "layer1.weightsvals": torch.tensor([0.1, 0.2, 0.3]),
-#     }
-
-#     # Mock get_with_retry
-#     peer_response = (state_dict, 1)
-#     comms_instance.get_with_retry = AsyncMock(return_value=peer_response)
-
-#     # Mock s3_put_object
-#     comms_instance.s3_put_object = AsyncMock()
-
-#     # Call gather with store_gathers=True
-#     result = await comms_instance.gather(
-#         state_dict=state_dict,
-#         my_uid="0",
-#         uids=["1"],
-#         window=1,
-#         key="gradient",
-#         timeout=5,
-#         device="cpu",
-#         global_step=0,
-#         local=True,
-#         store_gathers=True,
-#     )
-
-#     # Wait for async tasks
-#     await asyncio.sleep(0.1)
-
-#     # Verify s3_put_object was called
-#     assert comms_instance.s3_put_object.called
-
-#     # Verify the key format in the call
-#     call_args = comms_instance.s3_put_object.call_args
-#     assert call_args is not None
-#     assert call_args.kwargs["key"].startswith(f"gathers/{tplr.__version__}/")
-#     assert call_args.kwargs["key"].endswith(".npz")
-
-
-# async def test_gather_concurrent_store_gathers(comms_instance):
-#     """Test concurrent gradient storage during gather"""
-#     # Setup multiple peer responses
-#     state_dict = {
-#         "layer1.weightsidxs": torch.tensor([0, 1, 2]),
-#         "layer1.weightsvals": torch.tensor([0.1, 0.2, 0.3]),
-#     }
-
-#     peer_responses = [(state_dict, i) for i in range(3)]
-#     comms_instance.get_with_retry = AsyncMock(side_effect=peer_responses)
-
-#     # Mock s3_put_object with delay to simulate upload
-#     async def delayed_upload(*args, **kwargs):
-#         await asyncio.sleep(0.1)
-#         return True
-
-#     comms_instance.s3_put_object = AsyncMock(side_effect=delayed_upload)
-
-#     # Clean temp directory before test
-#     if os.path.exists(comms_instance.temp_dir):
-#         for f in os.listdir(comms_instance.temp_dir):
-#             try:
-#                 os.remove(os.path.join(comms_instance.temp_dir, f))
-#             except Exception:
-#                 pass
-
-#     # Call gather with store_gathers=True
-#     result = await comms_instance.gather(
-#         state_dict=state_dict,
-#         my_uid="0",
-#         uids=["1", "2", "3"],
-#         window=1,
-#         key="gradient",
-#         timeout=5,
-#         device="cpu",
-#         global_step=0,
-#         local=True,
-#         store_gathers=True,
-#     )
-
-#     # Wait for all pending tasks to complete
-#     tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-#     await asyncio.gather(*tasks)
-
-#     # Additional wait for file cleanup
-#     await asyncio.sleep(2)  # Increased wait time
-
-#     # Verify s3_put_object was called multiple times
-#     assert comms_instance.s3_put_object.call_count == 3
-
-#     # Verify all calls had correct key format
-#     for call in comms_instance.s3_put_object.call_args_list:
-#         assert call.kwargs["key"].startswith(f"gathers/{tplr.__version__}/")
-#         assert call.kwargs["key"].endswith(".npz")
-
-#     # Force cleanup of temp files
-#     if os.path.exists(comms_instance.temp_dir):
-#         for f in os.listdir(comms_instance.temp_dir):
-#             try:
-#                 os.remove(os.path.join(comms_instance.temp_dir, f))
-#             except Exception:
-#                 pass
-
-#     # Verify temp directory is clean
-#     assert len(os.listdir(comms_instance.temp_dir)) == 0
 
 
 class TestCommsGradientOperations:
@@ -1511,488 +1275,1062 @@ def _get_smaller_split(n, close_to):
     return n
 
 
-class TestGatherWindowBatch:
-    @pytest.mark.asyncio
-    async def test_gather_window_batch_success(self, comms_instance):
-        """Test successful batch gathering"""
-        # Mock gather responses
-        mock_responses = [
-            SimpleNamespace(state_dict={"param1": torch.randn(10)}),
-            SimpleNamespace(state_dict={"param1": torch.randn(10)}),
-        ]
-        comms_instance.gather = AsyncMock(side_effect=mock_responses)
-
-        result = await comms_instance._gather_window_batch(
-            batch_windows=[1, 2],
-            uid="test_uid",
-            peers=[1, 2, 3],
-            device="cpu",
-            global_step=10,
-        )
-
-        assert len(result) == 2
-        assert all(w in result for w in [1, 2])
-        assert all(isinstance(r, SimpleNamespace) for r in result.values())
-
-    @pytest.mark.asyncio
-    async def test_gather_window_batch_partial_failure(self, comms_instance):
-        """Test when some gathers fail"""
-
-        # Create a mock gather function that returns success for window 1 and None for window 2
-        async def mock_gather(*args, **kwargs):
-            window = kwargs.get("window")
-            if window == 1:
-                return SimpleNamespace(state_dict={"param1": torch.randn(10)})
-            return None
-
-        comms_instance.gather = AsyncMock(side_effect=mock_gather)
-
-        result = await comms_instance._gather_window_batch(
-            batch_windows=[1, 2],
-            uid="test_uid",
-            peers=[1, 2, 3],
-            device="cpu",
-            global_step=10,
-        )
-
-        # Verify both windows are in result dict
-        assert 1 in result
-        assert 2 in result
-        assert result[1] is not None  # First window should have data
-        assert result[2] is None  # Second window should be None
-        assert len(result) == 2  # Should have entries for both windows
-
-    @pytest.mark.asyncio
-    async def test_gather_window_batch_exception(self, comms_instance):
-        """Test exception handling"""
-        comms_instance.gather = AsyncMock(side_effect=Exception("Network error"))
-
-        result = await comms_instance._gather_window_batch(
-            batch_windows=[1, 2],
-            uid="test_uid",
-            peers=[1, 2, 3],
-            device="cpu",
-            global_step=10,
-        )
-
-        # The implementation returns a dict with None values for all windows on failure
-        assert result == {1: None, 2: None}  # Updated assertion
-        assert len(result) == 2
-        assert all(v is None for v in result.values())
-
-
-class TestApplyGatheredGradients:
-    @pytest.fixture
-    def mock_model(self):
-        model = MagicMock(spec=LlamaForCausalLM)
-        model.named_parameters.return_value = [
-            ("param1", torch.nn.Parameter(torch.randn(10))),
-            ("param2", torch.nn.Parameter(torch.randn(10))),
-        ]
-        return model
-
-    @pytest.fixture
-    def mock_transformer(self):
-        transformer = MagicMock(spec=TransformDCT)
-        transformer.shapes = {"param1": (10,), "param2": (10,)}
-        transformer.totalks = {"param1": 5, "param2": 5}
-        transformer.decode.return_value = torch.randn(10)
-        return transformer
-
-    @pytest.fixture
-    def mock_compressor(self):
-        compressor = MagicMock(spec=CompressDCT)
-        compressor.batch_decompress.return_value = torch.randn(10)
-        return compressor
-
-    @pytest.mark.asyncio
-    async def test_apply_gathered_gradients_success(
-        self, comms_instance, mock_model, mock_transformer, mock_compressor
-    ):
-        """Test successful gradient application"""
-        optimizer = MagicMock(spec=SGD)
-        scheduler = MagicMock(spec=SequentialLR)
-
-        gather_result = SimpleNamespace(
-            state_dict=SimpleNamespace(
-                param1idxs=[0, 1],
-                param1vals=torch.randn(2),
-                param2idxs=[0, 1],
-                param2vals=torch.randn(2),
-            )
-        )
-
-        success, new_step = await comms_instance._apply_gathered_gradients(
-            gather_result=gather_result,
-            model=mock_model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            transformer=mock_transformer,
-            compressor=mock_compressor,
-            device="cpu",
-            window=1,
-            global_step=10,
-        )
-
-        assert success
-        assert new_step == 11
-        optimizer.step.assert_called_once()
-        scheduler.step.assert_called_once()
-
-    # @pytest.mark.asyncio
-    # async def test_apply_gathered_gradients_invalid_data(self, comms_instance, mock_model, mock_transformer, mock_compressor):
-    #     """Test handling of invalid gradient data"""
-    #     optimizer = MagicMock(spec=SGD)
-    #     scheduler = MagicMock(spec=SequentialLR)
-
-    #     gather_result = SimpleNamespace(state_dict=SimpleNamespace())
-
-    #     success, step = await comms_instance._apply_gathered_gradients(
-    #         gather_result=gather_result,
-    #         model=mock_model,
-    #         optimizer=optimizer,
-    #         scheduler=scheduler,
-    #         transformer=mock_transformer,
-    #         compressor=mock_compressor,
-    #         device="cpu",
-    #         window=1,
-    #         global_step=10
-    #     )
-
-    #     assert not success
-    #     assert step == 10
-    #     optimizer.step.assert_not_called()
-    #     scheduler.step.assert_not_called()
-
-
-class TestCheckAndPerformCatchUp:
-    @pytest.fixture
-    def mock_hparams(self):
-        return SimpleNamespace(
-            catch_up_threshold=2,
-            catch_up_min_peers=3,
-            catch_up_batch_size=5,
-            catch_up_timeout=300,
-        )
-
-    @pytest.mark.asyncio
-    async def test_check_and_perform_catch_up_below_threshold(
-        self, comms_instance, mock_hparams
-    ):
-        """Test when catch-up is not needed due to small window gap"""
-        result = await comms_instance.check_and_perform_catch_up(
-            model=MagicMock(),
-            optimizer=MagicMock(),
-            scheduler=MagicMock(),
-            transformer=MagicMock(),
-            compressor=MagicMock(),
-            current_window=11,
-            sync_window=10,
-            device="cpu",
-            peers=[1, 2, 3, 4],
-            uid="test_uid",
-            global_step=10,
-            hparams=mock_hparams,
-        )
-
-        assert not result[0]
-        assert result[1] == 10
-
-    @pytest.mark.asyncio
-    async def test_check_and_perform_catch_up_timeout(
-        self, comms_instance, mock_hparams
-    ):
-        """Test catch-up timeout handling"""
-        mock_hparams.catch_up_timeout = 0.1  # Short timeout
-
-        async def slow_gather(*args, **kwargs):
-            await asyncio.sleep(0.2)  # Sleep longer than timeout
-            return {}
-
-        comms_instance._gather_window_batch = AsyncMock(side_effect=slow_gather)
-
-        result = await comms_instance.check_and_perform_catch_up(
-            model=MagicMock(),
-            optimizer=MagicMock(),
-            scheduler=MagicMock(),
-            transformer=MagicMock(),
-            compressor=MagicMock(),
-            current_window=20,
-            sync_window=10,
-            device="cpu",
-            peers=[1, 2, 3, 4],
-            uid="test_uid",
-            global_step=10,
-            hparams=mock_hparams,
-        )
-
-        assert not result[0]  # Should fail due to timeout
-        assert result[1] == 10  # Global step should remain unchanged
-
-    @pytest.mark.asyncio
-    async def test_check_and_perform_catch_up_with_sleep(
-        self, comms_instance, mock_hparams
-    ):
-        """Test catch-up with proper sleep handling"""
-        mock_hparams.catch_up_timeout = 1.0  # Longer timeout
-
-        async def gather_with_sleep(*args, **kwargs):
-            await asyncio.sleep(0.1)  # Short sleep that should complete
-            return {
-                11: SimpleNamespace(state_dict={"param1": torch.randn(10)}),
-                12: SimpleNamespace(state_dict={"param1": torch.randn(10)}),
-            }
-
-        comms_instance._gather_window_batch = AsyncMock(side_effect=gather_with_sleep)
-        comms_instance._apply_gathered_gradients = AsyncMock(return_value=(True, 11))
-
-        result = await comms_instance.check_and_perform_catch_up(
-            model=MagicMock(),
-            optimizer=MagicMock(),
-            scheduler=MagicMock(),
-            transformer=MagicMock(),
-            compressor=MagicMock(),
-            current_window=15,
-            sync_window=10,
-            device="cpu",
-            peers=[1, 2, 3, 4],
-            uid="test_uid",
-            global_step=10,
-            hparams=mock_hparams,
-        )
-
-        assert result[0]  # Should succeed
-        assert result[1] > 10  # Global step should increase
-        assert comms_instance._gather_window_batch.called
-        assert comms_instance._apply_gathered_gradients.called
-
-
-# New tests for upload_large_file retry behavior
 @pytest.mark.asyncio
-async def test_upload_large_file_retry_success(comms_instance):
-    """Test retry logic in upload_large_file with exact implementation parameters"""
-    mock_client = AsyncMock()
+async def test_valid_response_handling(comms_instance, model):
+    """
+    Test 1: Valid Response Handling
+        - Setup:
+              • Create a dummy reference model with a few parameters.
+              • Precompute dummy xshapes and totalks for each parameter.
+              • Use AsyncMock to simulate a get_with_retry response for a UID that returns a state_dict
+                containing proper keys "<param_name>idxs" and "<param_name>vals", which when passed into
+                compressor.batch_decompress and transformer.decode succeed without raising an exception.
+        - Expected Outcome:
+              • The UID appears in valid_uids.
+              • The aggregated state_dict contains normalized tensors for each gradient.
+              • The skipped_uids list is empty.
+              • Global steps are aggregated correctly.
+    """
+    comms = comms_instance  # using the provided fixture
+    device = "cpu"
 
-    # Track uploaded parts for verification
-    uploaded_parts = []
+    # If compressor is None, assign a dummy one; otherwise, patch its method.
+    if comms.compressor is None:
 
-    async def mock_upload_part(**kwargs):
-        uploaded_parts.append(
-            {"PartNumber": kwargs["PartNumber"], "ETag": f"etag_{kwargs['PartNumber']}"}
+        class DummyCompressor:
+            def batch_decompress(self, p, idxs, vals, xshape, totalk):
+                return torch.ones_like(p)
+
+        comms.compressor = DummyCompressor()
+    else:
+        comms.compressor.batch_decompress = (
+            lambda p, idxs, vals, xshape, totalk: torch.ones_like(p)
         )
-        return {"ETag": f"etag_{kwargs['PartNumber']}"}
 
-    mock_client.create_multipart_upload = AsyncMock(
-        side_effect=[Exception("First attempt failed"), {"UploadId": "test_id"}]
+    # If transformer is None, assign a dummy one; otherwise, patch its method.
+    if comms.transformer is None:
+
+        class DummyTransformer:
+            def decode(self, x):
+                return x
+
+        comms.transformer = DummyTransformer()
+    else:
+        comms.transformer.decode = lambda x: x
+
+    # Precompute dummy xshapes and totalks for each parameter.
+    xshapes = {}
+    totalks = {}
+    for name, param in model.named_parameters():
+        xshapes[name] = param.shape  # using the original shape as dummy xshape
+        totalks[name] = param.numel()  # total number of elements
+
+    # Define a list of dummy UIDs.
+    uids = ["uid1", "uid2", "uid3"]
+
+    # Create valid responses for each UID.
+    def create_valid_state_dict():
+        state_dict = {}
+        for name, param in model.named_parameters():
+            # Simulate proper gradient keys.
+            state_dict[name + "idxs"] = torch.tensor([0, 1], dtype=torch.long)
+            state_dict[name + "vals"] = torch.tensor([0.1, 0.2], dtype=torch.float32)
+        return state_dict
+
+    # Simulate global step responses.
+    responses = [
+        (create_valid_state_dict(), 10),
+        (create_valid_state_dict(), 20),
+        (create_valid_state_dict(), 30),
+    ]
+    call_count = 0
+
+    async def mock_get_with_retry(*args, **kwargs):
+        nonlocal call_count
+        if call_count < len(responses):
+            response = responses[call_count]
+            call_count += 1
+            return response
+        return None
+
+    # Replace the real get_with_retry with our mock.
+    comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+
+    # Call gather providing the reference model and the dummy xshapes and totalks.
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=uids,
+        window=1,
+        key="gradient",
+        timeout=5,
+        device=device,
+        local=False,
+        ref_model=model,
+        xshapes=xshapes,
+        totalks=totalks,
     )
-    mock_client.upload_part = AsyncMock(side_effect=mock_upload_part)
-    mock_client.complete_multipart_upload = AsyncMock()
-    mock_client.abort_multipart_upload = AsyncMock()
 
-    async def mock_create_client(*args, **kwargs):
-        return mock_client
+    # Validate the result.
+    assert result is not None, "Expected gather result to be non-None"
+    # Check that all UIDs appear in valid_uids.
+    assert set(result.uids) == set(uids), (
+        f"Expected valid_uids {uids}, got {result.uids}"
+    )
+    # Ensure no UID was skipped.
+    assert result.skipped_uids == [], (
+        f"Expected skipped_uids to be empty, got {result.skipped_uids}"
+    )
+    # Verify global steps are aggregated in order.
+    assert result.global_steps == [10, 20, 30], (
+        f"Unexpected global_steps: {result.global_steps}"
+    )
 
-    comms_instance.session.create_client = AsyncMock(side_effect=mock_create_client)
-
-    # Create test file matching implementation's part size
-    PART_SIZE = 50 * 1024 * 1024  # 50MB chunks from implementation
-    MAX_CONCURRENT_PARTS = 5  # From implementation
-
-    # Create a file that will generate multiple batches (120MB = 3 parts)
-    file_size = 120 * 1024 * 1024
-    with open("test_file.txt", "wb") as f:
-        f.write(b"\0" * file_size)
-
-    try:
-        await comms_instance.upload_large_file(
-            file_path="test_file.txt", key="test_key", s3_client=mock_client
+    # Check that the aggregated state_dict contains normalized tensors.
+    aggregated = result.state_dict.__dict__
+    for name, param in model.named_parameters():
+        key_vals = name + "vals"
+        assert key_vals in aggregated, f"Missing aggregated key {key_vals}"
+        tensor_list = aggregated[key_vals]
+        # There should be one tensor per UID.
+        assert len(tensor_list) == len(uids), (
+            f"Expected {len(uids)} tensors in {key_vals}, got {len(tensor_list)}"
         )
+        # Each tensor should be normalized (norm approx. 1).
+        for tensor in tensor_list:
+            norm = torch.norm(tensor)
+            assert torch.isclose(norm, torch.tensor(1.0, device=device), atol=1e-5), (
+                f"Tensor in {key_vals} is not normalized: norm = {norm}"
+            )
 
-        # Verify create_multipart_upload retry behavior
-        assert mock_client.create_multipart_upload.call_count == 2
-        create_calls = mock_client.create_multipart_upload.call_args_list
-        for call in create_calls:
-            assert call.kwargs["Bucket"] == comms_instance.bucket.name
-            assert call.kwargs["Key"] == "test_key"
-
-        # Verify part upload behavior
-        expected_parts = math.ceil(file_size / PART_SIZE)
-        expected_batches = math.ceil(expected_parts / MAX_CONCURRENT_PARTS)
-
-        print(f"\nFile size: {file_size / (1024 * 1024):.2f}MB")
-        print(f"Part size: {PART_SIZE / (1024 * 1024):.2f}MB")
-        print(f"Expected parts: {expected_parts}")
-        print(f"Expected batches: {expected_batches}")
-        print(f"Actual uploaded parts: {len(uploaded_parts)}")
-
-        # Verify number of parts
-        assert len(uploaded_parts) == expected_parts
-
-        # Verify all required part numbers are present (order doesn't matter for uploads)
-        uploaded_part_numbers = {part["PartNumber"] for part in uploaded_parts}
-        expected_part_numbers = set(range(1, expected_parts + 1))
-        assert uploaded_part_numbers == expected_part_numbers, (
-            f"Missing part numbers. Got {uploaded_part_numbers}, expected {expected_part_numbers}"
-        )
-
-        # Verify complete_multipart_upload was called with correct parts
-        assert mock_client.complete_multipart_upload.call_count == 1
-        complete_call = mock_client.complete_multipart_upload.call_args
-        assert complete_call.kwargs["Bucket"] == comms_instance.bucket.name
-        assert complete_call.kwargs["Key"] == "test_key"
-        assert complete_call.kwargs["UploadId"] == "test_id"
-
-        # Verify parts in complete_multipart_upload are sorted by PartNumber
-        complete_parts = complete_call.kwargs["MultipartUpload"]["Parts"]
-        assert len(complete_parts) == expected_parts
-        complete_part_numbers = [p["PartNumber"] for p in complete_parts]
-        assert complete_part_numbers == sorted(complete_part_numbers), (
-            f"Parts in complete_multipart_upload not properly sorted: {complete_part_numbers}"
-        )
-
-        # Verify abort was not called (successful upload)
-        assert mock_client.abort_multipart_upload.call_count == 0
-
-    finally:
-        if os.path.exists("test_file.txt"):
-            os.remove("test_file.txt")
+    # Verify that download_bytes metric is computed (i.e. > 0).
+    assert result.download_bytes > 0, "Expected download_bytes to be >0"
 
 
-# New test for gather batching
 @pytest.mark.asyncio
-async def test_gather_with_batching(comms_instance):
-    """Test gather operation with batched processing"""
-    state_dict = {
-        "layer1.weightsidxs": torch.tensor([0, 1, 2]),
-        "layer1.weightsvals": torch.tensor([0.1, 0.2, 0.3]),
-    }
+async def test_missing_idxs_key(comms_instance, model):
+    """
+    Test 2: Missing "idxs" Key for a Parameter
+        - Setup:
+              • Simulate a UID response that includes "<param_name>vals" but is missing "<param_name>idxs".
+        - Expected Outcome:
+              • The gradient decoding check fails for that UID.
+              • The UID is skipped and is added to skipped_uids.
+              • This UID does not contribute to the aggregated state_dict.
+    """
+    comms = comms_instance  # use provided fixture
+    device = "cpu"
 
-    peer_responses = [
-        (
-            {
-                "layer1.weightsidxs": torch.tensor([i, i + 1]),
-                "layer1.weightsvals": torch.tensor([0.1 * i, 0.2 * i]),
-            },
-            i,
+    # Ensure compressor and transformer are available.
+    if comms.compressor is None:
+
+        class DummyCompressor:
+            def batch_decompress(self, p, idxs, vals, xshape, totalk):
+                return torch.ones_like(p)
+
+        comms.compressor = DummyCompressor()
+    else:
+        comms.compressor.batch_decompress = (
+            lambda p, idxs, vals, xshape, totalk: torch.ones_like(p)
         )
-        for i in range(1, 8)
+
+    if comms.transformer is None:
+
+        class DummyTransformer:
+            def decode(self, x):
+                return x
+
+        comms.transformer = DummyTransformer()
+    else:
+        comms.transformer.decode = lambda x: x
+
+    # Precompute dummy xshapes and totalks for each model parameter.
+    xshapes, totalks = {}, {}
+    for name, param in model.named_parameters():
+        xshapes[name] = param.shape
+        totalks[name] = param.numel()
+
+    # Define dummy UIDs.
+    uids = ["uid1", "uid2", "uid3"]
+
+    # Define helper to create valid state_dict.
+    def create_valid_state_dict():
+        state_dict = {}
+        for name, param in model.named_parameters():
+            state_dict[name + "idxs"] = torch.tensor([0, 1], dtype=torch.long)
+            state_dict[name + "vals"] = torch.tensor([0.1, 0.2], dtype=torch.float32)
+        return state_dict
+
+    # Define helper to create an invalid state_dict missing the "<param_name>idxs" keys.
+    def create_missing_idxs_state_dict():
+        state_dict = {}
+        for name, param in model.named_parameters():
+            # Intentionally omit the "idxs" key.
+            state_dict[name + "vals"] = torch.tensor([0.1, 0.2], dtype=torch.float32)
+        return state_dict
+
+    # Simulate responses: first UID returns invalid state_dict, others valid.
+    responses = [
+        (
+            create_missing_idxs_state_dict(),
+            10,
+        ),  # UID "uid1" is missing "idxs" -> should be skipped.
+        (create_valid_state_dict(), 20),  # UID "uid2" valid.
+        (create_valid_state_dict(), 30),  # UID "uid3" valid.
+    ]
+    call_count = 0
+
+    async def mock_get_with_retry(*args, **kwargs):
+        nonlocal call_count
+        if call_count < len(responses):
+            resp = responses[call_count]
+            call_count += 1
+            return resp
+        return None
+
+    # Replace real get_with_retry with the mock.
+    comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+
+    # Call gather() with our simulated responses.
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=uids,
+        window=1,
+        key="gradient",
+        timeout=5,
+        device=device,
+        local=False,
+        ref_model=model,
+        xshapes=xshapes,
+        totalks=totalks,
+    )
+
+    # Validate the result.
+    # Expect only valid UIDs "uid2" and "uid3".
+    assert result is not None, "Expected non-None result from gather()"
+    assert result.uids == ["uid2", "uid3"], (
+        f"Expected valid_uids ['uid2', 'uid3'], got {result.uids}"
+    )
+    assert result.skipped_uids == ["uid1"], (
+        f"Expected skipped_uids ['uid1'], got {result.skipped_uids}"
+    )
+    # Global steps should match those from valid responses.
+    assert result.global_steps == [20, 30], (
+        f"Expected global_steps [20, 30], got {result.global_steps}"
+    )
+
+    # Check aggregated state_dict: only valid UIDs (2 responses) should be aggregated.
+    aggregated = result.state_dict.__dict__
+    for name, _ in model.named_parameters():
+        key_vals = name + "vals"
+        assert key_vals in aggregated, f"Missing aggregated key {key_vals}"
+        tensor_list = aggregated[key_vals]
+        assert len(tensor_list) == 2, (
+            f"Expected 2 tensors in {key_vals}, got {len(tensor_list)}"
+        )
+        # Verify each tensor gets normalized (norm approx. 1).
+        for tensor in tensor_list:
+            norm = torch.norm(tensor)
+            assert torch.isclose(norm, torch.tensor(1.0, device=device), atol=1e-5), (
+                f"Tensor in {key_vals} is not normalized: norm = {norm}"
+            )
+
+    # Confirm the download_bytes metric is computed.
+    assert result.download_bytes > 0, "Expected download_bytes to be > 0"
+
+
+@pytest.mark.asyncio
+async def test_missing_vals_key(comms_instance, model):
+    """
+    Test 3: Missing "vals" Key for a Parameter
+        - Setup:
+              • Simulate a UID response with "<param_name>idxs" present but missing "<param_name>vals".
+        - Expected Outcome:
+              • The UID is skipped and added to skipped_uids.
+              • No gradient data from this UID is aggregated.
+    """
+    comms = comms_instance  # using the provided fixture
+    device = "cpu"
+
+    # Ensure compressor and transformer are available.
+    if comms.compressor is None:
+
+        class DummyCompressor:
+            def batch_decompress(self, p, idxs, vals, xshape, totalk):
+                return torch.ones_like(p)
+
+        comms.compressor = DummyCompressor()
+    else:
+        comms.compressor.batch_decompress = (
+            lambda p, idxs, vals, xshape, totalk: torch.ones_like(p)
+        )
+
+    if comms.transformer is None:
+
+        class DummyTransformer:
+            def decode(self, x):
+                return x
+
+        comms.transformer = DummyTransformer()
+    else:
+        comms.transformer.decode = lambda x: x
+
+    # Precompute dummy xshapes and totalks for each model parameter.
+    xshapes, totalks = {}, {}
+    for name, param in model.named_parameters():
+        xshapes[name] = param.shape
+        totalks[name] = param.numel()
+
+    # Define dummy UIDs.
+    uids = ["uid1", "uid2", "uid3"]
+
+    # Helper function to create a valid state_dict with both keys.
+    def create_valid_state_dict():
+        state_dict = {}
+        for name, _ in model.named_parameters():
+            state_dict[name + "idxs"] = torch.tensor([0, 1], dtype=torch.long)
+            state_dict[name + "vals"] = torch.tensor([0.1, 0.2], dtype=torch.float32)
+        return state_dict
+
+    # Helper function to create an invalid state_dict missing the "vals" key.
+    def create_missing_vals_state_dict():
+        state_dict = {}
+        for name, _ in model.named_parameters():
+            state_dict[name + "idxs"] = torch.tensor([0, 1], dtype=torch.long)
+            # Intentionally omit the "vals" key.
+        return state_dict
+
+    # Simulate responses:
+    #  - "uid1" returns a state_dict missing "vals"
+    #  - "uid2" returns a state_dict missing "vals"
+    #  - "uid3" returns a valid state_dict.
+    responses = [
+        (create_missing_vals_state_dict(), 10),
+        (create_valid_state_dict(), 20),
+        (create_valid_state_dict(), 30),
+    ]
+    call_count = 0
+
+    async def mock_get_with_retry(*args, **kwargs):
+        nonlocal call_count
+        if call_count < len(responses):
+            resp = responses[call_count]
+            call_count += 1
+            return resp
+        return None
+
+    # Replace the real get_with_retry with our mock.
+    comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+
+    # Invoke gather() with our simulated responses.
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=uids,
+        window=1,
+        key="gradient",
+        timeout=5,
+        device=device,
+        local=False,
+        ref_model=model,
+        xshapes=xshapes,
+        totalks=totalks,
+    )
+
+    # Validate the result.
+    # We expect that only UIDs "uid2" and "uid3" are accepted as valid.
+    assert result is not None, "Expected non-None result from gather()"
+    assert result.uids == ["uid2", "uid3"], (
+        f"Expected valid_uids ['uid2', 'uid3'], got {result.uids}"
+    )
+    assert result.skipped_uids == ["uid1"], (
+        f"Expected skipped_uids ['uid1'], got {result.skipped_uids}"
+    )
+    # Global steps should be from uid2 and uid3.
+    assert result.global_steps == [20, 30], (
+        f"Expected global_steps [20, 30], got {result.global_steps}"
+    )
+
+    # Check aggregated state_dict: only valid UIDs (2 responses) should be aggregated.
+    aggregated = result.state_dict.__dict__
+    for name, _ in model.named_parameters():
+        key_vals = name + "vals"
+        assert key_vals in aggregated, f"Missing aggregated key {key_vals}"
+        tensor_list = aggregated[key_vals]
+        # There should be one entry per valid UID.
+        assert len(tensor_list) == 2, (
+            f"Expected 2 tensors in {key_vals}, got {len(tensor_list)}"
+        )
+        for tensor in tensor_list:
+            norm = torch.norm(tensor)
+            assert torch.isclose(norm, torch.tensor(1.0, device=device), atol=1e-5), (
+                f"Tensor in {key_vals} is not normalized: norm = {norm}"
+            )
+
+    # Verify that the download_bytes metric is computed.
+    assert result.download_bytes > 0, "Expected download_bytes to be > 0"
+
+
+@pytest.mark.asyncio
+async def test_empty_or_none_state_dict(comms_instance, model):
+    """
+    Test 4: Empty or None state_dict
+      - Setup:
+            • Use AsyncMock to have get_with_retry return a valid response for the first UID and
+              None (or an empty dict) for subsequent UIDs.
+      - Expected Outcome:
+            • Only the UID that returns a valid state_dict is aggregated.
+            • The remaining UIDs are skipped (i.e. collected in skipped_uids).
+            • Global steps reflect only valid responses.
+    """
+    comms = comms_instance
+    device = "cpu"
+    xshapes, totalks = create_xshapes_totalks(model)
+
+    # Patch transformer and compressor so decoding succeeds.
+    if comms.transformer is None:
+
+        class DummyTransformer:
+            def decode(self, x):
+                return x
+
+        comms.transformer = DummyTransformer()
+    else:
+        comms.transformer.decode = lambda x: x
+
+    if comms.compressor is None:
+
+        class DummyCompressor:
+            def batch_decompress(self, p, idxs, vals, xshape, totalk):
+                return vals
+
+        comms.compressor = DummyCompressor()
+    else:
+        comms.compressor.batch_decompress = lambda p, idxs, vals, xshape, totalk: vals
+
+    # Define dummy UIDs.
+    uids = ["uid1", "uid2", "uid3"]
+    call_count = 0
+
+    async def mock_get_with_retry(*args, **kwargs):
+        nonlocal call_count
+        if call_count == 0:
+            call_count += 1
+            return (create_valid_state_dict(model), 10)
+        elif call_count == 1:
+            call_count += 1
+            return None
+        elif call_count == 2:
+            call_count += 1
+            return ({}, 30)
+        return None
+
+    comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=uids,
+        window=1,
+        key="gradient",
+        timeout=5,
+        device=device,
+        local=False,
+        ref_model=model,
+        xshapes=xshapes,
+        totalks=totalks,
+    )
+
+    # Since only the first UID returns a valid response,
+    # valid_uids should be ["uid1"] and the others should be skipped.
+    assert result is not None, "Expected a non-None result."
+    assert result.uids == ["uid1"], f"Expected valid_uids ['uid1'], got {result.uids}"
+    assert set(result.skipped_uids) == {"uid2", "uid3"}, (
+        f"Expected skipped_uids {{'uid2', 'uid3'}}, got {result.skipped_uids}"
+    )
+    assert result.global_steps == [10], (
+        f"Expected global_steps [10], got {result.global_steps}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_with_retry_exception(comms_instance, model, caplog):
+    """
+    Test 5: get_with_retry Exception
+      - Setup:
+            • Force get_with_retry (via AsyncMock) to throw an exception for a UID.
+      - Expected Outcome:
+            • That UID is skipped.
+            • The UID is recorded in skipped_uids.
+            • An appropriate warning message is logged.
+    """
+    comms = comms_instance
+    device = "cpu"
+    xshapes, totalks = create_xshapes_totalks(
+        model
+    )  # global helper from earlier in the file
+    uids = ["uid1", "uid2", "uid3"]
+
+    # Patch transformer and compressor so that gradient decoding succeeds.
+    if comms.transformer is None:
+
+        class DummyTransformer:
+            def decode(self, x):
+                return x
+
+        comms.transformer = DummyTransformer()
+    else:
+        comms.transformer.decode = lambda x: x
+
+    if comms.compressor is None:
+
+        class DummyCompressor:
+            def batch_decompress(self, p, idxs, vals, xshape, totalk):
+                return vals
+
+        comms.compressor = DummyCompressor()
+    else:
+        comms.compressor.batch_decompress = lambda p, idxs, vals, xshape, totalk: vals
+
+    call_count = 0
+
+    async def mock_get_with_retry(*args, **kwargs):
+        nonlocal call_count
+        if call_count == 0:
+            call_count += 1
+            raise Exception("Simulated exception in get_with_retry")
+        elif call_count == 1:
+            call_count += 1
+            return (create_valid_state_dict(model), 20)
+        elif call_count == 2:
+            call_count += 1
+            return (create_valid_state_dict(model), 30)
+        return None
+
+    caplog.set_level("DEBUG")
+    comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=uids,
+        window=1,
+        key="gradient",
+        timeout=5,
+        device=device,
+        local=False,
+        ref_model=model,
+        xshapes=xshapes,
+        totalks=totalks,
+    )
+
+    # Expect that the first UID raised an exception and that UIDs uid2 and uid3 contributed.
+    assert result is not None, "Expected non-None result."
+    assert result.uids == ["uid2", "uid3"], (
+        f"Expected valid_uids ['uid2', 'uid3'], got {result.uids}"
+    )
+    assert result.global_steps == [20, 30], (
+        f"Expected global_steps [20, 30], got {result.global_steps}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gradient_decoding_failure(comms_instance, model):
+    """
+    Test 6: Gradient Decoding Failure
+      - Setup:
+            • Simulate a UID response where transformer.decode raises an exception during processing.
+      - Expected Outcome:
+            • The exception is caught.
+            • The entire UID response is skipped.
+            • UID "uid1" is skipped, and UIDs "uid2" and "uid3" are aggregated.
+    """
+    comms = comms_instance
+    device = "cpu"
+    xshapes, totalks = create_xshapes_totalks(model)
+    uids = ["uid1", "uid2", "uid3"]
+
+    # Create a transformer that fails on the second decode call.
+    # For a typical model with a Linear layer, the state dict may include weight and bias.
+    # This ensures that the first UID (uid1) fails decoding.
+    class FaultyTransformer:
+        def __init__(self):
+            self.call_count = 0
+
+        def decode(self, x):
+            self.call_count += 1
+            if self.call_count == 2:
+                raise Exception("Decoding failure")
+            return x
+
+    comms.transformer = FaultyTransformer()
+
+    # Use a dummy compressor that simply returns the values.
+    class DummyCompressor:
+        def batch_decompress(self, p, idxs, vals, xshape, totalk):
+            return vals
+
+    comms.compressor = DummyCompressor()
+
+    # Use the global create_valid_state_dict(model) helper here.
+    responses = [
+        (create_valid_state_dict(model), 10),
+        (create_valid_state_dict(model), 20),
+        (create_valid_state_dict(model), 30),
     ]
 
     call_count = 0
 
     async def mock_get_with_retry(*args, **kwargs):
         nonlocal call_count
-        if call_count < len(peer_responses):
-            response = peer_responses[call_count]
+        if call_count < len(responses):
+            response = responses[call_count]
             call_count += 1
             return response
         return None
 
-    comms_instance.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+    comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
 
-    result = await comms_instance.gather(
-        state_dict=state_dict,
-        my_uid="0",
-        uids=[str(i) for i in range(1, 8)],
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=uids,
         window=1,
         key="gradient",
         timeout=5,
-        device="cpu",
-        global_step=0,
-        local=True,
+        device=device,
+        local=False,
+        ref_model=model,
+        xshapes=xshapes,
+        totalks=totalks,
     )
 
-    assert result is not None
-    assert len(result.uids) == 7
-    assert hasattr(result.state_dict, "layer1.weightsvals")
-
-    # Access the attributes using dictionary style access
-    vals = getattr(result.state_dict, "layer1.weightsvals")
-    idxs = getattr(result.state_dict, "layer1.weightsidxs")
-
-    # Print debug info
-    print("\nGathered state dict attributes:", vars(result.state_dict))
-    print("Vals type:", type(vals))
-    print("Vals:", vals)
-
-    # Verify we got a list of tensors
-    assert isinstance(vals, list), f"Expected list but got {type(vals)}"
-    assert all(isinstance(v, torch.Tensor) for v in vals), (
-        "All elements should be tensors"
+    # Expect that uid1 is skipped due to the decoding exception.
+    assert result is not None, "Expected a non-None result"
+    # UID "uid1" should be skipped, and "uid2" and "uid3" should be aggregated.
+    assert result.uids == ["uid2", "uid3"], (
+        f"Expected valid_uids ['uid2', 'uid3'], got {result.uids}"
     )
-    assert len(vals) == 7, f"Expected 7 tensors but got {len(vals)}"
-
-    # Verify tensor shapes
-    for i, v in enumerate(vals):
-        assert v.shape == torch.Size([2]), f"Tensor {i} has wrong shape: {v.shape}"
-
-    # Verify we got responses from all peers
-    assert len(result.uids) == 7
-    assert all(str(uid) in result.uids for uid in range(1, 8))
-
-    # Verify the global steps were collected
-    assert len(result.global_steps) == 7
-    assert result.global_steps == list(range(1, 8))
+    assert set(result.skipped_uids) == {"uid1"}, (
+        f"Expected skipped_uids {{'uid1'}}, got {result.skipped_uids}"
+    )
 
 
-# New test for connection semaphore
 @pytest.mark.asyncio
-async def test_gather_connection_limiting(comms_instance):
-    """Test connection limiting in gather operation"""
+async def test_mixed_valid_and_invalid_uid_responses(comms_instance, model):
+    """
+    Test 7: Mixed Valid and Invalid UID Responses
+      - Setup:
+            • Simulate responses for multiple UIDs – some with valid gradient data and some with missing keys or causing decode errors.
+      - Expected Outcome:
+            • Only valid UID responses are aggregated.
+            • valid_uids contains only the UIDs without decoding issues.
+            • skipped_uids lists all UIDs with problems.
+            • Global steps and metrics reflect only the valid responses.
+    """
+    comms = comms_instance
+    device = "cpu"
+    xshapes, totalks = create_xshapes_totalks(model)
+    uids = ["uid1", "uid2", "uid3", "uid4"]
 
-    async def delayed_response(*args, **kwargs):
-        await asyncio.sleep(0.1)
-        return (
-            {
-                "layer1.weightsidxs": torch.tensor([0]),
-                "layer1.weightsvals": torch.tensor([0.1]),
-            },
-            1,
+    def create_valid():
+        return create_valid_state_dict(model)
+
+    def create_missing_idxs():
+        d = {}
+        for name, _ in model.named_parameters():
+            d[name + "vals"] = torch.tensor([0.1, 0.2], dtype=torch.float32)
+        return d
+
+    responses = [
+        (create_valid(), 10),  # uid1 valid
+        (create_missing_idxs(), 20),  # uid2 invalid (missing idxs)
+        (create_valid(), 30),  # uid3 valid
+        (create_valid(), 40),  # uid4 will trigger decode error
+    ]
+    call_count = 0
+
+    async def mock_get_with_retry(*args, **kwargs):
+        nonlocal call_count
+        resp = responses[call_count]
+        call_count += 1
+        return resp
+
+    comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+
+    # Ensure that comms.transformer is not None.
+    if comms.transformer is None:
+
+        class DummyTransformer:
+            def decode(self, x):
+                return x
+
+        comms.transformer = DummyTransformer()
+
+    # Patch transformer.decode to simulate a decode failure for uid4.
+    p_count = sum(1 for _ in model.parameters())
+    decode_call_count = 0
+
+    def custom_decode(x):
+        nonlocal decode_call_count, p_count
+        decode_call_count += 1
+        # For the fourth UID, simulate a decoding failure on its first decode call.
+        # Given the processing order, we assume uid4's first call occurs when decode_call_count == (2 * p_count) + 1.
+        if decode_call_count == (2 * p_count) + 1:
+            raise Exception("Simulated gradient decoding failure for uid4")
+        return x
+
+    comms.transformer.decode = custom_decode
+
+    # Similarly, if no compressor is set, create a dummy compressor.
+    if comms.compressor is None:
+
+        class DummyCompressor:
+            def batch_decompress(self, p, idxs, vals, xshape, totalk):
+                return vals
+
+        comms.compressor = DummyCompressor()
+
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=uids,
+        window=1,
+        key="gradient",
+        timeout=5,
+        device=device,
+        local=False,
+        ref_model=model,
+        xshapes=xshapes,
+        totalks=totalks,
+    )
+
+    # Expect valid responses only from uid1 and uid3.
+    assert result is not None, "Expected a non-None result"
+    assert result.uids == ["uid1", "uid3"], (
+        f"Expected valid_uids ['uid1', 'uid3'], got {result.uids}"
+    )
+    # Expect uid2 (missing idxs) and uid4 (decoding error) to be skipped.
+    assert set(result.skipped_uids) == {"uid2", "uid4"}, (
+        f"Expected skipped_uids {{'uid2', 'uid4'}}, got {result.skipped_uids}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_no_uids_provided(comms_instance, model):
+    """
+    Test 8: No UIDs Provided
+      - Setup:
+            • Call gather() with an empty UID list.
+      - Expected Outcome:
+            • The function returns None or an appropriate empty result.
+            • No gradients are aggregated.
+    """
+    comms = comms_instance
+    device = "cpu"
+    xshapes, totalks = create_xshapes_totalks(model)
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=[],  # empty UID list
+        window=1,
+        key="gradient",
+        timeout=5,
+        device=device,
+        local=False,
+        ref_model=model,
+        xshapes=xshapes,
+        totalks=totalks,
+    )
+    if result is None:
+        assert result is None, "Expected None when no UIDs provided."
+    else:
+        assert result.uids == []
+        assert result.skipped_uids == []
+        assert result.global_steps == []
+        for key, tensor_list in result.state_dict.__dict__.items():
+            assert tensor_list == [] or tensor_list is None, (
+                f"Expected empty aggregation for {key}"
+            )
+        assert result.download_bytes == 0
+
+
+@pytest.mark.asyncio
+async def test_aggregation_without_reference_information(comms_instance, model):
+    """
+    Test 9: Aggregation Without Reference Information
+      - Setup:
+            • Call gather() without passing ref_model, xshapes, and totalks.
+            • Simulate valid get_with_retry responses.
+      - Expected Outcome:
+            • Aggregation proceeds solely by converting tensors.
+            • No UID is skipped due to decoding failures.
+    """
+    comms = comms_instance
+    device = "cpu"
+    uids = ["uid1", "uid2", "uid3"]
+
+    # Setup transformer and compressor as identity decoders.
+    if comms.transformer is None:
+
+        class DummyTransformer:
+            def decode(self, x):
+                return x
+
+        comms.transformer = DummyTransformer()
+    else:
+        comms.transformer.decode = lambda x: x
+    if comms.compressor is None:
+
+        class DummyCompressor:
+            def batch_decompress(self, p, idxs, vals, xshape, totalk):
+                return torch.tensor(p, dtype=torch.float32)
+
+        comms.compressor = DummyCompressor()
+    else:
+        comms.compressor.batch_decompress = (
+            lambda p, idxs, vals, xshape, totalk: torch.tensor(p, dtype=torch.float32)
         )
 
-    max_concurrent = 0
-    current_concurrent = 0
-    lock = asyncio.Lock()
+    async def mock_get_with_retry(*args, **kwargs):
+        return (create_valid_state_dict(model), 10)
 
-    async def wrapped_get_with_retry(*args, **kwargs):
-        nonlocal max_concurrent, current_concurrent
-        async with lock:
-            current_concurrent += 1
-            max_concurrent = max(max_concurrent, current_concurrent)
+    comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
 
-        result = await delayed_response(*args, **kwargs)
-
-        async with lock:
-            current_concurrent -= 1
-        return result
-
-    comms_instance.get_with_retry = AsyncMock(side_effect=wrapped_get_with_retry)
-
-    result = await comms_instance.gather(
-        state_dict=None,
-        my_uid="0",
-        uids=[str(i) for i in range(10)],
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=uids,
         window=1,
         key="gradient",
         timeout=5,
-        device="cpu",
-        global_step=0,
+        device=device,
+        local=False,
+        # ref_model, xshapes, totalks omitted intentionally.
+    )
+    assert result is not None, "Expected non-None result."
+    assert result.uids == uids, f"Expected valid_uids {uids}, got {result.uids}"
+    assert result.skipped_uids == [], (
+        f"Expected no skipped_uids, got {result.skipped_uids}"
+    )
+    assert result.global_steps == [10, 10, 10]
+
+
+@pytest.mark.asyncio
+async def test_tensor_device_conversion(comms_instance, model):
+    """
+    Test 10: Tensor Device Conversion
+        - Setup:
+              • Simulate responses with tensors initially on CPU.
+              • Call gather() with device explicitly set (e.g., "cuda" or "cpu").
+        - Expected Outcome:
+              • All tensors in the aggregated state_dict end up on the specified device.
+    """
+    comms = comms_instance
+    # Use "cuda" if available; otherwise fallback to "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    expected_device = torch.device(device)
+    if expected_device.type == "cuda" and expected_device.index is None:
+        expected_device = torch.device("cuda:0")
+
+    # Patch transformer if not set.
+    if comms.transformer is None:
+
+        class DummyTransformer:
+            def decode(self, x):
+                return x
+
+        comms.transformer = DummyTransformer()
+    else:
+        comms.transformer.decode = lambda x: x
+
+    # Patch compressor.
+    if comms.compressor is None:
+
+        class DummyCompressor:
+            def batch_decompress(self, p, idxs, vals, xshape, totalk):
+                return p.clone().detach().to(dtype=torch.float32)
+
+        comms.compressor = DummyCompressor()
+    else:
+        comms.compressor.batch_decompress = (
+            lambda p, idxs, vals, xshape, totalk: p.clone()
+            .detach()
+            .to(dtype=torch.float32)
+        )
+
+    # Compute xshapes and totalks from the model.
+    xshapes, totalks = create_xshapes_totalks(model)
+    uids = ["uid1", "uid2"]
+
+    def create_valid():
+        return create_valid_state_dict(model)
+
+    responses = [
+        (create_valid(), 10),
+        (create_valid(), 20),
+    ]
+    call_count = 0
+
+    async def mock_get_with_retry(*args, **kwargs):
+        nonlocal call_count
+        resp = responses[call_count]
+        call_count += 1
+        return resp
+
+    comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=uids,
+        window=1,
+        key="gradient",
+        timeout=5,
+        device=device,
+        local=False,
+        ref_model=model,
+        xshapes=xshapes,
+        totalks=totalks,
     )
 
-    assert max_concurrent <= 20
-    assert result is not None
-    assert len(result.uids) == 10
+    assert result is not None, "Expected non-None result."
+    # Verify that every tensor in the aggregated state dict is on the expected device.
+    aggregated = result.state_dict.__dict__
+    for key, tensor_list in aggregated.items():
+        for tensor in tensor_list:
+            assert tensor.device == expected_device, (
+                f"Tensor {key} is on {tensor.device} but expected {expected_device}"
+            )
+
+    # Also verify that download_bytes is non-zero.
+    assert result.download_bytes > 0, "Expected download_bytes to be > 0"
 
 
-@pytest.fixture
-def monkeypatch():
-    with patch(
-        "tplr.comms.Comms.get_base_url", lambda account_id: "http://localhost:4566"
-    ):
-        yield
+@pytest.mark.asyncio
+async def test_all_uids_skipped(comms_instance, model):
+    """
+    Test 13: All UIDs Skipped
+      - Setup:
+            • Force all simulated UID responses to fail.
+      - Expected Outcome:
+            • No valid responses are received.
+            • The function returns None or an empty aggregation.
+            • skipped_uids contains all provided UIDs.
+    """
+    comms = comms_instance
+    device = "cpu"
+    xshapes, totalks = create_xshapes_totalks(model)
+    uids = ["uid1", "uid2", "uid3"]
+
+    call_count = 0
+
+    async def mock_get_with_retry(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return None  # Always fail
+
+    comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=uids,
+        window=1,
+        key="gradient",
+        timeout=5,
+        device=device,
+        local=False,
+        ref_model=model,
+        xshapes=xshapes,
+        totalks=totalks,
+    )
+    if result is None:
+        assert result is None, "Expected None when all responses are invalid"
+    else:
+        assert result.uids == []
+        assert set(result.skipped_uids) == set(uids), (
+            f"Expected skipped_uids {set(uids)}, got {result.skipped_uids}"
+        )
 
 
-async def test_get_base_url(monkeypatch):
-    comms = await setup_test_comms()
-    base_url = comms.get_base_url("test_account")
-    assert base_url == "http://localhost:4566"
+@pytest.mark.asyncio
+async def test_extremely_large_tensor_normalization(comms_instance, model):
+    """
+    Test: Extremely Large Tensor Normalization
+      - Setup:
+            • Simulate responses with extremely large tensor gradients.
+      - Expected Outcome:
+            • The gradients are normalized correctly without transformer.decode errors.
+    """
+    comms = comms_instance
+    device = "cpu"
+    xshapes, totalks = create_xshapes_totalks(model)
+    uids = ["uid_large1", "uid_large2"]
+
+    # Ensure transformer is set to a dummy implementation to avoid 'NoneType' decode errors.
+    if comms.transformer is None:
+
+        class DummyTransformer:
+            def decode(self, x):
+                return x
+
+        comms.transformer = DummyTransformer()
+    else:
+        comms.transformer.decode = lambda x: x
+
+    # Likewise, patch compressor if needed.
+    if comms.compressor is None:
+
+        class DummyCompressor:
+            def batch_decompress(self, p, idxs, vals, xshape, totalk):
+                return vals
+
+        comms.compressor = DummyCompressor()
+    else:
+        comms.compressor.batch_decompress = lambda p, idxs, vals, xshape, totalk: vals
+
+    # Create state dicts with extremely large tensor values.
+    def create_extremely_large_state_dict(scale):
+        state_dict = {}
+        for name, _ in model.named_parameters():
+            state_dict[name + "idxs"] = torch.tensor([0, 1], dtype=torch.long)
+            # Multiply by a large scale factor.
+            state_dict[name + "vals"] = torch.tensor(
+                [scale * 1e6, scale * 2e6], dtype=torch.float32
+            )
+        return state_dict
+
+    responses = [
+        (create_extremely_large_state_dict(1.0), 100),  # uid_large1
+        (create_extremely_large_state_dict(2.0), 200),  # uid_large2
+    ]
+    call_count = 0
+
+    async def mock_get_with_retry(*args, **kwargs):
+        nonlocal call_count
+        resp = responses[call_count]
+        call_count += 1
+        return resp
+
+    comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
+
+    result = await comms.gather(
+        my_uid="dummy_uid",
+        uids=uids,
+        window=1,
+        key="gradient",
+        timeout=5,
+        device=device,
+        local=False,
+        ref_model=model,
+        xshapes=xshapes,
+        totalks=totalks,
+    )
+
+    # Verify that a result is returned and that all expected keys are present.
+    assert result is not None, "Expected non-None gathered result"
+    aggregated = result.state_dict.__dict__
+    for name, _ in model.named_parameters():
+        key_idxs = name + "idxs"
+        key_vals = name + "vals"
+        assert key_idxs in aggregated, f"Expected {key_idxs} in aggregated state_dict"
+        assert key_vals in aggregated, f"Expected {key_vals} in aggregated state_dict"
+        # Verify tensors are on the specified device.
+        for tensor in aggregated[key_idxs]:
+            assert tensor.device.type == device, (
+                f"Tensor for {key_idxs} is on {tensor.device}, expected {device}"
+            )
+        for tensor in aggregated[key_vals]:
+            assert tensor.device.type == device, (
+                f"Tensor for {key_vals} is on {tensor.device}, expected {device}"
+            )

@@ -47,10 +47,16 @@ class Comms(ChainManager):
         metagraph=None,
         hparams=None,
         uid=None,
+        transformer=None,
+        compressor=None,
         **kwargs,
     ):
         self.wallet = wallet
         self.uid = uid
+        # Store transformer and compressor
+        self.transformer = transformer
+        self.compressor = compressor
+
         # Create temp directory for this instance
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -791,58 +797,6 @@ class Comms(ChainManager):
             # Retry after a short delay
             await asyncio.sleep(0.1)
 
-    # async def _store_gradient_data(
-    #     self,
-    #     uid: str,
-    #     window: int,
-    #     global_step: int,
-    #     state_dict_resp: dict,
-    #     global_step_resp: int,
-    # ):
-    #     """Separate async function to handle gradient storage"""
-    #     try:
-    #         stored_state_dict = {}
-    #         for key, value in state_dict_resp.items():
-    #             if isinstance(value, torch.Tensor):
-    #                 stored_state_dict[key] = value.cpu()
-    #             else:
-    #                 stored_state_dict[key] = value
-
-    #         gradient_data = {
-    #             "state_dict": stored_state_dict,
-    #             "metadata": {
-    #                 "uid": uid,
-    #                 "window": window,
-    #                 "global_step": global_step_resp,
-    #                 "timestamp": time.time(),
-    #                 "version": __version__,
-    #             },
-    #         }
-
-    #         # Create temporary file
-    #         temp_file = os.path.join(
-    #             self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
-    #         )
-
-    #         np.savez_compressed(temp_file, **gradient_data)
-    #         key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
-
-    #         # Create separate tasks for upload and cleanup
-    #         upload_task = asyncio.create_task(
-    #             self.s3_put_object(key=key, file_path=temp_file)
-    #         )
-
-    #         # Schedule cleanup to run after upload completes
-    #         upload_task.add_done_callback(
-    #             lambda _: asyncio.create_task(self._cleanup_temp_file(temp_file))
-    #         )
-
-    #     except Exception as e:
-    #         tplr.logger.warning(f"Failed to store gradient from UID {uid}: {e}")
-    #         # Ensure cleanup happens even on error
-    #         if "temp_file" in locals():
-    #             asyncio.create_task(self._cleanup_temp_file(temp_file))
-
     async def gather(
         self,
         my_uid: str,
@@ -853,23 +807,35 @@ class Comms(ChainManager):
         device: str,
         local: bool = True,
         stale_retention: int = 10,
+        *,
+        ref_model: Optional[torch.nn.Module] = None,
+        xshapes: Optional[Dict[str, Any]] = None,
+        totalks: Optional[Dict[str, Any]] = None,
     ) -> Optional[SimpleNamespace]:
-        """Gather operation with individual gradient normalization and connection management."""
+        """Gather operation with individual gradient normalization and connection management.
+
+        If ref_model, xshapes and totalks are provided then each peer's gradients are verified via
+        the standard batch_decompress + decode logic (as in validator) before aggregation.
+        If any parameter fails decoding, the entire peer response is skipped.
+
+        Returns:
+            A SimpleNamespace with aggregated state_dict, valid UIDs, global steps and a list of skipped UIDs.
+        """
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
+        skipped_uids = []  # collect UIDs that are skipped
 
         tplr.logger.debug(
             f"Starting gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
         )
         tplr.logger.debug(f"Target UIDs for gathering: {uids}")
 
-        # Initialize variables
+        # Initialize aggregation variables.
         aggregated_state_dict = {}
         valid_uids = []
         global_steps = []
 
         async with self.client_semaphore:
-            # Prepare gather tasks for batch
             batch_tasks = [
                 self.get_with_retry(
                     uid=uid,
@@ -882,7 +848,6 @@ class Comms(ChainManager):
                 for uid in uids
             ]
 
-            # Process batch responses
             try:
                 batch_responses = await asyncio.gather(
                     *batch_tasks, return_exceptions=True
@@ -893,10 +858,12 @@ class Comms(ChainManager):
                         tplr.logger.debug(
                             f"Error getting response from UID {uid}: {str(response)}"
                         )
+                        skipped_uids.append(uid)
                         continue
 
                     if response is None:
                         tplr.logger.debug(f"No data received from UID {uid}")
+                        skipped_uids.append(uid)
                         continue
 
                     try:
@@ -908,13 +875,66 @@ class Comms(ChainManager):
                         tplr.logger.debug(
                             f"Invalid response format from UID {uid}: {e}"
                         )
+                        skipped_uids.append(uid)
                         continue
 
                     if state_dict_resp is None:
                         tplr.logger.debug(f"Empty state dict from UID {uid}")
+                        skipped_uids.append(uid)
                         continue
 
-                    # Process tensors (keeping existing normalization logic)
+                    valid_response = True
+                    if (
+                        ref_model is not None
+                        and xshapes is not None
+                        and totalks is not None
+                    ):
+                        # Build reference state from ref_model.
+                        ref_state = {
+                            name: param for name, param in ref_model.named_parameters()
+                        }
+                        # For each parameter in the reference.
+                        for n, p in ref_state.items():
+                            idxs_key = n + "idxs"
+                            vals_key = n + "vals"
+                            if (
+                                idxs_key in state_dict_resp
+                                and vals_key in state_dict_resp
+                            ):
+                                idxs = state_dict_resp[idxs_key].to(device)
+                                vals = state_dict_resp[vals_key].to(device)
+                                try:
+                                    # Use batch_decompress exactly as in validator.
+                                    _ = self.transformer.decode(
+                                        self.compressor.batch_decompress(
+                                            p.to(device),
+                                            idxs,
+                                            vals,
+                                            xshapes[n],
+                                            totalks[n],
+                                        )
+                                    ).to(device)
+                                except Exception as e:
+                                    tplr.logger.warning(
+                                        f"Decoding gradient for parameter {n} from UID {uid} failed: {e}"
+                                    )
+                                    valid_response = False
+                                    break
+                            else:
+                                tplr.logger.warning(
+                                    f"Missing keys for parameter {n} in response from UID {uid}"
+                                )
+                                valid_response = False
+                                break
+
+                    if not valid_response:
+                        tplr.logger.warning(
+                            f"Skipping UID {uid} due to gradient decoding failure."
+                        )
+                        skipped_uids.append(uid)
+                        continue
+
+                    # If verification passed, aggregate tensors.
                     for param_name, tensor in state_dict_resp.items():
                         if isinstance(tensor, torch.Tensor):
                             if param_name.endswith("vals"):
@@ -938,24 +958,18 @@ class Comms(ChainManager):
                     global_steps.append(global_step_resp)
 
             except Exception as e:
-                tplr.logger.error(
-                    f"Error processing uid batch: {str(e)}"
-                )
+                tplr.logger.error(f"Error processing uid batch: {str(e)}")
 
-        # If no valid responses, return None
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")
             return None
 
         total_time = time.time() - start_time
         tplr.logger.info(
-            f"Gather operation completed in {total_time:.2f}s. "
-            f"Success rate: {len(valid_uids)}/{len(uids)}, "
-            f"Upload: {metrics['upload_bytes']} bytes, "
-            f"Download: {metrics['download_bytes']} bytes"
+            f"Gather operation completed in {total_time:.2f}s. Success: {len(valid_uids)}/{len(uids)}, "
+            f"Upload: {metrics['upload_bytes']} bytes, Download: {metrics['download_bytes']} bytes"
         )
 
-        # Create result namespace
         result = SimpleNamespace(
             time=total_time,
             upload_bytes=metrics["upload_bytes"],
@@ -964,6 +978,7 @@ class Comms(ChainManager):
             state_dict=SimpleNamespace(**aggregated_state_dict),
             uids=valid_uids,
             global_steps=global_steps,
+            skipped_uids=skipped_uids,
         )
 
         return result

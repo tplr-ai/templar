@@ -824,20 +824,8 @@ class Comms(ChainManager):
         device: str,
         local: bool = True,
         stale_retention: int = 10,
-        *,
-        ref_model: Optional[torch.nn.Module] = None,
-        xshapes: Optional[Dict[str, Any]] = None,
-        totalks: Optional[Dict[str, Any]] = None,
     ) -> Optional[SimpleNamespace]:
-        """Gather operation with individual gradient normalization and connection management.
-
-        If ref_model, xshapes and totalks are provided then each peer's gradients are verified via
-        the standard batch_decompress + decode logic (as in validator) before aggregation.
-        If any parameter fails decoding, the entire peer response is skipped.
-
-        Returns:
-            A SimpleNamespace with aggregated state_dict, valid UIDs, global steps and a list of skipped UIDs.
-        """
+        """Gather operation with individual gradient normalization and connection management."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
         skipped_uids = []  # collect UIDs that are skipped
@@ -920,7 +908,7 @@ class Comms(ChainManager):
                                 valid_response = False
                                 break
                             try:
-                                check_compressed_indices(
+                                self.check_compressed_indices(
                                     param_name,
                                     tensor.to(device),
                                     totalk,
@@ -984,7 +972,6 @@ class Comms(ChainManager):
         )
 
         return result
-
     async def _cleanup_temp_file(self, file_path: str):
         """Helper to cleanup temporary files asynchronously"""
         try:
@@ -1760,3 +1747,37 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.error(f"Catch-up failed: {str(e)}")
             return False, global_step, optimizer, scheduler
+
+    def check_compressed_indices(self, param_name: str, idxs, totalk: int, allowed_topk: int = None) -> None:
+        """
+        Validates that the compressed indices for a given parameter meet the conditions:
+          1. The number of indices does not exceed allowed_topk.
+          2. Each index is in the valid range [0, totalk-1].
+
+        Args:
+            param_name (str): Name of the parameter.
+            idxs (list or torch.Tensor): Compressed indices.
+            totalk (int): Maximum allowed index (computed from the parameter shape).
+            allowed_topk (int, optional): Maximum allowed number of indices.
+                Defaults to self.hparams.topk_compression if not provided.
+
+        Raises:
+            ValueError: If any of the validation conditions fail.
+        """
+        if allowed_topk is None:
+            allowed_topk = self.hparams.topk_compression
+
+        if not isinstance(idxs, (list, tuple)):
+            idxs = [idxs]
+
+        if len(idxs) > allowed_topk:
+            raise ValueError(
+                f"[{param_name}] Too many indices: got {len(idxs)} but maximum is {allowed_topk}"
+            )
+
+        for idx in idxs:
+            idx_val = int(idx.item()) if isinstance(idx, torch.Tensor) else int(idx)
+            if idx_val < 0 or idx_val >= totalk:
+                raise ValueError(
+                    f"[{param_name}] Index {idx_val} out of bounds (totalk = {totalk})"
+                )

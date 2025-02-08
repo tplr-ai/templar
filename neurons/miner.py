@@ -135,7 +135,9 @@ class Miner:
             netuid=self.config.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
-            uid=self.uid,  
+            uid=self.uid, 
+            transformer=self.transformer,
+            compressor=self.compressor,
         )
 
         self.bucket = self.comms.get_own_bucket('gradients', 'read')

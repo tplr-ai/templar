@@ -166,8 +166,7 @@ class Validator:
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
-            transformer=self.transformer,
-            compressor=self.compressor,
+            totalks=self.totalks
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
@@ -416,14 +415,21 @@ class Validator:
                 uids=self.peers,
                 window=self.sync_window,
                 key="gradient",
-                timeout=30,
+                timeout=60,
                 device=self.config.device,
                 local=False,
-                ref_model=self.model,
-                xshapes=self.xshapes,
                 totalks=self.totalks,
             )
+            if gather_result is None:
+                tplr.logger.warning(
+                    f"No gradients gathered for window {self.sync_window}. Skipping this window."
+                )
+                self.global_step += 1
+                continue
             tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
+            tplr.logger.info(
+                f"{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers"
+            )
 
             # Add check for empty peers (evaluating all peer uids)
             if not self.peers:
@@ -803,8 +809,8 @@ class Validator:
 
                     # Calculate original performance score (gradient quality)
                     self.gradient_scores[eval_uid] = (
-                        (loss_before_own - loss_after_own) / loss_before_own
-                        if loss_before_own > 0
+                        (loss_before_random - loss_after_random) / loss_before_random
+                        if loss_before_random > 0
                         else 0
                     )
                     tplr.logger.debug(
@@ -1109,10 +1115,6 @@ class Validator:
             for n, p in self.model.named_parameters():
                 p.data.mul_(1.0 - lr * self.hparams.weight_decay)
 
-            gather_result = await gather_result
-            tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers"
-            )
             if gather_result is not None and gather_result.state_dict is not None:
                 for n, p in self.model.named_parameters():
                     idxs_key = n + "idxs"

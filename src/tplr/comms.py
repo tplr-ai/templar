@@ -41,7 +41,6 @@ from .schemas import Bucket
 
 import tplr as tplr
 from .compress import TransformDCT, CompressDCT
-from .validate_compression import check_compressed_indices
 # from .hparams import HParams
 
 
@@ -64,15 +63,10 @@ class Comms(ChainManager):
         metagraph=None,
         hparams=None,
         uid=None,
-        transformer=None,
-        compressor=None,
         **kwargs,
     ):
         self.wallet = wallet
         self.uid = uid
-        # Store transformer and compressor
-        self.transformer = transformer
-        self.compressor = compressor
 
         # Create temp directory for this instance
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
@@ -822,22 +816,22 @@ class Comms(ChainManager):
         key: str,
         timeout: int,
         device: str,
+        totalks: dict,
         local: bool = True,
         stale_retention: int = 10,
     ) -> Optional[SimpleNamespace]:
         """Gather operation with individual gradient normalization and connection management."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
-        skipped_uids = []  # collect UIDs that are skipped
 
         tplr.logger.debug(
             f"Starting gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
         )
         tplr.logger.debug(f"Target UIDs for gathering: {uids}")
 
-        # Initialize aggregation variables.
         aggregated_state_dict = {}
         valid_uids = []
+        skipped_uids = []   # Retain UIDs that are skipped.
         global_steps = []
 
         async with self.client_semaphore:
@@ -860,12 +854,9 @@ class Comms(ChainManager):
 
                 for uid, response in zip(uids, batch_responses):
                     if isinstance(response, Exception):
-                        tplr.logger.debug(
-                            f"Error getting response from UID {uid}: {str(response)}"
-                        )
+                        tplr.logger.debug(f"Error from UID {uid}: {str(response)}")
                         skipped_uids.append(uid)
                         continue
-
                     if response is None:
                         tplr.logger.debug(f"No data received from UID {uid}")
                         skipped_uids.append(uid)
@@ -877,9 +868,7 @@ class Comms(ChainManager):
                             f"Received state dict and global step {global_step_resp} from UID {uid}"
                         )
                     except (TypeError, ValueError) as e:
-                        tplr.logger.debug(
-                            f"Invalid response format from UID {uid}: {e}"
-                        )
+                        tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
                         skipped_uids.append(uid)
                         continue
 
@@ -888,26 +877,19 @@ class Comms(ChainManager):
                         skipped_uids.append(uid)
                         continue
 
+                    # ---------- Begin Compressed Indices Check ----------
                     valid_response = True
-                    # For every key ending in 'idxs', verify totalk is provided and check its indices.
                     for param_name, tensor in state_dict_resp.items():
                         if param_name.endswith("idxs"):
-                            totalk_key = param_name.replace("idxs", "totalk")
-                            if totalk_key not in state_dict_resp:
+                            base_name = param_name[:-4]
+                            totalk = totalks.get(base_name)
+                            if totalk is None:
                                 tplr.logger.warning(
-                                    f"Missing totalk for parameter {param_name} from UID {uid}, skipping UID."
+                                    f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
                                 )
                                 valid_response = False
                                 break
-                            try:
-                                totalk = int(state_dict_resp[totalk_key])
-                            except Exception as e:
-                                tplr.logger.warning(
-                                    f"Invalid totalk value for parameter {param_name} from UID {uid}: {e}"
-                                )
-                                valid_response = False
-                                break
-                            try:
+                            try: 
                                 self.check_compressed_indices(
                                     param_name,
                                     tensor.to(device),
@@ -923,26 +905,19 @@ class Comms(ChainManager):
                     if not valid_response:
                         skipped_uids.append(uid)
                         continue
+                    # ---------- End Compressed Indices Check ----------
 
-                    # If verification passed, aggregate tensors.
+                    # Process tensors (with normalization on 'vals' keys).
                     for param_name, tensor in state_dict_resp.items():
                         if isinstance(tensor, torch.Tensor):
                             if param_name.endswith("vals"):
                                 tensor = tensor.to(device)
                                 norm = torch.norm(tensor)
                                 normalized = tensor / (norm + 1e-8)
-                                if param_name not in aggregated_state_dict:
-                                    aggregated_state_dict[param_name] = []
-                                aggregated_state_dict[param_name].append(normalized)
+                                aggregated_state_dict.setdefault(param_name, []).append(normalized)
                             else:
-                                if param_name not in aggregated_state_dict:
-                                    aggregated_state_dict[param_name] = []
-                                aggregated_state_dict[param_name].append(
-                                    tensor.to(device)
-                                )
-                            metrics["download_bytes"] += (
-                                tensor.element_size() * tensor.nelement()
-                            )
+                                aggregated_state_dict.setdefault(param_name, []).append(tensor.to(device))
+                            metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
 
                     valid_uids.append(uid)
                     global_steps.append(global_step_resp)
@@ -956,7 +931,7 @@ class Comms(ChainManager):
 
         total_time = time.time() - start_time
         tplr.logger.info(
-            f"Gather operation completed in {total_time:.2f}s. Success: {len(valid_uids)}/{len(uids)}, "
+            f"Gather completed in {total_time:.2f}s. Success rate: {len(valid_uids)}/{len(uids)}, "
             f"Upload: {metrics['upload_bytes']} bytes, Download: {metrics['download_bytes']} bytes"
         )
 
@@ -970,8 +945,8 @@ class Comms(ChainManager):
             global_steps=global_steps,
             skipped_uids=skipped_uids,
         )
-
         return result
+
     async def _cleanup_temp_file(self, file_path: str):
         """Helper to cleanup temporary files asynchronously"""
         try:
@@ -1201,7 +1176,7 @@ class Comms(ChainManager):
             if checkpoints:
                 # choose the last modified checkpoint
                 latest = max(checkpoints, key=lambda x: x["modified"])
-                checkpoint_data = torch.load(latest["path"])
+                checkpoint_data = torch.load(latest["path"], weights_only=True)
                 return checkpoint_data, latest["window"]
             else:
                 return None
@@ -1747,37 +1722,81 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.error(f"Catch-up failed: {str(e)}")
             return False, global_step, optimizer, scheduler
-
+        
     def check_compressed_indices(self, param_name: str, idxs, totalk: int, allowed_topk: int = None) -> None:
         """
         Validates that the compressed indices for a given parameter meet the conditions:
-          1. The number of indices does not exceed allowed_topk.
-          2. Each index is in the valid range [0, totalk-1].
+          1. If indices are provided as a flat list/tensor, the length must equal min(self.hparams.topk_compression, totalk).
+          2. If the indices are multi-dimensional (typically when compressed per row),
+             then the size of the last dimension must equal min(self.hparams.topk_compression, totalk).
+          3. Every index must be in the valid range [0, totalk-1].
 
-        Args:
-            param_name (str): Name of the parameter.
-            idxs (list or torch.Tensor): Compressed indices.
-            totalk (int): Maximum allowed index (computed from the parameter shape).
-            allowed_topk (int, optional): Maximum allowed number of indices.
-                Defaults to self.hparams.topk_compression if not provided.
-
-        Raises:
-            ValueError: If any of the validation conditions fail.
+        This function handles both flat and nested (e.g. per-row) indices.
         """
         if allowed_topk is None:
             allowed_topk = self.hparams.topk_compression
+        # Only allow up to the maximum available columns.
+        allowed_topk = min(allowed_topk, totalk)
 
-        if not isinstance(idxs, (list, tuple)):
-            idxs = [idxs]
-
-        if len(idxs) > allowed_topk:
-            raise ValueError(
-                f"[{param_name}] Too many indices: got {len(idxs)} but maximum is {allowed_topk}"
-            )
-
-        for idx in idxs:
-            idx_val = int(idx.item()) if isinstance(idx, torch.Tensor) else int(idx)
-            if idx_val < 0 or idx_val >= totalk:
+        def validate_list(indices):
+            # Expected flat list length must equal allowed_topk.
+            if len(indices) != allowed_topk:
                 raise ValueError(
-                    f"[{param_name}] Index {idx_val} out of bounds (totalk = {totalk})"
+                    f"[{param_name}] Invalid number of indices: got {len(indices)} but expected {allowed_topk}"
+                )
+            for idx in indices:
+                try:
+                    idx_int = int(idx)
+                except Exception as e:
+                    raise ValueError(
+                        f"[{param_name}] Failed to convert index {idx} to int: {e}"
+                    )
+                if idx_int < 0 or idx_int >= totalk:
+                    raise ValueError(
+                        f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
+                    )
+
+        # If idxs is a tensor:
+        if torch.is_tensor(idxs):
+            if idxs.ndim == 1:
+                # Flat tensor: expect exactly allowed_topk elements.
+                if idxs.size(0) != allowed_topk:
+                    raise ValueError(
+                        f"[{param_name}] Invalid number of indices: got {idxs.size(0)} but expected {allowed_topk}"
+                    )
+                for idx in idxs.tolist():
+                    if not (0 <= int(idx) < totalk):
+                        raise ValueError(
+                            f"[{param_name}] Index {int(idx)} out of bounds (totalk = {totalk})"
+                        )
+            else:
+                # Multi-dimensional: check that the last dimension equals allowed_topk.
+                if idxs.size(-1) != allowed_topk:
+                    raise ValueError(
+                        f"[{param_name}] Last dimension size invalid: got {idxs.size(-1)} but expected {allowed_topk}"
+                    )
+                # Check all indices in the tensor.
+                for idx in idxs.flatten().tolist():
+                    if not (0 <= int(idx) < totalk):
+                        raise ValueError(
+                            f"[{param_name}] Index {int(idx)} out of bounds (totalk = {totalk})"
+                        )
+        # If idxs is a list or tuple
+        elif isinstance(idxs, (list, tuple)):
+            if idxs and isinstance(idxs[0], (list, tuple)):
+                # Nested structure: check each sub-list.
+                for sublist in idxs:
+                    validate_list(sublist)
+            else:
+                # Flat list.
+                validate_list(list(idxs))
+        else:
+            # Single value provided.
+            try:
+                idx_int = int(idxs)
+            except Exception as e:
+                raise ValueError(f"[{param_name}] Failed to convert index {idxs} to int: {e}")
+            if idx_int < 0 or idx_int >= totalk:
+                raise ValueError(
+                    f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
                 )

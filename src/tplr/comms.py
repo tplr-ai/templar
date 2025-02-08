@@ -41,7 +41,7 @@ from .schemas import Bucket
 
 import tplr as tplr
 from .compress import TransformDCT, CompressDCT
-# from .hparams import HParams
+from .validate_compression import check_compressed_indices
 
 
 # Constants
@@ -919,20 +919,23 @@ class Comms(ChainManager):
                             ):
                                 idxs = state_dict_resp[idxs_key].to(device)
                                 vals = state_dict_resp[vals_key].to(device)
+                                # Wrap into lists if they're not already
+                                if not isinstance(idxs, (list, tuple)):
+                                    idxs = [idxs]
+                                if not isinstance(vals, (list, tuple)):
+                                    vals = [vals]
                                 try:
-                                    # Use batch_decompress exactly as in validator.
-                                    _ = self.transformer.decode(
-                                        self.compressor.batch_decompress(
-                                            p.to(device),
-                                            idxs,
-                                            vals,
-                                            xshapes[n],
-                                            totalks[n],
-                                        )
-                                    ).to(device)
-                                except Exception as e:
+                                    # Validate: check that we have no more than allowed topk indices
+                                    # and that none of the indices exceed the total positions for this param.
+                                    check_compressed_indices(
+                                        param_name=n,
+                                        idxs=idxs,
+                                        totalk=totalks[n],
+                                        allowed_topk=self.hparams.topk_compression
+                                    )
+                                except ValueError as e:
                                     tplr.logger.warning(
-                                        f"Decoding gradient for parameter {n} from UID {uid} failed: {e}"
+                                        f"Validation failed for parameter {n} from UID {uid}: {e}"
                                     )
                                     valid_response = False
                                     break

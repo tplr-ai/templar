@@ -12,9 +12,6 @@ from pprint import pprint
 import torch
 import itertools
 from torch.nn.functional import cosine_similarity
-import matplotlib.pyplot as plt
-import seaborn as sns
-import pandas as pd
 import numpy as np
 import os, json
 CF_REGION_NAME: str = "enam"
@@ -102,8 +99,13 @@ class Grafana:
             daemon=True,
         ).start()
         self.comms.start_commitment_fetcher()
-        self.start_window = await self.comms.get_start_window()
+        self.start_window, self.started_time = await self.get_start_window()
         tplr.logger.info(f"Using start_window: {self.start_window}")
+        tplr.logger.info(f"Started Time: {self.started_time}")
+        
+        # Save started time and started window and show it.
+        
+        
         # self.comms.start_background_tasks()
     
     async def is_gradient_exist(self, uid: int, window: int):
@@ -189,6 +191,7 @@ class Grafana:
         # Delete old grad dict
         self.del_old_grad_dict(self.grad_dict, window)
         self.del_old_grad_dict(self.grad_error_dict, window)
+        self.del_old_grad_dict(self.window_info, window)
         
         # Get all UIDs and the ones already checked for the current window
         all_uids = set(self.comms.commitments.keys())
@@ -231,6 +234,24 @@ class Grafana:
     
     def get_window_info(self, window):
         return self.window_info[window]
+    
+    def get_avg_wnd_duration(self):
+        window_keys = self.window_info.keys()
+        count = len(window_keys)
+        
+        if count < 2:
+            return None
+        
+        total_duration = 0
+        for i, window in enumerate(window_keys):
+            if i == 0: continue
+            
+            window_duration = self.window_info[int(window)]["window_time"] - self.window_info[int(window) - 1]["window_time"]
+            total_duration += window_duration
+        
+        total_duration = total_duration / i
+        return total_duration
+            
     
     def get_metagraph_info(self):
         """
@@ -281,18 +302,22 @@ class Grafana:
                 self.comms.update_peers_with_buckets()
                 # print(self.get_metagraph_info())
 
-
+                avg_wnd_duration = self.get_avg_wnd_duration()
+                print(f"Average Window Duration: {avg_wnd_duration}")
+                
                 active_uids = [peer["uid"] for peer in active_peers]
                 active_uids.sort()
-                print(f"window: {step_window}, Active list: {active_uids}")
+                print(f"window: {step_window}, Length of Actives: {len(active_uids)} Active list: {active_uids}")
                 
-                for peer in active_peers:
-                    print(f"Active Peer Data: {peer}")
+                # for peer in active_peers:
+                #     print(f"Active Peer Data: {peer}")
                 
                 # SAVE THIS METADATA TO DB AND SHOW IN GRAFANA!
-                print(f"Downloaded: {gradients.keys()}")
-                for uid in gradients.keys():
-                    print(f"Metadata for UID {uid}: {gradients_metadata[uid]}")
+                downloaded_uids = [int(uid) for uid in gradients.keys()]
+                download_uids.sort()
+                print(f"Downloaded Length : {len(download_uids)}, UIDs: {download_uids}")
+                # for uid in gradients.keys():
+                #     print(f"Metadata for UID {uid}: {gradients_metadata[uid]}")
 
                 similarities = await self.compute_cosine_similarities(gradients)
 
@@ -300,7 +325,7 @@ class Grafana:
                 await self.print_similarity_matrix(similarities)
                 
                 # SAVE THIS LIST TO DB AND SHOW IN GRAFANA!
-                bad_peers = await self.analyze_similarities(similarities, active_peers, window=step_window, threshold=0.995)
+                bad_peers = await self.analyze_similarities(similarities, active_peers, window=step_window, threshold=0.9)
                 
                 step_window = self.current_window - WINDOW_OFFSET
                 gradients = {}
@@ -387,16 +412,16 @@ class Grafana:
             similarity_matrix[i, j] = similarity
             similarity_matrix[j, i] = similarity  
 
-        df_similarities = pd.DataFrame(similarity_matrix, index=uids, columns=uids)
+        # df_similarities = pd.DataFrame(similarity_matrix, index=uids, columns=uids)
 
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(df_similarities, annot=True, fmt=".2f", cmap="coolwarm", linewidths=0.5)
-        plt.title("Cosine Similarities Heatmap")
-        plt.xlabel("UIDs")
-        plt.ylabel("UIDs")
-        plt.xticks(rotation=45)
-        plt.yticks(rotation=0)
-        plt.show()
+        # plt.figure(figsize=(10, 8))
+        # sns.heatmap(df_similarities, annot=True, fmt=".2f", cmap="coolwarm", linewidths=0.5)
+        # plt.title("Cosine Similarities Heatmap")
+        # plt.xlabel("UIDs")
+        # plt.ylabel("UIDs")
+        # plt.xticks(rotation=45)
+        # plt.yticks(rotation=0)
+        # plt.show()
         
     async def print_similarity_matrix(self, similarities):
         """Prints cosine similarity matrix in the console in a readable format."""
@@ -412,15 +437,15 @@ class Grafana:
             similarity_matrix[i][j] = similarity
             similarity_matrix[j][i] = similarity  # Ensure symmetry
 
-        # Print Header Row (UIDs)
-        header = "     " + "  ".join(f"{uid:5}" for uid in uids)
-        print(header)
-        print("-" * len(header))
+        # # Print Header Row (UIDs)
+        # header = "     " + "  ".join(f"{uid:5}" for uid in uids)
+        # print(header)
+        # print("-" * len(header))
 
-        # Print each row
-        for i, uid in enumerate(uids):
-            row_values = "  ".join(f"{similarity_matrix[i][j]:.2f}" for j in range(len(uids)))
-            print(f"{uid:5} | {row_values}")
+        # # Print each row
+        # for i, uid in enumerate(uids):
+        #     row_values = "  ".join(f"{similarity_matrix[i][j]:.2f}" for j in range(len(uids)))
+        #     print(f"{uid:5} | {row_values}")
 
         
     async def compute_cosine_similarities(self, gradients):
@@ -458,7 +483,7 @@ class Grafana:
 
         return similarity_results
 
-    async def analyze_similarities(self, similarities, active_peers, window, threshold=0.9):
+    async def analyze_similarities(self, similarities, active_peers, window, threshold=0.99):
         """
         Analyzes cosine similarities to detect bad peers.
         
@@ -538,29 +563,68 @@ class Grafana:
         
         print(f"📁 Bad peers for window {window} appended to {file_path}")
 
-# def compute_cosine_similarities(gradients):
-#     """Computes cosine similarities between each pair of gradient tensors."""
-#     similarity_results = {}
+    async def get_start_window(self) -> int:
+        while True:
+            try:
+                (
+                    validator_bucket,
+                    validator_uid,
+                ) = await self.comms._get_highest_stake_validator_bucket()
+                if validator_bucket is None:
+                    tplr.logger.warning(
+                        "No highest staked validator bucket found. Retrying in 10 seconds."
+                    )
+                    await asyncio.sleep(10)
+                    continue
 
-#     for (uid1, grads1), (uid2, grads2) in itertools.combinations(gradients.items(), 2):
-#         total_similarity = 0
-#         count = 0
+                tplr.logger.info(
+                    f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name}"
+                )
 
-#         for key in grads1.keys():
-#             if key in grads2:
-#                 tensor1 = grads1[key].flatten()
-#                 tensor2 = grads2[key].flatten()
-                
-#                 # Ensure same shape before comparison
-#                 if tensor1.shape == tensor2.shape:
-#                     similarity = cosine_similarity(tensor1.unsqueeze(0), tensor2.unsqueeze(0)).item()
-#                     total_similarity += similarity
-#                     count += 1
+                started_time = ""
+                async with self.comms.session.create_client(
+                    "s3",
+                    endpoint_url=self.comms.get_base_url(validator_bucket.account_id),
+                    region_name=CF_REGION_NAME,
+                    config=client_config,
+                    aws_access_key_id=validator_bucket.access_key_id,
+                    aws_secret_access_key=validator_bucket.secret_access_key,
+                ) as s3_client:
+                    filename=f"start_window_v{__version__}.json"
+                    tplr.logger.debug(
+                        f"Checking for {filename} in bucket {validator_bucket.name}"
+                    )
+                    response = await s3_client.head_object(
+                        Bucket=validator_bucket.name, Key=filename
+                    )
+                    # Get and log the created timestamp of the file
+                    started_time = response["LastModified"].isoformat()
+                        
+                # Fetch 'start_window.json' using s3_get_object
+                start_window_data = await self.comms.s3_get_object(
+                    key=f"start_window_v{__version__}.json", bucket=validator_bucket
+                )
+                if start_window_data is not None:
+                    # Check if start_window_data is already a dict
+                    if isinstance(start_window_data, dict):
+                        start_window_json = start_window_data
+                    else:
+                        # If it's bytes, decode and load JSON
+                        start_window_json = json.loads(
+                            start_window_data.decode("utf-8")
+                        )
 
-#         avg_similarity = total_similarity / count if count > 0 else None
-#         similarity_results[(uid1, uid2)] = avg_similarity
+                    start_window = start_window_json["start_window"]
+                    tplr.logger.info(f"Fetched start_window: {start_window}")
+                    return start_window, started_time
 
-#     return similarity_results
+                tplr.logger.warning(
+                    "start_window.json not found or empty. Retrying in 10 seconds."
+                )
+                await asyncio.sleep(10)
+            except Exception as e:
+                tplr.logger.error(f"Error fetching start_window: {e}")
+                await asyncio.sleep(10)
 
 if __name__ == "__main__":
     asyncio.run(Grafana().run())

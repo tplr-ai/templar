@@ -17,6 +17,7 @@ import tplr
 from tplr import __version__
 from dotenv import load_dotenv
 import wandb
+import numpy as np
 
 # Load environment variables from .env file
 load_dotenv()
@@ -51,11 +52,11 @@ def get_tplr_version():
     else:
         print("Failed to fetch file.")
 
-def update_current_version(current_version, old_version_record):
+def update_current_version(current_version, old_version_record, created_at):
     # Create a new version record
     new_window_info = Version(
         version=current_version,
-        created_at=datetime.utcnow(),  # current timestamp
+        created_at=created_at,  # current timestamp
     )
     db.session.add(new_window_info)
 
@@ -78,25 +79,27 @@ def insert_window(window_number, global_step, learning_rate):
 
     return new_window_info.id
 
-def insert_run_metadata(window_id, avg_window_duration, gradient_retention):    
+def insert_run_metadata(window_id, avg_window_duration, blocks_per_window, gradient_retention):    
     # Create a new run metadata record
     new_run_metadata = RunMetadata(
         window_id=window_id,
         avg_window_duration=avg_window_duration,
+        blocks_per_window=blocks_per_window,
         gradient_retention=gradient_retention
     )
 
     # Add the new record to the session
     db.session.add(new_run_metadata)
 
-def insert_active_miners(window_id, active_miners, error_miners):    
+def insert_active_miners(window_id, active_miners, error_miners, bad_miners):    
     tplr.logger.info(f"\n window_id: {window_id}")
-    tplr.logger.info(f"\n active_miners: {active_miners}, error_miners: {error_miners}")
+    tplr.logger.info(f"\n active_miners: {active_miners}, error_miners: {error_miners}, bad_miners: {bad_miners}")
     # Create a new active miners record
     new_active_miners = ActiveMiners(
         window_id=window_id,
         active_miners=",".join(map(str, active_miners)),
         error_miners=",".join(map(str, error_miners)),
+        bad_miners=",".join(map(str, bad_miners)),
     )
 
     # Add the new record to the session
@@ -145,6 +148,12 @@ def insert_validator_eval_info(window_id):
                 eval_info["loss_after"] = value
             elif "latest/validator/loss/own/improvement" in key:
                 eval_info["loss_improvement"] = value
+            elif "latest/validator/loss/random/before" in key:
+                eval_info["loss_random_before"] = value
+            elif "latest/validator/loss/random/after" in key:
+                eval_info["loss_random_after"] = value
+            elif "latest/validator/loss/random/improvement" in key:
+                eval_info["loss_random_improvement"] = value
             elif "latest/validator/network/evaluated_uids" in key:
                 eval_info["eval_uids"] = value
             elif "latest/validator/scores/mean" in key:
@@ -175,6 +184,9 @@ def insert_validator_eval_info(window_id):
             loss_before=eval_info.get("loss_before", 0),
             loss_after=eval_info.get("loss_after", 0),
             loss_improvement=eval_info.get("loss_improvement", 0),
+            loss_random_before=eval_info.get("loss_random_before", 0),
+            loss_random_after=eval_info.get("loss_random_after", 0),
+            loss_random_improvement=eval_info.get("loss_random_improvement", 0),
             # current_eval_uid="10",
             eval_uids=eval_info.get("eval_uids", 0),
             mean_scores=eval_info.get("mean_scores", 0),
@@ -212,6 +224,34 @@ def insert_gradients(window_id, active_miners):
         # Add the new record to the session
         db.session.add(new_gradient)
 
+async def get_active_miners(grafana, step_window):
+    active_miners, error_miners = await grafana.get_active_miners(step_window)
+    active_miners_uids = [miner["uid"] for miner in active_miners]
+    error_miners_uids = [miner["uid"] for miner in error_miners]
+
+
+    active_peers = grafana.grad_dict.get(step_window, [])
+    gradients = {}
+    download_uids = []
+    for peer in active_peers:
+        if peer["uid"] not in gradients.keys():
+            download_uids.append(peer["uid"])
+    
+    # Download gradients
+    num_samples = min(7, len(download_uids))  # Ensure we don’t exceed available elements
+    download_uids = np.random.choice(download_uids, size=num_samples, replace=False)
+    
+    result_gradients, result_metadata = await grafana.download_gradients(download_uids, step_window, key="gradient")
+    similarities = await grafana.compute_cosine_similarities(gradients)
+
+    # Prepare Data for Heatmap
+    await grafana.print_similarity_matrix(similarities)
+    
+    # SAVE THIS LIST TO DB AND SHOW IN GRAFANA!
+    bad_peers = await grafana.analyze_similarities(similarities, active_peers, window=step_window, threshold=0.9)
+    tplr.logger.info(f"\nBad peers {bad_peers}")
+    return active_miners_uids, error_miners_uids, bad_peers
+
 # Async function moved from grafana_tools.py
 async def run_grafana():
     print("--------Running grafana task------")
@@ -233,20 +273,18 @@ async def run_grafana():
             version = get_tplr_version()
             version_record = get_current_version_record()
             if not version_record or version != version_record.version:
-                update_current_version(version, version_record)
-                tplr.logger.info(f"\nUpdated version {version}")
+                update_current_version(version, version_record, grafana.started_time)
+                tplr.logger.info(f"\nUpdated version {version} started_time {grafana.started_time}")
             # Insert a new window
             global_step = step_window - grafana.start_window
             window_id = insert_window(step_window, global_step, grafana.hparams.learning_rate)
             tplr.logger.info(f"\nInserted a new window {step_window}, window_id {window_id}")
             # Insert a run metadata
-            insert_run_metadata(window_id, grafana.hparams.blocks_per_window, 100)
+            insert_run_metadata(window_id, grafana.get_avg_wnd_duration(), grafana.hparams.blocks_per_window, 100)
             tplr.logger.info(f"\nInserted a run metadata {step_window}")
             # Insert active miners
-            active_miners, error_miners = await grafana.get_active_miners(step_window)
-            active_miners_uids = [miner["uid"] for miner in active_miners]
-            error_miners_uids = [miner["uid"] for miner in error_miners]
-            insert_active_miners(window_id, active_miners_uids, error_miners_uids)
+            active_miners_uids, error_miners_uids, bad_miners_uids = await get_active_miners(grafana, step_window)
+            insert_active_miners(window_id, active_miners_uids, error_miners_uids, bad_miners_uids)
             tplr.logger.info(f"\nInserted active miners {step_window}")
 
             # Insert validator eval info & eval info detail

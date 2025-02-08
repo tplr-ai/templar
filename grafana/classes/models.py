@@ -19,6 +19,7 @@ class RunMetadata(db.Model):
     __tablename__ = 'tbl_run_metadata'
     id = db.Column(db.Integer, primary_key=True)
     window_id = db.Column(db.Integer, nullable=False)
+    blocks_per_window = db.Column(db.Float, nullable=True)
     avg_window_duration = db.Column(db.Float, nullable=True)
     gradient_retention = db.Column(db.Float, nullable=True)
 
@@ -36,6 +37,7 @@ class ActiveMiners(db.Model):
     window_id = db.Column(db.Integer, db.ForeignKey('tbl_window_info.id'), nullable=False)
     active_miners = db.Column(db.String(1000), nullable=True)
     error_miners = db.Column(db.String(1000), nullable=True)
+    bad_miners = db.Column(db.String(1000), nullable=True)
 
 class Neuron(db.Model):
     __tablename__ = 'tbl_neuron'
@@ -61,6 +63,9 @@ class ValidatorEvalInfo(db.Model):
     loss_before = db.Column(db.Float, nullable=True)
     loss_after = db.Column(db.Float, nullable=True)
     loss_improvement = db.Column(db.Float, nullable=True)
+    loss_random_before = db.Column(db.Float, nullable=True)
+    loss_random_after = db.Column(db.Float, nullable=True)
+    loss_random_improvement = db.Column(db.Float, nullable=True)
     current_eval_uid = db.Column(db.String(200), nullable=True)
     eval_uids = db.Column(db.String(1000), nullable=True)
     mean_scores = db.Column(db.Float, nullable=True)

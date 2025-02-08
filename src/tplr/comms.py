@@ -42,6 +42,7 @@ from .schemas import Bucket
 import tplr as tplr
 from .compress import TransformDCT, CompressDCT
 from .validate_compression import check_compressed_indices
+# from .hparams import HParams
 
 
 # Constants
@@ -900,45 +901,38 @@ class Comms(ChainManager):
                         continue
 
                     valid_response = True
-                    if (
-                        ref_model is not None
-                        and xshapes is not None
-                        and totalks is not None
-                    ):
-                        # Iterate over the keys available in our xshapes / totalks dictionaries.
-                        for n in totalks.keys():
-                            idxs_key = n + "idxs"
-                            vals_key = n + "vals"
-                            if idxs_key in state_dict_resp and vals_key in state_dict_resp:
-                                idxs = state_dict_resp[idxs_key].to(device)
-                                # Wrap into lists if not already
-                                if not isinstance(idxs, (list, tuple)):
-                                    idxs = [idxs]
-                                try:
-                                    # Validate indices using the pre-computed totalk value.
-                                    check_compressed_indices(
-                                        param_name=n,
-                                        idxs=idxs,
-                                        totalk=totalks[n],
-                                        allowed_topk=self.hparams.topk_compression
-                                    )
-                                except ValueError as e:
-                                    tplr.logger.warning(
-                                        f"Validation failed for parameter {n} from UID {uid}: {e}"
-                                    )
-                                    valid_response = False
-                                    break
-                            else:
+                    # For every key ending in 'idxs', verify totalk is provided and check its indices.
+                    for param_name, tensor in state_dict_resp.items():
+                        if param_name.endswith("idxs"):
+                            totalk_key = param_name.replace("idxs", "totalk")
+                            if totalk_key not in state_dict_resp:
                                 tplr.logger.warning(
-                                    f"Missing keys for parameter {n} in response from UID {uid}"
+                                    f"Missing totalk for parameter {param_name} from UID {uid}, skipping UID."
                                 )
                                 valid_response = False
                                 break
-
+                            try:
+                                totalk = int(state_dict_resp[totalk_key])
+                            except Exception as e:
+                                tplr.logger.warning(
+                                    f"Invalid totalk value for parameter {param_name} from UID {uid}: {e}"
+                                )
+                                valid_response = False
+                                break
+                            try:
+                                check_compressed_indices(
+                                    param_name,
+                                    tensor.to(device),
+                                    totalk,
+                                    allowed_topk=self.hparams.topk_compression,
+                                )
+                            except Exception as e:
+                                tplr.logger.warning(
+                                    f"Compressed indices check failed for parameter {param_name} from UID {uid}: {e}"
+                                )
+                                valid_response = False
+                                break
                     if not valid_response:
-                        tplr.logger.warning(
-                            f"Skipping UID {uid} due to gradient decoding failure."
-                        )
                         skipped_uids.append(uid)
                         continue
 

@@ -316,4 +316,3 @@ def _get_smaller_split(n, close_to):
                 return val
             return all_divisors[ix - 1]
     return n
-

@@ -307,7 +307,6 @@ class Validator:
         self.comms.start_background_tasks()
 
         while True:
-            
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
             ):
@@ -562,7 +561,9 @@ class Validator:
                                     grad.sign(), alpha=self.scheduler.get_last_lr()[0]
                                 )
                     except Exception as e:
-                        tplr.logger.error(f"Failed to apply gradient for uid {uid}: {str(e)}")
+                        tplr.logger.error(
+                            f"Failed to apply gradient for uid {uid}: {str(e)}"
+                        )
                         continue
 
                     # 10. Compute loss after gradient application
@@ -722,7 +723,9 @@ class Validator:
                                     grad.sign(), alpha=self.scheduler.get_last_lr()[0]
                                 )
                     except Exception as e:
-                        tplr.logger.error(f"Failed to apply gradient for UID {eval_uid}: {str(e)}")
+                        tplr.logger.error(
+                            f"Failed to apply gradient for UID {eval_uid}: {str(e)}"
+                        )
                         continue
 
                     # 10. Compute loss after gradient application for random data
@@ -903,9 +906,14 @@ class Validator:
                         "validator/network/window": self.sync_window,
                         "validator/network/step": self.global_step,
                         "validator/network/evaluated_uids": len(self.evaluated_uids),
-                        "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
-                        "validator/network/active_miners": len(self.valid_score_indices),
-                        "validator/gather/success_rate": gather_result.success_rate * 100,  # Success percentage
+                        "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[
+                            0
+                        ],
+                        "validator/network/active_miners": len(
+                            self.valid_score_indices
+                        ),
+                        "validator/gather/success_rate": gather_result.success_rate
+                        * 100,  # Success percentage
                     }
                     self.wandb.log(evaluation_metrics, step=self.global_step)
                     tplr.logger.info(

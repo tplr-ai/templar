@@ -928,7 +928,7 @@ async def test_download_large_file(comms_instance):
 #         totalks = {}
 #         for n, p in model.named_parameters():
 #             _, _, _, totalk = compressor.compress(
-#                 transformer.encode(torch.zeros_like(p)), 
+#                 transformer.encode(torch.zeros_like(p)),
 #                 hparams.topk_compression
 #             )
 #             totalks[n] = totalk

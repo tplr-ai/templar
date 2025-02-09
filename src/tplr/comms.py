@@ -1287,6 +1287,8 @@ class Comms(ChainManager):
                 )
                 return False, {}, 0, optimizer, scheduler
 
+            # Instead of computing global_step from the entire training period,
+            # compute window_difference as the number of missed windows.
             window_difference = current_window - checkpoint_current_window
             global_step = current_window - checkpoint_start_window
 
@@ -1295,8 +1297,8 @@ class Comms(ChainManager):
                 f"local_current={current_window}, window_diff={window_difference}, global_step={global_step}"
             )
 
-            # 2) Sync scheduler with global_step if needed
-            steps_needed = global_step - scheduler.last_epoch
+            # 2) Sync scheduler with the missing window count (only catch-up missed windows)
+            steps_needed = window_difference
             if steps_needed > 0:
                 tplr.logger.info(
                     f"Syncing optimizer/scheduler by stepping {steps_needed} times…"
@@ -1318,7 +1320,7 @@ class Comms(ChainManager):
             tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
 
             # 4) Option: Parallel gather in batches, but apply in ascending order
-            BATCH_SIZE = 5  # tweak based on memory/time constraints
+            BATCH_SIZE = 20  # tweak based on memory/time constraints
             windows_to_catch_up = range(
                 checkpoint_current_window + 1, current_window + 1
             )

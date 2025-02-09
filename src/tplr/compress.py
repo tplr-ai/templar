@@ -317,22 +317,3 @@ def _get_smaller_split(n, close_to):
             return all_divisors[ix - 1]
     return n
 
-
-def compute_totalks(model) -> dict:
-    """
-    Computes totalks for each parameter in the model.
-    For parameters with more than 2 dimensions (e.g. [y, x, h, w]),
-    totalk is computed as the product of the last two dimensions (h * w).
-    For parameters with 2 or fewer dimensions, totalk is simply the size of the last dimension.
-
-    Returns:
-        A dictionary mapping parameter names to totalk.
-    """
-    totalks = {}
-    for name, param in model.named_parameters():
-        shape = list(param.shape)
-        if len(shape) > 2:
-            totalks[name] = shape[-2] * shape[-1]
-        else:
-            totalks[name] = shape[-1]
-    return totalks

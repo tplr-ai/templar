@@ -193,8 +193,8 @@ class Validator:
         self.relative_improvement_random = 0.0
         self.valid_score_indices = []
         self.gradient_scores = torch.zeros(self.metagraph.n, dtype=torch.float32)
-        self.binary_indicator_scores = torch.zeros(
-            self.metagraph.n, dtype=torch.float32
+        self.binary_indicator_scores = torch.full(
+            (self.metagraph.n,), 0.5, dtype=torch.float32
         )
         self.gradient_moving_avg_scores = torch.zeros(
             self.metagraph.n, dtype=torch.float32
@@ -267,9 +267,6 @@ class Validator:
                 f"Using start_window: {self.start_window}, global_step: {self.global_step}"
             )
 
-        totalks = tplr.compress.compute_totalks(self.model)
-        tplr.logger.info(f"Totalks: {totalks}")
-
         # Proceed to load checkpoint
         (
             success,
@@ -287,7 +284,7 @@ class Validator:
             device=self.config.device,
             peers=self.peers,
             uid=self.uid,
-            totalks=totalks,
+            totalks=self.totalks,
         )
         if success:
             self.momentum = loaded_momentum
@@ -310,35 +307,7 @@ class Validator:
         self.comms.start_background_tasks()
 
         while True:
-            # Check for catch-up need
-            (
-                catch_up_success,
-                new_global_step,
-                new_optimizer,
-                new_scheduler,
-            ) = await self.comms.check_and_perform_catch_up(
-                model=self.model,
-                optimizer=self.optimizer,
-                scheduler=self.scheduler,
-                transformer=self.transformer,
-                compressor=self.compressor,
-                current_window=self.current_window,
-                sync_window=self.sync_window,
-                device=self.config.device,
-                peers=self.peers,
-                uid=self.uid,
-                global_step=self.global_step,
-                hparams=self.hparams,
-                totalks=totalks,
-            )
-
-            if catch_up_success:
-                self.global_step = new_global_step
-                self.optimizer = new_optimizer
-                self.scheduler = new_scheduler
-                self.sync_window = self.current_window
-                continue
-
+            
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
             ):
@@ -565,32 +534,36 @@ class Validator:
                     )
 
                     # 9. Apply gradient and compute loss after
-                    self.optimizer.zero_grad()
-                    model_own_data_eval.zero_grad()
+                    try:
+                        self.optimizer.zero_grad()
+                        model_own_data_eval.zero_grad()
 
-                    for n, p in model_own_data_eval.named_parameters():
-                        idxs_key = n + "idxs"
-                        vals_key = n + "vals"
-                        idxs = state_dict.get(idxs_key, None)
-                        vals = state_dict.get(vals_key, None)
+                        for n, p in model_own_data_eval.named_parameters():
+                            idxs_key = n + "idxs"
+                            vals_key = n + "vals"
+                            idxs = state_dict.get(idxs_key, None)
+                            vals = state_dict.get(vals_key, None)
 
-                        if idxs is not None and vals is not None:
-                            idxs = idxs.to(self.config.device)
-                            vals = vals.to(self.config.device)
+                            if idxs is not None and vals is not None:
+                                idxs = idxs.to(self.config.device)
+                                vals = vals.to(self.config.device)
 
-                            grad = self.transformer.decode(
-                                self.compressor.decompress(
-                                    p.to(self.config.device),
-                                    idxs,
-                                    vals,
-                                    self.xshapes[n],
-                                    self.totalks[n],
+                                grad = self.transformer.decode(
+                                    self.compressor.decompress(
+                                        p.to(self.config.device),
+                                        idxs,
+                                        vals,
+                                        self.xshapes[n],
+                                        self.totalks[n],
+                                    )
+                                ).to(self.config.device)
+
+                                p.data.sub_(
+                                    grad.sign(), alpha=self.scheduler.get_last_lr()[0]
                                 )
-                            ).to(self.config.device)
-
-                            p.data.sub_(
-                                grad.sign(), alpha=self.scheduler.get_last_lr()[0]
-                            )
+                    except Exception as e:
+                        tplr.logger.error(f"Failed to apply gradient for uid {uid}: {str(e)}")
+                        continue
 
                     # 10. Compute loss after gradient application
                     self.optimizer.zero_grad()
@@ -720,34 +693,37 @@ class Validator:
                     tplr.logger.debug(
                         f"Loss before (random data): {self.loss_before_per_batch_random}"
                     )
-
                     # 9. Apply gradient and compute loss after
-                    self.optimizer.zero_grad()
-                    model_random_data_eval.zero_grad()
+                    try:
+                        self.optimizer.zero_grad()
+                        model_random_data_eval.zero_grad()
 
-                    for n, p in model_random_data_eval.named_parameters():
-                        idxs_key = n + "idxs"
-                        vals_key = n + "vals"
-                        idxs = state_dict.get(idxs_key, None)
-                        vals = state_dict.get(vals_key, None)
+                        for n, p in model_random_data_eval.named_parameters():
+                            idxs_key = n + "idxs"
+                            vals_key = n + "vals"
+                            idxs = state_dict.get(idxs_key, None)
+                            vals = state_dict.get(vals_key, None)
 
-                        if idxs is not None and vals is not None:
-                            idxs = idxs.to(self.config.device)
-                            vals = vals.to(self.config.device)
+                            if idxs is not None and vals is not None:
+                                idxs = idxs.to(self.config.device)
+                                vals = vals.to(self.config.device)
 
-                            grad = self.transformer.decode(
-                                self.compressor.decompress(
-                                    p.to(self.config.device),
-                                    idxs,
-                                    vals,
-                                    self.xshapes[n],
-                                    self.totalks[n],
+                                grad = self.transformer.decode(
+                                    self.compressor.decompress(
+                                        p.to(self.config.device),
+                                        idxs,
+                                        vals,
+                                        self.xshapes[n],
+                                        self.totalks[n],
+                                    )
+                                ).to(self.config.device)
+
+                                p.data.sub_(
+                                    grad.sign(), alpha=self.scheduler.get_last_lr()[0]
                                 )
-                            ).to(self.config.device)
-
-                            p.data.sub_(
-                                grad.sign(), alpha=self.scheduler.get_last_lr()[0]
-                            )
+                    except Exception as e:
+                        tplr.logger.error(f"Failed to apply gradient for UID {eval_uid}: {str(e)}")
+                        continue
 
                     # 10. Compute loss after gradient application for random data
                     self.optimizer.zero_grad()
@@ -927,12 +903,9 @@ class Validator:
                         "validator/network/window": self.sync_window,
                         "validator/network/step": self.global_step,
                         "validator/network/evaluated_uids": len(self.evaluated_uids),
-                        "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[
-                            0
-                        ],
-                        "validator/network/active_miners": len(
-                            self.valid_score_indices
-                        ),
+                        "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
+                        "validator/network/active_miners": len(self.valid_score_indices),
+                        "validator/gather/success_rate": gather_result.success_rate * 100,  # Success percentage
                     }
                     self.wandb.log(evaluation_metrics, step=self.global_step)
                     tplr.logger.info(
@@ -1031,7 +1004,7 @@ class Validator:
                     f"  - Normalised binary score: {self.normalised_binary_moving_averages[uid]:.4f}"
                 )
                 tplr.logger.info(
-                    f"  - Final Moving avg score: {self.final_moving_avg_scores[uid]:.4f}"
+                    f"  - Final Moving avg score: {self.final_moving_avg_scores[uid]}"
                 )
                 tplr.logger.info(f"  - Weight: {self.weights[uid]:.4f}")
 

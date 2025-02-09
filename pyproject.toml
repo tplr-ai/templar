@@ -39,7 +39,6 @@ dev = [
     "pandas",
     "matplotlib",
     "seaborn",
-    "pytest-asyncio",
     "ruff",
     "pytest-xdist"
 

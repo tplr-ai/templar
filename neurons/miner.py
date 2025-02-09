@@ -226,7 +226,7 @@ class Miner:
             device=self.config.device,
             peers=self.peers,
             uid=self.uid,
-            totalks=totalks
+            totalks=totalks,
         )
         if success:
             self.momentum = loaded_momentum
@@ -428,10 +428,9 @@ class Miner:
                     device="cpu",
                     local=False,
                     stale_retention=100,
-                    totalks=totalks 
+                    totalks=totalks,
                 )
             )
-
 
             tplr.logger.info("Waiting on background tasks...")
             gather_result, _ = await asyncio.gather(gather_task, put_task)
@@ -578,6 +577,7 @@ class Miner:
                 break
             except Exception:
                 time.sleep(1)
+
 
 # Start miner.
 if __name__ == "__main__":

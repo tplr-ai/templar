@@ -166,7 +166,7 @@ class Validator:
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
-            totalks=self.totalks
+            totalks=self.totalks,
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
@@ -268,7 +268,7 @@ class Validator:
             )
 
         totalks = tplr.compress.compute_totalks(self.model)
-        tplr.logger.info(f'Totalks: {totalks}')
+        tplr.logger.info(f"Totalks: {totalks}")
 
         # Proceed to load checkpoint
         (
@@ -287,7 +287,7 @@ class Validator:
             device=self.config.device,
             peers=self.peers,
             uid=self.uid,
-            totalks=totalks
+            totalks=totalks,
         )
         if success:
             self.momentum = loaded_momentum
@@ -329,7 +329,7 @@ class Validator:
                 uid=self.uid,
                 global_step=self.global_step,
                 hparams=self.hparams,
-                totalks=totalks
+                totalks=totalks,
             )
 
             if catch_up_success:

@@ -47,8 +47,12 @@ def prepare_gradient_dict(miner, pages, step_window):
         p.data.mul_(1.0 - lr * miner.hparams.weight_decay)
         # Apply momentum decay.
         miner.momentum[n].mul_(miner.hparams.momentum_decay)
-        # Update momentum with the current gradient scaled by lr.
-        miner.momentum[n].add_(p.grad, alpha=lr)
+        # Ensure the gradient is on the same device as the parameter.
+        grad = p.grad.to(p.device)
+        # Ensure the momentum tensor is on the same device.
+        if miner.momentum[n].device != p.device:
+            miner.momentum[n] = miner.momentum[n].to(p.device)
+        miner.momentum[n].add_(grad, alpha=lr)
         # Compress momentum via DCT-based compression.
         idxs, vals, xshape, totalk = miner.compressor.compress(
             miner.transformer.encode(miner.momentum[n]), miner.hparams.topk_compression

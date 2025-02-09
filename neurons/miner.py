@@ -105,12 +105,24 @@ class Miner:
         self.model.to(self.config.device)
         self.tokenizer = self.hparams.tokenizer
 
+        # Init compression
+        self.transformer = tplr.compress.TransformDCT(
+            self.model, target_chunk=self.hparams.target_chunk
+        )
+        self.compressor = tplr.compress.CompressDCT()
+
         # Init optimizer and momentum
         self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
         self.momentum = {}
+        self.xshapes = {}
+        self.totalks = {}
         for n, p in self.model.named_parameters():
             self.momentum[n] = torch.zeros_like(p)
-
+            _, _, xshape, totalk = self.compressor.compress(
+                self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
+            )
+            self.xshapes[n] = xshape
+            self.totalks[n] = totalk
         # Set up scheduler
         warmup_scheduler = LinearLR(
             self.optimizer,
@@ -207,7 +219,6 @@ class Miner:
 
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
-        totalks = tplr.compress.compute_totalks(self.model)
 
         # Proceed to load checkpoint
         (
@@ -226,7 +237,7 @@ class Miner:
             device=self.config.device,
             peers=self.peers,
             uid=self.uid,
-            totalks=totalks,
+            totalks=self.totalks,
         )
         if success:
             self.momentum = loaded_momentum
@@ -524,6 +535,8 @@ class Miner:
                     "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
                     "miner/mean_momentum_norm": sum(momentum_norms)
                     / len(momentum_norms),
+                    # Added gather success rate in %
+                    "miner/gather/success_rate": gather_result.success_rate * 100,
                 },
                 step=self.global_step,
             )

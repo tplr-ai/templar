@@ -207,6 +207,7 @@ class Miner:
 
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
+        totalks = tplr.compress.compute_totalks(self.model)
 
         # Proceed to load checkpoint
         (
@@ -225,6 +226,7 @@ class Miner:
             device=self.config.device,
             peers=self.peers,
             uid=self.uid,
+            totalks=totalks
         )
         if success:
             self.momentum = loaded_momentum
@@ -355,10 +357,6 @@ class Miner:
                 f"Uploading {upload_size} bytes of own state for UID: {self.uid}"
             )
 
-            # 4. Wait for next window
-            tplr.logger.info("Wait for next window...")
-            while self.current_window == step_window:
-                await asyncio.sleep(0.1)
             tplr.logger.info(
                 f"Stopped accumulating: {i + 1} batches with {(i + 1) * self.hparams.batch_size * self.hparams.sequence_length} tokens"
             )
@@ -556,6 +554,11 @@ class Miner:
             else:
                 tplr.logger.info("Skipping checkpoint save this round")
 
+            # 4. Wait for next window
+            tplr.logger.info("Wait for next window...")
+            while self.current_window == step_window:
+                await asyncio.sleep(0.1)
+
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
         def handler(event, _u, _s):
@@ -576,7 +579,6 @@ class Miner:
             except Exception:
                 time.sleep(1)
 
-
-# Start miner/validator.
+# Start miner.
 if __name__ == "__main__":
     asyncio.run(Miner().run())

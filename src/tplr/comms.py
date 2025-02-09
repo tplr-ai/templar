@@ -1235,6 +1235,7 @@ class Comms(ChainManager):
         device: str,
         peers: list,
         uid: str,
+        totalks: dict, 
     ) -> tuple[
         bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
     ]:
@@ -1328,6 +1329,7 @@ class Comms(ChainManager):
                         device=device,
                         local=False,
                         stale_retention=100,
+                        totalks=totalks
                     )
                     for w in batch_windows
                 ]
@@ -1513,6 +1515,7 @@ class Comms(ChainManager):
         uid: str,
         peers: List[int],
         device: str,
+        totalks: dict,
         global_step: int,
     ) -> Dict[int, SimpleNamespace]:
         """Gather gradients for multiple windows in parallel."""
@@ -1525,12 +1528,12 @@ class Comms(ChainManager):
                     key="gradient",
                     timeout=30,
                     device=device,
+                    totalks=totalks,
                     local=False,
                     stale_retention=100,
                 )
                 for w in batch_windows
             ]
-
             # Wait for all gather tasks to complete
             batch_results = await asyncio.gather(*gather_tasks, return_exceptions=True)
 
@@ -1546,9 +1549,7 @@ class Comms(ChainManager):
             tplr.logger.error(
                 f"Failed to gather window batch {batch_windows}: {str(e)}"
             )
-            return {
-                w: None for w in batch_windows
-            }  # Return dict with None values on failure
+            return {w: None for w in batch_windows}  # Return dict with None values on failure
 
     async def _apply_gathered_gradients(
         self,
@@ -1629,11 +1630,11 @@ class Comms(ChainManager):
 
     async def check_and_perform_catch_up(
         self,
-        model: LlamaForCausalLM,
+        model: "LlamaForCausalLM",
         optimizer: SGD,
         scheduler: SequentialLR,
-        transformer: TransformDCT,
-        compressor: CompressDCT,
+        transformer: "TransformDCT",
+        compressor: "CompressDCT",
         current_window: int,
         sync_window: int,
         device: str,
@@ -1641,7 +1642,8 @@ class Comms(ChainManager):
         uid: str,
         global_step: int,
         hparams,
-    ) -> Tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
+        totalks: dict,  # totalks dictionary passed along
+    ) -> Tuple[bool, int, SGD, SequentialLR]:
         window_gap = current_window - sync_window
 
         if window_gap <= hparams.catch_up_threshold:
@@ -1655,41 +1657,32 @@ class Comms(ChainManager):
         tplr.logger.info(f"Initiating catch-up for {window_gap} windows")
 
         try:
-            # Process windows in batches
-            for i in range(
-                sync_window + 1, current_window + 1, hparams.catch_up_batch_size
-            ):
+            # Process windows in batches.
+            for i in range(sync_window + 1, current_window + 1, hparams.catch_up_batch_size):
                 batch_end = min(i + hparams.catch_up_batch_size, current_window + 1)
                 batch_windows = list(range(i, batch_end))
 
-                # Check timeout
                 if time.time() - catch_up_start > hparams.catch_up_timeout:
                     tplr.logger.warning("Catch-up exceeded maximum time")
                     return False, global_step, optimizer, scheduler
 
                 try:
-                    # Use asyncio.wait_for to handle timeout for gather operation
                     gathered_data = await asyncio.wait_for(
                         self._gather_window_batch(
                             batch_windows=batch_windows,
                             uid=uid,
                             peers=peers,
                             device=device,
+                            totalks=totalks,
                             global_step=global_step,
                         ),
-                        timeout=max(
-                            0.1,
-                            hparams.catch_up_timeout - (time.time() - catch_up_start),
-                        ),
+                        timeout=max(0.1, hparams.catch_up_timeout - (time.time() - catch_up_start)),
                     )
-
-                    # Verify gathered_data is a dict
                     if not isinstance(gathered_data, dict):
                         raise TypeError(
                             f"Expected dict from _gather_window_batch, got {type(gathered_data)}"
                         )
-
-                    # Apply updates in order
+                    # Apply updates in ascending order.
                     for w in sorted(gathered_data.keys()):
                         success, new_global_step = await self._apply_gathered_gradients(
                             gather_result=gathered_data[w],
@@ -1702,16 +1695,13 @@ class Comms(ChainManager):
                             window=w,
                             global_step=global_step,
                         )
-
                         if success:
                             global_step = new_global_step
 
                     torch.cuda.empty_cache()
 
                 except asyncio.TimeoutError:
-                    tplr.logger.warning(
-                        f"Timeout while gathering windows {batch_windows}"
-                    )
+                    tplr.logger.warning(f"Timeout while gathering windows {batch_windows}")
                     return False, global_step, optimizer, scheduler
                 except (TypeError, AttributeError) as e:
                     tplr.logger.error(f"Invalid data format during catch-up: {str(e)}")

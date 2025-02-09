@@ -62,7 +62,6 @@ def prepare_gradient_dict(miner, pages, step_window):
         # Save compressed gradient information.
         gradient[n + "idxs"] = idxs
         gradient[n + "vals"] = vals
-        gradient[n + "totalk"] = totalk
         xshapes[n] = xshape
         totalks[n] = totalk
         transmitted[n] = transmit_grad

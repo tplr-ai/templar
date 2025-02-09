@@ -29,6 +29,7 @@ import torch
 import torch.fft
 
 from einops import rearrange
+from typing import Tuple
 
 
 class TransformDCT:
@@ -130,7 +131,7 @@ class CompressDCT:
         if topk < 1:
             topk = 1
         return topk
-
+    
     @torch.no_grad()
     def compress(self, x, topk):
         xshape = x.shape
@@ -145,6 +146,7 @@ class CompressDCT:
         val = torch.gather(x, dim=-1, index=idx)
 
         return idx, val, xshape, totalk
+
 
     @torch.no_grad()
     def decompress(self, p, idx, val, xshape, totalk):
@@ -314,3 +316,23 @@ def _get_smaller_split(n, close_to):
                 return val
             return all_divisors[ix - 1]
     return n
+
+
+def compute_totalks(model) -> dict:
+    """
+    Computes totalks for each parameter in the model.
+    For parameters with more than 2 dimensions (e.g. [y, x, h, w]),
+    totalk is computed as the product of the last two dimensions (h * w).
+    For parameters with 2 or fewer dimensions, totalk is simply the size of the last dimension.
+
+    Returns:
+        A dictionary mapping parameter names to totalk.
+    """
+    totalks = {}
+    for name, param in model.named_parameters():
+        shape = list(param.shape)
+        if len(shape) > 2:
+            totalks[name] = shape[-2] * shape[-1]
+        else:
+            totalks[name] = shape[-1]
+    return totalks

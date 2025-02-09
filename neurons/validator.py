@@ -267,6 +267,9 @@ class Validator:
                 f"Using start_window: {self.start_window}, global_step: {self.global_step}"
             )
 
+        totalks = tplr.compress.compute_totalks(self.model)
+        tplr.logger.info(f'Totalks: {totalks}')
+
         # Proceed to load checkpoint
         (
             success,
@@ -284,6 +287,7 @@ class Validator:
             device=self.config.device,
             peers=self.peers,
             uid=self.uid,
+            totalks=totalks
         )
         if success:
             self.momentum = loaded_momentum
@@ -301,8 +305,6 @@ class Validator:
                 n: torch.zeros_like(p) for n, p in self.model.named_parameters()
             }
             self.model.to(self.config.device)
-        # Start block listener
-        # self.loop = asyncio.get_running_loop()
 
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
@@ -327,6 +329,7 @@ class Validator:
                 uid=self.uid,
                 global_step=self.global_step,
                 hparams=self.hparams,
+                totalks=totalks
             )
 
             if catch_up_success:
@@ -336,7 +339,6 @@ class Validator:
                 self.sync_window = self.current_window
                 continue
 
-            # Normal processing continues...
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
             ):

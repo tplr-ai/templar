@@ -831,7 +831,7 @@ class Comms(ChainManager):
 
         aggregated_state_dict = {}
         valid_uids = []
-        skipped_uids = []   # Retain UIDs that are skipped.
+        skipped_uids = []  # Retain UIDs that are skipped.
         global_steps = []
 
         async with self.client_semaphore:
@@ -868,7 +868,9 @@ class Comms(ChainManager):
                             f"Received state dict and global step {global_step_resp} from UID {uid}"
                         )
                     except (TypeError, ValueError) as e:
-                        tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
+                        tplr.logger.debug(
+                            f"Invalid response format from UID {uid}: {e}"
+                        )
                         skipped_uids.append(uid)
                         continue
 
@@ -889,7 +891,7 @@ class Comms(ChainManager):
                                 )
                                 valid_response = False
                                 break
-                            try: 
+                            try:
                                 self.check_compressed_indices(
                                     param_name,
                                     tensor.to(device),
@@ -914,10 +916,16 @@ class Comms(ChainManager):
                                 tensor = tensor.to(device)
                                 norm = torch.norm(tensor)
                                 normalized = tensor / (norm + 1e-8)
-                                aggregated_state_dict.setdefault(param_name, []).append(normalized)
+                                aggregated_state_dict.setdefault(param_name, []).append(
+                                    normalized
+                                )
                             else:
-                                aggregated_state_dict.setdefault(param_name, []).append(tensor.to(device))
-                            metrics["download_bytes"] += tensor.element_size() * tensor.nelement()
+                                aggregated_state_dict.setdefault(param_name, []).append(
+                                    tensor.to(device)
+                                )
+                            metrics["download_bytes"] += (
+                                tensor.element_size() * tensor.nelement()
+                            )
 
                     valid_uids.append(uid)
                     global_steps.append(global_step_resp)
@@ -1235,7 +1243,7 @@ class Comms(ChainManager):
         device: str,
         peers: list,
         uid: str,
-        totalks: dict, 
+        totalks: dict,
     ) -> tuple[
         bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
     ]:
@@ -1329,7 +1337,7 @@ class Comms(ChainManager):
                         device=device,
                         local=False,
                         stale_retention=100,
-                        totalks=totalks
+                        totalks=totalks,
                     )
                     for w in batch_windows
                 ]
@@ -1549,7 +1557,9 @@ class Comms(ChainManager):
             tplr.logger.error(
                 f"Failed to gather window batch {batch_windows}: {str(e)}"
             )
-            return {w: None for w in batch_windows}  # Return dict with None values on failure
+            return {
+                w: None for w in batch_windows
+            }  # Return dict with None values on failure
 
     async def _apply_gathered_gradients(
         self,
@@ -1658,7 +1668,9 @@ class Comms(ChainManager):
 
         try:
             # Process windows in batches.
-            for i in range(sync_window + 1, current_window + 1, hparams.catch_up_batch_size):
+            for i in range(
+                sync_window + 1, current_window + 1, hparams.catch_up_batch_size
+            ):
                 batch_end = min(i + hparams.catch_up_batch_size, current_window + 1)
                 batch_windows = list(range(i, batch_end))
 
@@ -1676,7 +1688,10 @@ class Comms(ChainManager):
                             totalks=totalks,
                             global_step=global_step,
                         ),
-                        timeout=max(0.1, hparams.catch_up_timeout - (time.time() - catch_up_start)),
+                        timeout=max(
+                            0.1,
+                            hparams.catch_up_timeout - (time.time() - catch_up_start),
+                        ),
                     )
                     if not isinstance(gathered_data, dict):
                         raise TypeError(
@@ -1701,7 +1716,9 @@ class Comms(ChainManager):
                     torch.cuda.empty_cache()
 
                 except asyncio.TimeoutError:
-                    tplr.logger.warning(f"Timeout while gathering windows {batch_windows}")
+                    tplr.logger.warning(
+                        f"Timeout while gathering windows {batch_windows}"
+                    )
                     return False, global_step, optimizer, scheduler
                 except (TypeError, AttributeError) as e:
                     tplr.logger.error(f"Invalid data format during catch-up: {str(e)}")
@@ -1712,8 +1729,10 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.error(f"Catch-up failed: {str(e)}")
             return False, global_step, optimizer, scheduler
-        
-    def check_compressed_indices(self, param_name: str, idxs, totalk: int, allowed_topk: int = None) -> None:
+
+    def check_compressed_indices(
+        self, param_name: str, idxs, totalk: int, allowed_topk: int = None
+    ) -> None:
         """
         Validates that the compressed indices for a given parameter meet the conditions:
           1. If indices are provided as a flat list/tensor, the length must equal min(self.hparams.topk_compression, totalk).
@@ -1785,7 +1804,9 @@ class Comms(ChainManager):
             try:
                 idx_int = int(idxs)
             except Exception as e:
-                raise ValueError(f"[{param_name}] Failed to convert index {idxs} to int: {e}")
+                raise ValueError(
+                    f"[{param_name}] Failed to convert index {idxs} to int: {e}"
+                )
             if idx_int < 0 or idx_int >= totalk:
                 raise ValueError(
                     f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"

@@ -280,7 +280,9 @@ async def test_gather_basic_functionality(comms_instance):
               • Valid UIDs and global steps match the responses.
     """
     # Bypass the compressed indices validation:
-    comms_instance.check_compressed_indices = lambda param_name, idxs, totalk, allowed_topk=None: None
+    comms_instance.check_compressed_indices = (
+        lambda param_name, idxs, totalk, allowed_topk=None: None
+    )
 
     comms_instance.get_with_retry = AsyncMock()
 
@@ -289,7 +291,7 @@ async def test_gather_basic_functionality(comms_instance):
         {
             "0.weightidxs": torch.tensor([0, 1, 2]),
             "0.weightvals": torch.tensor([0.4, 0.5, 0.6]),
-            "totalks": {"0.weight": totalk_value}
+            "totalks": {"0.weight": totalk_value},
         },
         1,  # global_step for uid "1"
     )
@@ -297,7 +299,7 @@ async def test_gather_basic_functionality(comms_instance):
         {
             "0.weightidxs": torch.tensor([0, 1, 2]),
             "0.weightvals": torch.tensor([0.7, 0.8, 0.9]),
-            "totalks": {"0.weight": totalk_value}
+            "totalks": {"0.weight": totalk_value},
         },
         2,  # global_step for uid "2"
     )
@@ -317,27 +319,35 @@ async def test_gather_basic_functionality(comms_instance):
     )
 
     assert result is not None, "Expected a non-None result"
-    assert result.uids == ["1", "2"], f"Expected valid_uids ['1', '2'], got {result.uids}"
-    assert result.global_steps == [1, 2], f"Expected global_steps [1, 2], got {result.global_steps}"
+    assert result.uids == ["1", "2"], (
+        f"Expected valid_uids ['1', '2'], got {result.uids}"
+    )
+    assert result.global_steps == [1, 2], (
+        f"Expected global_steps [1, 2], got {result.global_steps}"
+    )
 
     aggregated = result.state_dict.__dict__
     for key in ["0.weightidxs", "0.weightvals"]:
         assert key in aggregated, f"Expected key {key} in aggregated state_dict"
-        assert len(aggregated[key]) == 2, f"Expected 2 tensors for key {key}, got {len(aggregated[key])}"
+        assert len(aggregated[key]) == 2, (
+            f"Expected 2 tensors for key {key}, got {len(aggregated[key])}"
+        )
 
 
 @pytest.mark.asyncio
 async def test_gather_normalization(comms_instance):
     # Bypass the compressed indices validation for simplicity.
-    comms_instance.check_compressed_indices = lambda param_name, idxs, totalk, allowed_topk=None: None
+    comms_instance.check_compressed_indices = (
+        lambda param_name, idxs, totalk, allowed_topk=None: None
+    )
     comms_instance.get_with_retry = AsyncMock()
-    
+
     totalk_value = 100
     peer_response = (
         {
             "0.weightidxs": torch.tensor([0, 1, 2]),
             "0.weightvals": torch.tensor([0.4, 0.5, 0.6]),
-            "totalks": {"0.weight": totalk_value}
+            "totalks": {"0.weight": totalk_value},
         },
         1,
     )
@@ -351,14 +361,17 @@ async def test_gather_normalization(comms_instance):
         device="cpu",
         local=True,
         stale_retention=10,
-        totalks={"0.weight": totalk_value}
+        totalks={"0.weight": totalk_value},
     )
     # Add your assertions here.
     assert result is not None
 
+
 @pytest.mark.asyncio
 async def test_gather_empty_responses(comms_instance):
-    comms_instance.check_compressed_indices = lambda param_name, idxs, totalk, allowed_topk=None: None
+    comms_instance.check_compressed_indices = (
+        lambda param_name, idxs, totalk, allowed_topk=None: None
+    )
     comms_instance.get_with_retry = AsyncMock(return_value=(None, None))
     result = await comms_instance.gather(
         my_uid="0",
@@ -369,21 +382,24 @@ async def test_gather_empty_responses(comms_instance):
         device="cpu",
         local=True,
         stale_retention=10,
-        totalks={"0.weight": 100}
+        totalks={"0.weight": 100},
     )
     # Assert that empty responses yield a specific result (adjust as needed)
     assert result is None
 
+
 @pytest.mark.asyncio
 async def test_gather_averaging(comms_instance):
-    comms_instance.check_compressed_indices = lambda param_name, idxs, totalk, allowed_topk=None: None
+    comms_instance.check_compressed_indices = (
+        lambda param_name, idxs, totalk, allowed_topk=None: None
+    )
     comms_instance.get_with_retry = AsyncMock()
     totalk_value = 100
     peer1_response = (
         {
             "0.weightidxs": torch.tensor([0, 1, 2]),
             "0.weightvals": torch.tensor([0.4, 0.5, 0.6]),
-            "totalks": {"0.weight": totalk_value}
+            "totalks": {"0.weight": totalk_value},
         },
         1,
     )
@@ -391,7 +407,7 @@ async def test_gather_averaging(comms_instance):
         {
             "0.weightidxs": torch.tensor([0, 1, 2]),
             "0.weightvals": torch.tensor([0.8, 0.9, 1.0]),
-            "totalks": {"0.weight": totalk_value}
+            "totalks": {"0.weight": totalk_value},
         },
         2,
     )
@@ -405,14 +421,17 @@ async def test_gather_averaging(comms_instance):
         device="cpu",
         local=True,
         stale_retention=10,
-        totalks={"0.weight": totalk_value}
+        totalks={"0.weight": totalk_value},
     )
     # Add your averaging-specific assertions here.
     assert result.global_steps == [1, 2]
 
+
 @pytest.mark.asyncio
 async def test_gather_complex_normalization(comms_instance):
-    comms_instance.check_compressed_indices = lambda param_name, idxs, totalk, allowed_topk=None: None
+    comms_instance.check_compressed_indices = (
+        lambda param_name, idxs, totalk, allowed_topk=None: None
+    )
     comms_instance.get_with_retry = AsyncMock()
     totalk_value = 100
     # Simulated complex response with multiple keys.
@@ -420,7 +439,7 @@ async def test_gather_complex_normalization(comms_instance):
         {
             "0.weightidxs": torch.tensor([0, 1, 2]),
             "0.weightvals": torch.tensor([0.3, 0.4, 0.5]),
-            "totalks": {"0.weight": totalk_value}
+            "totalks": {"0.weight": totalk_value},
         },
         3,
     )
@@ -434,11 +453,10 @@ async def test_gather_complex_normalization(comms_instance):
         device="cpu",
         local=True,
         stale_retention=10,
-        totalks={"0.weight": totalk_value}
+        totalks={"0.weight": totalk_value},
     )
     # Add your assertions for normalization.
     assert result is not None
-
 
 
 #  TODO: Move to analyser when refactored
@@ -488,7 +506,9 @@ async def test_gather_complex_normalization(comms_instance):
 @pytest.mark.asyncio
 async def test_gather_averaging(comms_instance):
     # Mock check_compressed_indices as specified.
-    comms_instance.check_compressed_indices = lambda param_name, idxs, totalk, allowed_topk=None: None
+    comms_instance.check_compressed_indices = (
+        lambda param_name, idxs, totalk, allowed_topk=None: None
+    )
 
     # Patch get_with_retry to simulate two peer responses.
     comms_instance.get_with_retry = AsyncMock()
@@ -527,19 +547,27 @@ async def test_gather_averaging(comms_instance):
     # Validate the aggregated result.
     assert result is not None, "Expected a non-None gather result"
     assert result.uids == ["1", "2"], f"Expected UIDs ['1', '2'], got {result.uids}"
-    assert result.global_steps == [1, 2], f"Expected global_steps [1, 2] got {result.global_steps}"
+    assert result.global_steps == [1, 2], (
+        f"Expected global_steps [1, 2] got {result.global_steps}"
+    )
 
     aggregated = result.state_dict.__dict__
     for key in ["layer.idxs", "layer.vals"]:
         assert key in aggregated, f"Expected key {key} in state_dict"
-        assert len(aggregated[key]) == 2, f"Expected 2 tensors for key {key}, got {len(aggregated[key])}"
+        assert len(aggregated[key]) == 2, (
+            f"Expected 2 tensors for key {key}, got {len(aggregated[key])}"
+        )
 
 
 async def test_gather_complex_normalization(comms_instance):
     # Bypass the compressed indices validation for this test.
-    comms_instance.check_compressed_indices = lambda param_name, idxs, totalk, allowed_topk=None: None
+    comms_instance.check_compressed_indices = (
+        lambda param_name, idxs, totalk, allowed_topk=None: None
+    )
 
-    totalk_value = 3  # For three indices, allowed_topk = min(topk_compression, totalk_value) = 3
+    totalk_value = (
+        3  # For three indices, allowed_topk = min(topk_compression, totalk_value) = 3
+    )
     # Include totalks in each peer response using the key "layer." (so that stripping "idxs"/"vals" returns the same base key).
     peer1_response = (
         {
@@ -609,7 +637,9 @@ async def test_gather_complex_normalization(comms_instance):
     # Floating point comparisons with tolerances.
     assert torch.allclose(actual_vals, expected_vals, rtol=1e-3, atol=1e-3)
     # Additional assertions to verify that all peers were processed.
-    assert len(normalized_tensors) == 3, f"Expected 3 normalized tensors, got {len(normalized_tensors)}"
+    assert len(normalized_tensors) == 3, (
+        f"Expected 3 normalized tensors, got {len(normalized_tensors)}"
+    )
     assert len(result.uids) == 3, f"Expected 3 valid UIDs, got {len(result.uids)}"
 
 
@@ -798,6 +828,7 @@ async def test_load_checkpoint_success(comms_instance):
         patch("tplr.logger.warning") as mock_warning,
     ):
         from tplr.compress import compute_totalks
+
         totalks = compute_totalks(model)
         success, momentum, step, opt, sched = await comms_instance.load_checkpoint(
             model=model,
@@ -1364,7 +1395,9 @@ def _get_smaller_split(n, close_to):
 @pytest.mark.asyncio
 async def test_valid_response_handling(comms_instance):
     # Patch out the compressed indices check
-    comms_instance.check_compressed_indices = lambda param_name, idxs, totalk, allowed_topk=None: None
+    comms_instance.check_compressed_indices = (
+        lambda param_name, idxs, totalk, allowed_topk=None: None
+    )
 
     # Patch get_with_retry to simulate three valid peer responses.
     comms_instance.get_with_retry = AsyncMock()
@@ -1393,7 +1426,11 @@ async def test_valid_response_handling(comms_instance):
         },
         30,
     )
-    comms_instance.get_with_retry.side_effect = [peer1_response, peer2_response, peer3_response]
+    comms_instance.get_with_retry.side_effect = [
+        peer1_response,
+        peer2_response,
+        peer3_response,
+    ]
 
     totalks_arg = {"0.weight": totalk_value}
     result = await comms_instance.gather(
@@ -1476,6 +1513,7 @@ async def test_missing_idxs_key(comms_instance, model):
         if idxs is None:
             raise ValueError(f"Missing indices for {param_name}")
         return None
+
     comms.check_compressed_indices = patched_check
 
     # Call gather() with our simulated responses.
@@ -1589,7 +1627,9 @@ async def test_missing_vals_key(comms_instance, model):
 
     comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
     # Patch check_compressed_indices as a no-op.
-    comms.check_compressed_indices = lambda param_name, data, totalk, allowed_topk=None: None
+    comms.check_compressed_indices = (
+        lambda param_name, data, totalk, allowed_topk=None: None
+    )
 
     result = await comms.gather(
         my_uid="dummy_uid",
@@ -1603,7 +1643,9 @@ async def test_missing_vals_key(comms_instance, model):
     )
 
     assert result is not None, "Expected non-None result from gather()"
-    assert result.uids == ["uid2", "uid3"], f"Expected valid_uids ['uid2', 'uid3'], got {result.uids}"
+    assert result.uids == ["uid2", "uid3"], (
+        f"Expected valid_uids ['uid2', 'uid3'], got {result.uids}"
+    )
 
 
 @pytest.mark.asyncio
@@ -1641,7 +1683,9 @@ async def test_empty_or_none_state_dict(comms_instance, model):
     xshapes, totalks = create_xshapes_totalks(model)
 
     # Patch check_compressed_indices to be a no-op so that valid responses won't be rejected.
-    comms.check_compressed_indices = lambda param_name, idxs, totalk, allowed_topk=None: None
+    comms.check_compressed_indices = (
+        lambda param_name, idxs, totalk, allowed_topk=None: None
+    )
 
     # Define dummy UIDs.
     uids = ["uid1", "uid2", "uid3"]

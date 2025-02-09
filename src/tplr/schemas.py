@@ -14,7 +14,6 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
-# fmt: off
 
 # Global imports
 from pydantic import BaseModel
@@ -39,6 +38,7 @@ class Bucket(BaseModel):
     account_id: str
     access_key_id: str
     secret_access_key: str
+
     class Config:
         str_min_length = 1
         str_strip_whitespace = True

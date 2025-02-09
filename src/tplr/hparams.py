@@ -14,7 +14,6 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
-# fmt: off
 
 # Global imports
 import json
@@ -28,24 +27,20 @@ DEFAULT_HPARAMS = {
     # Run configuration
     "spec_version": 5,
     "project": "templar",
-    
     # Model parameters
     "sequence_length": 1024,
     "pages_per_window": 2,
     "batch_size": 8,
     "learning_rate": 0.001,
-    
     # Window and sync parameters
     "blocks_per_window": 2,
     "windows_per_sync": 100,
     "windows_per_weights": 10,
-    
     # Optimization parameters
     "momentum_decay": 0.999,
     "topk_compression": 32,
     "target_chunk": 64,
     "scores_alpha": 0.001,
-    
     # Model architecture (these should be in your hparams.json)
     "tokenizer_name": "huggyllama/llama-7b",
     "hidden_size": 4096,
@@ -55,15 +50,14 @@ DEFAULT_HPARAMS = {
     "num_key_value_heads": 32,
     "activation_function": "silu",
     "max_position_embeddings": 2048,
-    
     # Bucket configuration
     "bucket_name": "your-default-bucket-name",
-    
     # Scheduler parameters
     "warmup_steps": 250,
     "alpha_f": 0.1,  # Final learning rate multiplier
     "t_max": 20000,  # Total steps for cosine decay
 }
+
 
 def create_namespace(hparams: dict) -> SimpleNamespace:
     """
@@ -78,7 +72,7 @@ def create_namespace(hparams: dict) -> SimpleNamespace:
     # Merge with defaults
     full_hparams = DEFAULT_HPARAMS.copy()
     full_hparams.update(hparams)
-    
+
     hparams_ns = SimpleNamespace(**full_hparams)
 
     # Initialize tokenizer
@@ -108,6 +102,7 @@ def create_namespace(hparams: dict) -> SimpleNamespace:
         raise
 
     return hparams_ns
+
 
 def load_hparams(hparams_file: str = "hparams.json") -> SimpleNamespace:
     """

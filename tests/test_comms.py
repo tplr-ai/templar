@@ -6,15 +6,8 @@ import pytest
 import torch
 from types import SimpleNamespace
 from dotenv import load_dotenv
-import pytest_asyncio
 import asyncio
 from dataclasses import dataclass
-import time
-import numpy as np
-from torch.optim import SGD
-from torch.optim.lr_scheduler import SequentialLR
-from transformers import LlamaForCausalLM
-import math
 
 
 # Set required environment variables
@@ -102,9 +95,6 @@ import tplr
 from tplr import logger, debug
 
 debug()
-
-# Setup pytest-asyncio
-pytestmark = [pytest.mark.asyncio]
 
 
 # Test fixture for comms instance
@@ -202,19 +192,29 @@ async def comms_instance(mock_wallet, mock_metagraph):
     )
 
 
-# Existing tests remain unchanged
+"""
+Tests for the Comms class functionality focusing on local storage, data retrieval,
+and gradient gathering operations.
+"""
+
+
 async def test_put_local(comms_instance):
-    # Test putting data to local storage
+    """Test 1: Local Storage Functionality
+
+    Tests the ability to store data locally by:
+    - Verifying data can be correctly stored in local filesystem
+    - Checking directory cleanup operations work properly
+    - Ensuring correct file creation with proper naming
+    - Validating storage location and structure
+    """
     test_state_dict = {"param": torch.tensor([1, 2, 3])}
     uid = "0"
     window = 1
     key = "gradient"
 
-    # Clean up test directory first
     expected_dir = os.path.join("/tmp/local_store", uid, str(window))
     base_dir = os.path.dirname(expected_dir)  # /tmp/local_store/0
 
-    # Recursive cleanup of the uid directory
     if os.path.exists(base_dir):
         for root, dirs, files in os.walk(base_dir, topdown=False):
             for name in files:
@@ -223,7 +223,6 @@ async def test_put_local(comms_instance):
                 os.rmdir(os.path.join(root, name))
         os.rmdir(base_dir)
 
-    # Ensure local directory cleanup is called
     with patch.object(comms_instance, "cleanup_local_data") as mock_cleanup:
         await comms_instance.put(
             state_dict=test_state_dict,
@@ -234,14 +233,20 @@ async def test_put_local(comms_instance):
         )
         mock_cleanup.assert_called_once()
 
-    # Check that the file was saved locally
     files = os.listdir(expected_dir)
     assert len(files) == 1
     assert files[0].startswith(key)
 
 
 async def test_get_local(comms_instance):
-    # Prepare local file
+    """Test 2: Local Data Retrieval
+
+    Validates the retrieval of locally stored data by:
+    - Testing correct loading of stored state dictionaries
+    - Verifying proper handling of global step information
+    - Ensuring cleanup operations are called during retrieval
+    - Checking data integrity after retrieval
+    """
     test_state_dict = {
         "state_dict": {"param": torch.tensor([1, 2, 3])},
         "global_step": 10,
@@ -255,7 +260,6 @@ async def test_get_local(comms_instance):
     local_path = os.path.join(local_dir, filename)
     torch.save(test_state_dict, local_path)
 
-    # Test getting data from local storage
     with patch.object(comms_instance, "cleanup_local_data") as mock_cleanup:
         state_dict, global_step = await comms_instance.get(
             uid=uid,
@@ -271,15 +275,14 @@ async def test_get_local(comms_instance):
 
 @pytest.mark.asyncio
 async def test_gather_basic_functionality(comms_instance):
+    """Test 3: Basic Gradient Gathering
+
+    Tests fundamental gradient gathering operations by:
+    - Validating correct handling of multiple peer responses
+    - Verifying proper aggregation of gradients
+    - Checking accurate tracking of UIDs and global steps
+    - Ensuring correct structure of aggregated results
     """
-    Test gather basic functionality:
-        - Setup:
-              • Simulate two valid peer responses via get_with_retry.
-        - Expected Outcome:
-              • The aggregated state_dict is correctly constructed.
-              • Valid UIDs and global steps match the responses.
-    """
-    # Bypass the compressed indices validation:
     comms_instance.check_compressed_indices = (
         lambda param_name, idxs, totalk, allowed_topk=None: None
     )
@@ -293,7 +296,7 @@ async def test_gather_basic_functionality(comms_instance):
             "0.weightvals": torch.tensor([0.4, 0.5, 0.6]),
             "totalks": {"0.weight": totalk_value},
         },
-        1,  # global_step for uid "1"
+        1,
     )
     peer2_response = (
         {
@@ -301,7 +304,7 @@ async def test_gather_basic_functionality(comms_instance):
             "0.weightvals": torch.tensor([0.7, 0.8, 0.9]),
             "totalks": {"0.weight": totalk_value},
         },
-        2,  # global_step for uid "2"
+        2,
     )
     comms_instance.get_with_retry.side_effect = [peer1_response, peer2_response]
 
@@ -336,7 +339,13 @@ async def test_gather_basic_functionality(comms_instance):
 
 @pytest.mark.asyncio
 async def test_gather_normalization(comms_instance):
-    # Bypass the compressed indices validation for simplicity.
+    """Test 4: Gradient Normalization
+
+    Validates gradient normalization functionality by:
+    - Testing proper handling of normalized gradients
+    - Verifying correct processing of single peer response
+    - Ensuring normalization maintains data integrity
+    """
     comms_instance.check_compressed_indices = (
         lambda param_name, idxs, totalk, allowed_topk=None: None
     )
@@ -363,12 +372,18 @@ async def test_gather_normalization(comms_instance):
         stale_retention=10,
         totalks={"0.weight": totalk_value},
     )
-    # Add your assertions here.
     assert result is not None
 
 
 @pytest.mark.asyncio
 async def test_gather_empty_responses(comms_instance):
+    """Test 5: Empty Response Handling
+
+    Tests system behavior with empty responses by:
+    - Verifying proper handling when peers return no data
+    - Ensuring system gracefully handles null responses
+    - Checking appropriate error states and return values
+    """
     comms_instance.check_compressed_indices = (
         lambda param_name, idxs, totalk, allowed_topk=None: None
     )
@@ -384,12 +399,18 @@ async def test_gather_empty_responses(comms_instance):
         stale_retention=10,
         totalks={"0.weight": 100},
     )
-    # Assert that empty responses yield a specific result (adjust as needed)
     assert result is None
 
 
 @pytest.mark.asyncio
 async def test_gather_averaging(comms_instance):
+    """Test 6: Gradient Averaging
+
+    Validates gradient averaging functionality by:
+    - Testing correct averaging of gradients from multiple peers
+    - Verifying proper handling of global steps during averaging
+    - Ensuring averaged gradients maintain mathematical correctness
+    """
     comms_instance.check_compressed_indices = (
         lambda param_name, idxs, totalk, allowed_topk=None: None
     )
@@ -423,18 +444,23 @@ async def test_gather_averaging(comms_instance):
         stale_retention=10,
         totalks={"0.weight": totalk_value},
     )
-    # Add your averaging-specific assertions here.
     assert result.global_steps == [1, 2]
 
 
 @pytest.mark.asyncio
 async def test_gather_complex_normalization(comms_instance):
+    """Test 7: Complex Normalization Scenarios
+
+    Tests advanced normalization cases by:
+    - Validating handling of multiple keys in gradient responses
+    - Verifying normalization behavior with complex data structures
+    - Ensuring proper handling of multi-dimensional tensors
+    """
     comms_instance.check_compressed_indices = (
         lambda param_name, idxs, totalk, allowed_topk=None: None
     )
     comms_instance.get_with_retry = AsyncMock()
     totalk_value = 100
-    # Simulated complex response with multiple keys.
     peer_response = (
         {
             "0.weightidxs": torch.tensor([0, 1, 2]),
@@ -455,7 +481,6 @@ async def test_gather_complex_normalization(comms_instance):
         stale_retention=10,
         totalks={"0.weight": totalk_value},
     )
-    # Add your assertions for normalization.
     assert result is not None
 
 
@@ -505,6 +530,15 @@ async def test_gather_complex_normalization(comms_instance):
 
 @pytest.mark.asyncio
 async def test_gather_averaging(comms_instance):
+    """Test 8: Verify gradient averaging with multiple peers
+
+    Tests that gradients from multiple peers are properly averaged during gather operation.
+    Checks:
+    - Proper handling of totalks parameter
+    - Correct aggregation of peer responses
+    - Validation of UIDs and global steps
+    - Tensor shape and size validation
+    """
     # Mock check_compressed_indices as specified.
     comms_instance.check_compressed_indices = (
         lambda param_name, idxs, totalk, allowed_topk=None: None
@@ -560,6 +594,15 @@ async def test_gather_averaging(comms_instance):
 
 
 async def test_gather_complex_normalization(comms_instance):
+    """Test 8: Verify complex gradient normalization with multiple peers
+
+    Tests normalization of gradients with different scales and signs.
+    Checks:
+    - Proper normalization of tensors with different magnitudes
+    - Correct handling of different signs in gradients
+    - Validation of aggregated results against expected values
+    - Proper handling of multiple peer responses
+    """
     # Bypass the compressed indices validation for this test.
     comms_instance.check_compressed_indices = (
         lambda param_name, idxs, totalk, allowed_topk=None: None
@@ -645,7 +688,15 @@ async def test_gather_complex_normalization(comms_instance):
 
 # Test Initialization and Cleanup
 async def test_comms_init(comms_instance):
-    """Test proper initialization of Comms instance"""
+    """Test 10: Verify proper initialization of Comms instance
+
+    Tests that all required components are properly initialized.
+    Checks:
+    - Temporary directory creation
+    - Save location existence
+    - Lock initialization
+    - Active peers set initialization
+    """
     assert os.path.exists(comms_instance.temp_dir)
     assert os.path.exists(comms_instance.save_location)
     assert comms_instance.lock is not None
@@ -653,7 +704,14 @@ async def test_comms_init(comms_instance):
 
 
 async def test_cleanup_local_data(comms_instance):
-    """Test cleanup of stale local data"""
+    """Test 11: Verify cleanup of stale local data
+
+    Tests the cleanup functionality for old local data.
+    Checks:
+    - Proper removal of old data based on window
+    - Retention of recent data
+    - Directory structure maintenance
+    """
     # Setup test directories and files
     uid = "test_uid"
     test_dir = os.path.join("/tmp/local_store", uid)
@@ -667,7 +725,15 @@ async def test_cleanup_local_data(comms_instance):
 
 # Test S3 Operations
 async def test_s3_put_small_file(comms_instance):
-    """Test uploading small file to S3"""
+    """Test 12: Verify S3 upload for small files
+
+    Tests the basic S3 upload functionality for small files.
+    Checks:
+    - Proper file creation
+    - S3 client initialization
+    - Upload operation execution
+    - Cleanup after upload
+    """
     # Create test file
     with open("test_file.txt", "w") as f:
         f.write("test data")
@@ -693,7 +759,16 @@ async def test_s3_put_small_file(comms_instance):
 
 @pytest.mark.asyncio
 async def test_s3_put_large_file(comms_instance):
-    """Test multipart upload for large files with batching and retries"""
+    """Test 13: Verify S3 multipart upload for large files
+
+    Tests the multipart upload functionality for large files.
+    Checks:
+    - Multipart upload initialization
+    - Proper part uploading
+    - Upload completion
+    - Part number ordering
+    - Cleanup operations
+    """
     mock_client = AsyncMock()
     mock_client.create_multipart_upload = AsyncMock(
         return_value={"UploadId": "test_id"}
@@ -725,7 +800,15 @@ async def test_s3_put_large_file(comms_instance):
 
 
 async def test_download_large_file(comms_instance):
-    """Test downloading large file with chunks"""
+    """Test 14: Verify downloading of large files
+
+    Tests the chunked download functionality for large files.
+    Checks:
+    - Proper content length handling
+    - Chunk size calculations
+    - Range request handling
+    - Download completion
+    """
     # Mock S3 client with proper responses
     mock_client = AsyncMock()
     mock_client.head_object = AsyncMock(
@@ -759,7 +842,17 @@ async def test_download_large_file(comms_instance):
 # Test Checkpoint Operations
 @pytest.mark.asyncio
 async def test_load_checkpoint_success(comms_instance):
-    """Test successful checkpoint loading"""
+    """Test 15: Verify successful checkpoint loading
+
+    Tests the complete checkpoint loading process.
+    Checks:
+    - Model state dict loading
+    - Optimizer state loading
+    - Scheduler state loading
+    - Momentum handling
+    - Global step tracking
+    - Window management
+    """
     # Create mock model and parameters
     model = MagicMock()
     test_param = torch.nn.Parameter(torch.randn(10))
@@ -865,7 +958,15 @@ async def test_load_checkpoint_success(comms_instance):
 
 @pytest.mark.asyncio
 async def test_load_checkpoint_missing_data(comms_instance):
-    """Test loading checkpoint when data is missing"""
+    """Test 16: Verify checkpoint loading with missing data
+
+    Tests the checkpoint loading behavior when data is missing.
+    Checks:
+    - Proper handling of missing checkpoint data
+    - Default value returns
+    - Error handling
+    - State preservation
+    """
     # Mock the get_latest_checkpoint method to return None without error
     comms_instance.get_latest_checkpoint = AsyncMock(return_value=None)
 
@@ -911,7 +1012,14 @@ async def test_load_checkpoint_missing_data(comms_instance):
 
 
 async def test_gather_timeout(comms_instance):
-    """Test gather operation with timeout"""
+    """Test 17: Verify gather operation timeout handling
+
+    Tests the timeout mechanism in gather operations.
+    Checks:
+    - Proper timeout handling
+    - Error response
+    - Resource cleanup
+    """
 
     async def slow_get(*args, **kwargs):
         await asyncio.sleep(2)
@@ -1721,3 +1829,193 @@ async def test_empty_or_none_state_dict(comms_instance, model):
     # valid_uids should be ["uid1"].
     assert result is not None, "Expected a non-None result."
     assert result.uids == ["uid1"], f"Expected valid_uids ['uid1'], got {result.uids}"
+
+
+# Dummy hparams with topk_compression set to 3.
+class DummyHParams:
+    topk_compression = 3
+
+
+# Dummy Comms instance that only supplies hparams for testing.
+class DummyComms(Comms):
+    def __init__(self):
+        # Only initialization required for testing check_compressed_indices.
+        self.hparams = DummyHParams()
+
+
+def test_valid_flat_tensor():
+    """
+    Test Case: test_valid_flat_tensor
+      - Input: A 1D tensor (torch.Tensor) with length equal to min(hparams.topk_compression, totalk).
+      - Valid indices (all indices within [0, totalk-1]).
+      - Expected Outcome: The function should complete without raising an error.
+    """
+    dummy_comms = DummyComms()
+
+    # totalk is set to 10; allowed_topk is min(3, 10) == 3.
+    totalk = 10
+    valid_tensor = torch.tensor([1, 5, 9], dtype=torch.long)
+
+    # This call should complete without any error.
+    dummy_comms.check_compressed_indices("test_param", valid_tensor, totalk)
+
+
+def test_valid_multi_dim_tensor():
+    """
+    Test that a multi-dimensional tensor (e.g., 2D tensor) where the last dimension equals min(hparams.topk_compression, totalk)
+    and all indices are within the valid range completes without raising an error.
+    """
+    dummy_comms = DummyComms()
+    totalk = 20  # allowed_topk = min(3, 20) = 3
+    # Create a valid 2D tensor (shape: 2 x 3) with valid indices.
+    valid_tensor = torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.long)
+    dummy_comms.check_compressed_indices("param", valid_tensor, totalk)
+
+
+def test_valid_flat_list():
+    """
+    Test that a flat Python list of integers with length equal to allowed_topk
+    and valid indices completes without raising an error.
+    """
+    dummy_comms = DummyComms()
+    totalk = 20  # allowed_topk = min(3, 20) = 3
+    valid_list = [0, 1, 19]  # All values are within [0, totalk)
+    dummy_comms.check_compressed_indices("param", valid_list, totalk)
+
+
+def test_valid_nested_list():
+    """
+    Test that a nested list (list of lists), where each inner list has length equal to allowed_topk
+    and contains valid indices completes without raising an error.
+    """
+    dummy_comms = DummyComms()
+    totalk = 20  # allowed_topk = 3
+    valid_nested = [[0, 1, 2], [3, 4, 5]]
+    dummy_comms.check_compressed_indices("param", valid_nested, totalk)
+
+
+def test_invalid_flat_tensor_wrong_length():
+    """
+    Test that a 1D tensor whose length does not equal min(hparams.topk_compression, totalk) (e.g., too short)
+    raises ValueError with message about invalid number of indices.
+    """
+    dummy_comms = DummyComms()
+    totalk = 10  # allowed_topk = min(3, 10) = 3
+    invalid_tensor = torch.tensor([0, 1], dtype=torch.long)  # Length is 2, should be 3.
+    with pytest.raises(ValueError, match="Invalid number of indices"):
+        dummy_comms.check_compressed_indices("param", invalid_tensor, totalk)
+
+
+def test_invalid_multi_dim_tensor_wrong_last_dimension():
+    """
+    Test that a multi-dimensional tensor where the size of the last dimension is not equal to min(hparams.topk_compression, totalk)
+    raises ValueError indicating the last dimension size is invalid.
+    """
+    dummy_comms = DummyComms()
+    totalk = 20  # allowed_topk = min(3, 20) = 3
+    # Create a 2D tensor with last dimension size 4 (should be 3)
+    invalid_tensor = torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=torch.long)
+    with pytest.raises(ValueError, match="Last dimension size invalid"):
+        dummy_comms.check_compressed_indices("param", invalid_tensor, totalk)
+
+
+def test_invalid_flat_list_negative_index():
+    """
+    Test that a flat list with one or more indices being negative raises ValueError indicating that an index is out of bounds.
+    """
+    dummy_comms = DummyComms()
+    totalk = 10  # allowed_topk = min(3, 10) = 3
+    invalid_list = [0, -1, 2]  # Contains a negative index.
+    with pytest.raises(ValueError, match="Index -1 out of bounds"):
+        dummy_comms.check_compressed_indices("param", invalid_list, totalk)
+
+
+def test_invalid_flat_tensor_out_of_range_index():
+    """
+    Test that a flat tensor with an index equal to or greater than totalk raises ValueError indicating index out of bounds.
+    """
+    dummy_comms = DummyComms()
+    totalk = 10  # allowed_topk = min(3, 10) = 3
+    # Index 10 is out-of-range because valid indices are 0 to 9.
+    invalid_tensor = torch.tensor([0, 1, 10], dtype=torch.long)
+    with pytest.raises(ValueError, match="Index 10 out of bounds"):
+        dummy_comms.check_compressed_indices("param", invalid_tensor, totalk)
+
+
+def test_invalid_flat_list_wrong_length():
+    """
+    Test that a flat list whose length is not equal to allowed_topk raises ValueError about the invalid number of indices.
+    """
+    dummy_comms = DummyComms()
+    totalk = 20  # allowed_topk = min(3, 20) = 3
+    invalid_list = [0, 1]  # Only 2 elements instead of 3.
+    with pytest.raises(ValueError, match="Invalid number of indices"):
+        dummy_comms.check_compressed_indices("param", invalid_list, totalk)
+
+
+def test_invalid_nested_list_wrong_length():
+    """
+    Test that a nested list where at least one sublist has a length different from allowed_topk raises ValueError on the offending sublist.
+    """
+    dummy_comms = DummyComms()
+    totalk = 20  # allowed_topk = 3
+    # The second sublist has only 2 elements.
+    invalid_nested = [[0, 1, 2], [3, 4]]
+    with pytest.raises(ValueError, match="Invalid number of indices"):
+        dummy_comms.check_compressed_indices("param", invalid_nested, totalk)
+
+
+def test_valid_single_value():
+    """
+    Test that a single valid integer index (not wrapped in a list or tensor) within the range [0, totalk-1] completes without raising an error.
+    """
+    dummy_comms = DummyComms()
+    totalk = 5
+    valid_single = 3  # Valid since 0 <= 3 < 5.
+    dummy_comms.check_compressed_indices("param", valid_single, totalk)
+
+
+def test_invalid_single_value_out_of_bounds():
+    """
+    Test that a single integer index that is out-of-bounds raises ValueError indicating the index is out of bounds.
+    """
+    dummy_comms = DummyComms()
+    totalk = 5
+    # Index 5 is out-of-bounds because valid indices are 0 to 4.
+    with pytest.raises(ValueError, match="Index 5 out of bounds"):
+        dummy_comms.check_compressed_indices("param", 5, totalk)
+
+
+def test_override_allowed_topk():
+    """
+    Test using the optional allowed_topk parameter to override hparams.topk_compression:
+    - Call with a flat list matching the provided allowed_topk -> Should pass
+    - Call with a list of a different length than allowed_topk -> Should raise ValueError
+    """
+    dummy_comms = DummyComms()
+    totalk = 10
+    # Override allowed_topk to 2.
+    valid_list = [0, 9]  # Correct length: 2 elements.
+    dummy_comms.check_compressed_indices("param", valid_list, totalk, allowed_topk=2)
+
+    invalid_list = [0, 1, 2]  # Incorrect length: 3 elements instead of 2.
+    with pytest.raises(ValueError, match="Invalid number of indices"):
+        dummy_comms.check_compressed_indices(
+            "param", invalid_list, totalk, allowed_topk=2
+        )
+
+
+def test_topk_auto_adjust_when_totalk_is_lower():
+    """
+    Test scenario where totalk is less than hparams.topk_compression:
+    - Provide a flat list with length equal to totalk (which is the adjusted allowed_topk) -> Should pass
+    - Test a list with fewer elements than totalk -> Should raise ValueError
+    """
+    dummy_comms = DummyComms()
+    totalk = 2  # Now allowed_topk becomes min(hparams.topk_compression, totalk) = min(3,2) = 2.
+    valid_list = [0, 1]  # Valid: length matches allowed_topk (which is 2).
+    dummy_comms.check_compressed_indices("param", valid_list, totalk)
+
+    invalid_list = [0]  # Too few elements.
+    with pytest.raises(ValueError, match="Invalid number of indices"):
+        dummy_comms.check_compressed_indices("param", invalid_list, totalk)

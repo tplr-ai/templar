@@ -14,7 +14,7 @@ test-run:
     ./scripts/start.sh
 
 dev:
-    uv pip install -e ".[dev]"
+    uv pip install -e ".[dev]" --prerelease=allow
 
 test:
     uv run pytest -sv

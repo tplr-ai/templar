@@ -448,15 +448,9 @@ class Miner:
             await put_task
             tplr.logger.info("Put task completed!")
 
-            try:
-                gather_result = await asyncio.wait_for(gather_task, timeout=5.0)
-            except (asyncio.TimeoutError, Exception) as e:
-                tplr.logger.warning(f"Gather attempt failed: {e}")
-                gather_result = None
-                # Wait for next window to maintain sync
-                while self.current_window == step_window:
-                    await asyncio.sleep(0.1)
-                continue
+            tplr.logger.info("Waiting on gather task...")
+            gather_result = await gather_task
+            tplr.logger.info("Gather task completed!")
 
             if gather_result is None:
                 tplr.logger.error(

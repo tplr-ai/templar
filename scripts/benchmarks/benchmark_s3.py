@@ -1,3 +1,5 @@
+# ruff: noqa
+
 import os
 import time
 import logging
@@ -32,26 +34,38 @@ ITERATIONS = int(os.getenv("ITERATIONS", "5"))
 TIMEOUT = int(os.getenv("TIMEOUT", "60"))
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 # File data (120MB)
 EXPECTED_SIZE = 120 * 1024 * 1024  # 120MB
 
+
 # Generate or verify test file
 def get_test_file_data():
     local_file_path = os.getenv("LOCAL_FILE_PATH", OBJECT_KEY)
-    if not os.path.isfile(local_file_path) or os.path.getsize(local_file_path) != EXPECTED_SIZE:
-        logging.info(f"Generating test file '{local_file_path}' with {EXPECTED_SIZE} bytes.")
+    if (
+        not os.path.isfile(local_file_path)
+        or os.path.getsize(local_file_path) != EXPECTED_SIZE
+    ):
+        logging.info(
+            f"Generating test file '{local_file_path}' with {EXPECTED_SIZE} bytes."
+        )
         with open(local_file_path, "wb") as f:
             f.write(b"\0" * EXPECTED_SIZE)
     with open(local_file_path, "rb") as f:
         return f.read()
 
+
 test_data = get_test_file_data()
+
 
 # Cloudflare R2 S3 Client Setup
 class R2Client:
-    def __init__(self, account_id, access_key_id, secret_access_key, region_name, bucket_name):
+    def __init__(
+        self, account_id, access_key_id, secret_access_key, region_name, bucket_name
+    ):
         self.account_id = account_id
         self.access_key_id = access_key_id
         self.secret_access_key = secret_access_key
@@ -83,6 +97,7 @@ class R2Client:
         ) as s3_client:
             await s3_client.put_object(Bucket=self.bucket_name, Key=key, Body=data)
 
+
 # Backblaze S3 Client Setup
 class BackblazeClient:
     def __init__(self, key_id, application_key, region, bucket_name):
@@ -98,7 +113,7 @@ class BackblazeClient:
             endpoint_url=self.endpoint_url,
             aws_access_key_id=self.key_id,
             aws_secret_access_key=self.application_key,
-            config=Config(signature_version="s3v4")
+            config=Config(signature_version="s3v4"),
         )
 
     def get_object(self, client, key):
@@ -107,10 +122,19 @@ class BackblazeClient:
     def put_object(self, client, key, data):
         client.put_object(Bucket=self.bucket_name, Key=key, Body=data)
 
+
 # Benchmark Function
 async def benchmark_s3_object():
-    r2_client = R2Client(R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, CF_REGION_NAME, R2_BUCKET_NAME)
-    b2_client = BackblazeClient(B2_KEY_ID, B2_APPLICATION_KEY, B2_REGION, B2_BUCKET_NAME)
+    r2_client = R2Client(
+        R2_ACCOUNT_ID,
+        R2_ACCESS_KEY_ID,
+        R2_SECRET_ACCESS_KEY,
+        CF_REGION_NAME,
+        R2_BUCKET_NAME,
+    )
+    b2_client = BackblazeClient(
+        B2_KEY_ID, B2_APPLICATION_KEY, B2_REGION, B2_BUCKET_NAME
+    )
 
     # Cloudflare R2 PUT Benchmark
     logging.info("Starting Cloudflare R2 PUT benchmark")
@@ -120,7 +144,7 @@ async def benchmark_s3_object():
         await r2_client.put_object(OBJECT_KEY, test_data)
         elapsed = time.perf_counter() - start
         r2_put_times.append(elapsed)
-        logging.info(f"R2 PUT iteration {i+1}: {elapsed:.2f} seconds")
+        logging.info(f"R2 PUT iteration {i + 1}: {elapsed:.2f} seconds")
 
     r2_avg_put_time = sum(r2_put_times) / len(r2_put_times)
     logging.info(f"R2 PUT average time: {r2_avg_put_time:.2f} seconds")
@@ -134,7 +158,7 @@ async def benchmark_s3_object():
         b2_client.put_object(b2_client_instance, OBJECT_KEY, test_data)
         elapsed = time.perf_counter() - start
         b2_put_times.append(elapsed)
-        logging.info(f"Backblaze S3 PUT iteration {i+1}: {elapsed:.2f} seconds")
+        logging.info(f"Backblaze S3 PUT iteration {i + 1}: {elapsed:.2f} seconds")
 
     b2_avg_put_time = sum(b2_put_times) / len(b2_put_times)
     logging.info(f"Backblaze S3 PUT average time: {b2_avg_put_time:.2f} seconds")
@@ -147,7 +171,7 @@ async def benchmark_s3_object():
         await r2_client.get_object(OBJECT_KEY)
         elapsed = time.perf_counter() - start
         r2_get_times.append(elapsed)
-        logging.info(f"R2 GET iteration {i+1}: {elapsed:.2f} seconds")
+        logging.info(f"R2 GET iteration {i + 1}: {elapsed:.2f} seconds")
 
     r2_avg_get_time = sum(r2_get_times) / len(r2_get_times)
     logging.info(f"R2 GET average time: {r2_avg_get_time:.2f} seconds")
@@ -160,10 +184,11 @@ async def benchmark_s3_object():
         b2_client.get_object(b2_client_instance, OBJECT_KEY)
         elapsed = time.perf_counter() - start
         b2_get_times.append(elapsed)
-        logging.info(f"Backblaze S3 GET iteration {i+1}: {elapsed:.2f} seconds")
+        logging.info(f"Backblaze S3 GET iteration {i + 1}: {elapsed:.2f} seconds")
 
     b2_avg_get_time = sum(b2_get_times) / len(b2_get_times)
     logging.info(f"Backblaze S3 GET average time: {b2_avg_get_time:.2f} seconds")
+
 
 # Main
 if __name__ == "__main__":

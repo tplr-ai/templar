@@ -262,7 +262,24 @@ class Miner:
         while True:
             # 1. Initialize window and update peers
             window_start = tplr.T()
+            # Start the gather in the background:
+            gather_start = tplr.T()
             step_window = self.current_window
+            # Start gathering gradients from peers asynchronously
+            gather_task = asyncio.create_task(
+                self.comms.gather(
+                    my_uid=self.uid,
+                    uids=self.peers,
+                    window=step_window,
+                    key="gradient",
+                    timeout=45,
+                    device="cpu",
+                    local=False,
+                    stale_retention=100,
+                    totalks=self.totalks,
+                )
+            )
+
             self.global_step = (
                 self.current_window - self.start_window
             )  # Update global_step
@@ -427,25 +444,15 @@ class Miner:
             # 6. Await both gather and put tasks concurrently
             # ---------------------------------------------------------------------
 
-            # Start the gather in the background:
-            gather_start = tplr.T()
-            gather_task = asyncio.create_task(
-                self.comms.gather(
-                    my_uid=self.uid,
-                    uids=self.peers,
-                    window=step_window,
-                    key="gradient",
-                    timeout=45,
-                    device="cpu",
-                    local=False,
-                    stale_retention=100,
-                    totalks=totalks,
-                )
-            )
+            tplr.logger.info("Waiting on put task...")
+            await put_task
+            tplr.logger.info("Put task completed!")
 
-            tplr.logger.info("Waiting on background tasks...")
-            gather_result, _ = await asyncio.gather(gather_task, put_task)
-            tplr.logger.info("Background tasks completed!")
+            try:
+                gather_result = await asyncio.wait_for(gather_task, timeout=5.0)
+            except (asyncio.TimeoutError, Exception) as e:
+                tplr.logger.warning(f"Skipping gather results: {e}")
+                gather_result = None
 
             if gather_result is None:
                 tplr.logger.error(

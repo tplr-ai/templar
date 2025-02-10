@@ -91,15 +91,16 @@ def insert_run_metadata(window_id, avg_window_duration, blocks_per_window, gradi
     # Add the new record to the session
     db.session.add(new_run_metadata)
 
-def insert_active_miners(window_id, active_miners, error_miners, bad_miners):    
+def insert_active_miners(window_id, active_miners, error_miners, bad_miners, gather_miners):    
     tplr.logger.info(f"\n window_id: {window_id}")
-    tplr.logger.info(f"\n active_miners: {active_miners}, error_miners: {error_miners}, bad_miners: {bad_miners}")
+    tplr.logger.info(f"\n active_miners: {active_miners}, error_miners: {error_miners}, bad_miners: {bad_miners}, gather_miners: {gather_miners}")
     # Create a new active miners record
     new_active_miners = ActiveMiners(
         window_id=window_id,
         active_miners=",".join(map(str, active_miners)),
         error_miners=",".join(map(str, error_miners)),
         bad_miners=",".join(map(str, bad_miners)),
+        gather_miners=",".join(map(str, gather_miners)),
     )
 
     # Add the new record to the session
@@ -246,11 +247,15 @@ async def get_active_miners(grafana, step_window):
 
     # Prepare Data for Heatmap
     await grafana.print_similarity_matrix(similarities)
+
+    grafana.comms.update_peers_with_buckets()
+    grafana.peers = grafana.comms.peers
+    tplr.logger.info(f"\nGather Peers: {grafana.peers}")
     
     # SAVE THIS LIST TO DB AND SHOW IN GRAFANA!
-    bad_peers = await grafana.analyze_similarities(similarities, active_peers, window=step_window, threshold=0.9)
+    bad_peers = await grafana.analyze_similarities(similarities, active_peers, window=step_window, threshold=0.99)
     tplr.logger.info(f"\nBad peers {bad_peers}")
-    return active_miners_uids, error_miners_uids, bad_peers
+    return active_miners_uids, error_miners_uids, bad_peers, grafana.peers
 
 # Async function moved from grafana_tools.py
 async def run_grafana():
@@ -283,8 +288,8 @@ async def run_grafana():
             insert_run_metadata(window_id, grafana.get_avg_wnd_duration(), grafana.hparams.blocks_per_window, 100)
             tplr.logger.info(f"\nInserted a run metadata {step_window}")
             # Insert active miners
-            active_miners_uids, error_miners_uids, bad_miners_uids = await get_active_miners(grafana, step_window)
-            insert_active_miners(window_id, active_miners_uids, error_miners_uids, bad_miners_uids)
+            active_miners_uids, error_miners_uids, bad_miners_uids, gather_miners_uids = await get_active_miners(grafana, step_window)
+            insert_active_miners(window_id, active_miners_uids, error_miners_uids, bad_miners_uids, gather_miners_uids)
             tplr.logger.info(f"\nInserted active miners {step_window}")
 
             # Insert validator eval info & eval info detail

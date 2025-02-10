@@ -79,7 +79,3 @@ FROM aa
 JOIN tbl_window_info bb ON aa.maxid = bb.id
 JOIN tbl_eval_info_detail cc ON aa.maxid = cc.window_id
 ORDER BY cc.miner_id;
-
-
-SELECT   'UID' || miner_id::TEXT miner_id, sum(score) score , window_time FROM v_eval_info_detail GROUP BY window_time, miner_id HAVING sum(score) > 0;
-SELECT   'UID' || miner_id::TEXT miner_id, sum(moving_avg_score) score , window_time FROM v_eval_info_detail GROUP BY window_time, miner_id HAVING sum(moving_avg_score) > 0;

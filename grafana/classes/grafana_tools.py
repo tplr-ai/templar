@@ -15,7 +15,7 @@ from torch.nn.functional import cosine_similarity
 import numpy as np
 import os, json
 CF_REGION_NAME: str = "enam"
-WINDOW_OFFSET = 1
+WINDOW_OFFSET = 2
 
 class Grafana:
     
@@ -99,6 +99,7 @@ class Grafana:
             daemon=True,
         ).start()
         self.comms.start_commitment_fetcher()
+        self.comms.start_background_tasks()
         self.start_window, self.started_time = await self.get_start_window()
         tplr.logger.info(f"Using start_window: {self.start_window}")
         tplr.logger.info(f"Started Time: {self.started_time}")
@@ -299,7 +300,6 @@ class Grafana:
                 error_peers = self.grad_error_dict.get(step_window, [])
                 
                 print(f"\n{'-' * 20} Window: {step_window}, Global Step: {global_step} {'-' * 20}")
-                self.comms.update_peers_with_buckets()
                 # print(self.get_metagraph_info())
 
                 avg_wnd_duration = self.get_avg_wnd_duration()
@@ -309,13 +309,17 @@ class Grafana:
                 active_uids.sort()
                 print(f"window: {step_window}, Length of Actives: {len(active_uids)} Active list: {active_uids}")
                 
+                self.comms.update_peers_with_buckets()
+                self.peers = self.comms.peers
+                print(f"Gather Peers: {self.peers}")
+                
                 # for peer in active_peers:
                 #     print(f"Active Peer Data: {peer}")
                 
                 # SAVE THIS METADATA TO DB AND SHOW IN GRAFANA!
                 downloaded_uids = [int(uid) for uid in gradients.keys()]
-                download_uids.sort()
-                print(f"Downloaded Length : {len(download_uids)}, UIDs: {download_uids}")
+                downloaded_uids.sort()
+                print(f"Downloaded Length : {len(downloaded_uids)}, UIDs: {downloaded_uids}")
                 # for uid in gradients.keys():
                 #     print(f"Metadata for UID {uid}: {gradients_metadata[uid]}")
 
@@ -325,7 +329,7 @@ class Grafana:
                 await self.print_similarity_matrix(similarities)
                 
                 # SAVE THIS LIST TO DB AND SHOW IN GRAFANA!
-                bad_peers = await self.analyze_similarities(similarities, active_peers, window=step_window, threshold=0.9)
+                bad_peers = await self.analyze_similarities(similarities, active_peers, window=step_window, threshold=0.99)
                 
                 step_window = self.current_window - WINDOW_OFFSET
                 gradients = {}

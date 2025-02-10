@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def load_bucket_secrets():
+    load_dotenv()
     secrets = {
         "gradients": {
             "account_id": os.environ.get("R2_GRADIENTS_ACCOUNT_ID"),

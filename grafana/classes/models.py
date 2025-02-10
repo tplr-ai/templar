@@ -38,6 +38,7 @@ class ActiveMiners(db.Model):
     active_miners = db.Column(db.String(1000), nullable=True)
     error_miners = db.Column(db.String(1000), nullable=True)
     bad_miners = db.Column(db.String(1000), nullable=True)
+    gather_miners = db.Column(db.String(1000), nullable=True)
 
 class Neuron(db.Model):
     __tablename__ = 'tbl_neuron'

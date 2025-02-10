@@ -93,14 +93,14 @@ def insert_run_metadata(window_id, avg_window_duration, blocks_per_window, gradi
 
 def insert_active_miners(window_id, active_miners, error_miners, bad_miners, gather_miners):    
     tplr.logger.info(f"\n window_id: {window_id}")
-    tplr.logger.info(f"\n active_miners: {active_miners}, error_miners: {error_miners}, bad_miners: {bad_miners}, gather_miners: {gather_miners}")
+    tplr.logger.info(f"\n active_miners: {active_miners}, error_miners: {error_miners}, bad_miners: {bad_miners}, gather_miners: {sorted(gather_miners)}")
     # Create a new active miners record
     new_active_miners = ActiveMiners(
         window_id=window_id,
         active_miners=",".join(map(str, active_miners)),
         error_miners=",".join(map(str, error_miners)),
         bad_miners=",".join(map(str, bad_miners)),
-        gather_miners=",".join(map(str, gather_miners)),
+        gather_miners=",".join(map(str, sorted(gather_miners))),
     )
 
     # Add the new record to the session
@@ -271,37 +271,40 @@ async def run_grafana():
 
     while True:
         if step_window != grafana.current_window - WINDOW_OFFSET:
-            step_window = grafana.current_window - WINDOW_OFFSET
-            tplr.logger.info(f"\n{'-' * 20} Window: {step_window} {'-' * 20}")
-            grafana.comms.update_peers_with_buckets()
-            # Check a version
-            version = get_tplr_version()
-            version_record = get_current_version_record()
-            if not version_record or version != version_record.version:
-                update_current_version(version, version_record, grafana.started_time)
-                tplr.logger.info(f"\nUpdated version {version} started_time {grafana.started_time}")
-            # Insert a new window
-            global_step = step_window - grafana.start_window
-            window_id = insert_window(step_window, global_step, grafana.hparams.learning_rate)
-            tplr.logger.info(f"\nInserted a new window {step_window}, window_id {window_id}")
-            # Insert a run metadata
-            insert_run_metadata(window_id, grafana.get_avg_wnd_duration(), grafana.hparams.blocks_per_window, 100)
-            tplr.logger.info(f"\nInserted a run metadata {step_window}")
-            # Insert active miners
-            active_miners_uids, error_miners_uids, bad_miners_uids, gather_miners_uids = await get_active_miners(grafana, step_window)
-            insert_active_miners(window_id, active_miners_uids, error_miners_uids, bad_miners_uids, gather_miners_uids)
-            tplr.logger.info(f"\nInserted active miners {step_window}")
+            try:
+                step_window = grafana.current_window - WINDOW_OFFSET
+                tplr.logger.info(f"\n{'-' * 20} Window: {step_window} {'-' * 20}")
+                grafana.comms.update_peers_with_buckets()
+                # Check a version
+                version = get_tplr_version()
+                version_record = get_current_version_record()
+                if not version_record or version != version_record.version:
+                    update_current_version(version, version_record, grafana.started_time)
+                    tplr.logger.info(f"\nUpdated version {version} started_time {grafana.started_time}")
+                # Insert a new window
+                global_step = step_window - grafana.start_window
+                window_id = insert_window(step_window, global_step, grafana.hparams.learning_rate)
+                tplr.logger.info(f"\nInserted a new window {step_window}, window_id {window_id}")
+                # Insert a run metadata
+                insert_run_metadata(window_id, grafana.get_avg_wnd_duration(), grafana.hparams.blocks_per_window, 100)
+                tplr.logger.info(f"\nInserted a run metadata {step_window}")
+                # Insert active miners
+                active_miners_uids, error_miners_uids, bad_miners_uids, gather_miners_uids = await get_active_miners(grafana, step_window)
+                insert_active_miners(window_id, active_miners_uids, error_miners_uids, bad_miners_uids, gather_miners_uids)
+                tplr.logger.info(f"\nInserted active miners {step_window}")
 
-            # Insert validator eval info & eval info detail
-            insert_validator_eval_info(window_id)
-            tplr.logger.info(f"\nInserted validator eval info {step_window}")
+                # Insert validator eval info & eval info detail
+                insert_validator_eval_info(window_id)
+                tplr.logger.info(f"\nInserted validator eval info {step_window}")
 
-            # Insert gradients
-            insert_gradients(window_id, active_miners)
-            tplr.logger.info(f"\nInserted gradients {step_window}")
+                # Insert gradients
+                insert_gradients(window_id, active_miners)
+                tplr.logger.info(f"\nInserted gradients {step_window}")
 
-            # Commit the session to save the changes
-            db.session.commit()
+                # Commit the session to save the changes
+                db.session.commit()
+            except Exception as e:
+                tplr.logger.error(f"Exception - {e}")
 
         grafana.grad_dict.setdefault(step_window, [])
         grafana.grad_error_dict.setdefault(step_window, [])

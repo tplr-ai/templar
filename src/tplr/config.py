@@ -19,12 +19,14 @@
 # Global imports
 import os
 import botocore.config
+from dotenv import load_dotenv
 
 # Local imports
 from .logging import logger
 
 
 def load_bucket_secrets():
+    load_dotenv()
     secrets = {
         "gradients": {
             "account_id": os.environ.get("R2_GRADIENTS_ACCOUNT_ID"),

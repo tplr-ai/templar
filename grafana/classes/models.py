@@ -51,7 +51,7 @@ class Neuron(db.Model):
 class NeuronThirdParty(db.Model):
     __tablename__ = 'tbl_neuron_third_party'
     id = db.Column(db.Integer, primary_key=True)
-    neuron_id = db.Column(db.Integer, db.ForeignKey('tbl_neuron.id'), nullable=False)
+    neuron_id = db.Column(db.Integer, db.ForeignKey('tbl_neuron.uid'), nullable=False)
     r2_bucket_name = db.Column(db.String(200), nullable=False)
     r2_read_access_key_id = db.Column(db.String(200), nullable=False)
     r2_read_secrect_access_key = db.Column(db.String(200), nullable=False)
@@ -60,7 +60,7 @@ class ValidatorEvalInfo(db.Model):
     __tablename__ = 'tbl_validator_eval_info'
     id = db.Column(db.Integer, primary_key=True)
     window_id = db.Column(db.Integer, db.ForeignKey('tbl_window_info.id'), nullable=False)
-    neuron_id = db.Column(db.Integer, db.ForeignKey('tbl_neuron.id'), nullable=False)
+    neuron_id = db.Column(db.Integer, db.ForeignKey('tbl_neuron.uid'), nullable=False)
     loss_before = db.Column(db.Float, nullable=True)
     loss_after = db.Column(db.Float, nullable=True)
     loss_improvement = db.Column(db.Float, nullable=True)
@@ -76,7 +76,7 @@ class Gradients(db.Model):
     __tablename__ = 'tbl_gradients'
     id = db.Column(db.Integer, primary_key=True)
     window_id = db.Column(db.Integer, db.ForeignKey('tbl_window_info.id'), nullable=False)
-    neuron_id = db.Column(db.Integer, db.ForeignKey('tbl_neuron.id'), nullable=False)
+    neuron_id = db.Column(db.Integer, db.ForeignKey('tbl_neuron.uid'), nullable=False)
     r2_bucketname = db.Column(db.String(200), nullable=False)
     gradient_filename = db.Column(db.String(200), nullable=False)
     gradient_filesize = db.Column(db.Float, nullable=False)
@@ -86,8 +86,8 @@ class EvalInfoDetail(db.Model):
     __tablename__ = 'tbl_eval_info_detail'
     id = db.Column(db.Integer, primary_key=True)
     window_id = db.Column(db.Integer, db.ForeignKey('tbl_window_info.id'), nullable=False)
-    vali_id = db.Column(db.Integer, db.ForeignKey('tbl_neuron.id'), nullable=False)
-    miner_id = db.Column(db.Integer, db.ForeignKey('tbl_neuron.id'), nullable=False)
+    vali_id = db.Column(db.Integer, db.ForeignKey('tbl_neuron.uid'), nullable=False)
+    miner_id = db.Column(db.Integer, db.ForeignKey('tbl_neuron.uid'), nullable=False)
     score = db.Column(db.Float, nullable=False)
     moving_avg_score = db.Column(db.Float, nullable=True)
     weight = db.Column(db.Float, nullable=True)

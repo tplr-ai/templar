@@ -1,7 +1,7 @@
 CREATE VIEW v_version AS
 SELECT 
     version,
-    TO_CHAR(created_at, 'Mon DD, YYYY, HH12:MI AM') AS created_at,
+    TO_CHAR(created_at, 'Mon DD, YYYY, HH12:MI AM +00:00') AS created_at,
     EXTRACT(HOUR FROM (NOW() - created_at)) || 'h ' ||
     EXTRACT(MINUTE FROM (NOW() - created_at)) || 'min ' ||
     FLOOR(EXTRACT(SECOND FROM (NOW() - created_at))) || 's' AS up_time
@@ -50,10 +50,12 @@ SELECT
     window_number, 
     avg_window_duration, 
     gradient_retention,
-	blocks_per_window
+	blocks_per_window,
+	gather_miners
 FROM aa
 JOIN tbl_window_info bb ON aa.maxid = bb.id
-JOIN tbl_run_metadata cc ON aa.maxid = cc.window_id;
+JOIN tbl_run_metadata cc ON aa.maxid = cc.window_id
+JOIN tbl_active_miners dd ON aa.maxid = dd.window_id;
 
 CREATE VIEW v_eval_info_detail AS
 SELECT 

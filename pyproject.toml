@@ -30,7 +30,6 @@ dependencies = [
     "s3fs",
     "pyarrow",
     "scipy"
-
 ]
 
 [project.optional-dependencies]

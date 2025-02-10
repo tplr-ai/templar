@@ -1,3 +1,19 @@
+# The MIT License (MIT)
+# © 2025 tplr.ai
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+# the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
 # type: ignore
 import os
 import re
@@ -51,6 +67,7 @@ class Comms(ChainManager):
     ):
         self.wallet = wallet
         self.uid = uid
+
         # Create temp directory for this instance
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
         os.makedirs(self.temp_dir, exist_ok=True)
@@ -706,7 +723,7 @@ class Comms(ChainManager):
         uid: str,
         window: int,
         key: str,
-        timeout: int = 5,
+        timeout: int = 10,
         local: bool = True,
         stale_retention: int = 10,
     ) -> Optional[tuple[dict, int]]:
@@ -791,71 +808,17 @@ class Comms(ChainManager):
             # Retry after a short delay
             await asyncio.sleep(0.1)
 
-    # async def _store_gradient_data(
-    #     self,
-    #     uid: str,
-    #     window: int,
-    #     global_step: int,
-    #     state_dict_resp: dict,
-    #     global_step_resp: int,
-    # ):
-    #     """Separate async function to handle gradient storage"""
-    #     try:
-    #         stored_state_dict = {}
-    #         for key, value in state_dict_resp.items():
-    #             if isinstance(value, torch.Tensor):
-    #                 stored_state_dict[key] = value.cpu()
-    #             else:
-    #                 stored_state_dict[key] = value
-
-    #         gradient_data = {
-    #             "state_dict": stored_state_dict,
-    #             "metadata": {
-    #                 "uid": uid,
-    #                 "window": window,
-    #                 "global_step": global_step_resp,
-    #                 "timestamp": time.time(),
-    #                 "version": __version__,
-    #             },
-    #         }
-
-    #         # Create temporary file
-    #         temp_file = os.path.join(
-    #             self.temp_dir, f"gradient_{uid}_{window}_{global_step}.npz"
-    #         )
-
-    #         np.savez_compressed(temp_file, **gradient_data)
-    #         key = f"gathers/{__version__}/{uid}/{window}/{global_step}.npz"
-
-    #         # Create separate tasks for upload and cleanup
-    #         upload_task = asyncio.create_task(
-    #             self.s3_put_object(key=key, file_path=temp_file)
-    #         )
-
-    #         # Schedule cleanup to run after upload completes
-    #         upload_task.add_done_callback(
-    #             lambda _: asyncio.create_task(self._cleanup_temp_file(temp_file))
-    #         )
-
-    #     except Exception as e:
-    #         tplr.logger.warning(f"Failed to store gradient from UID {uid}: {e}")
-    #         # Ensure cleanup happens even on error
-    #         if "temp_file" in locals():
-    #             asyncio.create_task(self._cleanup_temp_file(temp_file))
-
     async def gather(
         self,
-        state_dict: Optional[Dict[str, torch.Tensor]],
         my_uid: str,
         uids: List[str],
         window: int,
         key: str,
         timeout: int,
         device: str,
-        global_step: int,
+        totalks: dict,
         local: bool = True,
         stale_retention: int = 10,
-        store_gathers: bool = False,  # Parameter for storing gathered gradients
     ) -> Optional[SimpleNamespace]:
         """Gather operation with individual gradient normalization and connection management."""
         start_time = time.time()
@@ -866,146 +829,120 @@ class Comms(ChainManager):
         )
         tplr.logger.debug(f"Target UIDs for gathering: {uids}")
 
-        # Put own state if provided
-        if state_dict is not None:
-            tplr.logger.debug(f"Putting own state dict for UID {my_uid}")
-            processed_state_dict = {}
-            for k, v in state_dict.items():
-                if isinstance(v, torch.Tensor):
-                    processed_state_dict[k] = v.to(device)
-                else:
-                    processed_state_dict[k] = v
-            await self.put(
-                state_dict=processed_state_dict,
-                uid=str(my_uid),
-                window=window,
-                key=key,
-                global_step=global_step,
-                local=local,
-                stale_retention=stale_retention,
-            )
-            upload_size = sum(
-                tensor.element_size() * tensor.nelement()
-                for tensor in processed_state_dict.values()
-                if isinstance(tensor, torch.Tensor)
-            )
-            metrics["upload_bytes"] += upload_size
-            tplr.logger.debug(f"Uploaded {upload_size} bytes of own state")
-
-        await asyncio.sleep(0.1)
-
-        # Initialize variables
         aggregated_state_dict = {}
         valid_uids = []
+        skipped_uids = []  # Retain UIDs that are skipped.
         global_steps = []
 
-        # Process UIDs in batches to manage connections
-        BATCH_SIZE = 20
-        for i in range(0, len(uids), BATCH_SIZE):
-            batch_uids = uids[i : i + BATCH_SIZE]
+        async with self.client_semaphore:
+            batch_tasks = [
+                self.get_with_retry(
+                    uid=uid,
+                    window=window,
+                    key=key,
+                    timeout=timeout,
+                    local=local,
+                    stale_retention=stale_retention,
+                )
+                for uid in uids
+            ]
 
-            async with self.client_semaphore:
-                # Prepare gather tasks for batch
-                batch_tasks = [
-                    self.get_with_retry(
-                        uid=uid,
-                        window=window,
-                        key=key,
-                        timeout=timeout
-                        // (len(uids) // BATCH_SIZE + 1),  # Adjust timeout per batch
-                        local=local,
-                        stale_retention=stale_retention,
-                    )
-                    for uid in batch_uids
-                ]
+            try:
+                batch_responses = await asyncio.gather(
+                    *batch_tasks, return_exceptions=True
+                )
 
-                # Process batch responses
-                try:
-                    batch_responses = await asyncio.gather(
-                        *batch_tasks, return_exceptions=True
-                    )
+                for uid, response in zip(uids, batch_responses):
+                    if isinstance(response, Exception):
+                        tplr.logger.debug(f"Error from UID {uid}: {str(response)}")
+                        skipped_uids.append(uid)
+                        continue
+                    if response is None:
+                        tplr.logger.debug(f"No data received from UID {uid}")
+                        skipped_uids.append(uid)
+                        continue
 
-                    for uid, response in zip(batch_uids, batch_responses):
-                        if isinstance(response, Exception):
-                            tplr.logger.debug(
-                                f"Error getting response from UID {uid}: {str(response)}"
-                            )
-                            continue
+                    try:
+                        state_dict_resp, global_step_resp = response
+                        tplr.logger.debug(
+                            f"Received state dict and global step {global_step_resp} from UID {uid}"
+                        )
+                    except (TypeError, ValueError) as e:
+                        tplr.logger.debug(
+                            f"Invalid response format from UID {uid}: {e}"
+                        )
+                        skipped_uids.append(uid)
+                        continue
 
-                        if response is None:
-                            tplr.logger.debug(f"No data received from UID {uid}")
-                            continue
+                    if state_dict_resp is None:
+                        tplr.logger.debug(f"Empty state dict from UID {uid}")
+                        skipped_uids.append(uid)
+                        continue
 
-                        try:
-                            state_dict_resp, global_step_resp = response
-                            tplr.logger.debug(
-                                f"Received state dict and global step {global_step_resp} from UID {uid}"
-                            )
-                        except (TypeError, ValueError) as e:
-                            tplr.logger.debug(
-                                f"Invalid response format from UID {uid}: {e}"
-                            )
-                            continue
-
-                        if state_dict_resp is None:
-                            tplr.logger.debug(f"Empty state dict from UID {uid}")
-                            continue
-
-                        # # Store raw gradients if enabled
-                        # if store_gathers:
-                        #     asyncio.create_task(
-                        #         self._store_gradient_data(
-                        #             uid=uid,
-                        #             window=window,
-                        #             global_step=global_step,
-                        #             state_dict_resp=state_dict_resp,
-                        #             global_step_resp=global_step_resp,
-                        #         )
-                        #     )
-
-                        # Process tensors (keeping existing normalization logic)
-                        for param_name, tensor in state_dict_resp.items():
-                            if isinstance(tensor, torch.Tensor):
-                                if param_name.endswith("vals"):
-                                    tensor = tensor.to(device)
-                                    norm = torch.norm(tensor)
-                                    normalized = tensor / (norm + 1e-8)
-                                    if param_name not in aggregated_state_dict:
-                                        aggregated_state_dict[param_name] = []
-                                    aggregated_state_dict[param_name].append(normalized)
-                                else:
-                                    if param_name not in aggregated_state_dict:
-                                        aggregated_state_dict[param_name] = []
-                                    aggregated_state_dict[param_name].append(
-                                        tensor.to(device)
-                                    )
-                                metrics["download_bytes"] += (
-                                    tensor.element_size() * tensor.nelement()
+                    # ---------- Begin Compressed Indices Check ----------
+                    valid_response = True
+                    for param_name, tensor in state_dict_resp.items():
+                        if param_name.endswith("idxs"):
+                            base_name = param_name[:-4]
+                            totalk = totalks.get(base_name)
+                            if totalk is None:
+                                tplr.logger.warning(
+                                    f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
                                 )
+                                valid_response = False
+                                break
+                            try:
+                                self.check_compressed_indices(
+                                    param_name,
+                                    tensor.to(device),
+                                    totalk,
+                                    allowed_topk=self.hparams.topk_compression,
+                                )
+                            except Exception as e:
+                                tplr.logger.warning(
+                                    f"Compressed indices check failed for parameter {param_name} from UID {uid}: {e}"
+                                )
+                                valid_response = False
+                                break
+                    if not valid_response:
+                        skipped_uids.append(uid)
+                        continue
+                    # ---------- End Compressed Indices Check ----------
 
-                        valid_uids.append(uid)
-                        global_steps.append(global_step_resp)
+                    # Process tensors (with normalization on 'vals' keys).
+                    for param_name, tensor in state_dict_resp.items():
+                        if isinstance(tensor, torch.Tensor):
+                            if param_name.endswith("vals"):
+                                tensor = tensor.to(device)
+                                norm = torch.norm(tensor)
+                                normalized = tensor / (norm + 1e-8)
+                                aggregated_state_dict.setdefault(param_name, []).append(
+                                    normalized
+                                )
+                            else:
+                                aggregated_state_dict.setdefault(param_name, []).append(
+                                    tensor.to(device)
+                                )
+                            metrics["download_bytes"] += (
+                                tensor.element_size() * tensor.nelement()
+                            )
 
-                except Exception as e:
-                    tplr.logger.error(
-                        f"Error processing batch {i}-{i + BATCH_SIZE}: {str(e)}"
-                    )
-                    continue
+                    valid_uids.append(uid)
+                    global_steps.append(global_step_resp)
 
-        # If no valid responses, return None
+            except Exception as e:
+                tplr.logger.error(f"Error processing uid batch: {str(e)}")
+
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")
             return None
 
         total_time = time.time() - start_time
-        tplr.logger.debug(
-            f"Gather operation completed in {total_time:.2f}s. "
-            f"Success rate: {len(valid_uids)}/{len(uids)}, "
-            f"Upload: {metrics['upload_bytes']} bytes, "
-            f"Download: {metrics['download_bytes']} bytes"
+        tplr.logger.info(
+            f"Gather completed in {total_time:.2f}s. Success rate: {len(valid_uids)}/{len(uids)}, "
+            f"Upload: {metrics['upload_bytes']} bytes, Download: {metrics['download_bytes']} bytes"
         )
 
-        # Create result namespace
         result = SimpleNamespace(
             time=total_time,
             upload_bytes=metrics["upload_bytes"],
@@ -1014,8 +951,8 @@ class Comms(ChainManager):
             state_dict=SimpleNamespace(**aggregated_state_dict),
             uids=valid_uids,
             global_steps=global_steps,
+            skipped_uids=skipped_uids,
         )
-
         return result
 
     async def _cleanup_temp_file(self, file_path: str):
@@ -1247,7 +1184,7 @@ class Comms(ChainManager):
             if checkpoints:
                 # choose the last modified checkpoint
                 latest = max(checkpoints, key=lambda x: x["modified"])
-                checkpoint_data = torch.load(latest["path"])
+                checkpoint_data = torch.load(latest["path"], weights_only=True)
                 return checkpoint_data, latest["window"]
             else:
                 return None
@@ -1306,6 +1243,7 @@ class Comms(ChainManager):
         device: str,
         peers: list,
         uid: str,
+        totalks: dict,
     ) -> tuple[
         bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
     ]:
@@ -1349,6 +1287,8 @@ class Comms(ChainManager):
                 )
                 return False, {}, 0, optimizer, scheduler
 
+            # Instead of computing global_step from the entire training period,
+            # compute window_difference as the number of missed windows.
             window_difference = current_window - checkpoint_current_window
             global_step = current_window - checkpoint_start_window
 
@@ -1357,8 +1297,8 @@ class Comms(ChainManager):
                 f"local_current={current_window}, window_diff={window_difference}, global_step={global_step}"
             )
 
-            # 2) Sync scheduler with global_step if needed
-            steps_needed = global_step - scheduler.last_epoch
+            # 2) Sync scheduler with the missing window count (only catch-up missed windows)
+            steps_needed = window_difference
             if steps_needed > 0:
                 tplr.logger.info(
                     f"Syncing optimizer/scheduler by stepping {steps_needed} times…"
@@ -1380,7 +1320,7 @@ class Comms(ChainManager):
             tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
 
             # 4) Option: Parallel gather in batches, but apply in ascending order
-            BATCH_SIZE = 5  # tweak based on memory/time constraints
+            BATCH_SIZE = 20  # tweak based on memory/time constraints
             windows_to_catch_up = range(
                 checkpoint_current_window + 1, current_window + 1
             )
@@ -1391,7 +1331,6 @@ class Comms(ChainManager):
                 # Launch gathers in parallel
                 tasks = [
                     self.gather(
-                        state_dict={},
                         my_uid=uid,
                         uids=peers,
                         window=w,
@@ -1400,7 +1339,7 @@ class Comms(ChainManager):
                         device=device,
                         local=False,
                         stale_retention=100,
-                        global_step=global_step,
+                        totalks=totalks,
                     )
                     for w in batch_windows
                 ]
@@ -1586,26 +1525,25 @@ class Comms(ChainManager):
         uid: str,
         peers: List[int],
         device: str,
+        totalks: dict,
         global_step: int,
     ) -> Dict[int, SimpleNamespace]:
         """Gather gradients for multiple windows in parallel."""
         try:
             gather_tasks = [
                 self.gather(
-                    state_dict={},
                     my_uid=uid,
                     uids=peers,
                     window=w,
                     key="gradient",
                     timeout=30,
                     device=device,
+                    totalks=totalks,
                     local=False,
                     stale_retention=100,
-                    global_step=global_step,
                 )
                 for w in batch_windows
             ]
-
             # Wait for all gather tasks to complete
             batch_results = await asyncio.gather(*gather_tasks, return_exceptions=True)
 
@@ -1704,11 +1642,11 @@ class Comms(ChainManager):
 
     async def check_and_perform_catch_up(
         self,
-        model: LlamaForCausalLM,
+        model: "LlamaForCausalLM",
         optimizer: SGD,
         scheduler: SequentialLR,
-        transformer: TransformDCT,
-        compressor: CompressDCT,
+        transformer: "TransformDCT",
+        compressor: "CompressDCT",
         current_window: int,
         sync_window: int,
         device: str,
@@ -1716,7 +1654,8 @@ class Comms(ChainManager):
         uid: str,
         global_step: int,
         hparams,
-    ) -> Tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
+        totalks: dict,  # totalks dictionary passed along
+    ) -> Tuple[bool, int, SGD, SequentialLR]:
         window_gap = current_window - sync_window
 
         if window_gap <= hparams.catch_up_threshold:
@@ -1730,26 +1669,25 @@ class Comms(ChainManager):
         tplr.logger.info(f"Initiating catch-up for {window_gap} windows")
 
         try:
-            # Process windows in batches
+            # Process windows in batches.
             for i in range(
                 sync_window + 1, current_window + 1, hparams.catch_up_batch_size
             ):
                 batch_end = min(i + hparams.catch_up_batch_size, current_window + 1)
                 batch_windows = list(range(i, batch_end))
 
-                # Check timeout
                 if time.time() - catch_up_start > hparams.catch_up_timeout:
                     tplr.logger.warning("Catch-up exceeded maximum time")
                     return False, global_step, optimizer, scheduler
 
                 try:
-                    # Use asyncio.wait_for to handle timeout for gather operation
                     gathered_data = await asyncio.wait_for(
                         self._gather_window_batch(
                             batch_windows=batch_windows,
                             uid=uid,
                             peers=peers,
                             device=device,
+                            totalks=totalks,
                             global_step=global_step,
                         ),
                         timeout=max(
@@ -1757,14 +1695,11 @@ class Comms(ChainManager):
                             hparams.catch_up_timeout - (time.time() - catch_up_start),
                         ),
                     )
-
-                    # Verify gathered_data is a dict
                     if not isinstance(gathered_data, dict):
                         raise TypeError(
                             f"Expected dict from _gather_window_batch, got {type(gathered_data)}"
                         )
-
-                    # Apply updates in order
+                    # Apply updates in ascending order.
                     for w in sorted(gathered_data.keys()):
                         success, new_global_step = await self._apply_gathered_gradients(
                             gather_result=gathered_data[w],
@@ -1777,7 +1712,6 @@ class Comms(ChainManager):
                             window=w,
                             global_step=global_step,
                         )
-
                         if success:
                             global_step = new_global_step
 
@@ -1797,3 +1731,85 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.error(f"Catch-up failed: {str(e)}")
             return False, global_step, optimizer, scheduler
+
+    def check_compressed_indices(
+        self, param_name: str, idxs, totalk: int, allowed_topk: int = None
+    ) -> None:
+        """
+        Validates that the compressed indices for a given parameter meet the conditions:
+          1. If indices are provided as a flat list/tensor, the length must equal min(self.hparams.topk_compression, totalk).
+          2. If the indices are multi-dimensional (typically when compressed per row),
+             then the size of the last dimension must equal min(self.hparams.topk_compression, totalk).
+          3. Every index must be in the valid range [0, totalk-1].
+
+        This function handles both flat and nested (e.g. per-row) indices.
+        """
+        if allowed_topk is None:
+            allowed_topk = self.hparams.topk_compression
+        # Only allow up to the maximum available columns.
+        allowed_topk = min(allowed_topk, totalk)
+
+        def validate_list(indices):
+            # Expected flat list length must equal allowed_topk.
+            if len(indices) != allowed_topk:
+                raise ValueError(
+                    f"[{param_name}] Invalid number of indices: got {len(indices)} but expected {allowed_topk}"
+                )
+            for idx in indices:
+                try:
+                    idx_int = int(idx)
+                except Exception as e:
+                    raise ValueError(
+                        f"[{param_name}] Failed to convert index {idx} to int: {e}"
+                    )
+                if idx_int < 0 or idx_int >= totalk:
+                    raise ValueError(
+                        f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
+                    )
+
+        # If idxs is a tensor:
+        if torch.is_tensor(idxs):
+            if idxs.ndim == 1:
+                # Flat tensor: expect exactly allowed_topk elements.
+                if idxs.size(0) != allowed_topk:
+                    raise ValueError(
+                        f"[{param_name}] Invalid number of indices: got {idxs.size(0)} but expected {allowed_topk}"
+                    )
+                for idx in idxs.tolist():
+                    if not (0 <= int(idx) < totalk):
+                        raise ValueError(
+                            f"[{param_name}] Index {int(idx)} out of bounds (totalk = {totalk})"
+                        )
+            else:
+                # Multi-dimensional: check that the last dimension equals allowed_topk.
+                if idxs.size(-1) != allowed_topk:
+                    raise ValueError(
+                        f"[{param_name}] Last dimension size invalid: got {idxs.size(-1)} but expected {allowed_topk}"
+                    )
+                # Check all indices in the tensor.
+                for idx in idxs.flatten().tolist():
+                    if not (0 <= int(idx) < totalk):
+                        raise ValueError(
+                            f"[{param_name}] Index {int(idx)} out of bounds (totalk = {totalk})"
+                        )
+        # If idxs is a list or tuple
+        elif isinstance(idxs, (list, tuple)):
+            if idxs and isinstance(idxs[0], (list, tuple)):
+                # Nested structure: check each sub-list.
+                for sublist in idxs:
+                    validate_list(sublist)
+            else:
+                # Flat list.
+                validate_list(list(idxs))
+        else:
+            # Single value provided.
+            try:
+                idx_int = int(idxs)
+            except Exception as e:
+                raise ValueError(
+                    f"[{param_name}] Failed to convert index {idxs} to int: {e}"
+                )
+            if idx_int < 0 or idx_int >= totalk:
+                raise ValueError(
+                    f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
+                )

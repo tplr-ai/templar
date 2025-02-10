@@ -14,8 +14,7 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
-# fmt: off
-#type: ignore
+# type: ignore
 
 # Global imports
 import time
@@ -84,7 +83,6 @@ class ChainManager:
         self.wallet = wallet
         self.bucket = bucket
 
-
     def start_commitment_fetcher(self):
         """Attach to the already-running event loop."""
         if self._fetch_task is None:
@@ -98,8 +96,10 @@ class ChainManager:
             try:
                 # Create new subtensor instance for metagraph sync
                 subtensor_sync = bt.subtensor(config=self.config)
-                await asyncio.to_thread(lambda: self.metagraph.sync(subtensor=subtensor_sync))
-                
+                await asyncio.to_thread(
+                    lambda: self.metagraph.sync(subtensor=subtensor_sync)
+                )
+
                 # Create new subtensor instance for commitments
                 commitments = await self.get_commitments()
                 if commitments:
@@ -278,7 +278,6 @@ class ChainManager:
         except ValidationError as e:
             raise ValueError(f"Invalid data in commitment: {e}")
 
-
     async def get_commitments(self, block: Optional[int] = None) -> Dict[int, Bucket]:
         """Retrieves all bucket commitments from the chain.
 
@@ -352,7 +351,7 @@ class ChainManager:
         substrate = subtensor.substrate
         result = substrate.query_map(
             module="Commitments",
-            storage_function="CommitmentOf", 
+            storage_function="CommitmentOf",
             params=[self.netuid],
             block_hash=None if block is None else substrate.get_block_hash(block),
         )
@@ -398,7 +397,6 @@ class ChainManager:
                 continue
 
         return commitments
-
 
     async def get_bucket_for_neuron(self, wallet: "bt.wallet") -> Optional[Bucket]:
         """Get bucket configuration for a specific neuron's wallet
@@ -452,17 +450,21 @@ class ChainManager:
     def update_peers_with_buckets(self):
         """Updates peers for gradient gathering, evaluation peers, and tracks inactive peers."""
         # Create mappings
-        uid_to_stake = dict(zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist()))
-        uid_to_incentive = dict(zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist()))
+        uid_to_stake = dict(
+            zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist())
+        )
+        uid_to_incentive = dict(
+            zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist())
+        )
 
         # Get currently active peers
         active_peers = set(int(uid) for uid in self.active_peers)
-        
+
         # Track inactive peers (previously active peers that are no longer active)
         previously_active = set(self.eval_peers)
         newly_inactive = previously_active - active_peers
         self.inactive_peers = newly_inactive
-        
+
         logger.debug(f"Active peers: {active_peers}")
         logger.info(f"Newly inactive peers: {newly_inactive}")
         logger.debug(f"Stakes: {uid_to_stake}")
@@ -473,10 +475,11 @@ class ChainManager:
 
         # Filter active miners with buckets (stake <= 1000)
         self.eval_peers = [
-            int(uid) for uid in active_peers
+            int(uid)
+            for uid in active_peers
             if uid in uid_to_stake and uid_to_stake[uid] <= 1000
         ]
-        
+
         logger.debug(f"Filtered eval peers: {self.eval_peers}")
 
         # If total miners is less than minimum_peers, use all miners for both lists
@@ -495,7 +498,9 @@ class ChainManager:
         miner_incentives.sort(key=lambda x: x[1], reverse=True)
 
         # Calculate number of peers based on topk percentage
-        n_topk_peers = max(1, int(len(miner_incentives) * (self.hparams.topk_peers / 100)))
+        n_topk_peers = max(
+            1, int(len(miner_incentives) * (self.hparams.topk_peers / 100))
+        )
         n_peers = max(self.hparams.minimum_peers, n_topk_peers)
 
         # Take top n_peers by incentive for gradient gathering

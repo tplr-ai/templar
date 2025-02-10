@@ -272,7 +272,7 @@ class Miner:
                     uids=self.peers,
                     window=step_window,
                     key="gradient",
-                    timeout=45,
+                    timeout=72,
                     device="cpu",
                     local=False,
                     stale_retention=100,
@@ -451,8 +451,12 @@ class Miner:
             try:
                 gather_result = await asyncio.wait_for(gather_task, timeout=5.0)
             except (asyncio.TimeoutError, Exception) as e:
-                tplr.logger.warning(f"Skipping gather results: {e}")
+                tplr.logger.warning(f"Gather attempt failed: {e}")
                 gather_result = None
+                # Wait for next window to maintain sync
+                while self.current_window == step_window:
+                    await asyncio.sleep(0.1)
+                continue
 
             if gather_result is None:
                 tplr.logger.error(

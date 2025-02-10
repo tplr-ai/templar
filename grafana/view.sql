@@ -22,6 +22,7 @@ SELECT
     array_length(string_to_array(eval_uids, ','), 1) AS eval_uids_count 
 FROM tbl_validator_eval_info aa
 JOIN tbl_window_info bb ON aa.window_id = bb.id
+JOIN tbl_version cc ON bb.window_number >= cc.window_number and cc.is_running = true
 ORDER BY window_time ASC;
 
 CREATE VIEW v_active_miners AS
@@ -32,6 +33,7 @@ SELECT
     COALESCE(array_length(string_to_array(aa.bad_miners, ','), 1), 0) AS bad_miners_count 
 FROM tbl_active_miners aa
 JOIN tbl_window_info bb ON aa.window_id = bb.id
+JOIN tbl_version cc ON bb.window_number >= cc.window_number and cc.is_running = true
 ORDER BY bb.window_time ASC;
 
 CREATE VIEW v_gradients AS
@@ -40,6 +42,7 @@ SELECT
     COUNT(neuron_id) AS gradients_count 
 FROM tbl_gradients aa
 JOIN tbl_window_info bb ON aa.window_id = bb.id
+JOIN tbl_version cc ON bb.window_number >= cc.window_number and cc.is_running = true
 GROUP BY window_time
 ORDER BY window_time ASC;
 
@@ -48,7 +51,7 @@ WITH aa AS (
     SELECT MAX(id) AS maxid FROM tbl_window_info
 )
 SELECT 
-    window_number, 
+    bb.window_number, 
     avg_window_duration, 
     gradient_retention,
 	blocks_per_window,
@@ -67,6 +70,7 @@ SELECT
     weight 
 FROM tbl_eval_info_detail aa
 JOIN tbl_window_info bb ON aa.window_id = bb.id
+JOIN tbl_version cc ON bb.window_number >= cc.window_number and cc.is_running = true
 WHERE aa.vali_id = 1
 ORDER BY window_time, miner_id ASC;
 
@@ -75,13 +79,34 @@ WITH aa AS (
     SELECT MAX(id) AS maxid FROM tbl_window_info
 )
 SELECT 
-	'UID' || miner_id::TEXT miner_id,
+	miner_id::TEXT miner_id,
     moving_avg_score, 
     weight
 FROM aa
 JOIN tbl_window_info bb ON aa.maxid = bb.id
 JOIN tbl_eval_info_detail cc ON aa.maxid = cc.window_id
+JOIN tbl_version dd ON bb.window_number >= dd.window_number and dd.is_running = true
 ORDER BY cc.miner_id;
 
-SELECT   'UID' || miner_id::TEXT miner_id, sum(score) score , window_time FROM v_eval_info_detail GROUP BY window_time, miner_id  HAVING sum(score) > 0 
-SELECT   'UID' || miner_id::TEXT miner_id, sum(moving_avg_score) score , window_time FROM v_eval_info_detail GROUP BY window_time, miner_id HAVING sum(moving_avg_score) > 0;
+
+SELECT   'UID' || miner_id::TEXT miner_id, sum(score) score , window_time 
+FROM tbl_eval_info_detail aa
+JOIN tbl_window_info bb ON aa.window_id = bb.id
+JOIN tbl_version cc ON bb.window_number >= cc.window_number and cc.is_running = true
+WHERE aa.vali_id = 1
+GROUP BY window_time, miner_id  HAVING sum(score) > 0 
+
+SELECT   'UID' || miner_id::TEXT miner_id, sum(moving_avg_score) score , window_time 
+FROM tbl_eval_info_detail aa
+JOIN tbl_window_info bb ON aa.window_id = bb.id
+JOIN tbl_version cc ON bb.window_number >= cc.window_number and cc.is_running = true
+WHERE aa.vali_id = 1
+GROUP BY window_time, miner_id HAVING sum(moving_avg_score) > 0;
+
+
+SELECT   'UID' || miner_id::TEXT miner_id, sum(score) score , window_time 
+FROM tbl_eval_info_detail aa
+JOIN tbl_window_info bb ON aa.window_id = bb.id
+JOIN tbl_version cc ON bb.window_number >= cc.window_number and cc.is_running = true
+WHERE aa.vali_id = 1
+GROUP BY window_time, miner_id  HAVING sum(score) > 0;

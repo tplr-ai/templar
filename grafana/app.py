@@ -52,11 +52,12 @@ def get_tplr_version():
     else:
         print("Failed to fetch file.")
 
-def update_current_version(current_version, old_version_record, created_at):
+def update_current_version(current_version, old_version_record, created_at, window_number):
     # Create a new version record
     new_window_info = Version(
         version=current_version,
         created_at=created_at,  # current timestamp
+        window_number=window_number,
     )
     db.session.add(new_window_info)
 
@@ -279,7 +280,7 @@ async def run_grafana():
                 version = get_tplr_version()
                 version_record = get_current_version_record()
                 if not version_record or version != version_record.version:
-                    update_current_version(version, version_record, grafana.started_time)
+                    update_current_version(version, version_record, grafana.started_time, step_window)
                     tplr.logger.info(f"\nUpdated version {version} started_time {grafana.started_time}")
                 # Insert a new window
                 global_step = step_window - grafana.start_window
@@ -298,6 +299,7 @@ async def run_grafana():
                 tplr.logger.info(f"\nInserted validator eval info {step_window}")
 
                 # Insert gradients
+                active_miners, error_miners = await grafana.get_active_miners(step_window)
                 insert_gradients(window_id, active_miners)
                 tplr.logger.info(f"\nInserted gradients {step_window}")
 

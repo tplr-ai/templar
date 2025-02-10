@@ -10,6 +10,7 @@ class Version(db.Model):
     version = db.Column(db.String(50), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     is_running = db.Column(db.Boolean, nullable=False, default=True)
+    window_number = db.Column(db.Integer, nullable=True)
 
     @classmethod
     def get_last(cls):

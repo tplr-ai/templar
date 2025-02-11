@@ -52,11 +52,12 @@ def get_tplr_version():
     else:
         print("Failed to fetch file.")
 
-def update_current_version(current_version, old_version_record, created_at):
+def update_current_version(current_version, old_version_record, created_at, window_number):
     # Create a new version record
     new_window_info = Version(
         version=current_version,
         created_at=created_at,  # current timestamp
+        window_number=window_number,
     )
     db.session.add(new_window_info)
 
@@ -65,9 +66,35 @@ def update_current_version(current_version, old_version_record, created_at):
         old_version_record.is_running = False
 
 def insert_window(window_number, global_step, learning_rate):    
+    api = wandb.Api()
+    runs = api.runs(f"tplr/templar")
+    run_id = "hvf4v9fp" # Run ID for V1
+    for run in runs:
+        if run.name == "V1" and run.state == "running":
+            run_id = run.id
+            break
+    run = api.run(f"tplr/templar/{run_id}")
+    history = run.history(pandas=False)
+    tplr.logger.info(f"\nWandb run {run_id}")
+
+    sync_window_number = window_number
+    if history:
+        eval_info = {}
+        eval_info_detail = {}
+        last_row = history[-1]  # Get the last row
+        for key, value in last_row.items():
+            if "latest/validator/network/window" in key:
+                try:
+                    sync_window_number= value
+                    break
+
+                except ValueError as e:
+                    tplr.logger.error(f"Error parsing key: {key} - {e}")
+
     # Create a new WindowInfo record
     new_window_info = WindowInfo(
         window_number=window_number,
+        sync_window_number=sync_window_number,
         window_time=datetime.utcnow(),  # current timestamp
         global_step=global_step,
         learning_rate=learning_rate
@@ -279,7 +306,7 @@ async def run_grafana():
                 version = get_tplr_version()
                 version_record = get_current_version_record()
                 if not version_record or version != version_record.version:
-                    update_current_version(version, version_record, grafana.started_time)
+                    update_current_version(version, version_record, grafana.started_time, step_window)
                     tplr.logger.info(f"\nUpdated version {version} started_time {grafana.started_time}")
                 # Insert a new window
                 global_step = step_window - grafana.start_window
@@ -298,6 +325,7 @@ async def run_grafana():
                 tplr.logger.info(f"\nInserted validator eval info {step_window}")
 
                 # Insert gradients
+                active_miners, error_miners = await grafana.get_active_miners(step_window)
                 insert_gradients(window_id, active_miners)
                 tplr.logger.info(f"\nInserted gradients {step_window}")
 

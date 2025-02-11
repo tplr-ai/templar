@@ -378,27 +378,19 @@ class Validator:
                     step=self.global_step,
                 )
 
-            # 3. Gather gradients from peers
             gather_start = tplr.T()
-            gather_result = await self.comms.gather(
-                my_uid=self.uid,
-                uids=self.peers,
-                window=self.sync_window,
-                key="gradient",
-                timeout=30,
-                device=self.config.device,
-                local=False,
-                totalks=self.totalks,
-            )
-            if gather_result is None:
-                tplr.logger.warning(
-                    f"No gradients gathered for window {self.sync_window}. Skipping this window."
+            # Create gather task early
+            gather_task = asyncio.create_task(
+                self.comms.gather(
+                    my_uid=self.uid,
+                    uids=self.peers,
+                    window=self.sync_window,
+                    key="gradient",
+                    timeout=25,
+                    device=self.config.device,
+                    local=False,
+                    totalks=self.totalks,
                 )
-                self.global_step += 1
-                continue
-            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
-            tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers"
             )
 
             # Add check for empty peers (evaluating all peer uids)
@@ -893,29 +885,7 @@ class Validator:
                         tplr.logger.info(
                             "No positive scores found, all weights set to 0"
                         )
-                    # TODO: move out
-                    # 13. Log evaluation metrics once all evaluations are done
-                    evaluation_metrics = {
-                        "validator/loss/own/before": self.loss_before_per_batch_own,
-                        "validator/loss/own/after": self.loss_after_per_batch_own,
-                        "validator/loss/random/before": self.loss_before_per_batch_random,
-                        "validator/loss/random/after": self.loss_after_per_batch_random,
-                        "validator/loss/own/improvement": self.relative_improvement_own,
-                        "validator/loss/random/improvement": self.relative_improvement_random,
-                        "validator/network/block": self.current_block,
-                        "validator/network/window": self.sync_window,
-                        "validator/network/step": self.global_step,
-                        "validator/network/evaluated_uids": len(self.evaluated_uids),
-                        "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[
-                            0
-                        ],
-                        "validator/network/active_miners": len(
-                            self.valid_score_indices
-                        ),
-                        "validator/gather/success_rate": gather_result.success_rate
-                        * 100,  # Success percentage
-                    }
-                    self.wandb.log(evaluation_metrics, step=self.global_step)
+
                     tplr.logger.info(
                         f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
                     )
@@ -1088,6 +1058,18 @@ class Validator:
                     )
                 )
 
+            gather_result = await gather_task
+            if gather_result is None:
+                tplr.logger.error(
+                    "Failed to gather gradients from peers. Waiting for next window."
+                )
+                while self.current_window == self.sync_window:
+                    await asyncio.sleep(0.1)
+                continue
+            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
+            tplr.logger.info(
+                f"{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers"
+            )
             # 16. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
@@ -1141,16 +1123,30 @@ class Validator:
                 f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
             )
 
-            self.wandb.log(
-                {
-                    "validator/timing/window_total": tplr.T() - window_start,
-                    "validator/timing/peer_update": tplr.T() - peer_start,
-                    "validator/timing/gather": tplr.T() - gather_start,
-                    "validator/timing/evaluation": tplr.T() - eval_start,
-                    "validator/timing/model_update": tplr.T() - update_start,
-                },
-                step=self.global_step,
-            )
+            # 13. Log evaluation metrics once all evaluations are done
+            evaluation_metrics = {
+                "validator/loss/own/before": self.loss_before_per_batch_own,
+                "validator/loss/own/after": self.loss_after_per_batch_own,
+                "validator/loss/random/before": self.loss_before_per_batch_random,
+                "validator/loss/random/after": self.loss_after_per_batch_random,
+                "validator/loss/own/improvement": self.relative_improvement_own,
+                "validator/loss/random/improvement": self.relative_improvement_random,
+                "validator/network/block": self.current_block,
+                "validator/network/window": self.sync_window,
+                "validator/network/step": self.global_step,
+                "validator/network/evaluated_uids": len(self.evaluated_uids),
+                "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
+                "validator/network/active_miners": len(self.valid_score_indices),
+                "validator/gather/success_rate": gather_result.success_rate * 100
+                if gather_result
+                else 0,  # Success percentage
+                "validator/timing/window_total": tplr.T() - window_start,
+                "validator/timing/peer_update": tplr.T() - peer_start,
+                "validator/timing/gather": tplr.T() - gather_start,
+                "validator/timing/evaluation": tplr.T() - eval_start,
+                "validator/timing/model_update": tplr.T() - update_start,
+            }
+            self.wandb.log(evaluation_metrics, step=self.global_step)
 
             # 18. Increment global step
             self.global_step += 1

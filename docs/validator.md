@@ -59,20 +59,51 @@ This guide will help you set up and run a validator for **τemplar**. Validators
 
    Follow the same steps as in the [Miner Setup](#using-docker-compose-recommended) section.
 
-2. **Clone the Repository**:
+2. **Enable Docker GPU Support**:
+
+   Follow the official NVIDIA Container Toolkit installation guide:
+   
+   ```bash
+   # 1. Configure the production repository
+   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+     && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+     sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+     sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+   # 2. Update package listings
+   sudo apt-get update
+
+   # 3. Install the NVIDIA Container Toolkit
+   sudo apt-get install -y nvidia-container-toolkit
+
+   # 4. Configure Docker runtime
+   sudo nvidia-ctk runtime configure --runtime=docker
+
+   # 5. Restart Docker daemon
+   sudo systemctl restart docker
+
+   # 6. Test GPU support
+   docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
+   ```
+
+   If you see the `nvidia-smi` output, GPU support is working correctly.
+
+   For detailed instructions and other Linux distributions, refer to the [official NVIDIA Container Toolkit installation guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+
+3. **Clone the Repository**:
 
    ```bash
    git clone https://github.com/tplr-ai/templar.git
    cd templar
    ```
 
-3. **Navigate to the Docker Directory**:
+4. **Navigate to the Docker Directory**:
 
    ```bash
    cd docker
    ```
 
-4. **Create and Populate the `.env` File**:
+5. **Create and Populate the `.env` File**:
 
    Create a `.env` file in the `docker` directory by copying the `.env.example`:
 
@@ -83,42 +114,47 @@ This guide will help you set up and run a validator for **τemplar**. Validators
    Populate the `.env` file with your configuration. Variables to set:
 
    ```dotenv:docker/.env
-   WANDB_API_KEY=your_wandb_api_key
+   # Add your Weights & Biases API key
+   WANDB_API_KEY=<your_wandb_api_key>
 
-   # Cloudflare R2 Credentials
-   R2_ACCOUNT_ID=your_r2_account_id
 
-   R2_READ_ACCESS_KEY_ID=your_r2_read_access_key_id
-   R2_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
+   # Cloudflare R2 Credentials - Add your R2 credentials below
+   R2_GRADIENTS_ACCOUNT_ID=<your_r2_account_id>
+   R2_GRADIENTS_BUCKET_NAME=<your_r2_bucket_name>
 
-   R2_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
-   R2_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
+   R2_GRADIENTS_READ_ACCESS_KEY_ID=<your_r2_read_access_key_id>
+   R2_GRADIENTS_READ_SECRET_ACCESS_KEY=<your_r2_read_secret_access_key>
+
+   R2_GRADIENTS_WRITE_ACCESS_KEY_ID=<your_r2_write_access_key_id>
+   R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=<your_r2_write_secret_access_key>
+
+   R2_DATASET_ACCOUNT_ID=80f15715bb0b882c9e967c13e677ed7d
+   R2_DATASET_BUCKET_NAME=80f15715bb0b882c9e967c13e677ed7d
+   R2_DATASET_READ_ACCESS_KEY_ID=88548d962edc9a1f4416cbb3453d914a
+   R2_DATASET_READ_SECRET_ACCESS_KEY=4934ae848465113a75babf7d0a88efd9112aa49296c900744268e91f1d31998f
 
    # Wallet Configuration
-   WALLET_NAME=default
-   WALLET_HOTKEY=your_validator_hotkey_name
+   WALLET_NAME=<your_wallet_name>
+   WALLET_HOTKEY=<your_wallet_hotkey>
 
    # Network Configuration
    NETWORK=finney
    NETUID=3
-
    # GPU Configuration
    CUDA_DEVICE=cuda:0
-
    # Node Type
    NODE_TYPE=validator
-
    # Additional Settings
    DEBUG=false
    ```
 
    **Note**: Set `NODE_TYPE` to `validator`.
 
-5. **Update `docker-compose.yml`**:
+6. **Update `docker-compose.yml`**:
 
    Ensure that the `docker-compose.yml` file is correctly configured for your setup.
 
-6. **Run Docker Compose**:
+7. **Run Docker Compose**:
 
    Start the validator using Docker Compose:
 

@@ -57,7 +57,8 @@ SELECT
     floor(avg_window_duration * 10)/10 || 's' avg_window_duration, 
     gradient_retention,
 	blocks_per_window,
-	gather_miners
+	gather_miners,
+	diff_miners
 FROM aa
 JOIN tbl_window_info bb ON aa.maxid = bb.id
 JOIN tbl_run_metadata cc ON aa.maxid = cc.window_id

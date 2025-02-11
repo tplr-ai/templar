@@ -313,6 +313,19 @@ class Grafana:
                 self.peers = self.comms.peers
                 print(f"Gather Peers: {self.peers}")
                 
+                active_miners = self.comms.eval_peers
+                diff_miners = []
+                for uid in active_miners:
+                    if uid not in active_uids:
+                        diff_miners.append(uid)
+                
+                # Real Active miners is eval peers.
+                print(f"Total evaluation peers: {len(self.comms.eval_peers)}")
+                
+                print(f"Total diff miners: {len(diff_miners)}")
+                print(f"Diff Miners: {diff_miners}")
+                
+                
                 # for peer in active_peers:
                 #     print(f"Active Peer Data: {peer}")
                 

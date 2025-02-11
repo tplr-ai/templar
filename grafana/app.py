@@ -64,6 +64,7 @@ def update_current_version(current_version, old_version_record, created_at, wind
     # Update old version
     if old_version_record:
         old_version_record.is_running = False
+    db.session.commit()
 
 def insert_window(window_number, global_step, learning_rate):    
     api = wandb.Api()

@@ -1,8 +1,11 @@
+import re
 import sys
 import time
 import asyncio
 import argparse
 import threading
+
+import requests
 import bittensor as bt
 import tplr
 from tplr import __version__
@@ -90,6 +93,9 @@ class Grafana:
         self.window_info = {}
         self.start_window = None
 
+        self.version = __version__
+        self.version = self.get_tplr_version()
+
     async def initialize(self):
         # Start background block listener
         self.loop = asyncio.get_running_loop()
@@ -108,6 +114,20 @@ class Grafana:
         
         
         # self.comms.start_background_tasks()
+
+    def get_tplr_version(self):
+        url = "https://raw.githubusercontent.com/tplr-ai/templar/main/src/tplr/__init__.py"
+
+        response = requests.get(url)
+
+        if response.status_code == 200:
+            match = re.search(r'__version__ = ["\']([^"\']+)["\']', response.text)
+            if match:
+                return match.group(1)  # ✅ Extracts version number
+            else:
+                print("Version not found.")
+        else:
+            print("Failed to fetch file.")
     
     async def is_gradient_exist(self, uid: int, window: int):
         """Check if the miner has uploaded a gradient for a specific window and get the created timestamp of the file."""
@@ -127,7 +147,7 @@ class Grafana:
                 aws_access_key_id=peer_bucket.access_key_id,
                 aws_secret_access_key=peer_bucket.secret_access_key,
             ) as s3_client:
-                filename = f"gradient-{window}-{uid}-v{__version__}.pt"
+                filename = f"gradient-{window}-{uid}-v{self.version}.pt"
                 tplr.logger.debug(
                     f"Checking for {filename} in bucket {peer_bucket.name}"
                 )
@@ -367,7 +387,7 @@ class Grafana:
                     download_uids.append(peer["uid"])
             
             # Download gradients
-            num_samples = min(7, len(download_uids))  # Ensure we don’t exceed available elements
+            num_samples = min(1, len(download_uids))  # Ensure we don’t exceed available elements
             download_uids = np.random.choice(download_uids, size=num_samples, replace=False)
             
             result_gradients, result_metadata = await self.download_gradients(download_uids, step_window, key="gradient")
@@ -573,7 +593,7 @@ class Grafana:
         """
         file_path = "bad_peers_log.json"
         
-        entry = [window, __version__, {"bad peers": bad_peers}]
+        entry = [window, self.version, {"bad peers": bad_peers}]
         
         with open(file_path, "a") as f:
             f.write(json.dumps(entry) + "\n")
@@ -607,7 +627,7 @@ class Grafana:
                     aws_access_key_id=validator_bucket.access_key_id,
                     aws_secret_access_key=validator_bucket.secret_access_key,
                 ) as s3_client:
-                    filename=f"start_window_v{__version__}.json"
+                    filename=f"start_window_v{self.version}.json"
                     tplr.logger.debug(
                         f"Checking for {filename} in bucket {validator_bucket.name}"
                     )
@@ -619,7 +639,7 @@ class Grafana:
                         
                 # Fetch 'start_window.json' using s3_get_object
                 start_window_data = await self.comms.s3_get_object(
-                    key=f"start_window_v{__version__}.json", bucket=validator_bucket
+                    key=f"start_window_v{self.version}.json", bucket=validator_bucket
                 )
                 if start_window_data is not None:
                     # Check if start_window_data is already a dict

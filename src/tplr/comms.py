@@ -1310,19 +1310,18 @@ class Comms(ChainManager):
                     optimizer.step()
                     scheduler.step()
 
+            # # 3) Return early if no catch-up or behind
+            # if window_difference < 0:
+            #     tplr.logger.warning(
+            #         "Local current_window is behind checkpoint; using checkpoint without catch-up."
+            #     )
+            #     return True, momentum, global_step, optimizer, scheduler
+            # if window_difference == 0:
+            #     tplr.logger.info("No catch-up needed — aligned with checkpoint.")
+            #     return True, momentum, global_step, optimizer, scheduler
 
-            # 3) Return early if no catch-up or behind
-            if window_difference < 0:
-                tplr.logger.warning(
-                    "Local current_window is behind checkpoint; using checkpoint without catch-up."
-                )
-                return True, momentum, global_step, optimizer, scheduler
-            if window_difference == 0:
-                tplr.logger.info("No catch-up needed — aligned with checkpoint.")
-                return True, momentum, global_step, optimizer, scheduler
-
-            # TODO: investigate failures
-            tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
+            # # TODO: investigate failures
+            # tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
 
             # # 4) Option: Parallel gather in batches, but apply in ascending order
             # BATCH_SIZE = 20  # tweak based on memory/time constraints
@@ -1390,20 +1389,20 @@ class Comms(ChainManager):
             #                         p.to(device), idxs, vals, xshape, totalk
             #                     )
             #                 )
-            #                 param_updates[n] = new_grad.sign_()
+            # #                 param_updates[n] = new_grad.sign_()
 
-                    # Apply updates, step optimizer/scheduler
-                    with torch.no_grad():
-                        for n, p in model.named_parameters():
-                            if n in param_updates:
-                                p.grad = param_updates[n]
+            #         # Apply updates, step optimizer/scheduler
+            #         with torch.no_grad():
+            #             for n, p in model.named_parameters():
+            #                 if n in param_updates:
+            #                     p.grad = param_updates[n]
 
-                    optimizer.step()
-                    scheduler.step()
-                    global_step += 1
-                    tplr.logger.info(
-                        f"Caught up window {w}, global_step => {global_step}"
-                    )
+            #         optimizer.step()
+            #         scheduler.step()
+            #         global_step += 1
+            #         tplr.logger.info(
+            #             f"Caught up window {w}, global_step => {global_step}"
+            #         )
 
             return True, momentum, global_step, optimizer, scheduler
 

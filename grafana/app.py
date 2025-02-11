@@ -262,18 +262,22 @@ async def get_active_miners(grafana, step_window):
 
     active_miners = grafana.comms.eval_peers
     diff_miners_uids = []
-    for uid in active_miners:
-        if uid not in active_uids:
-            diff_miners_uids.append(uid)
-    active_miners_uids = [miner["uid"] for miner in active_miners]
-    error_miners_uids = [miner["uid"] for miner in error_miners]
+    tplr.logger.info(f"\neval_peers {active_miners}")
+    tplr.logger.info(f"\nactive_peers {active_peers}")
 
+    for uid in active_miners:
+        if len(active_uids) == 0 or uid not in active_uids:
+            diff_miners_uids.append(uid)
+
+    # active_miners_uids = [miner["uid"] for miner in active_miners]
+    active_miners_uids = active_miners
+    error_miners_uids = [miner["uid"] for miner in error_miners]
     gradients = {}
     download_uids = []
     for peer in active_peers:
         if peer["uid"] not in gradients.keys():
             download_uids.append(peer["uid"])
-    
+
     # Download gradients
     num_samples = min(7, len(download_uids))  # Ensure we don’t exceed available elements
     download_uids = np.random.choice(download_uids, size=num_samples, replace=False)

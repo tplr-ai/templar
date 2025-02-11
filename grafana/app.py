@@ -52,12 +52,12 @@ def get_tplr_version():
     else:
         print("Failed to fetch file.")
 
-def update_current_version(current_version, old_version_record, created_at, window_number):
+def update_current_version(current_version, old_version_record, created_at):
     # Create a new version record
     new_window_info = Version(
         version=current_version,
         created_at=created_at,  # current timestamp
-        window_number=window_number,
+        window_id=Window.get_last().id+1,
     )
     db.session.add(new_window_info)
 
@@ -255,9 +255,8 @@ def insert_gradients(window_id, active_miners):
         db.session.add(new_gradient)
 
 async def get_active_miners(grafana, step_window):
-    active_miners, error_miners = await grafana.get_active_miners(step_window)
+    active_peers, error_miners = await grafana.get_active_miners(step_window)
 
-    active_peers = grafana.grad_dict.get(step_window, [])
     active_uids = [peer["uid"] for peer in active_peers]
 
     active_miners = grafana.comms.eval_peers
@@ -319,7 +318,7 @@ async def run_grafana():
                 version = get_tplr_version()
                 version_record = get_current_version_record()
                 if not version_record or version != version_record.version:
-                    update_current_version(version, version_record, grafana.started_time, step_window)
+                    update_current_version(version, version_record, grafana.started_time)
                     tplr.logger.info(f"\nUpdated version {version} started_time {grafana.started_time}")
                 # Insert a new window
                 global_step = step_window - grafana.start_window

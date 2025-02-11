@@ -10,7 +10,7 @@ class Version(db.Model):
     version = db.Column(db.String(50), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     is_running = db.Column(db.Boolean, nullable=False, default=True)
-    window_number = db.Column(db.Integer, nullable=True)
+    window_id = db.Column(db.Integer, nullable=True)
 
     @classmethod
     def get_last(cls):
@@ -32,6 +32,9 @@ class WindowInfo(db.Model):
     window_time = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     global_step = db.Column(db.Integer, nullable=False)
     learning_rate = db.Column(db.Float, nullable=False)
+    @classmethod
+    def get_last(cls):
+        return cls.query.order_by(cls.id.desc()).first()
 
 class ActiveMiners(db.Model):
     __tablename__ = 'tbl_active_miners'

@@ -958,7 +958,7 @@ class Comms(ChainManager):
     async def _cleanup_temp_file(self, file_path: str):
         """Helper to cleanup temporary files asynchronously"""
         try:
-            await asyncio.sleep(1)  # Give time for upload to complete
+            await asyncio.sleep(60)  # Give time for upload to complete
             if os.path.exists(file_path):
                 os.remove(file_path)
         except Exception as e:

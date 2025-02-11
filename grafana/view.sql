@@ -1,3 +1,4 @@
+
 CREATE VIEW v_version AS
 SELECT 
     version,
@@ -52,7 +53,8 @@ WITH aa AS (
 )
 SELECT 
     bb.window_number, 
-    avg_window_duration, 
+    sync_window_number, 
+    floor(avg_window_duration * 10)/10 || 's' avg_window_duration, 
     gradient_retention,
 	blocks_per_window,
 	gather_miners
@@ -85,7 +87,6 @@ SELECT
 FROM aa
 JOIN tbl_window_info bb ON aa.maxid = bb.id
 JOIN tbl_eval_info_detail cc ON aa.maxid = cc.window_id
-JOIN tbl_version dd ON bb.window_number >= dd.window_number and dd.is_running = true
 ORDER BY cc.miner_id;
 
 
@@ -104,9 +105,9 @@ WHERE aa.vali_id = 1
 GROUP BY window_time, miner_id HAVING sum(moving_avg_score) > 0;
 
 
-SELECT   'UID' || miner_id::TEXT miner_id, sum(score) score , window_time 
+SELECT   'UID' || miner_id::TEXT miner_id, sum(weight) score , window_time 
 FROM tbl_eval_info_detail aa
 JOIN tbl_window_info bb ON aa.window_id = bb.id
 JOIN tbl_version cc ON bb.window_number >= cc.window_number and cc.is_running = true
 WHERE aa.vali_id = 1
-GROUP BY window_time, miner_id  HAVING sum(score) > 0;
+GROUP BY window_time, miner_id  HAVING sum(weight) > 0;

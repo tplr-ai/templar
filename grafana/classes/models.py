@@ -28,6 +28,7 @@ class WindowInfo(db.Model):
     __tablename__ = 'tbl_window_info'
     id = db.Column(db.Integer, primary_key=True)
     window_number = db.Column(db.Integer, nullable=False)
+    sync_window_number = db.Column(db.Integer, nullable=True)
     window_time = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     global_step = db.Column(db.Integer, nullable=False)
     learning_rate = db.Column(db.Float, nullable=False)

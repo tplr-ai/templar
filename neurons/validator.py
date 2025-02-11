@@ -1137,7 +1137,9 @@ class Validator:
                 "validator/network/evaluated_uids": len(self.evaluated_uids),
                 "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
                 "validator/network/active_miners": len(self.valid_score_indices),
-                "validator/gather/success_rate": gather_result.success_rate * 100 if gather_result else 0,  # Success percentage
+                "validator/gather/success_rate": gather_result.success_rate * 100
+                if gather_result
+                else 0,  # Success percentage
                 "validator/timing/window_total": tplr.T() - window_start,
                 "validator/timing/peer_update": tplr.T() - peer_start,
                 "validator/timing/gather": tplr.T() - gather_start,

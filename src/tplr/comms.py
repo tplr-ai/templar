@@ -326,11 +326,14 @@ class Comms(ChainManager):
         timeout: int = 5,
     ):
         """Download object from S3 using asynchronous streaming."""
-        temp_file_path = None
+        import uuid
+
+        temp_file_path = os.path.join(
+            self.temp_dir, f"temp_{key}_{uuid.uuid4().hex}.pt"
+        )
         try:
             # Create temp directory if it doesn't exist
             os.makedirs(self.temp_dir, exist_ok=True)
-            temp_file_path = os.path.join(self.temp_dir, f"temp_{key}")
 
             async with self.session.create_client(
                 "s3",
@@ -958,7 +961,7 @@ class Comms(ChainManager):
     async def _cleanup_temp_file(self, file_path: str):
         """Helper to cleanup temporary files asynchronously"""
         try:
-            await asyncio.sleep(1)  # Give time for upload to complete
+            await asyncio.sleep(60)  # Give time for upload to complete
             if os.path.exists(file_path):
                 os.remove(file_path)
         except Exception as e:
@@ -1307,98 +1310,99 @@ class Comms(ChainManager):
                     optimizer.step()
                     scheduler.step()
 
-            # 3) Return early if no catch-up or behind
-            if window_difference < 0:
-                tplr.logger.warning(
-                    "Local current_window is behind checkpoint; using checkpoint without catch-up."
-                )
-                return True, momentum, global_step, optimizer, scheduler
-            if window_difference == 0:
-                tplr.logger.info("No catch-up needed — aligned with checkpoint.")
-                return True, momentum, global_step, optimizer, scheduler
+            # # 3) Return early if no catch-up or behind
+            # if window_difference < 0:
+            #     tplr.logger.warning(
+            #         "Local current_window is behind checkpoint; using checkpoint without catch-up."
+            #     )
+            #     return True, momentum, global_step, optimizer, scheduler
+            # if window_difference == 0:
+            #     tplr.logger.info("No catch-up needed — aligned with checkpoint.")
+            #     return True, momentum, global_step, optimizer, scheduler
 
-            tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
+            # # TODO: investigate failures
+            # tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
 
-            # 4) Option: Parallel gather in batches, but apply in ascending order
-            BATCH_SIZE = 20  # tweak based on memory/time constraints
-            windows_to_catch_up = range(
-                checkpoint_current_window + 1, current_window + 1
-            )
+            # # 4) Option: Parallel gather in batches, but apply in ascending order
+            # BATCH_SIZE = 20  # tweak based on memory/time constraints
+            # windows_to_catch_up = range(
+            #     checkpoint_current_window + 1, current_window + 1
+            # )
 
-            for i in range(0, len(windows_to_catch_up), BATCH_SIZE):
-                batch_windows = list(windows_to_catch_up)[i : i + BATCH_SIZE]
+            # for i in range(0, len(windows_to_catch_up), BATCH_SIZE):
+            #     batch_windows = list(windows_to_catch_up)[i : i + BATCH_SIZE]
 
-                # Launch gathers in parallel
-                tasks = [
-                    self.gather(
-                        my_uid=uid,
-                        uids=peers,
-                        window=w,
-                        key="gradient",
-                        timeout=30,
-                        device=device,
-                        local=False,
-                        stale_retention=100,
-                        totalks=totalks,
-                    )
-                    for w in batch_windows
-                ]
-                batch_results = await asyncio.gather(*tasks)
+            #     # Launch gathers in parallel
+            #     tasks = [
+            #         self.gather(
+            #             my_uid=uid,
+            #             uids=peers,
+            #             window=w,
+            #             key="gradient",
+            #             timeout=30,
+            #             device=device,
+            #             local=False,
+            #             stale_retention=100,
+            #             totalks=totalks,
+            #         )
+            #         for w in batch_windows
+            #     ]
+            #     batch_results = await asyncio.gather(*tasks)
 
-                # Store results in dict so we can apply them in correct ascending order
-                gathered_data = dict(zip(batch_windows, batch_results))
+            #     # Store results in dict so we can apply them in correct ascending order
+            #     gathered_data = dict(zip(batch_windows, batch_results))
 
-                # 5) Apply each window's updates in ascending order
-                for w in sorted(gathered_data.keys()):
-                    gather_result = gathered_data[w]
-                    if not gather_result:
-                        tplr.logger.info(
-                            f"No valid gather data for window {w}, skipping."
-                        )
-                        continue
+            #     # 5) Apply each window's updates in ascending order
+            #     for w in sorted(gathered_data.keys()):
+            #         gather_result = gathered_data[w]
+            #         if not gather_result:
+            #             tplr.logger.info(
+            #                 f"No valid gather data for window {w}, skipping."
+            #             )
+            #             continue
 
-                    # Build param updates
-                    param_updates = {}
-                    for n, p in model.named_parameters():
-                        idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
-                        vals = getattr(gather_result.state_dict, f"{n}vals", None)
-                        if idxs is not None and vals is not None:
-                            if not isinstance(idxs, (list, tuple)):
-                                idxs = [idxs]
-                            if not isinstance(vals, (list, tuple)):
-                                vals = [vals]
-                            # Calculate xshape and totalk based on parameter dimensions
-                            if len(p.shape) > 1:
-                                # For 2D weights, get block sizes for rows and columns
-                                xshape = (
-                                    transformer.shape_dict[p.shape[0]],
-                                    transformer.shape_dict[p.shape[1]],
-                                )
-                                totalk = xshape[0] * xshape[1]
-                            else:
-                                # For 1D weights
-                                xshape = transformer.shape_dict[p.shape[0]]
-                                totalk = xshape
-                            # Decompress and decode to get gradients, then take sign as update
-                            new_grad = transformer.decode(
-                                compressor.batch_decompress(
-                                    p.to(device), idxs, vals, xshape, totalk
-                                )
-                            )
-                            param_updates[n] = new_grad.sign_()
+            #         # Build param updates
+            #         param_updates = {}
+            #         for n, p in model.named_parameters():
+            #             idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
+            #             vals = getattr(gather_result.state_dict, f"{n}vals", None)
+            #             if idxs is not None and vals is not None:
+            #                 if not isinstance(idxs, (list, tuple)):
+            #                     idxs = [idxs]
+            #                 if not isinstance(vals, (list, tuple)):
+            #                     vals = [vals]
+            #                 # Calculate xshape and totalk based on parameter dimensions
+            #                 if len(p.shape) > 1:
+            #                     # For 2D weights, get block sizes for rows and columns
+            #                     xshape = (
+            #                         transformer.shape_dict[p.shape[0]],
+            #                         transformer.shape_dict[p.shape[1]],
+            #                     )
+            #                     totalk = xshape[0] * xshape[1]
+            #                 else:
+            #                     # For 1D weights
+            #                     xshape = transformer.shape_dict[p.shape[0]]
+            #                     totalk = xshape
+            #                 # Decompress and decode to get gradients, then take sign as update
+            #                 new_grad = transformer.decode(
+            #                     compressor.batch_decompress(
+            #                         p.to(device), idxs, vals, xshape, totalk
+            #                     )
+            #                 )
+            # #                 param_updates[n] = new_grad.sign_()
 
-                    # Apply updates, step optimizer/scheduler
-                    with torch.no_grad():
-                        for n, p in model.named_parameters():
-                            if n in param_updates:
-                                p.grad = param_updates[n]
+            #         # Apply updates, step optimizer/scheduler
+            #         with torch.no_grad():
+            #             for n, p in model.named_parameters():
+            #                 if n in param_updates:
+            #                     p.grad = param_updates[n]
 
-                    optimizer.step()
-                    scheduler.step()
-                    global_step += 1
-                    tplr.logger.info(
-                        f"Caught up window {w}, global_step => {global_step}"
-                    )
+            #         optimizer.step()
+            #         scheduler.step()
+            #         global_step += 1
+            #         tplr.logger.info(
+            #             f"Caught up window {w}, global_step => {global_step}"
+            #         )
 
             return True, momentum, global_step, optimizer, scheduler
 

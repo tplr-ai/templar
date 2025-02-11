@@ -386,7 +386,7 @@ class Validator:
                     uids=self.peers,
                     window=self.sync_window,
                     key="gradient",
-                    timeout=30,
+                    timeout=25,
                     device=self.config.device,
                     local=False,
                     totalks=self.totalks,
@@ -885,29 +885,7 @@ class Validator:
                         tplr.logger.info(
                             "No positive scores found, all weights set to 0"
                         )
-                    # TODO: move out
-                    # 13. Log evaluation metrics once all evaluations are done
-                    # evaluation_metrics = {
-                    #     "validator/loss/own/before": self.loss_before_per_batch_own,
-                    #     "validator/loss/own/after": self.loss_after_per_batch_own,
-                    #     "validator/loss/random/before": self.loss_before_per_batch_random,
-                    #     "validator/loss/random/after": self.loss_after_per_batch_random,
-                    #     "validator/loss/own/improvement": self.relative_improvement_own,
-                    #     "validator/loss/random/improvement": self.relative_improvement_random,
-                    #     "validator/network/block": self.current_block,
-                    #     "validator/network/window": self.sync_window,
-                    #     "validator/network/step": self.global_step,
-                    #     "validator/network/evaluated_uids": len(self.evaluated_uids),
-                    #     "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[
-                    #         0
-                    #     ],
-                    #     "validator/network/active_miners": len(
-                    #         self.valid_score_indices
-                    #     ),
-                    #     "validator/gather/success_rate": gather_result.success_rate
-                    #     * 100,  # Success percentage
-                    # }
-                    # self.wandb.log(evaluation_metrics, step=self.global_step)
+
                     tplr.logger.info(
                         f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
                     )
@@ -1159,13 +1137,12 @@ class Validator:
                 "validator/network/evaluated_uids": len(self.evaluated_uids),
                 "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
                 "validator/network/active_miners": len(self.valid_score_indices),
-                "validator/gather/success_rate": gather_result.success_rate,
+                "validator/gather/success_rate": gather_result.success_rate * 100 if gather_result else 0,  # Success percentage
                 "validator/timing/window_total": tplr.T() - window_start,
                 "validator/timing/peer_update": tplr.T() - peer_start,
                 "validator/timing/gather": tplr.T() - gather_start,
                 "validator/timing/evaluation": tplr.T() - eval_start,
                 "validator/timing/model_update": tplr.T() - update_start,
-                * 100,  # Success percentage
             }
             self.wandb.log(evaluation_metrics, step=self.global_step)
 

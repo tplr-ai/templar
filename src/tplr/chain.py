@@ -25,6 +25,7 @@ import bittensor as bt
 from bittensor import Wallet
 from typing import Dict, Optional
 from pydantic import ValidationError
+from bittensor.core.chain_data import decode_account_id
 
 # Local imports
 from .logging import logger
@@ -278,6 +279,14 @@ class ChainManager:
         except ValidationError as e:
             raise ValueError(f"Invalid data in commitment: {e}")
 
+    def decode_metadata(self, encoded_ss58: tuple, metadata: dict) -> tuple[str, str]:
+        # Decode the key into an SS58 address.
+        decoded_key = decode_account_id(encoded_ss58[0])
+        # Get the commitment from the metadata.
+        commitment = metadata["info"]["fields"][0][0]
+        bytes_tuple = commitment[next(iter(commitment.keys()))][0]
+        return decoded_key, bytes(bytes_tuple).decode()
+
     async def get_commitments(self, block: Optional[int] = None) -> Dict[int, Bucket]:
         """Retrieves all bucket commitments from the chain.
 
@@ -289,7 +298,8 @@ class ChainManager:
         """
         subtensor = bt.subtensor(config=self.config)
         substrate = subtensor.substrate
-        result = substrate.query_map(
+        # Query commitments via substrate.query_map
+        query_result = substrate.query_map(
             module="Commitments",
             storage_function="CommitmentOf",
             params=[self.netuid],
@@ -299,47 +309,41 @@ class ChainManager:
         hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids))
         commitments = {}
 
-        for key, value in result:
-            hotkey = key.value
-            if hotkey not in hotkey_to_uid:
+        for key, value in query_result:
+            try:
+                decoded_ss58, commitment_str = self.decode_metadata(key, value.value)
+            except Exception as e:
+                logger.error(f"Failed to decode metadata for key {key.value}: {e}")
                 continue
 
-            uid = hotkey_to_uid[hotkey]
-            commitment_info = value.value.get("info", {})
-            fields = commitment_info.get("fields", [])
-
-            if not fields or not isinstance(fields[0], dict):
+            if decoded_ss58 not in hotkey_to_uid:
                 continue
 
-            field_value = next(iter(fields[0].values()))
-            if field_value.startswith("0x"):
-                field_value = field_value[2:]
+            uid = hotkey_to_uid[decoded_ss58]
+            if len(commitment_str) != 128:
+                logger.error(
+                    f"Invalid commitment length for UID {uid}: {len(commitment_str)}"
+                )
+                continue
 
             try:
-                concatenated = bytes.fromhex(field_value).decode("utf-8").strip()
-                if len(concatenated) != 128:
-                    logger.error(
-                        f"Invalid commitment length for UID {uid}: {len(concatenated)}"
-                    )
-                    continue
-
                 bucket = Bucket(
-                    name=concatenated[:32],
-                    account_id=concatenated[:32],
-                    access_key_id=concatenated[32:64],
-                    secret_access_key=concatenated[64:],
+                    name=commitment_str[:32],
+                    account_id=commitment_str[:32],
+                    access_key_id=commitment_str[32:64],
+                    secret_access_key=commitment_str[64:],
                 )
                 commitments[uid] = bucket
                 logger.debug(f"Retrieved bucket commitment for UID {uid}")
-
             except Exception as e:
-                logger.error(f"Failed to decode commitment for UID {uid}: {e}")
+                logger.error(f"Failed to build bucket for UID {uid}: {e}")
                 continue
 
         return commitments
 
     def get_commitments_sync(self, block: Optional[int] = None) -> Dict[int, Bucket]:
-        """Retrieves all bucket commitments from the chain.
+        """
+        Retrieves all bucket commitments from the chain.
 
         Args:
             block (int, optional): Block number to query at
@@ -348,50 +352,30 @@ class ChainManager:
             Dict[int, Bucket]: Mapping of UIDs to their bucket configurations
         """
         subtensor = bt.subtensor(config=self.config)
-        substrate = subtensor.substrate
-        result = substrate.query_map(
-            module="Commitments",
-            storage_function="CommitmentOf",
-            params=[self.netuid],
-            block_hash=None if block is None else substrate.get_block_hash(block),
-        )
-
+        # Use the new API. It returns a dict mapping hotkeys to the decoded commitment string.
+        all_commitments = subtensor.get_all_commitments(self.netuid, block)
         hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids))
         commitments = {}
 
-        for key, value in result:
-            hotkey = key.value
+        for hotkey, commitment in all_commitments.items():
             if hotkey not in hotkey_to_uid:
                 continue
-
             uid = hotkey_to_uid[hotkey]
-            commitment_info = value.value.get("info", {})
-            fields = commitment_info.get("fields", [])
-
-            if not fields or not isinstance(fields[0], dict):
+            if len(commitment) != 128:
+                logger.error(
+                    f"Invalid commitment length for UID {uid}: {len(commitment)}"
+                )
                 continue
 
-            field_value = next(iter(fields[0].values()))
-            if field_value.startswith("0x"):
-                field_value = field_value[2:]
-
             try:
-                concatenated = bytes.fromhex(field_value).decode("utf-8").strip()
-                if len(concatenated) != 128:
-                    logger.error(
-                        f"Invalid commitment length for UID {uid}: {len(concatenated)}"
-                    )
-                    continue
-
                 bucket = Bucket(
-                    name=concatenated[:32],
-                    account_id=concatenated[:32],
-                    access_key_id=concatenated[32:64],
-                    secret_access_key=concatenated[64:],
+                    name=commitment[:32],
+                    account_id=commitment[:32],
+                    access_key_id=commitment[32:64],
+                    secret_access_key=commitment[64:],
                 )
                 commitments[uid] = bucket
                 logger.debug(f"Retrieved bucket commitment for UID {uid}")
-
             except Exception as e:
                 logger.error(f"Failed to decode commitment for UID {uid}: {e}")
                 continue
@@ -417,9 +401,9 @@ class ChainManager:
             )
             return None
 
-    def fetch_commitments(self):
+    async def fetch_commitments(self):
         """Fetches commitments and updates self.commitments."""
-        commitments = self.get_commitments_sync()
+        commitments = await self.get_commitments()
         if commitments:
             self.commitments = commitments
             self.update_peers_with_buckets()

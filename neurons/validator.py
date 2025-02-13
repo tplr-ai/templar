@@ -171,7 +171,7 @@ class Validator:
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
         self.comms.try_commit(self.wallet, self.bucket)
-        self.comms.fetch_commitments()
+        # self.comms.fetch_commitments()
 
         # Init state params
         self.stop_event = asyncio.Event()
@@ -245,7 +245,7 @@ class Validator:
         if self.uid not in self.peers:
             self.peers.append(self.uid)
 
-        self.comms.commitments = self.comms.get_commitments_sync()
+        self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
         tplr.logger.info("Loaded commitments")
 
@@ -1151,23 +1151,25 @@ class Validator:
             # 18. Increment global step
             self.global_step += 1
 
+    # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
-        def handler(event, _u, _s):
-            self.current_block = int(event["header"]["number"])  # type : ignore
+        def handler(event):
+            self.current_block = int(event["header"]["number"])  # type: ignore
             new_window = int(self.current_block / self.hparams.blocks_per_window)
             if new_window != self.current_window:
                 self.current_window = new_window
-                self.comms.current_window = (
-                    self.current_window
-                )  # Synchronize comms current_window
+                self.comms.current_window = self.current_window
+                tplr.logger.info(
+                    f"New block received. Current window updated to: {self.current_window}"
+                )
 
         while not self.stop_event.is_set():
             try:
                 bt.subtensor(config=self.config).substrate.subscribe_block_headers(
                     handler
                 )
-                break
-            except Exception:
+            except Exception as e:
+                tplr.logger.error(f"Block subscription error: {e}")
                 time.sleep(1)
 
 

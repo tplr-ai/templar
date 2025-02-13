@@ -9,7 +9,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "bittensor==9.0.0rc5",
+    "bittensor==9.0.0rc6",
     "bt-decode",
     "torch",
     "boto3",

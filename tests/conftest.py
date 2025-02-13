@@ -10,6 +10,7 @@ import torch
 import tplr.comms as comms_module
 import tplr.compress as compress
 from types import SimpleNamespace
+import tplr.logging
 
 
 # Dummy wallet and other objects (adjust based on your actual code structure)
@@ -91,3 +92,9 @@ async def comms_instance():
     comms.totalks = {"0.weight": 100, "0.bias": 10}
 
     return comms
+
+
+@pytest.fixture(autouse=True)
+def enable_tplr_logger_propagation():
+    tplr.logging.logger.setLevel("INFO")
+    tplr.logging.logger.propagate = True

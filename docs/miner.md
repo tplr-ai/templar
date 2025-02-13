@@ -109,31 +109,40 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    Populate the `.env` file with your configuration. The variables that need to be set are:
 
    ```dotenv:docker/.env
-   WANDB_API_KEY=your_wandb_api_key
+   # Add your Weights & Biases API key
+   WANDB_API_KEY=<your_wandb_api_key>
 
-   # Cloudflare R2 Credentials
-   R2_ACCOUNT_ID=your_r2_account_id
 
-   R2_READ_ACCESS_KEY_ID=your_r2_read_access_key_id
-   R2_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
+   # Cloudflare R2 Credentials - Add your R2 credentials below
+   R2_GRADIENTS_ACCOUNT_ID=<your_r2_account_id>
+   R2_GRADIENTS_BUCKET_NAME=<your_r2_bucket_name>
 
-   R2_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
-   R2_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
+   R2_GRADIENTS_READ_ACCESS_KEY_ID=<your_r2_read_access_key_id>
+   R2_GRADIENTS_READ_SECRET_ACCESS_KEY=<your_r2_read_secret_access_key>
+
+   R2_GRADIENTS_WRITE_ACCESS_KEY_ID=<your_r2_write_access_key_id>
+   R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=<your_r2_write_secret_access_key>
+
+   R2_DATASET_ACCOUNT_ID=80f15715bb0b882c9e967c13e677ed7d
+   R2_DATASET_BUCKET_NAME=80f15715bb0b882c9e967c13e677ed7d
+   R2_DATASET_READ_ACCESS_KEY_ID=88548d962edc9a1f4416cbb3453d914a
+   R2_DATASET_READ_SECRET_ACCESS_KEY=4934ae848465113a75babf7d0a88efd9112aa49296c900744268e91f1d31998f
 
    # Wallet Configuration
-   WALLET_NAME=default
-   WALLET_HOTKEY=your_miner_hotkey_name
+   WALLET_NAME=<your_wallet_name>
+   WALLET_HOTKEY=<your_wallet_hotkey>
 
    # Network Configuration
    NETWORK=finney
    NETUID=3
-
    # GPU Configuration
    CUDA_DEVICE=cuda:0
-
+   # Node Type
+   NODE_TYPE=validator
    # Additional Settings
    DEBUG=false
    ```
+   
 
    Replace the placeholders with your actual values.
 
@@ -258,11 +267,21 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    export NETWORK=your_network
    export NETUID=your_netuid
    export DEBUG=your_debug_setting
-   export R2_ACCOUNT_ID=your_r2_account_id
-   export R2_READ_ACCESS_KEY_ID=your_r2_read_access_key_id
-   export R2_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
-   export R2_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
-   export R2_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
+   
+   # Gradients R2 credentials
+   export R2_GRADIENTS_ACCOUNT_ID=your_r2_account_id
+   export R2_GRADIENTS_BUCKET_NAME=your_r2_bucket_name
+   export R2_GRADIENTS_READ_ACCESS_KEY_ID=your_r2_read_access_key_id 
+   export R2_GRADIENTS_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
+   export R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
+   export R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
+
+   # Dataset R2 credentials
+   export R2_DATASET_ACCOUNT_ID=80f15715bb0b882c9e967c13e677ed7d
+   export R2_DATASET_BUCKET_NAME=80f15715bb0b882c9e967c13e677ed7d
+   export R2_DATASET_READ_ACCESS_KEY_ID=88548d962edc9a1f4416cbb3453d914a
+   export R2_DATASET_READ_SECRET_ACCESS_KEY=4934ae848465113a75babf7d0a88efd9112aa49296c900744268e91f1d31998f
+   
    export GITHUB_USER=your_github_username
    ```
 

@@ -1827,7 +1827,11 @@
       "gridPos": {
         "h": 7,
         "w": 8,
+<<<<<<< HEAD
         "x": 0,
+=======
+        "x": 8,
+>>>>>>> 612d224961a8005367ea653c7479c3ae019916d9
         "y": 37
       },
       "id": 13,
@@ -3179,13 +3183,21 @@
     "list": []
   },
   "time": {
+<<<<<<< HEAD
     "from": "now-6h",
+=======
+    "from": "now-1h",
+>>>>>>> 612d224961a8005367ea653c7479c3ae019916d9
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "v1",
   "uid": "dearu32oa7ugwc",
+<<<<<<< HEAD
   "version": 108,
+=======
+  "version": 105,
+>>>>>>> 612d224961a8005367ea653c7479c3ae019916d9
   "weekStart": ""
 }

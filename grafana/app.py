@@ -57,7 +57,7 @@ def update_current_version(current_version, old_version_record, created_at):
     new_window_info = Version(
         version=current_version,
         created_at=created_at,  # current timestamp
-        window_id=Window.get_last().id+1,
+        window_id=WindowInfo.get_last().id+1,
     )
     db.session.add(new_window_info)
 

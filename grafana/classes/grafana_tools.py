@@ -18,7 +18,7 @@ from torch.nn.functional import cosine_similarity
 import numpy as np
 import os, json
 CF_REGION_NAME: str = "enam"
-WINDOW_OFFSET = 2
+WINDOW_OFFSET = 1
 
 class Grafana:
     
@@ -71,17 +71,22 @@ class Grafana:
             uid=self.uid,  
         )
 
-        self.bucket = self.comms.get_own_bucket('gradients', 'read')
+        # self.bucket = self.comms.get_own_bucket('gradients', 'read')
         
+        # # self.comms.try_commit(self.wallet, self.bucket)
+        # self.comms.fetch_commitments()
+        
+        self.bucket = self.comms.get_own_bucket('gradients', 'read')
         # self.comms.try_commit(self.wallet, self.bucket)
-        self.comms.fetch_commitments()
-
+        # self.comms.fetch_commitments()
         # Init state params
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         self.comms.current_window = self.current_window 
         self.step_counter = 0
+
+
 
         # Add step tracking
         self.global_step = 0
@@ -109,6 +114,7 @@ class Grafana:
         self.start_window, self.started_time = await self.get_start_window()
         tplr.logger.info(f"Using start_window: {self.start_window}")
         tplr.logger.info(f"Started Time: {self.started_time}")
+        self.comms.commitments = await self.comms.get_commitments()
         
         # Save started time and started window and show it.
         
@@ -387,7 +393,7 @@ class Grafana:
                     download_uids.append(peer["uid"])
             
             # Download gradients
-            num_samples = min(1, len(download_uids))  # Ensure we don’t exceed available elements
+            num_samples = min(7, len(download_uids))  # Ensure we don’t exceed available elements
             download_uids = np.random.choice(download_uids, size=num_samples, replace=False)
             
             result_gradients, result_metadata = await self.download_gradients(download_uids, step_window, key="gradient")
@@ -398,19 +404,23 @@ class Grafana:
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
-        def handler(event, _u, _s):
-            self.current_block = int(event['header']['number'])
+        def handler(event):
+            self.current_block = int(event["header"]["number"])  # type: ignore
             new_window = int(self.current_block / self.hparams.blocks_per_window)
             if new_window != self.current_window:
                 self.current_window = new_window
-                self.comms.current_window = self.current_window  # Synchronize comms current_window
-                self.window_info[new_window] = {}
-                self.window_info[new_window]["window_time"] = time.time()
+                self.comms.current_window = self.current_window
+                tplr.logger.info(
+                    f"New block received. Current window updated to: {self.current_window}"
+                )
+
         while not self.stop_event.is_set():
             try:
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler)
-                break
-            except Exception:
+                bt.subtensor(config=self.config).substrate.subscribe_block_headers(
+                    handler
+                )
+            except Exception as e:
+                tplr.logger.error(f"Block subscription error: {e}")
                 time.sleep(1)
                 
     async def download_gradients(self, uids, window, key, timeout=10, local=False, stale_retention=100):

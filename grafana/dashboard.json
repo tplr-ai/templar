@@ -1056,7 +1056,7 @@
                 "value": null
               },
               {
-                "color": "red",
+                "color": "orange",
                 "value": 80
               }
             ]
@@ -1152,6 +1152,158 @@
       "fieldConfig": {
         "defaults": {
           "color": {
+            "fixedColor": "red",
+            "mode": "fixed"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "displayName": "${__field.labels.__values}",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bad_miners_count"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Bad Peers Count"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 23
+      },
+      "id": 24,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "aebwtzqr2regwe"
+          },
+          "editorMode": "builder",
+          "format": "table",
+          "rawSql": "SELECT window_time, bad_miners_count FROM v_active_miners ORDER BY window_time DESC LIMIT 5000 ",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [
+                  {
+                    "name": "window_time",
+                    "type": "functionParameter"
+                  }
+                ],
+                "type": "function"
+              },
+              {
+                "parameters": [
+                  {
+                    "name": "bad_miners_count",
+                    "type": "functionParameter"
+                  }
+                ],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 5000,
+            "orderBy": {
+              "property": {
+                "name": [
+                  "window_time"
+                ],
+                "type": "string"
+              },
+              "type": "property"
+            },
+            "orderByDirection": "DESC"
+          },
+          "table": "v_active_miners"
+        }
+      ],
+      "title": "Bad peers count",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "aebwtzqr2regwe"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
             "mode": "palette-classic"
           },
           "custom": {
@@ -1212,7 +1364,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "Active Miners Count"
+                "value": "Active Peers Count"
               }
             ]
           }
@@ -1220,9 +1372,9 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 23
+        "w": 8,
+        "x": 0,
+        "y": 30
       },
       "id": 5,
       "options": {
@@ -1292,7 +1444,7 @@
           "table": "v_active_miners"
         }
       ],
-      "title": "Active miners count",
+      "title": "Active peers count",
       "type": "timeseries"
     },
     {
@@ -1372,8 +1524,8 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 12,
-        "x": 0,
+        "w": 8,
+        "x": 8,
         "y": 30
       },
       "id": 4,
@@ -1455,7 +1607,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "fixedColor": "red",
+            "fixedColor": "purple",
             "mode": "fixed"
           },
           "custom": {
@@ -1511,12 +1663,12 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "bad_miners_count"
+              "options": "diff_miners_count"
             },
             "properties": [
               {
                 "id": "displayName",
-                "value": "Bad Miners Count"
+                "value": "Missing Gradients Peers Count"
               }
             ]
           }
@@ -1524,11 +1676,11 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 16,
         "y": 30
       },
-      "id": 24,
+      "id": 27,
       "options": {
         "legend": {
           "calcs": [],
@@ -1550,7 +1702,7 @@
           },
           "editorMode": "builder",
           "format": "table",
-          "rawSql": "SELECT window_time, bad_miners_count FROM v_active_miners ORDER BY window_time DESC LIMIT 5000 ",
+          "rawSql": "SELECT window_time, diff_miners_count FROM v_active_miners ORDER BY window_time DESC LIMIT 5000 ",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1566,7 +1718,7 @@
               {
                 "parameters": [
                   {
-                    "name": "bad_miners_count",
+                    "name": "diff_miners_count",
                     "type": "functionParameter"
                   }
                 ],
@@ -1596,153 +1748,7 @@
           "table": "v_active_miners"
         }
       ],
-      "title": "Bad miners count",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "grafana-postgresql-datasource",
-        "uid": "aebwtzqr2regwe"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic-by-name"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "points",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 4,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "eval_uids_count"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Eval UIDs Count"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 6,
-        "x": 0,
-        "y": 37
-      },
-      "id": 12,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "11.4.0",
-      "targets": [
-        {
-          "editorMode": "builder",
-          "format": "table",
-          "rawSql": "SELECT eval_uids_count, window_time FROM v_validator_eval_info ORDER BY window_time DESC LIMIT 5000 ",
-          "refId": "A",
-          "sql": {
-            "columns": [
-              {
-                "parameters": [
-                  {
-                    "name": "eval_uids_count",
-                    "type": "functionParameter"
-                  }
-                ],
-                "type": "function"
-              },
-              {
-                "parameters": [
-                  {
-                    "name": "window_time",
-                    "type": "functionParameter"
-                  }
-                ],
-                "type": "function"
-              }
-            ],
-            "groupBy": [
-              {
-                "property": {
-                  "type": "string"
-                },
-                "type": "groupBy"
-              }
-            ],
-            "limit": 5000,
-            "orderBy": {
-              "property": {
-                "name": [
-                  "window_time"
-                ],
-                "type": "string"
-              },
-              "type": "property"
-            },
-            "orderByDirection": "DESC"
-          },
-          "table": "v_validator_eval_info"
-        }
-      ],
-      "title": "Evaluated UIDs",
+      "title": "Missing gradients peers count",
       "type": "timeseries"
     },
     {
@@ -1820,8 +1826,8 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 6,
-        "x": 6,
+        "w": 8,
+        "x": 0,
         "y": 37
       },
       "id": 13,
@@ -1879,6 +1885,151 @@
         }
       ],
       "title": "Learning Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "aebwtzqr2regwe"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 1,
+            "pointSize": 4,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "always",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "eval_uids"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Evalued UIDs"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 37
+      },
+      "id": 28,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.4.0",
+      "targets": [
+        {
+          "editorMode": "builder",
+          "format": "table",
+          "rawSql": "SELECT window_time, eval_uids FROM v_validator_eval_info ORDER BY window_time LIMIT 5000 ",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [
+                  {
+                    "name": "window_time",
+                    "type": "functionParameter"
+                  }
+                ],
+                "type": "function"
+              },
+              {
+                "parameters": [
+                  {
+                    "name": "eval_uids",
+                    "type": "functionParameter"
+                  }
+                ],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 5000,
+            "orderBy": {
+              "property": {
+                "name": [
+                  "window_time"
+                ],
+                "type": "string"
+              },
+              "type": "property"
+            }
+          },
+          "table": "v_validator_eval_info"
+        }
+      ],
+      "title": "Evaluated UIDs",
       "type": "timeseries"
     },
     {
@@ -1970,8 +2121,8 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 16,
         "y": 37
       },
       "id": 15,
@@ -2257,7 +2408,7 @@
           "table": "v_overview"
         }
       ],
-      "title": "Deplayed peers",
+      "title": "Gradients missing peers",
       "type": "stat"
     },
     {
@@ -3028,13 +3179,13 @@
     "list": []
   },
   "time": {
-    "from": "now-3h",
+    "from": "now-6h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "v1",
   "uid": "dearu32oa7ugwc",
-  "version": 101,
+  "version": 108,
   "weekStart": ""
 }

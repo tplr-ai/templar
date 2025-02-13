@@ -20,7 +20,7 @@ SELECT
     loss_random_improvement, 
     mean_scores, 
     mean_moving_avg_scores,
-    array_length(string_to_array(eval_uids, ','), 1) AS eval_uids_count 
+    eval_uids::INTEGER eval_uids
 FROM tbl_validator_eval_info aa
 JOIN tbl_window_info bb ON aa.window_id = bb.id
 JOIN tbl_version cc ON bb.id >= cc.window_id and cc.is_running = true
@@ -31,7 +31,8 @@ SELECT
     bb.window_time, 
     COALESCE(array_length(string_to_array(aa.active_miners, ','), 1), 0) AS active_miners_count, 
     COALESCE(array_length(string_to_array(aa.error_miners, ','), 1), 0) AS error_miners_count,
-    COALESCE(array_length(string_to_array(aa.bad_miners, ','), 1), 0) AS bad_miners_count 
+    COALESCE(array_length(string_to_array(aa.bad_miners, ','), 1), 0) AS bad_miners_count,
+    COALESCE(array_length(string_to_array(aa.diff_miners, ','), 1), 0) AS diff_miners_count
 FROM tbl_active_miners aa
 JOIN tbl_window_info bb ON aa.window_id = bb.id
 JOIN tbl_version cc ON bb.id >= cc.window_id and cc.is_running = true

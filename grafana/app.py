@@ -125,11 +125,11 @@ def insert_active_miners(window_id, active_miners, error_miners, bad_miners, gat
     # Create a new active miners record
     new_active_miners = ActiveMiners(
         window_id=window_id,
-        active_miners=",".join(map(str, active_miners)),
-        error_miners=",".join(map(str, error_miners)),
-        bad_miners=",".join(map(str, bad_miners)),
-        gather_miners=",".join(map(str, sorted(gather_miners))),
-        diff_miners=",".join(map(str, sorted(diff_miners))),
+        active_miners=", ".join(map(str, active_miners)),
+        error_miners=", ".join(map(str, error_miners)),
+        bad_miners=", ".join(map(str, bad_miners)),
+        gather_miners=", ".join(map(str, sorted(gather_miners))),
+        diff_miners=", ".join(map(str, sorted(diff_miners))),
     )
 
     # Add the new record to the session

@@ -20,6 +20,7 @@ import time
 import logging
 from rich.logging import RichHandler
 from rich.highlighter import NullHighlighter
+import bittensor as bt
 
 
 def T() -> float:
@@ -69,6 +70,24 @@ logger = logging.getLogger("templar")
 logger.setLevel(logging.INFO)
 
 
+# -----------------------------------------------------------------------------
+# Custom Logging Filter to silence subtensor warnings
+# -----------------------------------------------------------------------------
+class NoSubtensorWarning(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Return False if the record contains the undesired subtensor warning
+        return (
+            "Verify your local subtensor is running on port" not in record.getMessage()
+        )
+
+
+# Apply our custom filter to both the root logger and all attached handlers.
+logging.getLogger().addFilter(NoSubtensorWarning())
+logger.addFilter(NoSubtensorWarning())
+for handler in logging.getLogger().handlers:
+    handler.addFilter(NoSubtensorWarning())
+
+
 def debug() -> None:
     """
     Sets the logger level to DEBUG.
@@ -94,5 +113,21 @@ def trace() -> None:
     logging.Logger.trace = trace_method
     logger.setLevel(TRACE_LEVEL_NUM)
 
+
+bt.logging.off()
+
+logger.setLevel(logging.INFO)
+logger.propagate = False
+logger.handlers.clear()
+logger.addHandler(
+    RichHandler(
+        markup=True,
+        rich_tracebacks=True,
+        highlighter=NullHighlighter(),
+        show_level=False,
+        show_time=True,
+        show_path=False,
+    )
+)
 
 __all__ = ["logger", "debug", "trace", "P", "T"]

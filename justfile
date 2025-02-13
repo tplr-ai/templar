@@ -14,10 +14,10 @@ test-run:
     ./scripts/start.sh
 
 dev:
-    uv pip install -e ".[dev]"
+    uv pip install --pre -e ".[dev]"
 
-test:
-    uv run pytest -sv
+test: dev
+    uv run pytest -sv --prerelease=allow --pre
 
 bistro:
     ps aux | grep Bistro

@@ -16,11 +16,10 @@ test-run:
 
 # Install package in development mode using uv package manager
 dev:
-    uv pip install -e ".[dev]"
+    uv pip install --pre -e ".[dev]"
 
-# Run all tests with verbose output
-test:
-    uv run pytest -sv
+test: dev
+    uv run pytest -sv --prerelease=allow --pre
 
 # Run specific test file
 test-file file:

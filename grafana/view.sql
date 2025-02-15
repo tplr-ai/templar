@@ -88,27 +88,4 @@ FROM
   tbl_window_info aa
 JOIN tbl_version bb ON aa.id >= bb.window_id and bb.is_running = true
 ORDER BY
-  window_time DESC
-
-SELECT   'UID' || miner_id::TEXT miner_id, sum(score) score , window_time 
-FROM tbl_eval_info_detail aa
-JOIN tbl_window_info bb ON aa.window_id = bb.id
-JOIN tbl_version cc ON bb.id >= cc.window_id and cc.is_running = true
-WHERE 'V'||aa.vali_id::TEXT = '${vali_uid}'
-GROUP BY window_time, miner_id  HAVING sum(score) > 0 
-
-
-SELECT   'UID' || miner_id::TEXT miner_id, sum(moving_avg_score) score , window_time 
-FROM tbl_eval_info_detail aa
-JOIN tbl_window_info bb ON aa.window_id = bb.id
-JOIN tbl_version cc ON bb.id >= cc.window_id and cc.is_running = true
-WHERE 'V'||aa.vali_id::TEXT = '${vali_uid}'
-GROUP BY window_time, miner_id HAVING sum(moving_avg_score) > 0;
-
-
-SELECT   'UID' || miner_id::TEXT miner_id, sum(weight) score , window_time 
-FROM tbl_eval_info_detail aa
-JOIN tbl_window_info bb ON aa.window_id = bb.id
-JOIN tbl_version cc ON bb.id >= cc.window_id and cc.is_running = true
-WHERE 'V'||aa.vali_id::TEXT = '${vali_uid}'
-GROUP BY window_time, miner_id  HAVING sum(weight) > 0;
+  window_time DESC;

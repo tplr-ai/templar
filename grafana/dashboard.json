@@ -459,7 +459,7 @@
           },
           "editorMode": "builder",
           "format": "table",
-          "rawSql": "SELECT loss_before, loss_after, window_time FROM v_validator_eval_info ORDER BY window_time DESC LIMIT 5000 ",
+          "rawSql": "SELECT loss_before, loss_after, window_time FROM v_validator_eval_info WHERE vali_uid = '${vali_uid}' ORDER BY window_time DESC LIMIT 5000 ",
           "refId": "A",
           "sql": {
             "columns": [
@@ -509,7 +509,35 @@
               },
               "type": "property"
             },
-            "orderByDirection": "DESC"
+            "orderByDirection": "DESC",
+            "whereJsonTree": {
+              "children1": [
+                {
+                  "id": "aa89a9ba-cdef-4012-b456-719504dfede4",
+                  "properties": {
+                    "field": "vali_uid",
+                    "fieldSrc": "field",
+                    "operator": "equal",
+                    "value": [
+                      "${vali_uid}"
+                    ],
+                    "valueError": [
+                      null
+                    ],
+                    "valueSrc": [
+                      "value"
+                    ],
+                    "valueType": [
+                      "text"
+                    ]
+                  },
+                  "type": "rule"
+                }
+              ],
+              "id": "a98888aa-0123-4456-b89a-b194fb06fa15",
+              "type": "group"
+            },
+            "whereString": "vali_uid = '${vali_uid}'"
           },
           "table": "v_validator_eval_info"
         }
@@ -620,7 +648,7 @@
           },
           "editorMode": "builder",
           "format": "table",
-          "rawSql": "SELECT loss_improvement, window_time FROM v_validator_eval_info ORDER BY window_time DESC LIMIT 5000 ",
+          "rawSql": "SELECT loss_improvement, window_time FROM v_validator_eval_info WHERE vali_uid = '${vali_uid}' ORDER BY window_time DESC LIMIT 5000 ",
           "refId": "A",
           "sql": {
             "columns": [
@@ -661,7 +689,35 @@
               },
               "type": "property"
             },
-            "orderByDirection": "DESC"
+            "orderByDirection": "DESC",
+            "whereJsonTree": {
+              "children1": [
+                {
+                  "id": "baa89a8a-89ab-4cde-b012-319504edec14",
+                  "properties": {
+                    "field": "vali_uid",
+                    "fieldSrc": "field",
+                    "operator": "equal",
+                    "value": [
+                      "${vali_uid}"
+                    ],
+                    "valueError": [
+                      null
+                    ],
+                    "valueSrc": [
+                      "value"
+                    ],
+                    "valueType": [
+                      "text"
+                    ]
+                  },
+                  "type": "rule"
+                }
+              ],
+              "id": "a98888aa-0123-4456-b89a-b194fb06fa15",
+              "type": "group"
+            },
+            "whereString": "vali_uid = '${vali_uid}'"
           },
           "table": "v_validator_eval_info"
         }
@@ -794,7 +850,7 @@
           },
           "editorMode": "builder",
           "format": "table",
-          "rawSql": "SELECT loss_random_before, loss_random_after, window_time FROM v_validator_eval_info ORDER BY window_time DESC LIMIT 5000 ",
+          "rawSql": "SELECT loss_random_before, loss_random_after, window_time FROM v_validator_eval_info WHERE vali_uid = '${vali_uid}' ORDER BY window_time DESC LIMIT 5000 ",
           "refId": "A",
           "sql": {
             "columns": [
@@ -844,7 +900,35 @@
               },
               "type": "property"
             },
-            "orderByDirection": "DESC"
+            "orderByDirection": "DESC",
+            "whereJsonTree": {
+              "children1": [
+                {
+                  "id": "99999aba-4567-489a-bcde-f19504f4401c",
+                  "properties": {
+                    "field": "vali_uid",
+                    "fieldSrc": "field",
+                    "operator": "equal",
+                    "value": [
+                      "${vali_uid}"
+                    ],
+                    "valueError": [
+                      null
+                    ],
+                    "valueSrc": [
+                      "value"
+                    ],
+                    "valueType": [
+                      "text"
+                    ]
+                  },
+                  "type": "rule"
+                }
+              ],
+              "id": "a98888aa-0123-4456-b89a-b194fb06fa15",
+              "type": "group"
+            },
+            "whereString": "vali_uid = '${vali_uid}'"
           },
           "table": "v_validator_eval_info"
         }
@@ -955,7 +1039,7 @@
           },
           "editorMode": "builder",
           "format": "table",
-          "rawSql": "SELECT loss_random_improvement, window_time FROM v_validator_eval_info ORDER BY window_time DESC LIMIT 5000 ",
+          "rawSql": "SELECT loss_random_improvement, window_time FROM v_validator_eval_info WHERE vali_uid = '${vali_uid}' ORDER BY window_time DESC LIMIT 5000 ",
           "refId": "A",
           "sql": {
             "columns": [
@@ -996,7 +1080,35 @@
               },
               "type": "property"
             },
-            "orderByDirection": "DESC"
+            "orderByDirection": "DESC",
+            "whereJsonTree": {
+              "children1": [
+                {
+                  "id": "88abaaaa-0123-4456-b89a-b19504f4de94",
+                  "properties": {
+                    "field": "vali_uid",
+                    "fieldSrc": "field",
+                    "operator": "equal",
+                    "value": [
+                      "${vali_uid}"
+                    ],
+                    "valueError": [
+                      null
+                    ],
+                    "valueSrc": [
+                      "value"
+                    ],
+                    "valueType": [
+                      "text"
+                    ]
+                  },
+                  "type": "rule"
+                }
+              ],
+              "id": "a98888aa-0123-4456-b89a-b194fb06fa15",
+              "type": "group"
+            },
+            "whereString": "vali_uid = '${vali_uid}'"
           },
           "table": "v_validator_eval_info"
         }
@@ -1293,7 +1405,7 @@
           "table": "v_active_miners"
         }
       ],
-      "title": "Bad peers count",
+      "title": "Bad peers",
       "type": "timeseries"
     },
     {
@@ -1444,7 +1556,7 @@
           "table": "v_active_miners"
         }
       ],
-      "title": "Active peers count",
+      "title": "Active peers",
       "type": "timeseries"
     },
     {
@@ -1748,7 +1860,7 @@
           "table": "v_active_miners"
         }
       ],
-      "title": "Missing gradients peers count",
+      "title": "Missing gradients peers",
       "type": "timeseries"
     },
     {
@@ -1827,11 +1939,7 @@
       "gridPos": {
         "h": 7,
         "w": 8,
-<<<<<<< HEAD
         "x": 0,
-=======
-        "x": 8,
->>>>>>> 612d224961a8005367ea653c7479c3ae019916d9
         "y": 37
       },
       "id": 13,
@@ -1918,7 +2026,7 @@
               "viz": false
             },
             "insertNulls": false,
-            "lineInterpolation": "smooth",
+            "lineInterpolation": "stepAfter",
             "lineWidth": 1,
             "pointSize": 4,
             "scaleDistribution": {
@@ -1988,7 +2096,7 @@
         {
           "editorMode": "builder",
           "format": "table",
-          "rawSql": "SELECT window_time, eval_uids FROM v_validator_eval_info ORDER BY window_time LIMIT 5000 ",
+          "rawSql": "SELECT window_time, eval_uids FROM v_validator_eval_info WHERE vali_uid = '${vali_uid}' ORDER BY window_time LIMIT 5000 ",
           "refId": "A",
           "sql": {
             "columns": [
@@ -2028,7 +2136,35 @@
                 "type": "string"
               },
               "type": "property"
-            }
+            },
+            "whereJsonTree": {
+              "children1": [
+                {
+                  "id": "99b88b8b-cdef-4012-b456-719505506575",
+                  "properties": {
+                    "field": "vali_uid",
+                    "fieldSrc": "field",
+                    "operator": "equal",
+                    "value": [
+                      "${vali_uid}"
+                    ],
+                    "valueError": [
+                      null
+                    ],
+                    "valueSrc": [
+                      "value"
+                    ],
+                    "valueType": [
+                      "text"
+                    ]
+                  },
+                  "type": "rule"
+                }
+              ],
+              "id": "a98888aa-0123-4456-b89a-b194fb06fa15",
+              "type": "group"
+            },
+            "whereString": "vali_uid = '${vali_uid}'"
           },
           "table": "v_validator_eval_info"
         }
@@ -2519,7 +2655,7 @@
           "format": "table",
           "hide": false,
           "rawQuery": true,
-          "rawSql": "SELECT   'UID' || miner_id::TEXT miner_id, sum(score) score , window_time \r\nFROM tbl_eval_info_detail aa\r\nJOIN tbl_window_info bb ON aa.window_id = bb.id\r\nJOIN tbl_version cc ON bb.id >= cc.window_id and cc.is_running = true\r\nWHERE aa.vali_id = 1\r\nGROUP BY window_time, miner_id  HAVING sum(score) > 0",
+          "rawSql": "SELECT   'UID' || miner_id::TEXT miner_id, sum(score) score , window_time \r\nFROM tbl_eval_info_detail aa\r\nJOIN tbl_window_info bb ON aa.window_id = bb.id\r\nJOIN tbl_version cc ON bb.id >= cc.window_id and cc.is_running = true\r\nWHERE 'V'||aa.vali_id::TEXT = '${vali_uid}'\r\nGROUP BY window_time, miner_id  HAVING sum(score) > 0",
           "refId": "A",
           "sql": {
             "columns": [
@@ -2663,7 +2799,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT   'UID' || miner_id::TEXT miner_id, sum(moving_avg_score) score , window_time \r\nFROM tbl_eval_info_detail aa\r\nJOIN tbl_window_info bb ON aa.window_id = bb.id\r\nJOIN tbl_version cc ON bb.id >= cc.window_id and cc.is_running = true\r\nWHERE aa.vali_id = 1\r\nGROUP BY window_time, miner_id HAVING sum(moving_avg_score) > 0;",
+          "rawSql": "SELECT   'UID' || miner_id::TEXT miner_id, sum(moving_avg_score) score , window_time \r\nFROM tbl_eval_info_detail aa\r\nJOIN tbl_window_info bb ON aa.window_id = bb.id\r\nJOIN tbl_version cc ON bb.id >= cc.window_id and cc.is_running = true\r\nWHERE 'V'||aa.vali_id::TEXT = '${vali_uid}'\r\nGROUP BY window_time, miner_id HAVING sum(moving_avg_score) > 0;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -2809,7 +2945,7 @@
           "editorMode": "builder",
           "format": "table",
           "hide": false,
-          "rawSql": "SELECT miner_id, moving_avg_score FROM v_eval_info_detail_current WHERE moving_avg_score > 0 LIMIT 500 ",
+          "rawSql": "SELECT miner_id, moving_avg_score FROM v_eval_info_detail_current WHERE (moving_avg_score > 0 AND vali_uid = '${vali_uid}') LIMIT 500 ",
           "refId": "A",
           "sql": {
             "columns": [
@@ -2863,12 +2999,33 @@
                     ]
                   },
                   "type": "rule"
+                },
+                {
+                  "id": "88a8aabb-0123-4456-b89a-b195050f05dd",
+                  "properties": {
+                    "field": "vali_uid",
+                    "fieldSrc": "field",
+                    "operator": "equal",
+                    "value": [
+                      "${vali_uid}"
+                    ],
+                    "valueError": [
+                      null
+                    ],
+                    "valueSrc": [
+                      "value"
+                    ],
+                    "valueType": [
+                      "text"
+                    ]
+                  },
+                  "type": "rule"
                 }
               ],
               "id": "8b8a9b99-0123-4456-b89a-b194df33eebd",
               "type": "group"
             },
-            "whereString": "moving_avg_score > 0"
+            "whereString": "(moving_avg_score > 0 AND vali_uid = '${vali_uid}')"
           },
           "table": "v_eval_info_detail_current"
         }
@@ -2962,7 +3119,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT   'UID' || miner_id::TEXT miner_id, sum(weight) score , window_time \r\nFROM tbl_eval_info_detail aa\r\nJOIN tbl_window_info bb ON aa.window_id = bb.id\r\nJOIN tbl_version cc ON bb.id >= cc.window_id and cc.is_running = true\r\nWHERE aa.vali_id = 1\r\nGROUP BY window_time, miner_id  HAVING sum(weight) > 0;",
+          "rawSql": "SELECT   'UID' || miner_id::TEXT miner_id, sum(weight) score , window_time \r\nFROM tbl_eval_info_detail aa\r\nJOIN tbl_window_info bb ON aa.window_id = bb.id\r\nJOIN tbl_version cc ON bb.id >= cc.window_id and cc.is_running = true\r\nWHERE 'V'||aa.vali_id::TEXT = '${vali_uid}'\r\nGROUP BY window_time, miner_id  HAVING sum(weight) > 0;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -3107,7 +3264,7 @@
           "editorMode": "builder",
           "format": "table",
           "hide": false,
-          "rawSql": "SELECT miner_id, weight FROM v_eval_info_detail_current WHERE moving_avg_score > 0 LIMIT 500 ",
+          "rawSql": "SELECT miner_id, weight FROM v_eval_info_detail_current WHERE (moving_avg_score > 0 AND vali_uid = '${vali_uid}') LIMIT 500 ",
           "refId": "A",
           "sql": {
             "columns": [
@@ -3161,12 +3318,33 @@
                     ]
                   },
                   "type": "rule"
+                },
+                {
+                  "id": "ba9aaaa8-0123-4456-b89a-b195050f9f24",
+                  "properties": {
+                    "field": "vali_uid",
+                    "fieldSrc": "field",
+                    "operator": "equal",
+                    "value": [
+                      "${vali_uid}"
+                    ],
+                    "valueError": [
+                      null
+                    ],
+                    "valueSrc": [
+                      "value"
+                    ],
+                    "valueType": [
+                      "text"
+                    ]
+                  },
+                  "type": "rule"
                 }
               ],
               "id": "8b8a9b99-0123-4456-b89a-b194df33eebd",
               "type": "group"
             },
-            "whereString": "moving_avg_score > 0"
+            "whereString": "(moving_avg_score > 0 AND vali_uid = '${vali_uid}')"
           },
           "table": "v_eval_info_detail_current"
         }
@@ -3180,24 +3358,31 @@
   "schemaVersion": 40,
   "tags": [],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "text": "V1",
+          "value": "V1"
+        },
+        "definition": " select 'V'||uid::TEXT uid from tbl_neuron where type = 'true';",
+        "label": "Validator",
+        "name": "vali_uid",
+        "options": [],
+        "query": " select 'V'||uid::TEXT uid from tbl_neuron where type = 'true';",
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      }
+    ]
   },
   "time": {
-<<<<<<< HEAD
-    "from": "now-6h",
-=======
-    "from": "now-1h",
->>>>>>> 612d224961a8005367ea653c7479c3ae019916d9
+    "from": "now-3h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "v1",
   "uid": "dearu32oa7ugwc",
-<<<<<<< HEAD
-  "version": 108,
-=======
-  "version": 105,
->>>>>>> 612d224961a8005367ea653c7479c3ae019916d9
+  "version": 112,
   "weekStart": ""
 }

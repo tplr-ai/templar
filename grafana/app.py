@@ -65,7 +65,7 @@ def update_current_version(current_version, old_version_record, created_at):
     if old_version_record:
         old_version_record.is_running = False
     db.session.commit()
-#0f1aec8a1acfdb996f1454e2412ee6bf68c2d120
+
 def insert_window(window_number, global_step, learning_rate):    
     api = wandb.Api()
     runs = api.runs(f"tplr/templar")
@@ -80,8 +80,6 @@ def insert_window(window_number, global_step, learning_rate):
 
     sync_window_number = window_number
     if history:
-        eval_info = {}
-        eval_info_detail = {}
         last_row = history[-1]  # Get the last row
         for key, value in last_row.items():
             if "latest/validator/network/window" in key:

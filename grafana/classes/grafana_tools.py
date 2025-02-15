@@ -71,11 +71,6 @@ class Grafana:
             uid=self.uid,  
         )
 
-        # self.bucket = self.comms.get_own_bucket('gradients', 'read')
-        
-        # # self.comms.try_commit(self.wallet, self.bucket)
-        # self.comms.fetch_commitments()
-        
         self.bucket = self.comms.get_own_bucket('gradients', 'read')
         # self.comms.try_commit(self.wallet, self.bucket)
         # self.comms.fetch_commitments()
@@ -364,8 +359,8 @@ class Grafana:
 
                 similarities = await self.compute_cosine_similarities(gradients)
 
-                # Prepare Data for Heatmap
-                await self.print_similarity_matrix(similarities)
+                # Print Similarity Matrix
+                # await self.print_similarity_matrix(similarities)
                 
                 # SAVE THIS LIST TO DB AND SHOW IN GRAFANA!
                 bad_peers = await self.analyze_similarities(similarities, active_peers, window=step_window, threshold=0.99)
@@ -413,6 +408,8 @@ class Grafana:
                 tplr.logger.info(
                     f"New block received. Current window updated to: {self.current_window}"
                 )
+                self.window_info[new_window] = {}
+                self.window_info[new_window]["window_time"] = time.time()
 
         while not self.stop_event.is_set():
             try:
@@ -447,28 +444,6 @@ class Grafana:
         gradient_metadata = {uid: metadata for uid, _, metadata in results if uid is not None}
 
         return gradient_tensors, gradient_metadata
-    
-    async def plot_heatmap(self, similarities):
-        """Plots cosine similarity heatmap asynchronously."""
-        uids = sorted(set(uid for pair in similarities.keys() for uid in pair))
-        similarity_matrix = np.zeros((len(uids), len(uids)))
-        uid_index = {uid: idx for idx, uid in enumerate(uids)}
-
-        for (uid1, uid2), similarity in similarities.items():
-            i, j = uid_index[uid1], uid_index[uid2]
-            similarity_matrix[i, j] = similarity
-            similarity_matrix[j, i] = similarity  
-
-        # df_similarities = pd.DataFrame(similarity_matrix, index=uids, columns=uids)
-
-        # plt.figure(figsize=(10, 8))
-        # sns.heatmap(df_similarities, annot=True, fmt=".2f", cmap="coolwarm", linewidths=0.5)
-        # plt.title("Cosine Similarities Heatmap")
-        # plt.xlabel("UIDs")
-        # plt.ylabel("UIDs")
-        # plt.xticks(rotation=45)
-        # plt.yticks(rotation=0)
-        # plt.show()
         
     async def print_similarity_matrix(self, similarities):
         """Prints cosine similarity matrix in the console in a readable format."""
@@ -484,15 +459,15 @@ class Grafana:
             similarity_matrix[i][j] = similarity
             similarity_matrix[j][i] = similarity  # Ensure symmetry
 
-        # # Print Header Row (UIDs)
-        # header = "     " + "  ".join(f"{uid:5}" for uid in uids)
-        # print(header)
-        # print("-" * len(header))
+        # Print Header Row (UIDs)
+        header = "     " + "  ".join(f"{uid:5}" for uid in uids)
+        print(header)
+        print("-" * len(header))
 
-        # # Print each row
-        # for i, uid in enumerate(uids):
-        #     row_values = "  ".join(f"{similarity_matrix[i][j]:.2f}" for j in range(len(uids)))
-        #     print(f"{uid:5} | {row_values}")
+        # Print each row
+        for i, uid in enumerate(uids):
+            row_values = "  ".join(f"{similarity_matrix[i][j]:.2f}" for j in range(len(uids)))
+            print(f"{uid:5} | {row_values}")
 
         
     async def compute_cosine_similarities(self, gradients):

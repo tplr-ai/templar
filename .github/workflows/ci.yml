@@ -47,7 +47,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install the project
-        run: uv sync --all-extras --dev
+        run: uv sync --all-extras --dev --prerelease=allow
 
       - name: Run Ruff Lint
         uses: astral-sh/ruff-action@v1

@@ -579,23 +579,31 @@ class Miner:
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
         def handler(event):
-            self.current_block = int(event["header"]["number"])  # type: ignore
-            new_window = int(self.current_block / self.hparams.blocks_per_window)
-            if new_window != self.current_window:
-                self.current_window = new_window
-                self.comms.current_window = self.current_window
-                tplr.logger.info(
-                    f"New block received. Current window updated to: {self.current_window}"
-                )
+            try:
+                self.current_block = int(event["header"]["number"])  # type: ignore
+                new_window = int(self.current_block / self.hparams.blocks_per_window)
+                if new_window != self.current_window:
+                    self.current_window = new_window
+                    self.comms.current_window = self.current_window
+                    tplr.logger.info(
+                        f"New block received. Current window updated to: {self.current_window}"
+                    )
+            except Exception as e:
+                tplr.logger.error(f"Error processing block event: {e}")
+
+        backoff = 1  # initial backoff in seconds
+        max_backoff = 60  # maximum backoff limit
 
         while not self.stop_event.is_set():
             try:
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(
-                    handler
-                )
+                bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler)
+                backoff = 1  # reset backoff if subscription exits without exception
             except Exception as e:
-                tplr.logger.error(f"Block subscription error: {e}")
-                time.sleep(1)
+                tplr.logger.error(
+                    f"Block subscription error: {e}. Retrying in {backoff} seconds."
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)  # exponential backoff up to a max limit
 
 
 # Start miner.

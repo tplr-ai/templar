@@ -1098,7 +1098,8 @@ class Validator:
                                 vals,
                                 self.xshapes[n],
                                 self.totalks[n],
-                            ))
+                            )
+                        )
                         # Store pre-sign gradient in momentum
                         self.momentum[n] = new_grad.clone()
                         if p.grad is None:
@@ -1170,14 +1171,18 @@ class Validator:
 
         while not self.stop_event.is_set():
             try:
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler)
+                bt.subtensor(config=self.config).substrate.subscribe_block_headers(
+                    handler
+                )
                 backoff = 1  # reset backoff if subscription exits without exception
             except Exception as e:
                 tplr.logger.error(
                     f"Block subscription error: {e}. Retrying in {backoff} seconds."
                 )
                 time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)  # exponential backoff up to a max limit
+                backoff = min(
+                    backoff * 2, max_backoff
+                )  # exponential backoff up to a max limit
 
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):

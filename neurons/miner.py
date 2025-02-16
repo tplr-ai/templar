@@ -596,14 +596,18 @@ class Miner:
 
         while not self.stop_event.is_set():
             try:
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler)
+                bt.subtensor(config=self.config).substrate.subscribe_block_headers(
+                    handler
+                )
                 backoff = 1  # reset backoff if subscription exits without exception
             except Exception as e:
                 tplr.logger.error(
                     f"Block subscription error: {e}. Retrying in {backoff} seconds."
                 )
                 time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)  # exponential backoff up to a max limit
+                backoff = min(
+                    backoff * 2, max_backoff
+                )  # exponential backoff up to a max limit
 
 
 # Start miner.

@@ -24,7 +24,7 @@ import numpy as np
 from pathlib import Path
 import pyarrow.parquet as pq
 from functools import lru_cache
-import random
+import threading
 
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
@@ -420,13 +420,24 @@ class R2DatasetLoader(DatasetLoader):
                 rows_per_group = chosen_shard["num_rows"] // num_row_groups
                 group_index = min(shard_offset // rows_per_group, num_row_groups - 1)
 
-                # Read the row group
-                table = await asyncio.to_thread(
-                    pf_data["parquet"].read_row_group,
-                    group_index,
-                    columns=["text"],
-                    use_threads=True,
-                )
+                def safe_read_row_group():
+                    # Instead of using cached file handles, open a new one per read.
+                    fs = R2DatasetLoader._get_fs()
+                    file_path = chosen_shard["path"]
+                    f = fs.open(file_path, "rb", buffer_size=R2DatasetLoader.READ_BUFFER_SIZE)
+                    try:
+                        # Create a new ParquetFile object from the newly opened file handle.
+                        pf = pq.ParquetFile(f, memory_map=True)
+                        table = pf.read_row_group(
+                            group_index,
+                            columns=["text"],
+                            use_threads=True
+                        )
+                    finally:
+                        f.close()
+                    return table
+
+                table = await asyncio.to_thread(safe_read_row_group)
 
                 # Adjust start_idx based on actual rows in the group
                 start_idx = shard_offset % rows_per_group
@@ -570,5 +581,5 @@ class R2DatasetLoader(DatasetLoader):
             pack_samples=pack_samples
         )
         elapsed = T() - start_time
-        logger.info(f"Loaded {data_type} data for window {window} with seed: {seed_val} " + P(window, elapsed))
+        logger.info(f"Loaded {data_type} data for window {window} with seed: {seed_val}, pages: {[p[1] for p in pages]} " + P(window, elapsed))
         return loader, pages

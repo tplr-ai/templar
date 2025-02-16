@@ -303,8 +303,6 @@ class Miner:
                 seed=self.uid,  # type: ignore
                 data_type="training"
             )
-            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - data_start)} Loaded training data')
-            tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}") #type: ignore
             
             # 3. Accumulate gradients over batches
             train_start = tplr.T()

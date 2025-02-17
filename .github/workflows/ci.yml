@@ -51,7 +51,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install the project
-        run: uv sync --all-extras --dev --prerelease=allow
+        run: uv sync --all-extras --dev
 
       - name: Run Ruff Lint
         uses: astral-sh/ruff-action@v1
@@ -65,7 +65,7 @@ jobs:
 
       - name: Run Tests with Coverage
         run: |
-          uv run --prerelease=allow pytest tests/ -v --cov=src --cov-report=xml --cov-report=term
+          uv run pytest tests/ -v --cov=src --cov-report=xml --cov-report=term
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4

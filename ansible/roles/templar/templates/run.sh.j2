@@ -1,0 +1,17 @@
+#!/bin/env bash
+
+set -x
+
+source .venv/bin/activate
+
+{% for key, value in env_vars.items() %}
+export {{ key }}={{ value | quote }}
+{% endfor %}
+
+while true; do
+    echo "Starting neurons/miner.py..."
+    {{ miner_command }}
+    EXIT_CODE=$?
+    echo "neurons/miner.py exited with code ${EXIT_CODE}. Restarting in 5 seconds..."
+    sleep 5
+done

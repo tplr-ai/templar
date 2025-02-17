@@ -1,0 +1,10 @@
+---
+- name: Provision Bittensor Subnet templar
+  hosts: all
+  become: yes
+  vars:
+    workspace_dir: "{{ ansible_env.HOME }}/workspace"
+    templar_dir: "{{ workspace_dir }}/templar"
+    bittensor_remote_dir: "/root/.bittensor"
+  roles:
+    - templar

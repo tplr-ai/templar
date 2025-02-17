@@ -9,6 +9,11 @@ on:
 jobs:
   lint-and-format:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -18,6 +23,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync --all-extras --dev
@@ -30,6 +36,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
     env:
       R2_GRADIENTS_ACCOUNT_ID: ${{ secrets.R2_GRADIENTS_ACCOUNT_ID }}
       R2_GRADIENTS_BUCKET_NAME: ${{ secrets.R2_GRADIENTS_BUCKET_NAME }}
@@ -72,6 +83,7 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync --all-extras --dev

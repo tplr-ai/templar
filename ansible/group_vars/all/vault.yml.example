@@ -15,15 +15,13 @@ env_vars:
   R2_DATASET_WRITE_SECRET_ACCESS_KEY: ".."
 
   WALLET_NAME: "default"
-  WALLET_HOTKEY: "miner"
   NETWORK: "finney"
   NETUID: "3"
-  CUDA_DEVICE: "cuda:0"
   GITHUB_USER: "..."
 
 actual_batch_size: 5
-device: "cuda"
 netuid: "3"
 subtensor_network: "finney"
 wallet_name: "default"
-wallet_hotkey: "miner"
+cuda_devices: ["cuda:0"]
+wallet_hotkeys: ["miner_0"]

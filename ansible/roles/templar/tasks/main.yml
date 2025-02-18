@@ -82,12 +82,12 @@
     chdir: "{{ templar_dir }}"
   become: false
 
-- name: Synchronize local ~/.bittensor configuration to remote /root/.bittensor
+- name: Synchronize local ~/.bittensor configuration to remote ~/.bittensor
   delegate_to: localhost
   become: false
   synchronize:
     src: "{{ lookup('env','HOME') }}/.bittensor/"
-    dest: "{{ bittensor_remote_dir }}/"
+    dest: "~/.bittensor/"
     recursive: yes
     compress: yes
     rsync_opts:

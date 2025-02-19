@@ -25,7 +25,8 @@ dependencies = [
     "s3fs",
     "pyarrow",
     "scipy",
-    "influxdb"
+    "influxdb",
+    "python-logging-loki-v2"
 
 ]
 

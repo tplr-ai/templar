@@ -100,6 +100,16 @@ class Miner:
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
 
+        # Ensure miners do not send logs to Loki.
+        try:
+            from logging_loki import LokiHandler
+
+            tplr.logger.handlers = [
+                h for h in tplr.logger.handlers if not isinstance(h, LokiHandler)
+            ]
+        except Exception as e:
+            tplr.logger.error(f"Error removing LokiHandler for miner: {e}")
+
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
         self.model.to(self.config.device)
@@ -182,7 +192,9 @@ class Miner:
         self.batch_times = []  # For tracking processing speed
 
         # Instead, initialize the metrics logger:
-        self.metrics_logger = tplr.metrics.MetricsLogger(host="localhost", port=8086, database="tplr_metrics")
+        self.metrics_logger = tplr.metrics.MetricsLogger(
+            host="localhost", port=8086, database="tplr_metrics"
+        )
 
     # Main training loop.
     async def run(self):
@@ -397,7 +409,12 @@ class Miner:
             momentum_norms = [m.norm().item() for m in self.momentum.values()]
             training_metrics = {
                 "loss": total_loss / (i + 1),
-                "tokens_per_sec": ((i + 1) * self.hparams.batch_size * self.hparams.sequence_length) / duration,
+                "weight_norms": weight_norms,
+                "momentum_norms": momentum_norms,
+                "tokens_per_sec": (
+                    (i + 1) * self.hparams.batch_size * self.hparams.sequence_length
+                )
+                / duration,
                 "batch_duration": duration,
                 "total_tokens": self.total_tokens_processed,
                 "global_step": self.global_step,
@@ -406,7 +423,9 @@ class Miner:
                 "active_peers": len(self.peers),
                 "effective_batch_size": len(self.peers) * self.hparams.batch_size,
                 "learning_rate": self.scheduler.get_last_lr()[0],
-                "mean_grad_norm": sum(grad_norms) / len(grad_norms) if grad_norms else 0,
+                "mean_grad_norm": sum(grad_norms) / len(grad_norms)
+                if grad_norms
+                else 0,
                 "max_grad_norm": max(grad_norms) if grad_norms else 0,
                 "min_grad_norm": min(grad_norms) if grad_norms else 0,
             }
@@ -417,9 +436,9 @@ class Miner:
                     "role": "miner",
                     "uid": self.uid,
                     "window": self.current_window,
-                    "global_step": self.global_step
+                    "global_step": self.global_step,
                 },
-                fields=training_metrics
+                fields=training_metrics,
             )
 
             # ---------------------------------------------------------------------
@@ -495,7 +514,7 @@ class Miner:
                     "compression_time": tplr.T() - compress_start,
                     "gather_time": tplr.T() - gather_start,
                     "model_update_time": tplr.T() - update_start,
-                }
+                },
             )
 
             self.global_step += 1

@@ -16,11 +16,25 @@ services:
     volumes:
       - ./influxdb_data:/var/lib/influxdb
 
+  loki:
+    image: grafana/loki:2.8.2
+    container_name: loki
+    user: root
+    ports:
+      - "3100:3100"
+    volumes:
+      - ../grafana/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+      - loki_wal:/wal
+      - ./loki-entrypoint.sh:/loki-entrypoint.sh:ro
+    entrypoint: [ "/loki-entrypoint.sh" ]
+
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
     depends_on:
       - influxdb
+      - loki
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
@@ -28,6 +42,9 @@ services:
       - "3000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
+      - ../grafana:/etc/grafana/provisioning
 
 volumes:
   grafana_data:
+  loki_data:
+  loki_wal:

@@ -20,6 +20,7 @@ import time
 from threading import Lock
 from . import __version__
 
+
 class MetricsLogger:
     def __init__(self, host="localhost", port=8086, database="tplr_metrics"):
         self.client = InfluxDBClient(host=host, port=port)
@@ -37,11 +38,13 @@ class MetricsLogger:
         if "version" not in tags:
             tags["version"] = __version__
 
-        data_point = [{
-            "measurement": measurement,
-            "tags": tags,
-            "time": timestamp,
-            "fields": fields,
-        }]
+        data_point = [
+            {
+                "measurement": measurement,
+                "tags": tags,
+                "time": timestamp,
+                "fields": fields,
+            }
+        ]
         with self.lock:
             self.client.write_points(data_point)

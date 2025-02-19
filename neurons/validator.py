@@ -25,8 +25,9 @@ import random
 import asyncio
 import argparse
 import threading
-from contextlib import contextmanager
 from time import perf_counter
+from logging_loki import LokiHandler
+from contextlib import contextmanager
 
 # Third party
 import torch
@@ -111,6 +112,14 @@ class Validator:
             )
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+
+        # Update Loki handler's tag with the dynamic UID from the validator.
+        try:
+            for handler in tplr.logger.handlers:
+                if isinstance(handler, LokiHandler):
+                    handler.tags["uid"] = str(self.uid)
+        except Exception as e:
+            tplr.logger.error(f"Failed to update Loki handler UID tag: {e}")
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
@@ -214,7 +223,9 @@ class Validator:
         self.eval_count = 0
 
         # Initialize InfluxDB metrics logger
-        self.metrics_logger = tplr.metrics.MetricsLogger(host="localhost", port=8086, database="tplr_metrics")
+        self.metrics_logger = tplr.metrics.MetricsLogger(
+            host="localhost", port=8086, database="tplr_metrics"
+        )
 
         # Initialize peers
         self.peers = []
@@ -225,7 +236,7 @@ class Validator:
         self.inactivity_slash_rate = 0.25  # 25% slash per window
 
     async def run(self):
-        gather_result = None  
+        gather_result = None
         # Start background block listener
         self.loop = asyncio.get_running_loop()
         self.listener = threading.Thread(
@@ -371,7 +382,7 @@ class Validator:
                     fields={
                         "score_before": old_score,
                         "score_after": new_score,
-                    }
+                    },
                 )
 
             gather_start = tplr.T()
@@ -401,7 +412,8 @@ class Validator:
             eval_start = tplr.T()
             # Sample a random subset of evaluation peers based on hparam uids_per_window
             evaluation_uids = random.sample(
-                self.eval_peers, min(self.hparams.uids_per_window, len(self.eval_peers)))
+                self.eval_peers, min(self.hparams.uids_per_window, len(self.eval_peers))
+            )
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
@@ -415,7 +427,6 @@ class Validator:
                     stale_retention=10,
                 )
 
-                scoring_start = tplr.T()
                 if eval_result is not None and eval_result[0] is not None:
                     state_dict, _ = eval_result
 
@@ -891,16 +902,24 @@ class Validator:
                         tags={
                             "role": "validator",
                             "uid": eval_uid,
-                            "window": self.sync_window
+                            "window": self.sync_window,
                         },
                         fields={
                             "gradient_score": self.gradient_scores[eval_uid].item(),
-                            "binary_indicator": self.binary_indicator_scores[eval_uid].item(),
-                            "binary_moving_avg": self.binary_moving_averages[eval_uid].item(),
-                            "normalised_binary": self.normalised_binary_moving_averages[eval_uid].item(),
-                            "final_moving_avg": self.final_moving_avg_scores[eval_uid].item(),
+                            "binary_indicator": self.binary_indicator_scores[
+                                eval_uid
+                            ].item(),
+                            "binary_moving_avg": self.binary_moving_averages[
+                                eval_uid
+                            ].item(),
+                            "normalised_binary": self.normalised_binary_moving_averages[
+                                eval_uid
+                            ].item(),
+                            "final_moving_avg": self.final_moving_avg_scores[
+                                eval_uid
+                            ].item(),
                             "weight": self.weights[eval_uid].item(),
-                        }
+                        },
                     )
 
                 else:
@@ -967,16 +986,24 @@ class Validator:
                             "role": "validator",
                             "uid": eval_uid,
                             "window": self.sync_window,
-                            "global_step": self.global_step
+                            "global_step": self.global_step,
                         },
                         fields={
                             "gradient_score": self.gradient_scores[eval_uid].item(),
-                            "binary_indicator": self.binary_indicator_scores[eval_uid].item(),
-                            "binary_moving_avg": self.binary_moving_averages[eval_uid].item(),
-                            "normalised_binary": self.normalised_binary_moving_averages[eval_uid].item(),
-                            "final_moving_avg": self.final_moving_avg_scores[eval_uid].item(),
+                            "binary_indicator": self.binary_indicator_scores[
+                                eval_uid
+                            ].item(),
+                            "binary_moving_avg": self.binary_moving_averages[
+                                eval_uid
+                            ].item(),
+                            "normalised_binary": self.normalised_binary_moving_averages[
+                                eval_uid
+                            ].item(),
+                            "final_moving_avg": self.final_moving_avg_scores[
+                                eval_uid
+                            ].item(),
                             "weight": self.weights[eval_uid].item(),
-                        }
+                        },
                     )
 
                 tplr.logger.info(
@@ -1016,7 +1043,9 @@ class Validator:
                 "evaluated_uids": len(self.evaluated_uids),
                 "learning_rate": self.scheduler.get_last_lr()[0],
                 "active_miners": len(self.valid_score_indices),
-                "gather_success_rate": gather_result.success_rate * 100 if gather_result else 0,
+                "gather_success_rate": gather_result.success_rate * 100
+                if gather_result
+                else 0,
             }
             self.metrics_logger.log(
                 measurement="templar_metrics",
@@ -1025,9 +1054,9 @@ class Validator:
                     "uid": self.uid,
                     "window": self.sync_window,
                     "global_step": self.global_step,
-                    "eval_uid": eval_uid
+                    "eval_uid": eval_uid,
                 },
-                fields=evaluation_metrics
+                fields=evaluation_metrics,
             )
 
             # 17. Set weights periodically
@@ -1171,9 +1200,9 @@ class Validator:
                 tags={
                     "role": "validator",
                     "uid": str(self.uid),
-                    "window": self.sync_window
+                    "window": self.sync_window,
                 },
-                fields=evaluation_metrics
+                fields=evaluation_metrics,
             )
 
             # 18. Increment global step

@@ -19,28 +19,26 @@ env_vars:
   R2_DATASET_READ_ACCESS_KEY_ID: "88548d962edc9a1f4416cbb3453d914a"
   R2_DATASET_READ_SECRET_ACCESS_KEY: "4934ae848465113a75babf7d0a88efd9112aa49296c900744268e91f1d31998f"
   WALLET_NAME: ""
-  WALLET_HOTKEY: ""
   NETWORK: "finney"
   NETUID: "3"
-  CUDA_DEVICE: ""
   DEBUG: "false"
   GITHUB_USER: ""
+  # CUDA_DEVICE: ""
+  # WALLET_HOTKEY: ""
 
 # Whether to use Systemd or not
 use_systemd: false
 
 # Miner cli parameters
 actual_batch_size: 5
-device: "cuda"
 netuid: "3"
 subtensor_network: "finney"
 wallet_name: ""
-wallet_hotkey: ""
 
-miner_command: >-
-  .venv/bin/python neurons/miner.py --actual_batch_size {{ actual_batch_size }}
-  --wallet.name {{ wallet_name }} --wallet.hotkey {{ wallet_hotkey }} --device {{ device }}
-  --use_wandb --netuid "{{ netuid }}" --subtensor.network "{{ subtensor_network }}" --sync_state
+# device: "cuda"
+# wallet_hotkey: ""
+cuda_devices: ["cuda:0"]
+wallet_hotkeys: ["miner_0"]
 
 apt_packages:
   - less

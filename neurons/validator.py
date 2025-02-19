@@ -1063,8 +1063,7 @@ class Validator:
                 tplr.logger.error(
                     "Failed to gather gradients from peers. Waiting for next window."
                 )
-                while self.current_window == self.sync_window:
-                    await asyncio.sleep(0.1)
+                self.global_step += 1
                 continue
             tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
             tplr.logger.info(

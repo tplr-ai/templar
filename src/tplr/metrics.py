@@ -15,36 +15,80 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-from influxdb import InfluxDBClient
+import influxdb_client
+from influxdb_client import Point, WritePrecision
+from influxdb_client.client.write_api import SYNCHRONOUS
 import time
 from threading import Lock
+import statistics
 from . import __version__
 
 
 class MetricsLogger:
-    def __init__(self, host="localhost", port=8086, database="tplr_metrics"):
-        self.client = InfluxDBClient(host=host, port=port)
-        self.database = database
-        self.client.create_database(self.database)
-        self.client.switch_database(self.database)
-        self.lock = Lock()  # ensure thread-safety
+    def __init__(
+        self,
+        host="localhost",
+        port=8086,
+        database="tplr_metrics",
+        token=None,
+        org="templar",
+    ):
+        # Initialize InfluxDB client with token auth
+        url = f"https://{host}:{port}"
+        self.client = influxdb_client.InfluxDBClient(url=url, token=token, org=org)
+        self.write_api = self.client.write_api(write_options=SYNCHRONOUS)
+        self.database = database  # In InfluxDB 2.x, this is called "bucket"
+        self.org = org
+        self.lock = Lock()
+
+    def process_value(self, v):
+        if isinstance(v, (int, float)):
+            return float(v)
+        elif isinstance(v, list):
+            # For lists, compute statistical measures
+            if not v:  # Empty list
+                return 0.0
+            return {
+                "mean": float(statistics.mean(v)),
+                "min": float(min(v)),
+                "max": float(max(v)),
+                "median": float(statistics.median(v)),
+            }
+        return v
 
     def log(self, measurement: str, tags: dict, fields: dict, timestamp=None):
-        if timestamp is None:
-            # Use nanosecond precision timestamp
-            timestamp = int(time.time() * 1e9)
+        try:
+            if timestamp is None:
+                timestamp = int(time.time_ns())
 
-        # Automatically inject __version__ as a tag if not provided.
-        if "version" not in tags:
-            tags["version"] = __version__
+            if "version" not in tags:
+                tags["version"] = __version__
 
-        data_point = [
-            {
-                "measurement": measurement,
-                "tags": tags,
-                "time": timestamp,
-                "fields": fields,
-            }
-        ]
-        with self.lock:
-            self.client.write_points(data_point)
+            # Process fields and handle lists
+            processed_fields = {}
+            for k, v in fields.items():
+                processed_value = self.process_value(v)
+                if isinstance(processed_value, dict):
+                    # For list values, create multiple fields with prefixes
+                    for stat_name, stat_value in processed_value.items():
+                        processed_fields[f"{k}_{stat_name}"] = stat_value
+                else:
+                    processed_fields[k] = processed_value
+
+            point = Point(measurement)
+
+            # Add tags
+            for tag_key, tag_value in tags.items():
+                point = point.tag(tag_key, str(tag_value))
+
+            # Add fields
+            for field_key, field_value in processed_fields.items():
+                point = point.field(field_key, field_value)
+
+            # Add timestamp
+            point = point.time(timestamp, WritePrecision.NS)
+
+            with self.lock:
+                self.write_api.write(bucket=self.database, org=self.org, record=point)
+        except Exception as e:
+            print(f"Error logging metrics: {str(e)}")

@@ -18,6 +18,7 @@
 # type: ignore
 
 # Standard library
+import os
 import sys
 import copy
 import time
@@ -224,7 +225,11 @@ class Validator:
 
         # Initialize InfluxDB metrics logger
         self.metrics_logger = tplr.metrics.MetricsLogger(
-            host="localhost", port=8086, database="tplr_metrics"
+            host="uaepr2itgl-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws",
+            port=8086,
+            database="tplr",
+            token=os.environ.get("INFLUXDB_TOKEN"),
+            org="templar",
         )
 
         # Initialize peers

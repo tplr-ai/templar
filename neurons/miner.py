@@ -23,6 +23,7 @@ import random
 import asyncio
 import argparse
 import threading
+import os
 
 # Third party
 import torch
@@ -191,9 +192,13 @@ class Miner:
         self.total_tokens_processed = 0
         self.batch_times = []  # For tracking processing speed
 
-        # Instead, initialize the metrics logger:
+        # Initialize InfluxDB metrics logger
         self.metrics_logger = tplr.metrics.MetricsLogger(
-            host="localhost", port=8086, database="tplr_metrics"
+            host="uaepr2itgl-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws",
+            port=8086,
+            database="tplr",
+            token=os.environ.get("INFLUXDB_TOKEN"),
+            org="templar",
         )
 
     # Main training loop.

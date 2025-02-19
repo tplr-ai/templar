@@ -24,7 +24,8 @@ dependencies = [
     "zstandard",
     "s3fs",
     "pyarrow",
-    "scipy"
+    "scipy",
+    "influxdb"
 
 ]
 

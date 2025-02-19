@@ -15,21 +15,29 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-# ruff: noqa
-# pylint: disable=all
-# mypy: ignore-errors
-# type: ignore
+from influxdb import InfluxDBClient
+import time
+from threading import Lock
 
-__version__ = "0.2.29"
+class MetricsLogger:
+    def __init__(self, host="localhost", port=8086, database="tplr_metrics"):
+        self.client = InfluxDBClient(host=host, port=port)
+        self.database = database
+        self.client.create_database(self.database)
+        self.client.switch_database(self.database)
+        self.lock = Lock()  # ensure thread-safety
 
-# Import package.
-from .chain import *
-from .comms import *
-from .compress import *
-from .dataset import *
-from .neurons import *
-from .r2_dataset import *
-from .hparams import *
-from .logging import *
-from .schemas import *
-from .wandb import initialize_wandb
+    def log(self, measurement: str, tags: dict, fields: dict, timestamp=None):
+        if timestamp is None:
+            # Use nanosecond precision timestamp
+            timestamp = int(time.time() * 1e9)
+        data_point = [
+            {
+                "measurement": measurement,
+                "tags": tags,
+                "time": timestamp,
+                "fields": fields,
+            }
+        ]
+        with self.lock:
+            self.client.write_points(data_point)

@@ -181,14 +181,8 @@ class Miner:
         self.total_tokens_processed = 0
         self.batch_times = []  # For tracking processing speed
 
-        # Initialize WandB
-        self.wandb = tplr.initialize_wandb(
-            run_prefix="M",
-            uid=self.uid,
-            config=self.config,
-            group="miner",
-            job_type="mining",
-        )
+        # Instead, initialize the metrics logger:
+        self.metrics_logger = tplr.metrics.MetricsLogger(host="localhost", port=8086, database="tplr_metrics")
 
     # Main training loop.
     async def run(self):
@@ -401,43 +395,24 @@ class Miner:
             ]
             weight_norms = [p.norm().item() for p in self.model.parameters()]
             momentum_norms = [m.norm().item() for m in self.momentum.values()]
-            self.wandb.log(
-                {
-                    # Training metrics
-                    "miner/loss": total_loss / (i + 1),
-                    "miner/tokens_per_sec": (
-                        (i + 1) * self.hparams.batch_size * self.hparams.sequence_length
-                    )
-                    / duration,
-                    "miner/batch_duration": duration,
-                    "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": batch_tokens,
-                    "miner/global_step": self.global_step,
-                    # Resource metrics
-                    "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                    / 1024**2,  # MB
-                    "miner/gpu_memory_cached": torch.cuda.memory_reserved()
-                    / 1024**2,  # MB
-                    # Network metrics
-                    "miner/active_peers": len(self.peers),
-                    "miner/effective_batch_size": len(self.peers)
-                    * self.hparams.batch_size,
-                    # Optimization metrics
-                    "miner/learning_rate": self.scheduler.get_last_lr()[0],
-                    # Gradient statistics as points
-                    "miner/mean_grad_norm": sum(grad_norms) / len(grad_norms)
-                    if grad_norms
-                    else 0,
-                    "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
-                    "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                    "miner/grad_norm_std": torch.tensor(grad_norms).std().item()
-                    if grad_norms
-                    else 0,
-                    "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
-                    "miner/mean_momentum_norm": sum(momentum_norms)
-                    / len(momentum_norms),
-                },
-                step=self.global_step,
+            self.metrics_logger.log(
+                measurement="miner_training",
+                tags={"uid": self.uid, "window": step_window},
+                fields={
+                    "loss": total_loss / (i + 1),
+                    "tokens_per_sec": ((i + 1) * self.hparams.batch_size * self.hparams.sequence_length) / duration,
+                    "batch_duration": duration,
+                    "total_tokens": self.total_tokens_processed,
+                    "global_step": self.global_step,
+                    "gpu_mem_allocated_mb": torch.cuda.memory_allocated() / 1024**2,
+                    "gpu_mem_cached_mb": torch.cuda.memory_reserved() / 1024**2,
+                    "active_peers": len(self.peers),
+                    "effective_batch_size": len(self.peers) * self.hparams.batch_size,
+                    "learning_rate": self.scheduler.get_last_lr()[0],
+                    "mean_grad_norm": sum(grad_norms) / len(grad_norms) if grad_norms else 0,
+                    "max_grad_norm": max(grad_norms) if grad_norms else 0,
+                    "min_grad_norm": min(grad_norms) if grad_norms else 0,
+                }
             )
 
             # ---------------------------------------------------------------------
@@ -502,48 +477,18 @@ class Miner:
                 f"{tplr.P(step_window, tplr.T() - window_start)} Completed window iteration"
             )
 
-            self.wandb.log(
-                {
-                    # Add timing metrics
-                    "miner/timing/window_total": tplr.T() - window_start,
-                    "miner/timing/peer_update": tplr.T() - peer_start,
-                    "miner/timing/data_loading": tplr.T() - data_start,
-                    "miner/timing/training": tplr.T() - train_start,
-                    "miner/timing/compression": tplr.T() - compress_start,
-                    "miner/timing/gather": tplr.T() - gather_start,
-                    "miner/timing/model_update": tplr.T() - update_start,
-                    # Existing metrics
-                    "miner/loss": total_loss / (i + 1),
-                    "miner/tokens_per_sec": (
-                        (i + 1) * self.hparams.batch_size * self.hparams.sequence_length
-                    )
-                    / duration,
-                    "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": batch_tokens,
-                    "miner/global_step": self.global_step,
-                    "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                    / 1024**2,  # MB
-                    "miner/gpu_memory_cached": torch.cuda.memory_reserved()
-                    / 1024**2,  # MB
-                    "miner/active_peers": len(self.peers),
-                    "miner/effective_batch_size": len(self.peers)
-                    * self.hparams.batch_size,
-                    "miner/learning_rate": self.scheduler.get_last_lr()[0],
-                    "miner/mean_grad_norm": sum(grad_norms) / len(grad_norms)
-                    if grad_norms
-                    else 0,
-                    "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
-                    "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                    "miner/grad_norm_std": torch.tensor(grad_norms).std().item()
-                    if grad_norms
-                    else 0,
-                    "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
-                    "miner/mean_momentum_norm": sum(momentum_norms)
-                    / len(momentum_norms),
-                    # Added gather success rate in %
-                    "miner/gather/success_rate": gather_result.success_rate * 100,
-                },
-                step=self.global_step,
+            self.metrics_logger.log(
+                measurement="miner_window_timing",
+                tags={"uid": self.uid, "window": step_window},
+                fields={
+                    "window_total": tplr.T() - window_start,
+                    "peer_update": tplr.T() - peer_start,
+                    "data_loading": tplr.T() - data_start,
+                    "training_time": tplr.T() - train_start,
+                    "compression_time": tplr.T() - compress_start,
+                    "gather_time": tplr.T() - gather_start,
+                    "model_update_time": tplr.T() - update_start,
+                }
             )
 
             self.global_step += 1

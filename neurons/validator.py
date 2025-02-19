@@ -225,6 +225,7 @@ class Validator:
         self.inactivity_slash_rate = 0.25  # 25% slash per window
 
     async def run(self):
+        gather_result = None  
         # Start background block listener
         self.loop = asyncio.get_running_loop()
         self.listener = threading.Thread(
@@ -400,8 +401,7 @@ class Validator:
             eval_start = tplr.T()
             # Sample a random subset of evaluation peers based on hparam uids_per_window
             evaluation_uids = random.sample(
-                self.eval_peers, min(self.hparams.uids_per_window, len(self.eval_peers))
-            )
+                self.eval_peers, min(self.hparams.uids_per_window, len(self.eval_peers)))
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
@@ -887,8 +887,12 @@ class Validator:
 
                     # Log individual UID metrics
                     self.metrics_logger.log(
-                        measurement="validator_evaluation",
-                        tags={"uid": eval_uid, "window": self.sync_window},
+                        measurement="templar_metrics",
+                        tags={
+                            "role": "validator",
+                            "uid": eval_uid,
+                            "window": self.sync_window
+                        },
                         fields={
                             "gradient_score": self.gradient_scores[eval_uid].item(),
                             "binary_indicator": self.binary_indicator_scores[eval_uid].item(),
@@ -958,8 +962,13 @@ class Validator:
 
                     # Log individual UID metrics
                     self.metrics_logger.log(
-                        measurement="validator_evaluation",
-                        tags={"uid": eval_uid, "window": self.sync_window},
+                        measurement="templar_metrics",
+                        tags={
+                            "role": "validator",
+                            "uid": eval_uid,
+                            "window": self.sync_window,
+                            "global_step": self.global_step
+                        },
                         fields={
                             "gradient_score": self.gradient_scores[eval_uid].item(),
                             "binary_indicator": self.binary_indicator_scores[eval_uid].item(),
@@ -1010,8 +1019,14 @@ class Validator:
                 "gather_success_rate": gather_result.success_rate * 100 if gather_result else 0,
             }
             self.metrics_logger.log(
-                measurement="validator_overall",
-                tags={"uid": self.uid, "window": self.sync_window},
+                measurement="templar_metrics",
+                tags={
+                    "role": "validator",
+                    "uid": self.uid,
+                    "window": self.sync_window,
+                    "global_step": self.global_step,
+                    "eval_uid": eval_uid
+                },
                 fields=evaluation_metrics
             )
 
@@ -1061,6 +1076,7 @@ class Validator:
                         global_step=self.global_step,
                         local=False,
                     )
+                )
 
             gather_result = await gather_task
             if gather_result is None:
@@ -1151,8 +1167,12 @@ class Validator:
                 "validator/timing/model_update": tplr.T() - update_start,
             }
             self.metrics_logger.log(
-                measurement="validator_overall",
-                tags={"uid": self.uid, "window": self.sync_window},
+                measurement="templar_metrics",
+                tags={
+                    "role": "validator",
+                    "uid": str(self.uid),
+                    "window": self.sync_window
+                },
                 fields=evaluation_metrics
             )
 

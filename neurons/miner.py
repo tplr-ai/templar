@@ -395,24 +395,31 @@ class Miner:
             ]
             weight_norms = [p.norm().item() for p in self.model.parameters()]
             momentum_norms = [m.norm().item() for m in self.momentum.values()]
+            training_metrics = {
+                "loss": total_loss / (i + 1),
+                "tokens_per_sec": ((i + 1) * self.hparams.batch_size * self.hparams.sequence_length) / duration,
+                "batch_duration": duration,
+                "total_tokens": self.total_tokens_processed,
+                "global_step": self.global_step,
+                "gpu_mem_allocated_mb": torch.cuda.memory_allocated() / 1024**2,
+                "gpu_mem_cached_mb": torch.cuda.memory_reserved() / 1024**2,
+                "active_peers": len(self.peers),
+                "effective_batch_size": len(self.peers) * self.hparams.batch_size,
+                "learning_rate": self.scheduler.get_last_lr()[0],
+                "mean_grad_norm": sum(grad_norms) / len(grad_norms) if grad_norms else 0,
+                "max_grad_norm": max(grad_norms) if grad_norms else 0,
+                "min_grad_norm": min(grad_norms) if grad_norms else 0,
+            }
+
             self.metrics_logger.log(
-                measurement="miner_training",
-                tags={"uid": self.uid, "window": step_window},
-                fields={
-                    "loss": total_loss / (i + 1),
-                    "tokens_per_sec": ((i + 1) * self.hparams.batch_size * self.hparams.sequence_length) / duration,
-                    "batch_duration": duration,
-                    "total_tokens": self.total_tokens_processed,
-                    "global_step": self.global_step,
-                    "gpu_mem_allocated_mb": torch.cuda.memory_allocated() / 1024**2,
-                    "gpu_mem_cached_mb": torch.cuda.memory_reserved() / 1024**2,
-                    "active_peers": len(self.peers),
-                    "effective_batch_size": len(self.peers) * self.hparams.batch_size,
-                    "learning_rate": self.scheduler.get_last_lr()[0],
-                    "mean_grad_norm": sum(grad_norms) / len(grad_norms) if grad_norms else 0,
-                    "max_grad_norm": max(grad_norms) if grad_norms else 0,
-                    "min_grad_norm": min(grad_norms) if grad_norms else 0,
-                }
+                measurement="templar_metrics",
+                tags={
+                    "role": "miner",
+                    "uid": self.uid,
+                    "window": self.current_window,
+                    "global_step": self.global_step
+                },
+                fields=training_metrics
             )
 
             # ---------------------------------------------------------------------

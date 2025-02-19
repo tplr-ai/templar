@@ -18,6 +18,7 @@
 from influxdb import InfluxDBClient
 import time
 from threading import Lock
+from . import __version__
 
 class MetricsLogger:
     def __init__(self, host="localhost", port=8086, database="tplr_metrics"):
@@ -31,13 +32,16 @@ class MetricsLogger:
         if timestamp is None:
             # Use nanosecond precision timestamp
             timestamp = int(time.time() * 1e9)
-        data_point = [
-            {
-                "measurement": measurement,
-                "tags": tags,
-                "time": timestamp,
-                "fields": fields,
-            }
-        ]
+
+        # Automatically inject __version__ as a tag if not provided.
+        if "version" not in tags:
+            tags["version"] = __version__
+
+        data_point = [{
+            "measurement": measurement,
+            "tags": tags,
+            "time": timestamp,
+            "fields": fields,
+        }]
         with self.lock:
             self.client.write_points(data_point)

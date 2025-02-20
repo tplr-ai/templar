@@ -16,7 +16,6 @@ from transformers.models.llama import LlamaForCausalLM
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"
-EVAL_SLEEP_TIME: int = 600
 
 
 def config() -> bt.Config:
@@ -285,7 +284,7 @@ class Evaluator:
                     tplr.logger.info(
                         f"No new checkpoint available (current: {latest_block}, last: {self.last_block_number})"
                     )
-                await asyncio.sleep(EVAL_SLEEP_TIME)
+                await asyncio.sleep(self.config.eval_interval)  # type: ignore
         except KeyboardInterrupt:
             tplr.logger.info("Benchmark run interrupted by user")
             self.stop_event.set()

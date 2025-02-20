@@ -75,6 +75,60 @@ class InfluxService {
       throw error;
     }
   }
+
+  async getTokensPerSec({ uid = null, version = config.version, timeRange = '24h', window = null, aggregate = false }) {
+    let fluxQuery = `
+      from(bucket: "${config.bucket}")
+        |> range(start: -${timeRange})
+        |> filter(fn: (r) => r["_measurement"] == "templar_metrics")
+        |> filter(fn: (r) => r["role"] == "miner")
+        |> filter(fn: (r) => r["version"] == "${version}")
+        |> filter(fn: (r) => r["_field"] == "tokens_per_sec")
+    `;
+
+    if (window) {
+      fluxQuery += `|> filter(fn: (r) => r["window"] == "${window}")`;
+    }
+
+    if (uid) {
+      fluxQuery += `|> filter(fn: (r) => r["uid"] == "${uid}")`;
+    }
+
+    if (aggregate) {
+      fluxQuery += `
+        |> group(columns: ["_time"])
+        |> mean()
+      `;
+    }
+
+    fluxQuery += `|> sort(columns: ["_time"])`;
+
+    try {
+      const data = [];
+      for await (const { values, tableMeta } of this.queryApi.iterateRows(fluxQuery)) {
+        const o = tableMeta.toObject(values);
+        data.push({
+          time: o._time,
+          tokens_per_sec: o._value,
+          ...(aggregate ? {} : { uid: o.uid })
+        });
+      }
+
+      return {
+        success: true,
+        data: data,
+        timestamp: new Date().toISOString()
+      };
+
+    } catch (error) {
+      console.error('InfluxDB Query Error:', error);
+      return {
+        success: false,
+        error: error.message,
+        timestamp: new Date().toISOString()
+      };
+    }
+  }
 }
 
 module.exports = new InfluxService();

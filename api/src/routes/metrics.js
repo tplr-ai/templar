@@ -41,4 +41,23 @@ router.get('/losses', async (req, res) => {
   }
 });
 
+router.get('/tokens-per-sec', async (req, res) => {
+  try {
+    const { uid, version, timeRange, window, aggregate } = req.query;
+    const result = await influxService.getTokensPerSec({
+      uid,
+      version: version || config.version,
+      timeRange: timeRange || '24h',
+      window,
+      aggregate: aggregate === 'true'
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ 
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 module.exports = router;

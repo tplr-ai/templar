@@ -906,7 +906,8 @@ class Validator:
                         measurement="templar_metrics",
                         tags={
                             "role": "validator",
-                            "uid": eval_uid,
+                            "eval_uid": eval_uid,
+                            "uid": self.uid,
                             "window": self.sync_window,
                         },
                         fields={
@@ -1048,9 +1049,11 @@ class Validator:
                 "evaluated_uids": len(self.evaluated_uids),
                 "learning_rate": self.scheduler.get_last_lr()[0],
                 "active_miners": len(self.valid_score_indices),
-                "gather_success_rate": gather_result.success_rate * 100
-                if gather_result
-                else 0,
+                "gather_success_rate": gather_result.success_rate * 100 if gather_result else 0,
+                "gather_peers": self.peers,
+                "skipped_peers": gather_result.skipped_uids if gather_result else [],
+                "total_peers": len(self.peers),
+                "total_skipped": len(gather_result.skipped_uids) if gather_result else 0,
             }
             self.metrics_logger.log(
                 measurement="templar_metrics",
@@ -1059,7 +1062,6 @@ class Validator:
                     "uid": self.uid,
                     "window": self.sync_window,
                     "global_step": self.global_step,
-                    "eval_uid": eval_uid,
                 },
                 fields=evaluation_metrics,
             )

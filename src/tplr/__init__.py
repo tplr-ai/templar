@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "0.2.28"
+__version__ = "0.2.29gt"
 
 # Import package.
 from .chain import *
@@ -32,4 +32,5 @@ from .r2_dataset import *
 from .hparams import *
 from .logging import *
 from .schemas import *
+from .metrics import *
 from .wandb import initialize_wandb

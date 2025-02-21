@@ -155,6 +155,7 @@ class Evaluator:
         """
         await self.update_state()
         global_step, block_number = await self.load_model()
+        current_window = block_number // self.hparams.blocks_per_window
 
         if block_number <= self.last_block_number:
             tplr.logger.info(
@@ -190,7 +191,12 @@ class Evaluator:
         runtime = time.time() - start_time
         self.metrics_logger.log(
             measurement="templar_benchmark_metrics",
-            tags={"role": "evaluator"},
+            tags={
+                "role": "evaluator",
+                "global_step": global_step,
+                "window": current_window,
+                "block": block_number,
+            },
             fields={
                 "lm_eval_exit_code": float(exit_code),
                 "benchmark_runtime_s": runtime,
@@ -229,6 +235,7 @@ class Evaluator:
                         "task": task_name,
                         "global_step": global_step,
                         "block": block_number,
+                        "window": current_window,
                     },
                     fields={"score": float(metric_value)},
                 )
@@ -248,7 +255,12 @@ class Evaluator:
         }
         self.metrics_logger.log(
             measurement="templar_benchmark_summary",
-            tags={"role": "evaluator"},
+            tags={
+                "role": "evaluator",
+                "global_step": global_step,
+                "window": current_window,
+                "block": block_number,
+            },
             fields=overall_benchmark,
         )
         wandb.log(

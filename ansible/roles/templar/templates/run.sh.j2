@@ -8,9 +8,22 @@ source .venv/bin/activate
 export {{ key }}={{ value | quote }}
 {% endfor %}
 
+# Instance-specific overrides
+export CUDA_DEVICE={{ device | quote }}
+export WALLET_HOTKEY={{ wallet_hotkey | quote }}
+
+
 while true; do
     echo "Starting neurons/miner.py..."
-    {{ miner_command }}
+    .venv/bin/python neurons/miner.py \
+      --actual_batch_size {{ actual_batch_size }} \
+      --wallet.name {{ wallet_name }} \
+      --wallet.hotkey {{ wallet_hotkey }} \
+      --device {{ device }} \
+      --use_wandb \
+      --netuid "{{ netuid }}" \
+      --subtensor.network "{{ subtensor_network }}" \
+      --sync_state
     EXIT_CODE=$?
     echo "neurons/miner.py exited with code ${EXIT_CODE}. Restarting in 5 seconds..."
     sleep 5

@@ -16,8 +16,11 @@
 # DEALINGS IN THE SOFTWARE.
 
 import influxdb_client
-from influxdb_client import Point, WritePrecision
+from influxdb_client.client.influxdb_client import InfluxDBClient
+from influxdb_client.client.write.point import Point
+from influxdb_client.domain.write_precision import WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
+from typing import Dict, Any
 import time
 from threading import Lock
 import statistics
@@ -33,9 +36,11 @@ class MetricsLogger:
         token=None,
         org="templar",
     ):
-        # Initialize InfluxDB client with token auth
+        if token is None:
+            raise ValueError("InfluxDB token must be provided")
+
         url = f"https://{host}:{port}"
-        self.client = influxdb_client.InfluxDBClient(url=url, token=token, org=org)
+        self.client = InfluxDBClient(url=url, token=token, org=org)
         self.write_api = self.client.write_api(write_options=SYNCHRONOUS)
         self.database = database  # In InfluxDB 2.x, this is called "bucket"
         self.org = org

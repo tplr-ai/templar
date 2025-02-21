@@ -50,7 +50,10 @@ class MetricsLogger:
         if isinstance(v, (int, float)):
             return float(v)
         elif isinstance(v, list):
-            # For lists, compute statistical measures
+            # If the list appears to be a list of peer UIDs, log the raw list as a string.
+            if v and all(isinstance(item, int) for item in v):
+                return str(v)  # Alternatively, return len(v) if count is preferred
+            # For lists of numbers that are not peer IDs, compute stats.
             if not v:  # Empty list
                 return 0.0
             return {

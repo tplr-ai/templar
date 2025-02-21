@@ -13,6 +13,7 @@ from typing import Any, Optional, Tuple
 from tplr.metrics import MetricsLogger
 from tplr.chain import ChainManager
 from transformers.models.llama import LlamaForCausalLM
+from tplr import __version__
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"
@@ -196,6 +197,7 @@ class Evaluator:
                 "global_step": global_step,
                 "window": current_window,
                 "block": block_number,
+                "version": __version__,
             },
             fields={
                 "lm_eval_exit_code": float(exit_code),
@@ -236,6 +238,7 @@ class Evaluator:
                         "global_step": global_step,
                         "block": block_number,
                         "window": current_window,
+                        "version": __version__,
                     },
                     fields={"score": float(metric_value)},
                 )
@@ -260,6 +263,7 @@ class Evaluator:
                 "global_step": global_step,
                 "window": current_window,
                 "block": block_number,
+                "version": __version__,
             },
             fields=overall_benchmark,
         )

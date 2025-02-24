@@ -194,18 +194,22 @@ class Comms(ChainManager):
     ):
         """Clean up stale S3 data for a given uid."""
         min_allowed_window = current_window - stale_retention
-        prefix = f"{uid}/"
 
+        # Regex pattern to match filenames of the form:
+        # gradient-<window>-<uid>-v<version>.pt
+        pattern = re.compile(rf"^gradient-(\d+)-{uid}-v{tplr.__version__}.pt$")
+
+        prefix = "gradient"
         session = get_session()
         async with session.create_client(
             "s3",
             endpoint_url=self.get_base_url(BUCKET_SECRETS["gradients"]["account_id"]),
             region_name=CF_REGION_NAME,
             config=client_config,
-            aws_access_key_id=BUCKET_SECRETS["gradients"]["credentials"]["write"][  # type: ignore
+            aws_access_key_id=BUCKET_SECRETS["gradients"]["credentials"]["write"][
                 "access_key_id"
             ],
-            aws_secret_access_key=BUCKET_SECRETS["gradients"]["credentials"]["write"][  # type: ignore
+            aws_secret_access_key=BUCKET_SECRETS["gradients"]["credentials"]["write"][
                 "secret_access_key"
             ],
         ) as s3_client:
@@ -226,21 +230,23 @@ class Comms(ChainManager):
                 # Identify stale objects to delete
                 stale_objects = []
                 for obj in contents:
-                    key: str = obj["Key"]  # type: ignore
-                    # Key format: uid/window/key
-                    parts = key.split("/")
-                    if len(parts) < 2:
-                        continue
-                    try:
-                        w = int(parts[1])
-                    except ValueError:
-                        continue
+                    key = obj["Key"]
 
-                    if w < min_allowed_window:
+                    # Attempt to match our known filename pattern
+                    match = pattern.match(key)
+                    if match is None:
+                        continue  # Skip if it doesn't match the naming scheme
+
+                    try:
+                        file_window = int(match.group(1))
+                    except ValueError:
+                        continue  # Skip if we can't parse the window as an integer
+
+                    if file_window < min_allowed_window:
                         stale_objects.append({"Key": key})
 
                 # Batch delete stale objects
-                if stale_objects:
+                if stale_objects.len() == 0:
                     tplr.logger.debug(
                         f"Removing stale S3 objects for {uid}: {stale_objects}"
                     )

@@ -1,6 +1,7 @@
 import os
 import json
 import shutil
+import sys
 import torch
 import asyncio
 import argparse
@@ -14,9 +15,16 @@ from tplr.metrics import MetricsLogger
 from tplr.chain import ChainManager
 from transformers.models.llama import LlamaForCausalLM
 from tplr import __version__
+from torch.optim import SGD
+from torch.optim.lr_scheduler import (
+    CosineAnnealingWarmRestarts,
+    LinearLR,
+    SequentialLR,
+)
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"
+DEFAULT_EVAL_INTERVAL: int = 60
 
 
 def config() -> bt.Config:
@@ -67,8 +75,14 @@ def config() -> bt.Config:
     parser.add_argument(
         "--eval_interval",
         type=int,
-        default=500,
+        default=DEFAULT_EVAL_INTERVAL,
         help="Global steps between evaluations",
+    )
+    parser.add_argument(
+        "--uid",
+        type=int,
+        default=None,
+        help="Override the wallet's UID",
     )
 
     bt.subtensor.add_args(parser)
@@ -98,17 +112,71 @@ class Evaluator:
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
         self.hparams = tplr.load_hparams()
+        self.wallet = bt.wallet(config=self.config)
+
+        self.uid = (
+            self.config.uid
+            if self.config.uid is not None
+            else self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+        )
+
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
 
-        self.chain_mgr = ChainManager(
+        self.tokenizer = self.hparams.tokenizer
+        self.compressor = tplr.compress.CompressDCT()
+        self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
+        self.transformer = tplr.compress.TransformDCT(
+            self.model, target_chunk=self.hparams.target_chunk
+        )
+
+        self.warmup_scheduler = LinearLR(
+            self.optimizer,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=250,
+        )
+        self.cosine_scheduler = CosineAnnealingWarmRestarts(
+            self.optimizer,
+            T_0=10000,
+            T_mult=2,
+            eta_min=self.hparams.learning_rate * 0.1,
+        )
+        self.scheduler = SequentialLR(
+            self.optimizer,
+            schedulers=[self.warmup_scheduler, self.cosine_scheduler],
+            milestones=[250],
+        )
+
+        # Init compression
+        self.transformer = tplr.compress.TransformDCT(
+            self.model,
+            target_chunk=self.hparams.target_chunk,
+        )
+
+        self.momentum = {}
+        self.totalks = {}
+        self.xshapes = {}
+        for n, p in self.model.named_parameters():
+            self.momentum[n] = torch.zeros_like(p)
+            _, _, xshape, totalk = self.compressor.compress(
+                self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
+            )
+            self.xshapes[n] = xshape
+            self.totalks[n] = totalk
+
+        self.comms = tplr.comms.Comms(
+            wallet=self.wallet,
+            save_location="/tmp",
+            key_prefix="model",
             config=self.config,
             netuid=self.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
+            uid=self.uid,
         )
 
-        self.buckets = self.chain_mgr.get_all_buckets()
+        self.buckets = self.comms.get_all_buckets()
         self.last_eval_step = 0
         self.stop_event = asyncio.Event()
         self.last_block_number = 0
@@ -123,50 +191,136 @@ class Evaluator:
         )
         self.wandb_run = wandb.init(project=self.config.project)
 
-        self.start_window = getattr(
-            self, "start_window", self.subtensor.block // self.hparams.blocks_per_window
-        )
-
     async def update_state(self) -> None:
         """
         Refresh the metagraph and bucket information.
         """
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
-        self.buckets = self.chain_mgr.get_all_buckets()
+        self.buckets = self.comms.get_all_buckets()
 
-    async def load_model(self) -> Tuple[int, int]:
-        """
-        Stripped-down load_model method.
-        Uses the chain (via ChainManager and subtensor state) to return the most recent global_step and block_number.
+    async def load_model(
+        self,
+        block_number: int,
+        current_window: int,
+    ) -> Tuple[bool, dict, int, int]:
+        """Load the most recent model checkpoint from the chain.
 
         Returns:
-            Tuple[int, int]: (global_step, block_number)
-
-        In this implementation, global_step is defined as the difference between the current window (derived from the latest block)
-        and the start_window. Block_number is simply the latest block number.
+            Tuple[bool, dict, int, int, int]: A tuple containing the following:
+                - success: A boolean indicating whether the model was successfully loaded.
+                - checkpoint_data: The checkpoint data dictionary.
+                - checkpoint_current_window: The current window of the checkpoint.
+                - global_step: The global step of the checkpoint.
+                - block_number: The block number of the checkpoint.
         """
-        current_block = self.subtensor.get_current_block()
-        current_window = current_block // self.hparams.blocks_per_window
-        global_step = current_window - self.start_window
-        return global_step, current_block
+        result = await self.comms.get_latest_checkpoint()
+
+        if not result:
+            tplr.logger.error("No valid checkpoints found")
+            return (False, {}, 0, 0)
+
+        checkpoint_data, _ = result
+
+        if block_number <= self.last_block_number:
+            tplr.logger.info(
+                f"No new checkpoint available (current block: {block_number}, last: {self.last_block_number})."
+            )
+            return (False, checkpoint_data, 0, 0)
+
+        batch_size = int(self.config.actual_batch_size)  # type: ignore
+        windows_to_catch_up = range(
+            checkpoint_data.get("current_window"), current_window + 1
+        )
+
+        for i in range(0, len(windows_to_catch_up), batch_size):
+            batch_windows = list(windows_to_catch_up)[i : i + batch_size]
+
+            # Launch gathers in parallel
+            tasks = [
+                self.comms.gather(
+                    my_uid=self.uid,
+                    uids=[str(uid) for uid in self.comms.peers if uid != self.uid],
+                    window=w,
+                    key="gradient",
+                    timeout=72,
+                    device="cpu",
+                    local=False,
+                    stale_retention=100,
+                    totalks=self.totalks,
+                )
+                for w in batch_windows
+            ]
+            await asyncio.gather(*tasks)
+
+        tplr.logger.info("Loaded commitments")
+
+        self.model.load_state_dict(
+            {
+                k: v.to(self.config.device)
+                for k, v in checkpoint_data["model_state_dict"].items()
+            }
+        )
+        self.model.to(self.config.device)  # type: ignore
+
+        self.momentum = checkpoint_data["momentum"]
+
+        checkpoint_start_window = checkpoint_data.get("start_window")
+        checkpoint_current_window = checkpoint_data.get("current_window")
+        if checkpoint_start_window is None or checkpoint_current_window is None:
+            tplr.logger.error("Checkpoint missing start_window or current_window info")
+            return (False, checkpoint_data, checkpoint_current_window, 0)
+
+        # Instead of computing global_step from the entire training period,
+        # compute window_difference as the number of missed windows.
+        window_difference = current_window - checkpoint_current_window
+        global_step = current_window - checkpoint_start_window
+
+        tplr.logger.info(
+            f"Checkpoint windows (start={checkpoint_start_window}, checkpoint_current={checkpoint_current_window}), "
+            f"local_current={current_window}, window_diff={window_difference}, global_step={global_step}"
+        )
+
+        if window_difference > 0:
+            tplr.logger.error(
+                f"Missed {window_difference} windows since last checkpoint"
+            )
+            return (False, checkpoint_data, checkpoint_current_window, 0)
+
+        return (
+            True,
+            checkpoint_data,
+            checkpoint_current_window,
+            global_step,
+        )
 
     async def _evaluate(self) -> Optional[int]:
         """
         Run benchmark evaluation with the highest stake model checkpoint and log the results.
         """
         await self.update_state()
-        global_step, block_number = await self.load_model()
-        current_window = block_number // self.hparams.blocks_per_window
+        self.comms.commitments = await self.comms.get_commitments()
+        self.comms.update_peers_with_buckets()
 
-        if block_number <= self.last_block_number:
-            tplr.logger.info(
-                f"No new checkpoint available (current block: {block_number}, last: {self.last_block_number})."
+        start_window = await self.comms.get_start_window()
+        block_number = self.subtensor.get_current_block() - 1
+
+        tplr.logger.info(
+            f"Using start_window: {start_window} and block: {block_number}"
+        )
+
+        (
+            success,
+            checkpoint_data,
+            checkpoint_window,
+            global_step,
+        ) = await self.load_model(block_number, start_window)
+
+        if not success:
+            tplr.logger.error(
+                f"Failed to load model checkpoint  (current block: {block_number}, last: {self.last_block_number})."
             )
-            return global_step
 
-        if global_step == 0 and self.last_block_number != 0:
-            tplr.logger.error("Failed to load checkpoint from highest stake neuron")
-            return None
+            return global_step
 
         tplr.logger.info(
             f"Starting benchmark run at global step {global_step} (block {block_number})"
@@ -188,6 +342,7 @@ class Evaluator:
             f"--batch_size {self.config.actual_batch_size} "
             f"--output_path {results_dir}"
         )
+        tplr.logger.info(f"Running benchmark command: {lm_eval_command}")
         exit_code = os.system(lm_eval_command)
         runtime = time.time() - start_time
         self.metrics_logger.log(
@@ -195,7 +350,7 @@ class Evaluator:
             tags={
                 "role": "evaluator",
                 "global_step": global_step,
-                "window": current_window,
+                "window": checkpoint_window,
                 "block": block_number,
                 "version": __version__,
             },
@@ -237,7 +392,7 @@ class Evaluator:
                         "task": task_name,
                         "global_step": global_step,
                         "block": block_number,
-                        "window": current_window,
+                        "window": checkpoint_window,
                         "version": __version__,
                     },
                     fields={"score": float(metric_value)},
@@ -261,7 +416,7 @@ class Evaluator:
             tags={
                 "role": "evaluator",
                 "global_step": global_step,
-                "window": current_window,
+                "window": checkpoint_window,
                 "block": block_number,
                 "version": __version__,
             },
@@ -286,6 +441,9 @@ class Evaluator:
         Main loop: periodically update state and run evaluations if new checkpoints exist.
         """
         try:
+            self.comms.start_commitment_fetcher()
+            self.comms.start_background_tasks()
+
             while not self.stop_event.is_set():
                 await self.update_state()
 

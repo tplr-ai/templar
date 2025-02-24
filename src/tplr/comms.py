@@ -246,7 +246,7 @@ class Comms(ChainManager):
                         stale_objects.append({"Key": key})
 
                 # Batch delete stale objects
-                if stale_objects.len() == 0:
+                if len(stale_objects) > 0:
                     tplr.logger.debug(
                         f"Removing stale S3 objects for {uid}: {stale_objects}"
                     )

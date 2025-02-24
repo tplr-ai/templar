@@ -1,3 +1,48 @@
+"""Templar Autonomous Model Evaluator Service
+
+This script implements an autonomous service that continuously evaluates the latest
+model checkpoints using standardized benchmark tasks. It runs on a fixed interval
+(default 10 minutes), downloads the latest model checkpoint, executes evaluations,
+and logs results to both InfluxDB and Weights & Biases.
+
+Key Features:
+    - Automatic checkpoint detection and evaluation
+    - Multiple benchmark task support (arc_challenge, winogrande, etc.)
+    - Distributed metrics logging
+    - Resource management and cleanup
+    - Service-oriented design for continuous operation
+
+Environment Requirements:
+    - Registered Bittensor wallet
+    - InfluxDB API access
+    - Weights & Biases API key
+    - R2 Dataset access credentials
+
+Required Environment Variables:
+    WANDB_API_KEY: Weights & Biases API key (see miner documentation)
+    R2_DATASET_ACCOUNT_ID: R2 dataset account identifier (see miner documentation)
+    R2_DATASET_BUCKET_NAME: R2 storage bucket name (see miner documentation)
+    R2_DATASET_READ_ACCESS_KEY_ID: R2 read access key (see miner documentation)
+    R2_DATASET_READ_SECRET_ACCESS_KEY: R2 secret access key (see miner documentation)
+    INFLUXDB_TOKEN: InfluxDB API token (this is new)
+
+Usage Examples:
+    Basic run:
+        $ uv run ./scripts/evaluator.py
+
+    Custom configuration:
+        $ uv run scripts/evaluator.py \\
+            --netuid 3 \\
+            --device cuda \\
+            --tasks "arc_challenge,winogrande" \\
+            --eval_interval 300
+
+Note:
+    WandB integration is temporary and scheduled for deprecation.
+    For additional environment setup, refer to the miner documentation:
+    https://github.com/tplr-ai/templar/blob/main/docs/miner.md
+"""
+
 import os
 import json
 import shutil
@@ -91,9 +136,35 @@ def config() -> bt.Config:
 
 
 class Evaluator:
-    """
-    Evaluator periodically checks for new checkpoints, runs benchmark evaluations, and logs results.
-    Also provides a load_model method that uses the chain to fetch the most recent global_step and block_number.
+    """Templar Model Evaluator Component
+
+    The Evaluator is responsible for automated benchmark evaluation of model checkpoints.
+    It continuously monitors for new checkpoints, downloads them, runs a comprehensive
+    suite of language model evaluations, and logs results to both InfluxDB and W&B.
+
+    Key Features:
+        - Automatic checkpoint detection and loading
+        - Multi-task model evaluation
+        - Distributed metrics logging
+        - Progress tracking via W&B
+        - Resource cleanup and management
+
+    Evaluation Flow:
+        1. Monitor blockchain for new checkpoints
+        2. Download and load checkpoint when detected
+        3. Run benchmark suite using lm-eval
+        4. Parse and log results
+        5. Clean up resources
+        6. Wait for next checkpoint
+
+    Attributes:
+        config (bt.Config): Configuration object containing CLI arguments
+        netuid (int): Network UID for the subnet
+        model (LlamaForCausalLM): The language model being evaluated
+        metrics_logger (MetricsLogger): Logger for InfluxDB metrics
+        wandb_run: Weights & Biases run instance
+        last_eval_step (int): Last evaluation step
+        last_block_number (int): Last processed block number
     """
 
     def __init__(self) -> None:
@@ -203,15 +274,24 @@ class Evaluator:
         block_number: int,
         current_window: int,
     ) -> Tuple[bool, dict, int, int]:
-        """Load the most recent model checkpoint from the chain.
+        """Load and prepare the latest model checkpoint for evaluation.
+
+        This method:
+        1. Fetches the latest checkpoint from storage
+        2. Verifies checkpoint validity
+        3. Loads model weights and momentum
+        4. Updates internal state trackers
+
+        Args:
+            block_number: Current blockchain block number
+            current_window: Current training window number
 
         Returns:
-            Tuple[bool, dict, int, int, int]: A tuple containing the following:
-                - success: A boolean indicating whether the model was successfully loaded.
-                - checkpoint_data: The checkpoint data dictionary.
-                - checkpoint_current_window: The current window of the checkpoint.
-                - global_step: The global step of the checkpoint.
-                - block_number: The block number of the checkpoint.
+            Tuple containing:
+            - success (bool): Whether loading succeeded
+            - checkpoint_data (dict): Checkpoint metadata
+            - checkpoint_window (int): Window number of checkpoint
+            - global_step (int): Global training step
         """
         result = await self.comms.get_latest_checkpoint()
 
@@ -294,8 +374,17 @@ class Evaluator:
         )
 
     async def _evaluate(self) -> Optional[int]:
-        """
-        Run benchmark evaluation with the highest stake model checkpoint and log the results.
+        """Execute benchmark evaluation on the current model.
+
+        Workflow:
+        1. Save model to temporary location
+        2. Run lm-eval benchmark suite
+        3. Parse results for each task
+        4. Log metrics to InfluxDB and W&B
+        5. Clean up temporary files
+
+        Returns:
+            Optional[int]: Global step number if successful, None on failure
         """
         await self.update_state()
         self.comms.commitments = await self.comms.get_commitments()
@@ -437,8 +526,13 @@ class Evaluator:
         return global_step
 
     async def run(self) -> None:
-        """
-        Main loop: periodically update state and run evaluations if new checkpoints exist.
+        """Main evaluation loop.
+
+        Continuously:
+        1. Check for new checkpoints
+        2. Trigger evaluation when new checkpoint detected
+        3. Handle interrupts and errors
+        4. Maintain evaluation interval
         """
         try:
             self.comms.start_commitment_fetcher()

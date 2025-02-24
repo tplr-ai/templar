@@ -24,7 +24,7 @@ from torch.optim.lr_scheduler import (
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"
-DEFAULT_EVAL_INTERVAL: int = 60
+DEFAULT_EVAL_INTERVAL: int = 60 * 10  # 10 mins default interval
 
 
 def config() -> bt.Config:

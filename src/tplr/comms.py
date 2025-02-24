@@ -1829,36 +1829,48 @@ class Comms(ChainManager):
         k:          number of items to sample.
         Returns a list of selected items.
         """
+        tplr.logger.debug("Starting weighted random sampling.")
+        tplr.logger.debug(f"Candidates: {candidates}")
+        tplr.logger.debug(f"Weights: {weights}")
+        tplr.logger.debug(f"Sample size (k): {k}")
+
         # Safety checks
         if not candidates or not weights or k <= 0:
+            tplr.logger.warning("Invalid input detected. Returning empty list.")
             return []
 
         # Pair up each candidate with its weight
         pool = list(zip(candidates, weights))
-        total_w = sum(weights)
+        total_w = float(sum(weights))
         selected = []
 
         # If total weight is 0, return empty
         if total_w <= 0:
+            tplr.logger.warning("Total weight is zero. Returning empty list.")
             return []
 
+        tplr.logger.debug(f"Initial total weight: {total_w}")
+
         for _ in range(min(k, len(candidates))):
-            # If total_w drops to 0 or we run out of pool, stop early
-            if total_w <= 0 or not pool:
+            if total_w <= 0 or len(pool) == 0:
+                tplr.logger.info("No more items to sample. Stopping early.")
                 break
 
             # Draw a uniform sample in [0, total_w]
-            r = random.random() * total_w
-            # Find which peer is picked
+            r = random.uniform(0.0, total_w)
+            tplr.logger.debug(f"Random threshold: {r}")
             cumulative = 0.0
             for idx, (uid, w) in enumerate(pool):
                 cumulative += w
                 if cumulative >= r:
                     # Found our pick
                     selected.append(uid)
+                    tplr.logger.info(f"Selected item: {uid} with weight {w}")
                     # Remove from pool and subtract from total_w
                     total_w -= w
                     pool.pop(idx)
+                    tplr.logger.debug(f"Updated total weight: {total_w}")
                     break
 
+        tplr.logger.debug(f"Final selected items: {selected}")
         return selected

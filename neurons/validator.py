@@ -193,8 +193,8 @@ class Validator:
         self.relative_improvement_random = 0.0
         self.valid_score_indices = []
         self.gradient_scores = torch.zeros(self.metagraph.n, dtype=torch.float32)
-        self.binary_indicator_scores = torch.full(
-            (self.metagraph.n,), 0.5, dtype=torch.float32
+        self.binary_indicator_scores = torch.zeros(
+            self.metagraph.n, dtype=torch.float32
         )
         self.gradient_moving_avg_scores = torch.zeros(
             self.metagraph.n, dtype=torch.float32
@@ -202,7 +202,9 @@ class Validator:
         self.final_moving_avg_scores = torch.zeros(
             self.metagraph.n, dtype=torch.float32
         )
-        self.binary_moving_averages = torch.zeros(self.metagraph.n, dtype=torch.float32)
+        self.binary_moving_averages = torch.full(
+            (self.metagraph.n,), 0.5, dtype=torch.float32
+        )
         self.weights = torch.zeros(self.metagraph.n, dtype=torch.float32)
         self.normalised_binary_moving_averages = torch.zeros(
             self.metagraph.n, dtype=torch.float32

@@ -268,7 +268,10 @@ class Miner:
             step_window = self.current_window
             # Start gathering gradients from peers asynchronously
             sync_block = step_window * self.hparams.blocks_per_window
-            time_min = datetime.fromtimestamp(self.subtensor.query_module('Timestamp', 'Now', block=sync_block).value/1000)
+            time_min = datetime.fromtimestamp(
+                self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
+                / 1000
+            )
             time_max = time_min + datetime.timedelta(seconds=4)
             gather_task = asyncio.create_task(
                 self.comms.gather(
@@ -281,8 +284,8 @@ class Miner:
                     local=False,
                     stale_retention=100,
                     totalks=self.totalks,
-                    time_min = time_min,
-                    time_max = time_max,
+                    time_min=time_min,
+                    time_max=time_max,
                 )
             )
 

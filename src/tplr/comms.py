@@ -26,13 +26,10 @@ import aiofiles
 import botocore
 import datetime
 import bittensor as bt
-from torch.optim import SGD
-from transformers import LlamaForCausalLM
-from torch.optim.lr_scheduler import SequentialLR
+from datetime import timezone
 
 from tqdm import tqdm as std_tqdm
-from types import SimpleNamespace
-from typing import List, Dict, Optional, TypeVar, Any, Tuple
+from typing import List, Dict, Optional, TypeVar, Any
 from aiobotocore.session import get_session
 
 from . import __version__
@@ -41,8 +38,14 @@ from .chain import ChainManager
 from .schemas import Bucket
 
 import tplr as tplr
-from .compress import TransformDCT, CompressDCT
 # from .hparams import HParams
+
+from types import SimpleNamespace
+from typing import Tuple
+from transformers import LlamaForCausalLM
+from torch.optim import SGD
+from torch.optim.lr_scheduler import SequentialLR
+from .compress import TransformDCT, CompressDCT
 
 
 # Constants
@@ -344,6 +347,12 @@ class Comms(ChainManager):
             # Create temp directory if it doesn't exist
             os.makedirs(self.temp_dir, exist_ok=True)
 
+            # Normalize timezone information BEFORE comparisons
+            if time_min is not None and not time_min.tzinfo:
+                time_min = time_min.replace(tzinfo=timezone.utc)
+            if time_max is not None and not time_max.tzinfo:
+                time_max = time_max.replace(tzinfo=timezone.utc)
+
             async with self.session.create_client(
                 "s3",
                 endpoint_url=self.get_base_url(bucket.name),
@@ -358,19 +367,23 @@ class Comms(ChainManager):
                         timeout=timeout,
                     )
                     # Retrieve the object's timestamp
-                    last_modified = response.get('LastModified')
+                    last_modified = response.get("LastModified")
                     if last_modified is None:
                         tplr.logger.debug(f"Object does not exist: {key}")
                         return None
 
                     # Check if the timestamp is within the desired range
-                    if time_min != None and last_modified < time_min:
-                        tplr.logger.debug(f"Object was uploaded before time_min: {key}, time_min: {time_min}")
+                    if time_min is not None and last_modified < time_min:
+                        tplr.logger.debug(
+                            f"Object was uploaded before time_min: {key}, time_min: {time_min}"
+                        )
                         return None
-                    if time_max != None and last_modified > time_max:
-                        tplr.logger.debug(f"Object was uploaded after time_max: {key}, time_max: {time_min}")
+                    if time_max is not None and last_modified > time_max:
+                        tplr.logger.debug(
+                            f"Object was uploaded after time_max: {key}, time_max: {time_max}"
+                        )
                         return None
-                    
+
                 except asyncio.TimeoutError:
                     tplr.logger.debug(f"Timeout checking for {key}")
                     return None
@@ -785,11 +798,11 @@ class Comms(ChainManager):
                 return None
 
             loaded_data = await self.s3_get_object(
-                key=filename, 
-                bucket=peer_bucket, 
+                key=filename,
+                bucket=peer_bucket,
                 timeout=timeout,
-                time_min = time_min,
-                time_max = time_max,
+                time_min=time_min,
+                time_max=time_max,
             )
 
             if loaded_data is None:
@@ -835,8 +848,8 @@ class Comms(ChainManager):
                 key=key,
                 local=local,
                 stale_retention=stale_retention,
-                time_min = time_min,
-                time_max = time_max,
+                time_min=time_min,
+                time_max=time_max,
             )
             if state_dict is not None:
                 return state_dict
@@ -881,8 +894,8 @@ class Comms(ChainManager):
                     timeout=timeout,
                     local=local,
                     stale_retention=stale_retention,
-                    time_min = time_min,
-                    time_max = time_max,
+                    time_min=time_min,
+                    time_max=time_max,
                 )
                 for uid in uids
             ]
@@ -1346,100 +1359,6 @@ class Comms(ChainManager):
                 for _ in range(steps_needed):
                     optimizer.step()
                     scheduler.step()
-
-            # # 3) Return early if no catch-up or behind
-            # if window_difference < 0:
-            #     tplr.logger.warning(
-            #         "Local current_window is behind checkpoint; using checkpoint without catch-up."
-            #     )
-            #     return True, momentum, global_step, optimizer, scheduler
-            # if window_difference == 0:
-            #     tplr.logger.info("No catch-up needed — aligned with checkpoint.")
-            #     return True, momentum, global_step, optimizer, scheduler
-
-            # # TODO: investigate failures
-            # tplr.logger.info(f"Performing catch-up for {window_difference} windows…")
-
-            # # 4) Option: Parallel gather in batches, but apply in ascending order
-            # BATCH_SIZE = 20  # tweak based on memory/time constraints
-            # windows_to_catch_up = range(
-            #     checkpoint_current_window + 1, current_window + 1
-            # )
-
-            # for i in range(0, len(windows_to_catch_up), BATCH_SIZE):
-            #     batch_windows = list(windows_to_catch_up)[i : i + BATCH_SIZE]
-
-            #     # Launch gathers in parallel
-            #     tasks = [
-            #         self.gather(
-            #             my_uid=uid,
-            #             uids=peers,
-            #             window=w,
-            #             key="gradient",
-            #             timeout=30,
-            #             device=device,
-            #             local=False,
-            #             stale_retention=100,
-            #             totalks=totalks,
-            #         )
-            #         for w in batch_windows
-            #     ]
-            #     batch_results = await asyncio.gather(*tasks)
-
-            #     # Store results in dict so we can apply them in correct ascending order
-            #     gathered_data = dict(zip(batch_windows, batch_results))
-
-            #     # 5) Apply each window's updates in ascending order
-            #     for w in sorted(gathered_data.keys()):
-            #         gather_result = gathered_data[w]
-            #         if not gather_result:
-            #             tplr.logger.info(
-            #                 f"No valid gather data for window {w}, skipping."
-            #             )
-            #             continue
-
-            #         # Build param updates
-            #         param_updates = {}
-            #         for n, p in model.named_parameters():
-            #             idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
-            #             vals = getattr(gather_result.state_dict, f"{n}vals", None)
-            #             if idxs is not None and vals is not None:
-            #                 if not isinstance(idxs, (list, tuple)):
-            #                     idxs = [idxs]
-            #                 if not isinstance(vals, (list, tuple)):
-            #                     vals = [vals]
-            #                 # Calculate xshape and totalk based on parameter dimensions
-            #                 if len(p.shape) > 1:
-            #                     # For 2D weights, get block sizes for rows and columns
-            #                     xshape = (
-            #                         transformer.shape_dict[p.shape[0]],
-            #                         transformer.shape_dict[p.shape[1]],
-            #                     )
-            #                     totalk = xshape[0] * xshape[1]
-            #                 else:
-            #                     # For 1D weights
-            #                     xshape = transformer.shape_dict[p.shape[0]]
-            #                     totalk = xshape
-            #                 # Decompress and decode to get gradients, then take sign as update
-            #                 new_grad = transformer.decode(
-            #                     compressor.batch_decompress(
-            #                         p.to(device), idxs, vals, xshape, totalk
-            #                     )
-            #                 )
-            # #                 param_updates[n] = new_grad.sign_()
-
-            #         # Apply updates, step optimizer/scheduler
-            #         with torch.no_grad():
-            #             for n, p in model.named_parameters():
-            #                 if n in param_updates:
-            #                     p.grad = param_updates[n]
-
-            #         optimizer.step()
-            #         scheduler.step()
-            #         global_step += 1
-            #         tplr.logger.info(
-            #             f"Caught up window {w}, global_step => {global_step}"
-            #         )
 
             return True, momentum, global_step, optimizer, scheduler
 

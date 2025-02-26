@@ -23,6 +23,7 @@ import copy
 import time
 import random
 import asyncio
+import datetime
 import argparse
 import threading
 from contextlib import contextmanager
@@ -382,7 +383,10 @@ class Validator:
 
             gather_start = tplr.T()
             sync_block = self.sync_window * self.hparams.blocks_per_window
-            time_min = datetime.fromtimestamp(self.subtensor.query_module('Timestamp', 'Now', block=sync_block).value/1000)
+            time_min = datetime.fromtimestamp(
+                self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
+                / 1000
+            )
             time_max = time_min + datetime.timedelta(seconds=4)
             # Create gather task early
             gather_task = asyncio.create_task(
@@ -395,8 +399,8 @@ class Validator:
                     device=self.config.device,
                     local=False,
                     totalks=self.totalks,
-                    time_min = time_min,
-                    time_max = time_max,
+                    time_min=time_min,
+                    time_max=time_max,
                 )
             )
 

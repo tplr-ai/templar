@@ -1,0 +1,32 @@
+services:
+  alice:
+    image: opentensor/subtensor:latest
+    container_name: subtensor-alice
+    ports:
+      - "9944:9944"
+      - "30334:30334"
+    volumes:
+      - ./data/alice:/data
+      - ./chain-specs:/chain-specs
+    command: >
+      --base-path /data --chain /chain-specs/local.json --alice --port 30334 --rpc-port 9944 --validator --rpc-cors=all --allow-private-ipv4 --discover-local --rpc-methods=Unsafe --unsafe-ws-external --unsafe-rpc-external
+    networks:
+      - subtensor-net
+
+  bob:
+    image: opentensor/subtensor:latest
+    container_name: subtensor-bob
+    ports:
+      - "9945:9945"
+      - "30335:30335"
+    volumes:
+      - ./data/bob:/data
+      - ./chain-specs:/chain-specs
+    command: >
+      --base-path /data --chain /chain-specs/local.json --bob --port 30335 --rpc-port 9945 --validator --rpc-cors=all --allow-private-ipv4 --discover-local --rpc-methods=Unsafe --unsafe-ws-external --unsafe-rpc-external
+    networks:
+      - subtensor-net
+
+networks:
+  subtensor-net:
+    driver: bridge

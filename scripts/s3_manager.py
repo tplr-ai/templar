@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-# The MIT License (MIT)
-# © 2025 tplr.ai
 
 import re
-import logging
 import argparse
 import os
 import sys
@@ -12,8 +9,8 @@ from datetime import datetime, timedelta
 from botocore.exceptions import ClientError
 from botocore.config import Config as BotoConfig
 from urllib.parse import urlparse
+from tplr.logging import logger
 
-logger = logging.getLogger(__name__)
 
 def create_r2_client(aws_access_key_id, aws_secret_access_key, endpoint_url):
     try:

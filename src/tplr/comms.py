@@ -24,6 +24,7 @@ import torch
 import asyncio
 import aiofiles
 import botocore
+import datetime
 import bittensor as bt
 from torch.optim import SGD
 from transformers import LlamaForCausalLM
@@ -330,6 +331,8 @@ class Comms(ChainManager):
         key: str,
         bucket: Bucket = None,
         timeout: int = 5,
+        time_min: datetime = None,
+        time_max: datetime = None,
     ):
         """Download object from S3 using asynchronous streaming."""
         import uuid
@@ -354,6 +357,20 @@ class Comms(ChainManager):
                         s3_client.head_object(Bucket=bucket.name, Key=key),
                         timeout=timeout,
                     )
+                    # Retrieve the object's timestamp
+                    last_modified = response.get('LastModified')
+                    if last_modified is None:
+                        tplr.logger.debug(f"Object does not exist: {key}")
+                        return None
+
+                    # Check if the timestamp is within the desired range
+                    if time_min != None and last_modified < time_min:
+                        tplr.logger.debug(f"Object was uploaded before time_min: {key}, time_min: {time_min}")
+                        return None
+                    if time_max != None and last_modified > time_max:
+                        tplr.logger.debug(f"Object was uploaded after time_max: {key}, time_max: {time_min}")
+                        return None
+                    
                 except asyncio.TimeoutError:
                     tplr.logger.debug(f"Timeout checking for {key}")
                     return None
@@ -735,6 +752,8 @@ class Comms(ChainManager):
         timeout: int = 10,
         local: bool = True,
         stale_retention: int = 10,
+        time_min: datetime = None,
+        time_max: datetime = None,
     ) -> Optional[tuple[dict, int]]:
         """GET operation."""
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
@@ -766,7 +785,11 @@ class Comms(ChainManager):
                 return None
 
             loaded_data = await self.s3_get_object(
-                key=filename, bucket=peer_bucket, timeout=timeout
+                key=filename, 
+                bucket=peer_bucket, 
+                timeout=timeout,
+                time_min = time_min,
+                time_max = time_max,
             )
 
             if loaded_data is None:
@@ -794,6 +817,8 @@ class Comms(ChainManager):
         timeout: int,
         local: bool = True,
         stale_retention: int = 10,
+        time_min: datetime = None,
+        time_max: datetime = None,
     ) -> Optional[dict]:
         """GET with retry operation."""
         start_time = time.time()
@@ -810,6 +835,8 @@ class Comms(ChainManager):
                 key=key,
                 local=local,
                 stale_retention=stale_retention,
+                time_min = time_min,
+                time_max = time_max,
             )
             if state_dict is not None:
                 return state_dict
@@ -828,6 +855,8 @@ class Comms(ChainManager):
         totalks: dict,
         local: bool = True,
         stale_retention: int = 10,
+        time_min: datetime = None,
+        time_max: datetime = None,
     ) -> Optional[SimpleNamespace]:
         """Gather operation with individual gradient normalization and connection management."""
         start_time = time.time()
@@ -852,6 +881,8 @@ class Comms(ChainManager):
                     timeout=timeout,
                     local=local,
                     stale_retention=stale_retention,
+                    time_min = time_min,
+                    time_max = time_max,
                 )
                 for uid in uids
             ]

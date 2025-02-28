@@ -355,11 +355,6 @@ class Miner:
                 else:
                     processed_state_dict[k] = v
 
-            # 4. Wait for next window
-            tplr.logger.info("Wait for next window...")
-            while self.current_window == step_window:
-                await asyncio.sleep(0.1)
-
             # Launch the put operation as a background task
             put_task = asyncio.create_task(
                 self.comms.put(

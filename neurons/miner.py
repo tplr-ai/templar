@@ -266,35 +266,35 @@ class Miner:
             # Start the gather in the background:
             gather_start = tplr.T()
             step_window = self.current_window
-            # Start gathering gradients from peers asynchronously
-            sync_block = step_window * self.hparams.blocks_per_window
-            time_min = datetime.fromtimestamp(
-                self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
-                / 1000,
-                tz=timezone.utc,
-            )
-            time_max = time_min + timedelta(
-                seconds=self.hparams.time_window_delta_seconds
-            )
+            # # Start gathering gradients from peers asynchronously
+            # sync_block = step_window * self.hparams.blocks_per_window
+            # time_min = datetime.fromtimestamp(
+            #     self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
+            #     / 1000,
+            #     tz=timezone.utc,
+            # )
+            # time_max = time_min + timedelta(
+            #     seconds=self.hparams.time_window_delta_seconds
+            # )
 
-            # Log the time window we're using
-            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
+            # # Log the time window we're using
+            # tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
 
-            gather_task = asyncio.create_task(
-                self.comms.gather(
-                    my_uid=self.uid,
-                    uids=[uid for uid in self.peers if uid != self.uid],
-                    window=step_window,
-                    key="gradient",
-                    timeout=72,
-                    device="cpu",
-                    local=False,
-                    stale_retention=100,
-                    totalks=self.totalks,
-                    time_min=time_min,
-                    time_max=time_max,
-                )
-            )
+            # gather_task = asyncio.create_task(
+            #     self.comms.gather(
+            #         my_uid=self.uid,
+            #         uids=[uid for uid in self.peers if uid != self.uid],
+            #         window=step_window,
+            #         key="gradient",
+            #         timeout=72,
+            #         device="cpu",
+            #         local=False,
+            #         stale_retention=100,
+            #         totalks=self.totalks,
+            #         time_min=time_min,
+            #         time_max=time_max,
+            #     )
+            # )
 
             self.global_step = (
                 self.current_window - self.start_window
@@ -409,6 +409,35 @@ class Miner:
 
             tplr.logger.info(
                 f"Stopped accumulating: {i + 1} batches with {(i + 1) * self.hparams.batch_size * self.hparams.sequence_length} tokens"
+            )
+
+            sync_block = self.current_window * self.hparams.blocks_per_window
+            time_min = datetime.fromtimestamp(
+                self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
+                / 1000,
+                tz=timezone.utc,
+            )
+            time_max = time_min + timedelta(
+                seconds=self.hparams.time_window_delta_seconds
+            )
+
+            # Log the time window we're using
+            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
+
+            gather_task = asyncio.create_task(
+                self.comms.gather(
+                    my_uid=self.uid,
+                    uids=[uid for uid in self.peers if uid != self.uid],
+                    window=step_window,
+                    key="gradient",
+                    timeout=30,
+                    device="cpu",
+                    local=False,
+                    stale_retention=100,
+                    totalks=self.totalks,
+                    time_min=time_min,
+                    time_max=time_max,
+                )
             )
 
             # 5. Calculate and log metrics

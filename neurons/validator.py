@@ -845,7 +845,7 @@ class Validator:
                     )
                     # Calculate final score incorporating both metrics
                     final_score = (
-                        self.gradient_scores[eval_uid]
+                        max(0, self.gradient_scores[eval_uid])
                         * self.normalised_binary_moving_averages[eval_uid]
                     )
                     tplr.logger.debug(

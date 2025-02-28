@@ -23,6 +23,7 @@ import copy
 import time
 import random
 import asyncio
+from datetime import datetime, timedelta, timezone
 import argparse
 import threading
 from contextlib import contextmanager
@@ -380,19 +381,33 @@ class Validator:
                     step=self.global_step,
                 )
 
+            # Calculate time window for this sync window
+            sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
+            time_min = datetime.fromtimestamp(
+                self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
+                / 1000,
+                tz=timezone.utc,
+            )
+            time_max = time_min + timedelta(
+                seconds=self.hparams.time_window_delta_seconds
+            )
+
+            # Log the time window we're using
+            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
+            tplr.logger.info(f"We are using peers {self.peers}")
+
             gather_start = tplr.T()
-            # Create gather task early
-            gather_task = asyncio.create_task(
-                self.comms.gather(
-                    my_uid=self.uid,
-                    uids=self.peers,
-                    window=self.sync_window,
-                    key="gradient",
-                    timeout=25,
-                    device=self.config.device,
-                    local=False,
-                    totalks=self.totalks,
-                )
+            gather_result = await self.comms.gather(
+                my_uid=self.uid,
+                uids=self.peers,
+                window=self.sync_window,
+                key="gradient",
+                timeout=30,
+                device=self.config.device,
+                local=False,
+                totalks=self.totalks,
+                time_min=time_min,
+                time_max=time_max,
             )
 
             # Add check for empty peers (evaluating all peer uids)
@@ -1060,7 +1075,6 @@ class Validator:
                     )
                 )
 
-            gather_result = await gather_task
             if gather_result is None:
                 tplr.logger.error(
                     "Failed to gather gradients from peers. Waiting for next window."

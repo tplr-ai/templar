@@ -39,5 +39,5 @@
     "catch_up_batch_size": 5,
     "catch_up_timeout": 300,
     "uids_per_window": 2,
-    "time_window_delta_seconds": 10
+    "time_window_delta_seconds": 15
 }

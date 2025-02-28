@@ -24,9 +24,8 @@ import torch
 import asyncio
 import aiofiles
 import botocore
-import datetime
+from datetime import datetime, timezone
 import bittensor as bt
-from datetime import timezone
 
 from tqdm import tqdm as std_tqdm
 from typing import List, Dict, Optional, TypeVar, Any
@@ -369,20 +368,23 @@ class Comms(ChainManager):
                     # Retrieve the object's timestamp
                     last_modified = response.get("LastModified")
                     if last_modified is None:
-                        tplr.logger.debug(f"Object does not exist: {key}")
+                        tplr.logger.info(f"Object does not exist: {key}")
                         return None
 
                     # Check if the timestamp is within the desired range
                     if time_min is not None and last_modified < time_min:
-                        tplr.logger.debug(
-                            f"Object was uploaded before time_min: {key}, time_min: {time_min}"
+                        time_diff = (time_min - last_modified).total_seconds()
+                        tplr.logger.info(
+                            f"Object {key} was uploaded {time_diff:.2f} seconds before time_min: {last_modified} < {time_min}"
                         )
                         return None
                     if time_max is not None and last_modified > time_max:
-                        tplr.logger.debug(
-                            f"Object was uploaded after time_max: {key}, time_max: {time_max}"
+                        time_diff = (last_modified - time_max).total_seconds()
+                        tplr.logger.info(
+                            f"Object {key} was uploaded {time_diff:.2f} seconds after time_max: {last_modified} > {time_max}"
                         )
-                        return None
+                        # Return special value to indicate "too late"
+                        return {"__status": "TOO_LATE"}
 
                 except asyncio.TimeoutError:
                     tplr.logger.debug(f"Timeout checking for {key}")
@@ -808,6 +810,16 @@ class Comms(ChainManager):
             if loaded_data is None:
                 return None
 
+            # Check for TOO_LATE marker
+            if (
+                isinstance(loaded_data, dict)
+                and loaded_data.get("__status") == "TOO_LATE"
+            ):
+                tplr.logger.info(
+                    f"Object for UID {uid}, window {window}, key {key} was uploaded too late. Skipping."
+                )
+                return {"__status": "TOO_LATE"}
+
             if key == "checkpoint":
                 return loaded_data, None
 
@@ -818,7 +830,6 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.debug(f"GET error {filename}: {e}")
             return None
-
         finally:
             tplr.logger.debug(f"GET {filename} <--")
 
@@ -851,6 +862,17 @@ class Comms(ChainManager):
                 time_min=time_min,
                 time_max=time_max,
             )
+
+            # Check for TOO_LATE marker - stop retrying immediately
+            if (
+                isinstance(state_dict, dict)
+                and state_dict.get("__status") == "TOO_LATE"
+            ):
+                tplr.logger.info(
+                    f"Gradient for UID {uid}, window {window} exists but was uploaded too late. Skipping."
+                )
+                return None
+
             if state_dict is not None:
                 return state_dict
 
@@ -875,6 +897,9 @@ class Comms(ChainManager):
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
+        tplr.logger.debug(
+            f"Starting gather for window {window} with time window: {time_min} to {time_max}"
+        )
         tplr.logger.debug(
             f"Starting gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
         )
@@ -911,7 +936,9 @@ class Comms(ChainManager):
                         skipped_uids.append(uid)
                         continue
                     if response is None:
-                        tplr.logger.debug(f"No data received from UID {uid}")
+                        tplr.logger.info(
+                            f"Skipped UID {uid} - gradient might not exist or was uploaded too late"
+                        )
                         skipped_uids.append(uid)
                         continue
 

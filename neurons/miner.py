@@ -17,7 +17,7 @@
 
 
 # Standard library
-import datetime
+from datetime import datetime, timedelta, timezone
 import sys
 import time
 import random
@@ -270,9 +270,16 @@ class Miner:
             sync_block = step_window * self.hparams.blocks_per_window
             time_min = datetime.fromtimestamp(
                 self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
-                / 1000
+                / 1000,
+                tz=timezone.utc,
             )
-            time_max = time_min + datetime.timedelta(seconds=4)
+            time_max = time_min + timedelta(
+                seconds=self.hparams.time_window_delta_seconds
+            )
+
+            # Log the time window we're using
+            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
+
             gather_task = asyncio.create_task(
                 self.comms.gather(
                     my_uid=self.uid,
@@ -351,6 +358,7 @@ class Miner:
                 if self.current_window != step_window:
                     tplr.logger.info("<Exhausted window>")
                     break
+
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - train_start)} Completed training"
             )
@@ -371,6 +379,11 @@ class Miner:
                     processed_state_dict[k] = v.to("cpu")
                 else:
                     processed_state_dict[k] = v
+
+            # 4. Wait for next window
+            tplr.logger.info("Wait for next window...")
+            while self.current_window == step_window:
+                await asyncio.sleep(0.1)
 
             # Launch the put operation as a background task
             put_task = asyncio.create_task(

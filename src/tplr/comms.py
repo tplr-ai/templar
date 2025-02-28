@@ -719,6 +719,8 @@ class Comms(ChainManager):
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         tplr.logger.debug(f"PUT {filename} -->")
 
+        put_start = tplr.T()
+
         # Create per-uid temp directory
         temp_dir = os.path.join("/tmp", str(self.uid))
         os.makedirs(temp_dir, exist_ok=True)
@@ -747,17 +749,19 @@ class Comms(ChainManager):
                 final_path = os.path.join(local_dir, filename)
                 os.replace(temp_file_path, final_path)
             else:
-                # Remote storage with automatic handling of large files
-                await self.cleanup_s3_data(
-                    uid=uid, current_window=window, stale_retention=stale_retention
-                )
                 await self.s3_put_object(filename, temp_file_path)
+                # Remote storage with automatic handling of large files
+                asyncio.create_task(
+                    self.cleanup_s3_data(
+                        uid=uid, current_window=window, stale_retention=stale_retention
+                    )
+                )
 
         finally:
             if os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
 
-        tplr.logger.debug(f"PUT {filename} <--")
+        tplr.logger.info(f"{tplr.P(window, tplr.T() - put_start)} PUT {filename} <--")
 
     async def get(
         self,

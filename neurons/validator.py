@@ -402,7 +402,7 @@ class Validator:
                 uids=self.peers,
                 window=self.sync_window,
                 key="gradient",
-                timeout=60,
+                timeout=30,
                 device=self.config.device,
                 local=False,
                 totalks=self.totalks,

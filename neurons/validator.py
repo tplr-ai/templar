@@ -436,11 +436,18 @@ class Validator:
                     local=False,
                     stale_retention=10,
                     time_max=time_max,
-                    time_min=time_min
+                    time_min=time_min,
                 )
 
                 scoring_start = tplr.T()
-                if eval_result is not None and eval_result[0] is not None:
+                if (
+                    eval_result is not None
+                    and not (
+                        isinstance(eval_result, dict)
+                        and eval_result.get("__status") in ["TOO_LATE", "TOO_EARLY"]
+                    )
+                    and eval_result[0] is not None
+                ):
                     state_dict, _ = eval_result
 
                     # Pull miner-sent pages info from metadata

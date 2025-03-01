@@ -377,7 +377,7 @@ class Comms(ChainManager):
                         tplr.logger.info(
                             f"Object {key} was uploaded {time_diff:.2f} seconds before time_min: {last_modified} < {time_min}"
                         )
-                        return None
+                        return {"__status": "TOO_EARLY"}
                     if time_max is not None and last_modified > time_max:
                         time_diff = (last_modified - time_max).total_seconds()
                         tplr.logger.info(
@@ -814,15 +814,18 @@ class Comms(ChainManager):
             if loaded_data is None:
                 return None
 
-            # Check for TOO_LATE marker
-            if (
-                isinstance(loaded_data, dict)
-                and loaded_data.get("__status") == "TOO_LATE"
-            ):
-                tplr.logger.info(
-                    f"Object for UID {uid}, window {window}, key {key} was uploaded too late. Skipping."
-                )
-                return {"__status": "TOO_LATE"}
+            # Check for TOO_LATE/TOO_EARLY marker
+            if isinstance(loaded_data, dict):
+                if loaded_data.get("__status") == "TOO_LATE":
+                    tplr.logger.info(
+                        f"Object for UID {uid}, window {window}, key {key} was uploaded too late. Skipping."
+                    )
+                    return {"__status": "TOO_LATE"}
+                elif loaded_data.get("__status") == "TOO_EARLY":
+                    tplr.logger.info(
+                        f"Object for UID {uid}, window {window}, key {key} was uploaded too early. Skipping."
+                    )
+                    return {"__status": "TOO_EARLY"}
 
             if key == "checkpoint":
                 return loaded_data, None
@@ -867,15 +870,18 @@ class Comms(ChainManager):
                 time_max=time_max,
             )
 
-            # Check for TOO_LATE marker - stop retrying immediately
-            if (
-                isinstance(state_dict, dict)
-                and state_dict.get("__status") == "TOO_LATE"
-            ):
-                tplr.logger.info(
-                    f"Gradient for UID {uid}, window {window} exists but was uploaded too late. Skipping."
-                )
-                return None
+            # Check for TOO_LATE/TOO_EARLY markers - stop retrying immediately
+            if isinstance(state_dict, dict):
+                if state_dict.get("__status") == "TOO_LATE":
+                    tplr.logger.info(
+                        f"Gradient for UID {uid}, window {window} exists but was uploaded too late. Skipping."
+                    )
+                    return None
+                elif state_dict.get("__status") == "TOO_EARLY":
+                    tplr.logger.info(
+                        f"Gradient for UID {uid}, window {window} exists but was uploaded too early. Skipping."
+                    )
+                    return None
 
             if state_dict is not None:
                 return state_dict

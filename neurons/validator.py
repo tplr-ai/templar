@@ -410,6 +410,33 @@ class Validator:
                 time_max=time_max,
             )
 
+            if gather_result is None:
+                tplr.logger.error(
+                    "Failed to gather gradients from peers. Waiting for next window."
+                )
+                self.global_step += 1
+                continue
+
+            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
+
+            # Slash peers failing to submit gradients (penalize 50%)
+            for uid in gather_result.skipped_uids:
+                tplr.logger.info(
+                    f"No gradient gathered from UID {uid}. Slashing moving average score by 50%."
+                )
+                if uid in self.final_moving_avg_scores:
+                    old_score = self.final_moving_avg_scores[uid].item()
+                    self.final_moving_avg_scores[uid] *= 0.5  # Apply 50% reduction
+                    new_score = self.final_moving_avg_scores[uid].item()
+                    tplr.logger.info(
+                        f"Reduced moving average score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient in gather."
+                    )
+                    self.evaluated_uids.add(uid)
+                else:
+                    tplr.logger.info(
+                        f"UID {uid} not found in final_moving_avg_scores; skipping penalty."
+                    )
+
             # Add check for empty peers (evaluating all peer uids)
             if not self.peers:
                 tplr.logger.warning(
@@ -1084,16 +1111,6 @@ class Validator:
                     )
                 )
 
-            if gather_result is None:
-                tplr.logger.error(
-                    "Failed to gather gradients from peers. Waiting for next window."
-                )
-                self.global_step += 1
-                continue
-            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
-            tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers"
-            )
             # 16. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()

@@ -435,6 +435,8 @@ class Validator:
                     timeout=15,
                     local=False,
                     stale_retention=10,
+                    time_max=time_max,
+                    time_min=time_min
                 )
 
                 scoring_start = tplr.T()

@@ -822,7 +822,7 @@ class Comms(ChainManager):
                 tplr.logger.info(
                     f"Object for UID {uid}, window {window}, key {key} was uploaded too late. Skipping."
                 )
-                return {"__status": "TOO_LATE"}
+                return None
 
             if key == "checkpoint":
                 return loaded_data, None

@@ -204,7 +204,7 @@ class Validator:
             self.metagraph.n, dtype=torch.float32
         )
         self.binary_moving_averages = torch.full(
-            (self.metagraph.n,), 0.5, dtype=torch.float32
+            (self.metagraph.n,), 0.0, dtype=torch.float32
         )
         self.weights = torch.zeros(self.metagraph.n, dtype=torch.float32)
         self.normalised_binary_moving_averages = torch.zeros(

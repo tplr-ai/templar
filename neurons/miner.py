@@ -202,6 +202,14 @@ class Miner:
             token=os.environ.get("INFLUXDB_TOKEN"),
             org="templar",
         )
+        # Initialize WandB run for miner metrics logging
+        self.wandb_run = tplr.wandb.initialize_wandb(
+            run_prefix="miner-",
+            uid=str(self.uid),
+            config=self.config,
+            group="miner",
+            job_type="training"
+        )
 
     # Main training loop.
     async def run(self):
@@ -466,6 +474,8 @@ class Miner:
                 },
                 fields=training_metrics,
             )
+            # Also log metrics to WandB
+            self.wandb_run.log(training_metrics, step=self.global_step)
 
             # ---------------------------------------------------------------------
             # 6. Await both gather and put tasks concurrently

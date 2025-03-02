@@ -237,6 +237,14 @@ class Validator:
             token=os.environ.get("INFLUXDB_TOKEN"),
             org="templar",
         )
+        # Initialize WandB run for validator metrics logging
+        self.wandb_run = tplr.wandb.initialize_wandb(
+            run_prefix="validator-",
+            uid=str(self.uid),
+            config=self.config,
+            group="validator",
+            job_type="evaluation"
+        )
 
         # Initialize peers
         self.peers = []
@@ -1070,7 +1078,7 @@ class Validator:
                         ) 
 
                     # Optionally, log to WandB
-                    self.wandb.log(
+                    self.wandb_run.log(
                         {
                             f"validator/final_moving_avg_scores/{eval_uid}": self.final_moving_avg_scores[
                                 eval_uid
@@ -1183,6 +1191,8 @@ class Validator:
                 },
                 fields=evaluation_metrics,
             )
+            # Also log evaluation metrics to WandB
+            self.wandb_run.log(evaluation_metrics, step=self.global_step)
 
             # 17. Set weights periodically
             if self.sync_window % self.hparams.windows_per_weights == 0:
@@ -1348,6 +1358,8 @@ class Validator:
                 },
                 fields=evaluation_metrics,
             )
+            # Also log evaluation metrics to WandB
+            self.wandb_run.log(evaluation_metrics, step=self.global_step)
 
             # 18. Increment global step
             self.global_step += 1

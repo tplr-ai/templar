@@ -558,7 +558,7 @@ class Miner:
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
 
             # Save checkpoint logic
-            if self.global_step % self.hparams.checkpoint_frequency == 0:
+            if self.global_step % self.hparams.miner_checkpoint_frequency == 0:
                 tplr.logger.info(
                     f"Creating checkpoint at global_step {self.global_step}"
                 )

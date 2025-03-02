@@ -1212,7 +1212,7 @@ class Validator:
 
             # 15. Create checkpoints periodically
             if (
-                self.global_step % self.hparams.checkpoint_frequency == 0
+                self.global_step % self.hparams.validator_checkpoint_frequency == 0
                 and self.global_step != 0
             ):
                 tplr.logger.info(

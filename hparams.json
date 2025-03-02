@@ -27,7 +27,7 @@
     "alpha_f": 0.1,
     "t_max": 20000,
     "validator_offset": 1,
-    "checkpoint_frequency": 500,
+    "checkpoint_frequency": 250,
     "topk_peers": 20,
     "max_topk_peers": 15,
     "minimum_peers": 5,

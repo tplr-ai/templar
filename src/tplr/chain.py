@@ -204,17 +204,29 @@ class ChainManager:
                 + commitment.access_key_id
                 + commitment.secret_access_key
             )
-            current_str = bucket.name + bucket.access_key_id + bucket.secret_access_key
-
-            logger.debug(
-                f"Comparing:\nCommitment: {commitment_str}\nCurrent: {current_str}"
+            bucket_details_from_env = (
+                bucket.name + bucket.access_key_id + bucket.secret_access_key
             )
 
-            if current_str != commitment_str:
-                raise ValueError("Bucket commitment data does not match")
+            logger.debug(
+                "Comparing current commitment to bucket details from the environment:\n"
+                f"Commitment: {commitment_str}\n"
+                f"Current: {bucket_details_from_env}"
+            )
+
+            if bucket_details_from_env != commitment_str:
+                if commitment_str == "":
+                    log_msg_base = "Commitment is empty, likely because you're running your miner for the first time"
+                else:
+                    log_msg_base = "Bucket details have changed"
+                logger.info(f"{log_msg_base}. Committing the new details.")
+                self.commit(wallet, bucket)
 
         except Exception as e:
-            logger.error(f"Commitment error: {str(e)}")
+            logger.error(
+                f"Error while verifying commitment: {str(e)}\n"
+                "Committing the bucket details from the environment."
+            )
             self.commit(wallet, bucket)
 
     def get_commitment(self, uid: int) -> Bucket:

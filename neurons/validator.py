@@ -27,7 +27,12 @@ from datetime import datetime, timedelta, timezone
 import argparse
 import threading
 from contextlib import contextmanager
+from collections import defaultdict
 from time import perf_counter
+import os
+from io import StringIO
+from rich.console import Console
+from rich.table import Table
 
 # Third party
 import torch
@@ -203,9 +208,7 @@ class Validator:
         self.final_moving_avg_scores = torch.zeros(
             self.metagraph.n, dtype=torch.float32
         )
-        self.binary_moving_averages = torch.full(
-            (self.metagraph.n,), 0.5, dtype=torch.float32
-        )
+        self.binary_moving_averages = torch.zeros(self.metagraph.n, dtype=torch.float32)
         self.weights = torch.zeros(self.metagraph.n, dtype=torch.float32)
         self.normalised_binary_moving_averages = torch.zeros(
             self.metagraph.n, dtype=torch.float32
@@ -227,7 +230,10 @@ class Validator:
 
         # Initialize peers
         self.peers = []
-        self.eval_peers = []
+        # Weighted selection counters for fair picking of eval peers
+        self.eval_peers = defaultdict(int)
+        # Track candidate weights separately
+        self.eval_candidates_counter = defaultdict(int)
 
         # Track inactive peer scores
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
@@ -340,6 +346,11 @@ class Validator:
             tplr.logger.info(f"Current gather peers: {self.peers}")
             tplr.logger.info(f"Current evaluation peers: {self.eval_peers}")
 
+            tplr.logger.info(f"Current gather peers: {self.peers}")
+            tplr.logger.info(
+                f"Current evaluation peers: {list(self.eval_peers.keys())}"
+            )
+
             newly_inactive = self.comms.inactive_peers
             current_window = self.sync_window
 
@@ -357,7 +368,7 @@ class Validator:
             # Apply penalties to all inactive peers
             for uid, (inactive_since, _) in list(self.inactive_scores.items()):
                 # If peer became active again, remove from inactive tracking
-                if uid in self.eval_peers:
+                if uid in self.eval_peers.keys():
                     del self.inactive_scores[uid]
                     tplr.logger.info(f"UID {uid} became active again")
                     continue
@@ -410,6 +421,33 @@ class Validator:
                 time_max=time_max,
             )
 
+            if gather_result is None:
+                tplr.logger.error(
+                    "Failed to gather gradients from peers. Waiting for next window."
+                )
+                self.global_step += 1
+                continue
+
+            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
+
+            # Slash peers failing to submit gradients (penalize 50%)
+            for uid in gather_result.skipped_uids:
+                tplr.logger.info(
+                    f"No gradient gathered from UID {uid}. Slashing moving average score by 50%."
+                )
+                if uid in self.final_moving_avg_scores:
+                    old_score = self.final_moving_avg_scores[uid].item()
+                    self.final_moving_avg_scores[uid] *= 0.5  # Apply 50% reduction
+                    new_score = self.final_moving_avg_scores[uid].item()
+                    tplr.logger.info(
+                        f"Reduced moving average score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient in gather."
+                    )
+                    self.evaluated_uids.add(uid)
+                else:
+                    tplr.logger.info(
+                        f"UID {uid} not found in final_moving_avg_scores; skipping penalty."
+                    )
+
             # Add check for empty peers (evaluating all peer uids)
             if not self.peers:
                 tplr.logger.warning(
@@ -420,11 +458,30 @@ class Validator:
 
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
-            # Sample a random subset of evaluation peers based on hparam uids_per_window
-            evaluation_uids = random.sample(
-                self.eval_peers, min(self.hparams.uids_per_window, len(self.eval_peers))
+
+            candidate_uids = list(self.eval_peers.keys())
+            candidate_weights = [
+                self.eval_candidates_counter[uid] for uid in candidate_uids
+            ]
+            k = min(self.hparams.uids_per_window, len(candidate_uids))
+            evaluation_uids = self.comms.weighted_random_sample_no_replacement(
+                candidate_uids, candidate_weights, k
             )
+
+            # Reset counters for chosen peers
+            for uid in evaluation_uids:
+                self.eval_peers[uid] = 0
+                self.eval_candidates_counter[uid] = 0
+
+            # Increment counters for not chosen peers
+            for uid in candidate_uids:
+                if uid not in evaluation_uids:
+                    self.eval_peers[uid] += 1
+                    self.eval_candidates_counter[uid] += 1
+            self.comms.eval_peers = self.eval_peers
+
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
+
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
 
@@ -967,11 +1024,12 @@ class Validator:
                     tplr.logger.info(
                         "Updated scores for evaluated UIDs after slashing:"
                     )
-                    for uid in self.evaluated_uids:
-                        tplr.logger.info(f"UID {uid}:")
-                        tplr.logger.info(
-                            f"  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}"
-                        )
+                    # Log evaluated UID scores (fixed join call)
+                    line = " | ".join(
+                        f"UID {uid}: {self.final_moving_avg_scores[uid]:.4f}"
+                        for uid in sorted(self.evaluated_uids)
+                    )
+                    tplr.logger.info(line)
 
                     # Optionally, log to WandB
                     self.wandb.log(
@@ -993,24 +1051,66 @@ class Validator:
                     f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
                 )
 
-            # Log scores and metrics for evaluated UIDs
-            tplr.logger.info("Updated scores for evaluated UIDs:")
-            for uid in self.evaluated_uids:
-                tplr.logger.info(f"UID {uid}:")
-                tplr.logger.info(f"  - Last score: {self.gradient_scores[uid]}")
-                tplr.logger.info(
-                    f"  - Binary indicator: {self.binary_indicator_scores[uid]:.4f}"
+            # Log scores and metrics for evaluated UIDs as a table
+            headers = [
+                "UID",
+                "Last Score",
+                "Binary Indicator",
+                "Binary Moving Avg",
+                "Norm Binary Score",
+                "Final Moving Avg",
+                "Weight",
+            ]
+            table = [headers]
+            for uid in sorted(self.evaluated_uids):
+                row = [
+                    str(uid),
+                    f"{self.gradient_scores[uid]:.4f}",
+                    f"{self.binary_indicator_scores[uid]:.4f}",
+                    f"{self.binary_moving_averages[uid]:.4f}",
+                    f"{self.normalised_binary_moving_averages[uid]:.4f}",
+                    f"{self.final_moving_avg_scores[uid]:.4f}",
+                    f"{self.weights[uid]:.4f}",
+                ]
+                table.append(row)
+
+            try:
+                try:
+                    width = os.get_terminal_size().columns
+                except Exception:
+                    width = 0
+                os.environ["COLUMNS"] = str(max(200, width))
+
+                rich_table = Table(title="Updated scores for evaluated UIDs")
+                for header in headers:
+                    rich_table.add_column(header)
+                for row in table[1:]:
+                    rich_table.add_row(*row)
+                sio = StringIO()
+                console = Console(file=sio, width=int(os.environ["COLUMNS"]))
+                console.print(rich_table)
+                table_str = sio.getvalue()
+            except ImportError:
+                tplr.logger.warning(
+                    "rich module not found; falling back to basic formatting."
                 )
-                tplr.logger.info(
-                    f"  - Binary moving avg: {self.binary_moving_averages[uid]:.4f}"
-                )
-                tplr.logger.info(
-                    f"  - Normalised binary score: {self.normalised_binary_moving_averages[uid]:.4f}"
-                )
-                tplr.logger.info(
-                    f"  - Final Moving avg score: {self.final_moving_avg_scores[uid]}"
-                )
-                tplr.logger.info(f"  - Weight: {self.weights[uid]:.4f}")
+                col_widths = [
+                    max(len(row[i]) for row in table) for i in range(len(headers))
+                ]
+                lines = []
+                for i, row in enumerate(table):
+                    line = " | ".join(
+                        row[j].ljust(col_widths[j]) for j in range(len(row))
+                    )
+                    lines.append(line)
+                    if i == 0:
+                        separator = "-+-".join(
+                            "-" * col_widths[j] for j in range(len(headers))
+                        )
+                        lines.append(separator)
+                table_str = "\n".join(lines)
+
+            tplr.logger.info("Updated scores for evaluated UIDs:\n" + table_str)
 
             # Log WandB metrics per UID
             for uid in sorted(self.evaluated_uids):
@@ -1084,16 +1184,6 @@ class Validator:
                     )
                 )
 
-            if gather_result is None:
-                tplr.logger.error(
-                    "Failed to gather gradients from peers. Waiting for next window."
-                )
-                self.global_step += 1
-                continue
-            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
-            tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers"
-            )
             # 16. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
@@ -1142,6 +1232,37 @@ class Validator:
             self.optimizer.step()
             self.scheduler.step()
             torch.cuda.empty_cache()
+
+            # Add debug data including successfully gathered peers
+            debug_dict = {}
+
+            # Add model parameters debug info
+            for name, param in self.model.named_parameters():
+                if (
+                    param is not None and param.numel() >= 2
+                ):  # Check if tensor has at least 2 elements
+                    debug_dict[name + "_debug"] = (
+                        param.flatten()[:2].detach().cpu().tolist()
+                    )
+
+            # Add successful peers information
+            if gather_result is not None:
+                debug_dict["successful_peers"] = sorted(
+                    list(set(self.peers) - set(gather_result.skipped_uids))
+                )
+                debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
+
+            # Store the debug dictionary
+            asyncio.create_task(
+                self.comms.put(
+                    state_dict=debug_dict,
+                    uid=str(self.uid),
+                    window=self.current_window,
+                    key="debug",
+                    local=False,
+                )
+            )
+            tplr.logger.info(f"Stored debug values for window {self.current_window}")
             # Log total window time and metrics
             tplr.logger.info(
                 f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"

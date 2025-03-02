@@ -23,6 +23,7 @@ import copy
 import time
 import random
 import asyncio
+from datetime import datetime, timedelta, timezone
 import argparse
 import threading
 from contextlib import contextmanager
@@ -194,8 +195,8 @@ class Validator:
         self.relative_improvement_random = 0.0
         self.valid_score_indices = []
         self.gradient_scores = torch.zeros(self.metagraph.n, dtype=torch.float32)
-        self.binary_indicator_scores = torch.full(
-            (self.metagraph.n,), 0.5, dtype=torch.float32
+        self.binary_indicator_scores = torch.zeros(
+            self.metagraph.n, dtype=torch.float32
         )
         self.gradient_moving_avg_scores = torch.zeros(
             self.metagraph.n, dtype=torch.float32
@@ -385,20 +386,61 @@ class Validator:
                     step=self.global_step,
                 )
 
-            gather_start = tplr.T()
-            # Create gather task early
-            gather_task = asyncio.create_task(
-                self.comms.gather(
-                    my_uid=self.uid,
-                    uids=self.peers,
-                    window=self.sync_window,
-                    key="gradient",
-                    timeout=25,
-                    device=self.config.device,
-                    local=False,
-                    totalks=self.totalks,
-                )
+            # Calculate time window for this sync window
+            sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
+            time_min = datetime.fromtimestamp(
+                self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
+                / 1000,
+                tz=timezone.utc,
             )
+            time_max = time_min + timedelta(
+                seconds=self.hparams.time_window_delta_seconds
+            )
+
+            # Log the time window we're using
+            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
+            tplr.logger.info(f"We are using peers {self.peers}")
+
+            gather_start = tplr.T()
+            gather_result = await self.comms.gather(
+                my_uid=self.uid,
+                uids=self.peers,
+                window=self.sync_window,
+                key="gradient",
+                timeout=30,
+                device=self.config.device,
+                local=False,
+                totalks=self.totalks,
+                time_min=time_min,
+                time_max=time_max,
+            )
+
+            if gather_result is None:
+                tplr.logger.error(
+                    "Failed to gather gradients from peers. Waiting for next window."
+                )
+                self.global_step += 1
+                continue
+
+            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
+
+            # Slash peers failing to submit gradients (penalize 50%)
+            for uid in gather_result.skipped_uids:
+                tplr.logger.info(
+                    f"No gradient gathered from UID {uid}. Slashing moving average score by 50%."
+                )
+                if uid in self.final_moving_avg_scores:
+                    old_score = self.final_moving_avg_scores[uid].item()
+                    self.final_moving_avg_scores[uid] *= 0.5  # Apply 50% reduction
+                    new_score = self.final_moving_avg_scores[uid].item()
+                    tplr.logger.info(
+                        f"Reduced moving average score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient in gather."
+                    )
+                    self.evaluated_uids.add(uid)
+                else:
+                    tplr.logger.info(
+                        f"UID {uid} not found in final_moving_avg_scores; skipping penalty."
+                    )
 
             # Add check for empty peers (evaluating all peer uids)
             if not self.peers:
@@ -442,10 +484,19 @@ class Validator:
                     timeout=15,
                     local=False,
                     stale_retention=10,
+                    time_max=time_max,
+                    time_min=time_min,
                 )
 
                 scoring_start = tplr.T()
-                if eval_result is not None and eval_result[0] is not None:
+                if (
+                    eval_result is not None
+                    and not (
+                        isinstance(eval_result, dict)
+                        and eval_result.get("__status") in ["TOO_LATE", "TOO_EARLY"]
+                    )
+                    and eval_result[0] is not None
+                ):
                     state_dict, _ = eval_result
 
                     # Pull miner-sent pages info from metadata
@@ -867,7 +918,7 @@ class Validator:
                     )
                     # Calculate final score incorporating both metrics
                     final_score = (
-                        self.gradient_scores[eval_uid]
+                        max(0, self.gradient_scores[eval_uid])
                         * self.normalised_binary_moving_averages[eval_uid]
                     )
                     tplr.logger.debug(
@@ -1082,18 +1133,6 @@ class Validator:
                     )
                 )
 
-            gather_result = await gather_task
-            if gather_result is None:
-                tplr.logger.error(
-                    "Failed to gather gradients from peers. Waiting for next window."
-                )
-                while self.current_window == self.sync_window:
-                    await asyncio.sleep(0.1)
-                continue
-            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
-            tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - gather_start)} Gathered gradients from peers"
-            )
             # 16. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
@@ -1177,9 +1216,11 @@ class Validator:
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
+        import websockets.exceptions  # Ensure we catch websockets errors
+
         def handler(event):
             try:
-                self.current_block = int(event["header"]["number"])  # type: ignore
+                self.current_block = int(event["header"]["number"])
                 new_window = int(self.current_block / self.hparams.blocks_per_window)
                 if new_window != self.current_window:
                     self.current_window = new_window
@@ -1195,18 +1236,23 @@ class Validator:
 
         while not self.stop_event.is_set():
             try:
+                # This call subscribes to block headers and might throw keepalive errors
                 bt.subtensor(config=self.config).substrate.subscribe_block_headers(
                     handler
                 )
                 backoff = 1  # reset backoff if subscription exits without exception
+            except websockets.exceptions.ConnectionClosedError as e:
+                tplr.logger.warning(
+                    f"Websocket ConnectionClosedError caught: {e}. Retrying in {backoff} seconds."
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
             except Exception as e:
                 tplr.logger.error(
                     f"Block subscription error: {e}. Retrying in {backoff} seconds."
                 )
                 time.sleep(backoff)
-                backoff = min(
-                    backoff * 2, max_backoff
-                )  # exponential backoff up to a max limit
+                backoff = min(backoff * 2, max_backoff)
 
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):

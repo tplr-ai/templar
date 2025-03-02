@@ -9,7 +9,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "bittensor==9.0.0",
+    "bittensor==9.0.3",
     "bt-decode",
     "torch",
     "boto3",
@@ -60,4 +60,23 @@ filterwarnings = [
     # Keep other warnings
     "default::RuntimeWarning",
     "default::UserWarning",
+]
+
+[tool.uv]
+prerelease = "allow"
+
+[tool.ruff]
+# Exclude directories that often trigger permission issues
+exclude = [
+    ".git",
+    "venv",
+    ".venv",
+    "node_modules",
+    "build",
+    "dist",
+    "__pycache__",
+    "downloads",
+    "eggs",
+    ".eggs",
+    "influxdb_data"
 ]

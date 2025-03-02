@@ -487,10 +487,10 @@ class ChainManager:
         ]
         miner_incentives.sort(key=lambda x: x[1], reverse=True)
 
-        # Calculate number of peers based on topk percentage
-        n_topk_peers = max(
-            1, int(len(miner_incentives) * (self.hparams.topk_peers / 100))
-        )
+        # Determine the number of top-k peers based on percentage
+        n_topk_peers = int(len(miner_incentives) * (self.hparams.topk_peers / 100))
+        n_topk_peers = min(max(n_topk_peers, 1), self.hparams.max_topk_peers)
+
         n_peers = max(self.hparams.minimum_peers, n_topk_peers)
 
         # Take top n_peers by incentive for gradient gathering

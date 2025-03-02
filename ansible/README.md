@@ -31,14 +31,18 @@ Before running the playbook, ensure you have the following installed on your con
 
 ### Inventory File
 
-Create an inventory file (for example, `inventory`) to define your target hosts. Since this file contains sensitive connection details, **add it to your `.gitignore`**.
-
-An example inventory file to connect to a host via SSH on a custom port:
+Create an inventory file defining your target hosts and their GPU configurations:
 
 ```ini
 [bittensor_subnet]
-192.168.123.213 ansible_user=root ansible_port=12345
+# Single GPU host example
+192.168.123.213 ansible_user=root ansible_port=12345 wallet_hotkeys='["miner"]' cuda_devices='["cuda"]'
+
+# Multi-GPU host example
+192.168.222.111 ansible_user=root ansible_port=23456 wallet_hotkeys='["miner_1", "miner_2", "miner_3", "miner_4"]' cuda_devices='["cuda:0", "cuda:1", "cuda:2", "cuda:3"]'
 ```
+
+Note: The `wallet_hotkeys` and `cuda_devices` arrays must have matching lengths.
 
 **Steps to create the inventory file:**
 
@@ -67,7 +71,15 @@ To securely store sensitive environment variables (e.g., API keys, wallet creden
      WANDB_API_KEY: "your_wandb_key"
      R2_ACCOUNT_ID: "your_r2_account_id"
      R2_GRADIENTS_ACCOUNT_ID: "your_r2_gradients_account_id"
-     # ... add all other sensitive variables here ...
+     # ... other env vars ...
+     WALLET_NAME: "default"
+     NETWORK: "finney"
+     NETUID: "3"
+     # Note: CUDA_DEVICE and WALLET_HOTKEY are now managed per-instance
+
+   # GPU configuration (defaults, can be overridden in inventory)
+   cuda_devices: ["cuda:0"]
+   wallet_hotkeys: ["miner_0"]
    ```
 
 4. Save and exit the editor. When you run the playbook, you’ll be prompted for the vault password.
@@ -115,6 +127,29 @@ The playbook is designed to be modular and configurable. You can override defaul
 
 - **Templates:**
   Both `.env` and `run.sh` are generated via Jinja2 templates (`.env.j2` and `run.sh.j2`). Adjust these templates if your application requires additional logic or different formatting.
+
+## Multi-GPU Support
+
+The playbook supports running multiple miner instances on hosts with multiple GPUs. For each GPU:
+
+- A separate clone of the repository is created in a unique directory
+- Environment variables are templated with GPU-specific settings
+- A dedicated systemd service is created (when systemd is enabled)
+
+To configure multiple GPUs:
+
+1. In your inventory, specify arrays for `cuda_devices` and `wallet_hotkeys`:
+
+   ```ini
+   miner2 cuda_devices='["cuda:0", "cuda:1"]' wallet_hotkeys='["miner_1", "miner_2"]'
+   ```
+
+2. The playbook will automatically:
+   - Create separate directories (e.g., templar-cuda0, templar-cuda1)
+   - Configure each instance with its own GPU and wallet
+   - Start separate services for each GPU
+
+Note: Ensure you have unique wallet hotkeys for each GPU to avoid conflicts.
 
 ## Additional Notes
 

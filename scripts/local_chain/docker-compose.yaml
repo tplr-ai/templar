@@ -1,0 +1,52 @@
+services:
+  alice:
+    image: ghcr.io/opentensor/subtensor:v2.0.4
+    container_name: subtensor-alice
+    ports:
+      - "9946:9933"
+      - "30334:30334"
+    volumes:
+      - ./data/alice:/data
+      - ./chain-specs:/chain-specs
+    command: >
+      --base-path=/data
+      --chain=/chain-specs/local.json
+      --alice
+      --port=30333
+      --rpc-port=9933
+      --rpc-cors=all
+      --rpc-external
+      --rpc-methods=unsafe
+      --validator
+      --node-key-file=/data/node.key
+      --public-addr=/ip4/127.0.0.1/tcp/30333
+    networks:
+      - subtensor-net
+
+  bob:
+    image: ghcr.io/opentensor/subtensor:v2.0.4
+    container_name: subtensor-bob
+    ports:
+      - "9944:9933"
+      - "30335:30335"
+    volumes:
+      - ./data/bob:/data
+      - ./chain-specs:/chain-specs
+    command: >
+      --base-path=/data
+      --chain=/chain-specs/local.json
+      --bob
+      --port=30334
+      --rpc-port=9933
+      --rpc-cors=all
+      --rpc-external
+      --rpc-methods=unsafe
+      --validator
+      --node-key-file=/data/node.key
+      --public-addr=/ip4/127.0.0.1/tcp/30334
+    networks:
+      - subtensor-net
+
+networks:
+  subtensor-net:
+    driver: bridge

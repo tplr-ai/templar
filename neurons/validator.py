@@ -29,6 +29,10 @@ import threading
 from contextlib import contextmanager
 from collections import defaultdict
 from time import perf_counter
+import os
+from io import StringIO
+from rich.console import Console
+from rich.table import Table
 
 # Third party
 import torch
@@ -1018,9 +1022,7 @@ class Validator:
                     )
                     for uid in self.evaluated_uids:
                         tplr.logger.info(f"UID {uid}:")
-                        tplr.logger.info(
-                            f"  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}"
-                        )
+                        tplr.logger.info(f"  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}")
 
                     # Optionally, log to WandB
                     self.wandb.log(
@@ -1042,24 +1044,50 @@ class Validator:
                     f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
                 )
 
-            # Log scores and metrics for evaluated UIDs
-            tplr.logger.info("Updated scores for evaluated UIDs:")
-            for uid in self.evaluated_uids:
-                tplr.logger.info(f"UID {uid}:")
-                tplr.logger.info(f"  - Last score: {self.gradient_scores[uid]}")
-                tplr.logger.info(
-                    f"  - Binary indicator: {self.binary_indicator_scores[uid]:.4f}"
-                )
-                tplr.logger.info(
-                    f"  - Binary moving avg: {self.binary_moving_averages[uid]:.4f}"
-                )
-                tplr.logger.info(
-                    f"  - Normalised binary score: {self.normalised_binary_moving_averages[uid]:.4f}"
-                )
-                tplr.logger.info(
-                    f"  - Final Moving avg score: {self.final_moving_avg_scores[uid]}"
-                )
-                tplr.logger.info(f"  - Weight: {self.weights[uid]:.4f}")
+            # Log scores and metrics for evaluated UIDs as a table
+            headers = ["UID", "Last Score", "Binary Indicator", "Binary Moving Avg", "Norm Binary Score", "Final Moving Avg", "Weight"]
+            table = [headers]
+            for uid in sorted(self.evaluated_uids):
+                row = [
+                    str(uid),
+                    f"{self.gradient_scores[uid]:.4f}",
+                    f"{self.binary_indicator_scores[uid]:.4f}",
+                    f"{self.binary_moving_averages[uid]:.4f}",
+                    f"{self.normalised_binary_moving_averages[uid]:.4f}",
+                    f"{self.final_moving_avg_scores[uid]:.4f}",
+                    f"{self.weights[uid]:.4f}",
+                ]
+                table.append(row)
+
+            try:
+                try:
+                    width = os.get_terminal_size().columns
+                except Exception:
+                    width = 0
+                os.environ["COLUMNS"] = str(max(200, width))
+
+                rich_table = Table(title="Updated scores for evaluated UIDs")
+                for header in headers:
+                    rich_table.add_column(header)
+                for row in table[1:]:
+                    rich_table.add_row(*row)
+                sio = StringIO()
+                console = Console(file=sio, width=int(os.environ["COLUMNS"]))
+                console.print(rich_table)
+                table_str = sio.getvalue()
+            except ImportError:
+                tplr.logger.warning("rich module not found; falling back to basic formatting.")
+                col_widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
+                lines = []
+                for i, row in enumerate(table):
+                    line = " | ".join(row[j].ljust(col_widths[j]) for j in range(len(row)))
+                    lines.append(line)
+                    if i == 0:
+                        separator = "-+-".join("-" * col_widths[j] for j in range(len(headers)))
+                        lines.append(separator)
+                table_str = "\n".join(lines)
+
+            tplr.logger.info("Updated scores for evaluated UIDs:\n" + table_str)
 
             # Log WandB metrics per UID
             for uid in sorted(self.evaluated_uids):
@@ -1181,6 +1209,32 @@ class Validator:
             self.optimizer.step()
             self.scheduler.step()
             torch.cuda.empty_cache()
+
+            # Add debug data including successfully gathered peers
+            debug_start = tplr.T()
+            debug_dict = {}
+            
+            # Add model parameters debug info
+            for name, param in self.model.named_parameters():
+                if param is not None and param.numel() >= 2:  # Check if tensor has at least 2 elements
+                    debug_dict[name + '_debug'] = param.flatten()[:2].detach().cpu().tolist()
+            
+            # Add successful peers information
+            if gather_result is not None:
+                debug_dict['successful_peers'] = sorted(list(set(self.peers) - set(gather_result.skipped_uids)))
+                debug_dict['skipped_peers'] = sorted(list(gather_result.skipped_uids))
+            
+            # Store the debug dictionary
+            asyncio.create_task(
+                self.comms.put(
+                    state_dict=debug_dict,
+                    uid=str(self.uid),
+                    window=self.current_window,
+                    key='debug',
+                    local=False
+                )
+            )
+            tplr.logger.info(f"Stored debug values for window {self.current_window}")
             # Log total window time and metrics
             tplr.logger.info(
                 f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"

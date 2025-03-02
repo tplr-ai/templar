@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tplr"
 version = "0.1.0"
-description = "Add your description here"
+description = "Incentivised Internet-Wide Training"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,8 +24,8 @@ dependencies = [
     "zstandard",
     "s3fs",
     "pyarrow",
-    "scipy"
-
+    "scipy",
+    "rich>=13.0.0"
 ]
 
 [project.optional-dependencies]

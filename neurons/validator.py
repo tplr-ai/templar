@@ -1022,7 +1022,9 @@ class Validator:
                     )
                     for uid in self.evaluated_uids:
                         tplr.logger.info(f"UID {uid}:")
-                        tplr.logger.info(f"  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}")
+                        tplr.logger.info(
+                            f"  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}"
+                        )
 
                     # Optionally, log to WandB
                     self.wandb.log(
@@ -1045,7 +1047,15 @@ class Validator:
                 )
 
             # Log scores and metrics for evaluated UIDs as a table
-            headers = ["UID", "Last Score", "Binary Indicator", "Binary Moving Avg", "Norm Binary Score", "Final Moving Avg", "Weight"]
+            headers = [
+                "UID",
+                "Last Score",
+                "Binary Indicator",
+                "Binary Moving Avg",
+                "Norm Binary Score",
+                "Final Moving Avg",
+                "Weight",
+            ]
             table = [headers]
             for uid in sorted(self.evaluated_uids):
                 row = [
@@ -1076,14 +1086,22 @@ class Validator:
                 console.print(rich_table)
                 table_str = sio.getvalue()
             except ImportError:
-                tplr.logger.warning("rich module not found; falling back to basic formatting.")
-                col_widths = [max(len(row[i]) for row in table) for i in range(len(headers))]
+                tplr.logger.warning(
+                    "rich module not found; falling back to basic formatting."
+                )
+                col_widths = [
+                    max(len(row[i]) for row in table) for i in range(len(headers))
+                ]
                 lines = []
                 for i, row in enumerate(table):
-                    line = " | ".join(row[j].ljust(col_widths[j]) for j in range(len(row)))
+                    line = " | ".join(
+                        row[j].ljust(col_widths[j]) for j in range(len(row))
+                    )
                     lines.append(line)
                     if i == 0:
-                        separator = "-+-".join("-" * col_widths[j] for j in range(len(headers)))
+                        separator = "-+-".join(
+                            "-" * col_widths[j] for j in range(len(headers))
+                        )
                         lines.append(separator)
                 table_str = "\n".join(lines)
 
@@ -1211,27 +1229,32 @@ class Validator:
             torch.cuda.empty_cache()
 
             # Add debug data including successfully gathered peers
-            debug_start = tplr.T()
             debug_dict = {}
-            
+
             # Add model parameters debug info
             for name, param in self.model.named_parameters():
-                if param is not None and param.numel() >= 2:  # Check if tensor has at least 2 elements
-                    debug_dict[name + '_debug'] = param.flatten()[:2].detach().cpu().tolist()
-            
+                if (
+                    param is not None and param.numel() >= 2
+                ):  # Check if tensor has at least 2 elements
+                    debug_dict[name + "_debug"] = (
+                        param.flatten()[:2].detach().cpu().tolist()
+                    )
+
             # Add successful peers information
             if gather_result is not None:
-                debug_dict['successful_peers'] = sorted(list(set(self.peers) - set(gather_result.skipped_uids)))
-                debug_dict['skipped_peers'] = sorted(list(gather_result.skipped_uids))
-            
+                debug_dict["successful_peers"] = sorted(
+                    list(set(self.peers) - set(gather_result.skipped_uids))
+                )
+                debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
+
             # Store the debug dictionary
             asyncio.create_task(
                 self.comms.put(
                     state_dict=debug_dict,
                     uid=str(self.uid),
                     window=self.current_window,
-                    key='debug',
-                    local=False
+                    key="debug",
+                    local=False,
                 )
             )
             tplr.logger.info(f"Stored debug values for window {self.current_window}")

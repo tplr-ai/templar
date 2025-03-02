@@ -26,6 +26,7 @@ from bittensor import Wallet
 from typing import Dict, Optional
 from pydantic import ValidationError
 from bittensor.core.chain_data import decode_account_id
+from collections import defaultdict
 
 # Local imports
 from .logging import logger
@@ -76,7 +77,7 @@ class ChainManager:
         # Initialize bucket storage
         self.commitments = {}
         self.peers = []
-        self.eval_peers = []
+        self.eval_peers = defaultdict(int)
         self.fetch_interval = fetch_interval
         self._fetch_task = None
 
@@ -204,17 +205,29 @@ class ChainManager:
                 + commitment.access_key_id
                 + commitment.secret_access_key
             )
-            current_str = bucket.name + bucket.access_key_id + bucket.secret_access_key
-
-            logger.debug(
-                f"Comparing:\nCommitment: {commitment_str}\nCurrent: {current_str}"
+            bucket_details_from_env = (
+                bucket.name + bucket.access_key_id + bucket.secret_access_key
             )
 
-            if current_str != commitment_str:
-                raise ValueError("Bucket commitment data does not match")
+            logger.debug(
+                "Comparing current commitment to bucket details from the environment:\n"
+                f"Commitment: {commitment_str}\n"
+                f"Current: {bucket_details_from_env}"
+            )
+
+            if bucket_details_from_env != commitment_str:
+                if commitment_str == "":
+                    log_msg_base = "Commitment is empty, likely because you're running your miner for the first time"
+                else:
+                    log_msg_base = "Bucket details have changed"
+                logger.info(f"{log_msg_base}. Committing the new details.")
+                self.commit(wallet, bucket)
 
         except Exception as e:
-            logger.error(f"Commitment error: {str(e)}")
+            logger.error(
+                f"Error while verifying commitment: {str(e)}\n"
+                "Committing the bucket details from the environment."
+            )
             self.commit(wallet, bucket)
 
     def get_commitment(self, uid: int) -> Bucket:
@@ -445,7 +458,9 @@ class ChainManager:
         active_peers = set(int(uid) for uid in self.active_peers)
 
         # Track inactive peers (previously active peers that are no longer active)
-        previously_active = set(self.eval_peers)
+        previously_active = set(
+            self.eval_peers.keys()
+        )  # since self.eval_peers is now a dict
         newly_inactive = previously_active - active_peers
         self.inactive_peers = newly_inactive
 
@@ -457,21 +472,24 @@ class ChainManager:
             logger.warning("No active peers found. Skipping update.")
             return
 
-        # Filter active miners with buckets (stake <= 1000)
-        self.eval_peers = [
-            int(uid)
+        # ---------------------------------------------------------------
+        # Convert self.eval_peers into a dict while retaining old counts
+        # for peers still active with stake <= 1000.
+        # ---------------------------------------------------------------
+        self.eval_peers = {
+            int(uid): self.eval_peers.get(int(uid), 1)
             for uid in active_peers
             if uid in uid_to_stake and uid_to_stake[uid] <= 1000
-        ]
+        }
 
-        logger.debug(f"Filtered eval peers: {self.eval_peers}")
+        logger.debug(f"Filtered eval peers: {list(self.eval_peers.keys())}")
 
-        # If total miners is less than minimum_peers, use all miners for both lists
+        # If total miners is less than minimum_peers, use all for aggregator
         if len(self.eval_peers) < self.hparams.minimum_peers:
-            self.peers = list(self.eval_peers)
+            self.peers = list(self.eval_peers.keys())  # aggregator uses all
             logger.warning(
-                f"Total active miners ({len(self.eval_peers)}) below minimum_peers ({self.hparams.minimum_peers}). "
-                f"Using all available miners as peers."
+                f"Total active miners ({len(self.eval_peers)}) below minimum_peers "
+                f"({self.hparams.minimum_peers}). Using all available miners as peers."
             )
             return
 
@@ -481,17 +499,18 @@ class ChainManager:
         ]
         miner_incentives.sort(key=lambda x: x[1], reverse=True)
 
-        # Calculate number of peers based on topk percentage
-        n_topk_peers = max(
-            1, int(len(miner_incentives) * (self.hparams.topk_peers / 100))
-        )
+        # Determine the number of top-k peers based on percentage
+        n_topk_peers = int(len(miner_incentives) * (self.hparams.topk_peers / 100))
+        n_topk_peers = min(max(n_topk_peers, 1), self.hparams.max_topk_peers)
+
         n_peers = max(self.hparams.minimum_peers, n_topk_peers)
 
         # Take top n_peers by incentive for gradient gathering
         self.peers = [uid for uid, _ in miner_incentives[:n_peers]]
 
         logger.info(
-            f"Updated gather peers (top {self.hparams.topk_peers}% or minimum {self.hparams.minimum_peers}): {self.peers}"
+            f"Updated gather peers (top {self.hparams.topk_peers}% or "
+            f"minimum {self.hparams.minimum_peers}): {self.peers}"
         )
         logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
         logger.info(f"Total inactive peers: {len(self.inactive_peers)}")

@@ -17,6 +17,7 @@
 
 
 # Standard library
+from datetime import datetime, timedelta, timezone
 import sys
 import time
 import random
@@ -24,6 +25,7 @@ import asyncio
 import argparse
 import threading
 import os
+import itertools
 
 # Third party
 import torch
@@ -276,21 +278,6 @@ class Miner:
             # Start the gather in the background:
             gather_start = tplr.T()
             step_window = self.current_window
-            # Start gathering gradients from peers asynchronously
-            gather_task = asyncio.create_task(
-                self.comms.gather(
-                    my_uid=self.uid,
-                    uids=[uid for uid in self.peers if uid != self.uid],
-                    window=step_window,
-                    key="gradient",
-                    timeout=72,
-                    device="cpu",
-                    local=False,
-                    stale_retention=100,
-                    totalks=self.totalks,
-                )
-            )
-
             self.global_step = (
                 self.current_window - self.start_window
             )  # Update global_step
@@ -332,8 +319,14 @@ class Miner:
             self.model.zero_grad()
             total_loss = 0
             batch_tokens = 0
+            i = 0
 
-            for i, batch in enumerate(loader):
+            # Use itertools.cycle to repeatedly loop over the same loader.
+            for batch in itertools.cycle(loader):
+                if self.current_window != step_window:
+                    tplr.logger.info("<Exhausted window during batch processing>")
+                    break
+
                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                 labels = input_ids.clone()
                 labels = torch.where(
@@ -347,12 +340,11 @@ class Miner:
 
                 total_loss += outputs.loss.item()
                 outputs.loss.backward()
+                tokens_in_batch = (labels != -100).sum().item()
+                batch_tokens += tokens_in_batch
+                i += 1
+                tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {i}]")
 
-                batch_tokens += (labels != -100).sum().item()
-                tplr.logger.info(f"loss: {outputs.loss.item()}")
-                if self.current_window != step_window:
-                    tplr.logger.info("<Exhausted window>")
-                    break
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - train_start)} Completed training"
             )
@@ -397,7 +389,36 @@ class Miner:
             )
 
             tplr.logger.info(
-                f"Stopped accumulating: {i + 1} batches with {(i + 1) * self.hparams.batch_size * self.hparams.sequence_length} tokens"
+                f"Stopped accumulating: {i} batches with {i * self.hparams.batch_size * self.hparams.sequence_length} tokens"
+            )
+
+            sync_block = self.current_window * self.hparams.blocks_per_window
+            time_min = datetime.fromtimestamp(
+                self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
+                / 1000,
+                tz=timezone.utc,
+            )
+            time_max = time_min + timedelta(
+                seconds=self.hparams.time_window_delta_seconds
+            )
+
+            # Log the time window we're using
+            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
+
+            gather_task = asyncio.create_task(
+                self.comms.gather(
+                    my_uid=self.uid,
+                    uids=[uid for uid in self.peers if uid != self.uid],
+                    window=step_window,
+                    key="gradient",
+                    timeout=30,
+                    device="cpu",
+                    local=False,
+                    stale_retention=100,
+                    totalks=self.totalks,
+                    time_min=time_min,
+                    time_max=time_max,
+                )
             )
 
             # 5. Calculate and log metrics
@@ -413,11 +434,11 @@ class Miner:
             weight_norms = [p.norm().item() for p in self.model.parameters()]
             momentum_norms = [m.norm().item() for m in self.momentum.values()]
             training_metrics = {
-                "loss": total_loss / (i + 1),
+                "loss": total_loss / i,
                 "weight_norms": weight_norms,
                 "momentum_norms": momentum_norms,
                 "tokens_per_sec": (
-                    (i + 1) * self.hparams.batch_size * self.hparams.sequence_length
+                    i * self.hparams.batch_size * self.hparams.sequence_length
                 )
                 / duration,
                 "batch_duration": duration,
@@ -554,9 +575,11 @@ class Miner:
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
+        import websockets.exceptions  # Ensure we catch websockets errors
+
         def handler(event):
             try:
-                self.current_block = int(event["header"]["number"])  # type: ignore
+                self.current_block = int(event["header"]["number"])
                 new_window = int(self.current_block / self.hparams.blocks_per_window)
                 if new_window != self.current_window:
                     self.current_window = new_window
@@ -572,18 +595,23 @@ class Miner:
 
         while not self.stop_event.is_set():
             try:
+                # This call subscribes to block headers and might throw keepalive errors
                 bt.subtensor(config=self.config).substrate.subscribe_block_headers(
                     handler
                 )
                 backoff = 1  # reset backoff if subscription exits without exception
+            except websockets.exceptions.ConnectionClosedError as e:
+                tplr.logger.warning(
+                    f"Websocket ConnectionClosedError caught: {e}. Retrying in {backoff} seconds."
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
             except Exception as e:
                 tplr.logger.error(
                     f"Block subscription error: {e}. Retrying in {backoff} seconds."
                 )
                 time.sleep(backoff)
-                backoff = min(
-                    backoff * 2, max_backoff
-                )  # exponential backoff up to a max limit
+                backoff = min(backoff * 2, max_backoff)
 
 
 # Start miner.

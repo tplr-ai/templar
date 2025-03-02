@@ -13,7 +13,7 @@
     "target_chunk": 64,
     "gradient_score_ma_alpha": 0.6,
     "binary_score_ma_alpha": 0.05,
-    "final_score_ma_alpha": 0.95,
+    "final_score_ma_alpha": 0.75,
     "tokenizer_name": "togethercomputer/LLaMA-2-7B-32K",
     "hidden_size": 2048,
     "num_hidden_layers": 16,
@@ -27,8 +27,9 @@
     "alpha_f": 0.1,
     "t_max": 20000,
     "validator_offset": 1,
-    "checkpoint_frequency": 100,
+    "checkpoint_frequency": 250,
     "topk_peers": 20,
+    "max_topk_peers": 15,
     "minimum_peers": 5,
     "active_check_interval": 60,
     "recent_windows": 5,
@@ -37,5 +38,6 @@
     "catch_up_threshold": 15,
     "catch_up_batch_size": 5,
     "catch_up_timeout": 300,
-    "uids_per_window": 2
+    "uids_per_window": 2,
+    "time_window_delta_seconds": 15
 }

@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tplr"
 version = "0.1.0"
-description = "Add your description here"
+description = "Incentivised Internet-Wide Training"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "bittensor==9.0.0",
+    "bittensor==9.0.3",
     "bt-decode",
     "torch",
     "boto3",
@@ -67,3 +67,19 @@ filterwarnings = [
 
 [tool.uv]
 prerelease = "allow"
+
+[tool.ruff]
+# Exclude directories that often trigger permission issues
+exclude = [
+    ".git",
+    "venv",
+    ".venv",
+    "node_modules",
+    "build",
+    "dist",
+    "__pycache__",
+    "downloads",
+    "eggs",
+    ".eggs",
+    "influxdb_data"
+]

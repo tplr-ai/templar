@@ -1,6 +1,7 @@
 # ruff: noqa
 
 import os
+import random
 from unittest.mock import patch, MagicMock, AsyncMock
 import pytest
 import torch
@@ -2030,6 +2031,139 @@ def test_topk_auto_adjust_when_totalk_is_lower():
     with pytest.raises(ValueError, match="Invalid number of indices"):
         dummy_comms.check_compressed_indices("param", invalid_list, totalk)
 
+
+
+# Tests for `weighted_random_sample_no_replacement`
+async def test_empty_candidates(comms_instance):
+    """
+    Test when candidates or weights are empty, or k <= 0.
+    """
+    assert comms_instance.weighted_random_sample_no_replacement([], [], 3) == []
+    assert (
+        comms_instance.weighted_random_sample_no_replacement([1, 2], [0.5, 0.5], 0)
+        == []
+    )
+
+
+async def test_total_weight_zero(comms_instance):
+    """
+    If total weight is <= 0, it should return an empty list.
+    """
+    candidates = [1, 2, 3]
+    weights = [0, 0, 0]
+    result = comms_instance.weighted_random_sample_no_replacement(
+        candidates, weights, 3
+    )
+    assert result == []
+
+
+async def test_k_bigger_than_candidates(comms_instance):
+    """
+    If k > len(candidates), it should only return up to len(candidates).
+    """
+    candidates = [1, 2, 3]
+    weights = [1, 2, 3]
+    result = comms_instance.weighted_random_sample_no_replacement(
+        candidates, weights, 10
+    )
+    # The sample must contain unique items from candidates (no duplicates).
+    assert len(result) == 3
+    assert set(result).issubset(candidates)
+
+
+async def test_basic_weighting(comms_instance):
+    """
+    Test that we can get all candidates if weights are all positive,
+    and the sample size equals the number of candidates.
+    """
+    candidates = ["A", "B", "C", "D"]
+    weights = [1, 2, 3, 4]
+    k = 4
+    result = comms_instance.weighted_random_sample_no_replacement(
+        candidates, weights, k
+    )
+    # Should have exactly the 4 unique candidates
+    assert set(result) == set(candidates)
+
+
+@pytest.mark.parametrize("seed", [42, 100, 9999])
+async def test_random_behavior(seed, comms_instance):
+    """
+    Check that the function runs consistently with a fixed random seed.
+    This doesn't guarantee distribution correctness, but ensures reproducibility.
+    """
+    random.seed(seed)
+    candidates = [1, 2, 3, 4, 5]
+    weights = [1, 2, 10, 0, 5]
+    k = 3
+    # Run multiple times to see it doesn't crash and provides a stable outcome
+    results = []
+    for _ in range(5):
+        random.seed(seed)  # re-seed before each call for reproducible draws
+        result = comms_instance.weighted_random_sample_no_replacement(
+            candidates, weights, k
+        )
+        results.append(result)
+    # Assert that across repeated calls with the same seed, we get the same sample
+    assert len({tuple(r) for r in results}) == 1
+
+
+async def test_update_peers_with_buckets(comms_instance):
+    """
+    Tests whether comms_instance.update_peers_with_buckets() correctly updates
+    eval_peers, peers, and inactive_peers using mock chain data.
+    """
+
+    # 1. Setup mock metagraph data
+    #    Suppose we have 4 peers (UIDs 0..3), with the following stakes & incentives
+    comms_instance.metagraph.uids = torch.tensor([0, 1, 2, 3])
+    comms_instance.metagraph.S = torch.tensor(
+        [500, 1500, 800, 50], dtype=torch.float32
+    )  # stake
+    comms_instance.metagraph.I = torch.tensor(
+        [5, 2, 10, 1], dtype=torch.float32
+    )  # incentive
+
+    # 2. Mark all four as currently active
+    comms_instance.active_peers = [0, 1, 2, 3]
+
+    # 3. Suppose we already had counters for some peers
+    from collections import defaultdict
+
+    comms_instance.eval_peers = defaultdict(int, {0: 2, 2: 1})  # old counters
+    comms_instance.inactive_peers = set()
+
+    # 4. Setup minimal hparams
+    #    minimum_peers => aggregator requires at least this many
+    #    topk_peers => aggregator takes top X% by incentive
+    comms_instance.hparams.minimum_peers = 2
+    comms_instance.hparams.topk_peers = 50  # i.e. "top 50%"
+
+    # 5. Call your update function
+    #    (Ensure the method is actually defined on comms_instance, or rename if needed.)
+    comms_instance.update_peers_with_buckets()
+
+    # 6. Verify the results:
+    #    a) No one should be newly inactive, since all old eval_peers are still active.
+    assert comms_instance.inactive_peers == set(), (
+        f"Expected no newly inactive peers, got: {comms_instance.inactive_peers}"
+    )
+
+    #    b) eval_peers must filter out stake>1000, so peer #1 is excluded.
+    #       That leaves UIDs 0,2,3. Keep old counters for 0,2 => 2,1; new peer 3 => default=1
+    expected_eval_peers = {0: 2, 2: 1, 3: 1}
+    actual_eval_dict = dict(comms_instance.eval_peers)
+    assert actual_eval_dict == expected_eval_peers, (
+        f"eval_peers mismatch.\nExpected: {expected_eval_peers}\nGot: {actual_eval_dict}"
+    )
+
+    #    c) aggregator peers should be top 2 by incentive among (0->5, 2->10, 3->1).
+    #       Incentives sorted desc => (2->10), (0->5), (3->1).
+    #       topk_peers=50% of length=3 => 1, but we do max(minimum_peers=2,1)=2 => top2 => [2,0]
+    expected_peers = [2, 0]
+    assert comms_instance.peers == expected_peers, (
+        f"Aggregator peers mismatch.\nExpected: {expected_peers}\nGot: {comms_instance.peers}"
+    )
 
 # Time-based Filtering Tests for comms.s3_get_object
 # These tests verify that objects are correctly filtered based on their LastModified timestamp

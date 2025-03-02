@@ -232,6 +232,8 @@ class Validator:
         self.peers = []
         # Weighted selection counters for fair picking of eval peers
         self.eval_peers = defaultdict(int)
+        # Track candidate weights separately
+        self.eval_candidates_counter = defaultdict(int)
 
         # Track inactive peer scores
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
@@ -469,11 +471,13 @@ class Validator:
             # Reset counters for chosen peers
             for uid in evaluation_uids:
                 self.eval_peers[uid] = 0
+                self.eval_candidates_counter[uid] = 0
 
             # Increment counters for not chosen peers
             for uid in candidate_uids:
                 if uid not in evaluation_uids:
                     self.eval_peers[uid] += 1
+                    self.eval_candidates_counter[uid] += 1
             self.comms.eval_peers = self.eval_peers
 
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
@@ -1020,11 +1024,12 @@ class Validator:
                     tplr.logger.info(
                         "Updated scores for evaluated UIDs after slashing:"
                     )
-                    for uid in self.evaluated_uids:
-                        tplr.logger.info(f"UID {uid}:")
-                        tplr.logger.info(
-                            f"  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}"
-                        )
+                    # Log evaluated UID scores (fixed join call)
+                    line = " | ".join(
+                        f"UID {uid}: {self.final_moving_avg_scores[uid]:.4f}"
+                        for uid in sorted(self.evaluated_uids)
+                    )
+                    tplr.logger.info(line)
 
                     # Optionally, log to WandB
                     self.wandb.log(

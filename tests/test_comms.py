@@ -1377,6 +1377,7 @@ class MockHParams:
         self.catch_up_timeout = 300
         self.active_check_interval = 60
         self.recent_windows = 5
+        self.max_topk_peers = 50
 
 
 def create_mock_gather_result(model, device, wrong_shape=False):
@@ -2032,7 +2033,6 @@ def test_topk_auto_adjust_when_totalk_is_lower():
         dummy_comms.check_compressed_indices("param", invalid_list, totalk)
 
 
-
 # Tests for `weighted_random_sample_no_replacement`
 async def test_empty_candidates(comms_instance):
     """
@@ -2164,6 +2164,7 @@ async def test_update_peers_with_buckets(comms_instance):
     assert comms_instance.peers == expected_peers, (
         f"Aggregator peers mismatch.\nExpected: {expected_peers}\nGot: {comms_instance.peers}"
     )
+
 
 # Time-based Filtering Tests for comms.s3_get_object
 # These tests verify that objects are correctly filtered based on their LastModified timestamp

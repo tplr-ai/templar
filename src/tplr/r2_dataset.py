@@ -536,3 +536,94 @@ class R2DatasetLoader(DatasetLoader):
     def _get_tokenized_cache(cache_key: str):
         """Cached tokenization results"""
         return R2DatasetLoader._token_cache.get(cache_key)
+
+class DataPreloader:
+    """
+    Preloads data asynchronously for efficient processing in miner and validator.
+    
+    This class handles preloading data for future windows, allowing the main 
+    training/validation loop to continue without waiting for data loading.
+    It works specifically with R2DatasetLoader to fetch and process data.
+    """
+    
+    def __init__(self, tokenizer, hparams):
+        """
+        Initialize the data preloader.
+        
+        Args:
+            tokenizer: The tokenizer to use for processing text
+            hparams: Hyperparameters containing batch_size, sequence_length, pages_per_window
+        """
+        self.tokenizer = tokenizer
+        self.hparams = hparams
+        self.current_task = None
+        self.next_data = None
+        
+    async def preload_data(self, window, uid):
+        """
+        Preload data for the next window.
+        
+        Args:
+            window: The window number to preload
+            uid: The UID to use as a seed for deterministic page selection
+            
+        Returns:
+            tuple: (loader, pages) containing the data loader and page information
+        """
+        pages = await R2DatasetLoader.next_pages(
+            offset=window,
+            n_pages=self.hparams.pages_per_window,
+            seed=uid,
+        )
+        loader = await R2DatasetLoader.create(
+            batch_size=self.hparams.batch_size,
+            sequence_length=self.hparams.sequence_length,
+            pages_info=pages,
+            tokenizer=self.tokenizer,
+        )
+        return loader, pages
+
+    async def start_preload(self, window, uid):
+        """
+        Start preloading data for the next window in the background.
+        
+        Args:
+            window: The window number to preload
+            uid: The UID to use as a seed
+        """
+        # Cancel any existing task before starting a new one
+        self.cancel_preload()
+        self.current_task = asyncio.create_task(self.preload_data(window, uid))
+        
+    def cancel_preload(self):
+        """Cancel any ongoing preload task."""
+        if self.current_task and not self.current_task.done():
+            self.current_task.cancel()
+            self.current_task = None
+        
+    async def get_data(self):
+        """
+        Get the preloaded data when it's ready.
+        
+        Returns:
+            tuple: (loader, pages) if data is ready, (None, None) otherwise
+        """
+        if self.current_task:
+            try:
+                loader, pages = await self.current_task
+                self.current_task = None
+                return loader, pages
+            except asyncio.CancelledError:
+                logger.debug("Preload task was cancelled")
+                self.current_task = None
+                return None, None
+            except Exception as e:
+                logger.error(f"Error loading data: {e}")
+                self.current_task = None
+                return None, None
+        return None, None
+        
+    def __del__(self):
+        """Clean up resources when the object is deleted."""
+        if self.current_task and not self.current_task.done():
+            self.current_task.cancel()

@@ -27,8 +27,8 @@ dependencies = [
     "scipy",
     "influxdb",
     "python-logging-loki-v2",
-    "influxdb-client"
-
+    "influxdb-client",
+    "lm-eval>=0.4.7",
 ]
 
 [project.optional-dependencies]

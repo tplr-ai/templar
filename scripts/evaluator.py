@@ -1,3 +1,48 @@
+"""Templar Autonomous Model Evaluator Service
+
+This script implements an autonomous service that continuously evaluates the latest
+model checkpoints using standardized benchmark tasks. It runs on a fixed interval
+(default 10 minutes), downloads the latest model checkpoint, executes evaluations,
+and logs results to both InfluxDB and Weights & Biases.
+
+Key Features:
+    - Automatic checkpoint detection and evaluation
+    - Multiple benchmark task support (arc_challenge, winogrande, etc.)
+    - Distributed metrics logging
+    - Resource management and cleanup
+    - Service-oriented design for continuous operation
+
+Environment Requirements:
+    - Registered Bittensor wallet
+    - InfluxDB API access
+    - Weights & Biases API key
+    - R2 Dataset access credentials
+
+Required Environment Variables:
+    WANDB_API_KEY: Weights & Biases API key (see miner documentation)
+    R2_DATASET_ACCOUNT_ID: R2 dataset account identifier (see miner documentation)
+    R2_DATASET_BUCKET_NAME: R2 storage bucket name (see miner documentation)
+    R2_DATASET_READ_ACCESS_KEY_ID: R2 read access key (see miner documentation)
+    R2_DATASET_READ_SECRET_ACCESS_KEY: R2 secret access key (see miner documentation)
+    INFLUXDB_TOKEN: InfluxDB API token (this is new)
+
+Usage Examples:
+    Basic run:
+        $ uv run ./scripts/evaluator.py
+
+    Custom configuration:
+        $ uv run scripts/evaluator.py \\
+            --netuid 3 \\
+            --device cuda \\
+            --tasks "arc_challenge,winogrande" \\
+            --eval_interval 300
+
+Note:
+    WandB integration is temporary and scheduled for deprecation.
+    For additional environment setup, refer to the miner documentation:
+    https://github.com/tplr-ai/templar/blob/main/docs/miner.md
+"""
+
 import os
 import json
 import shutil
@@ -10,12 +55,12 @@ import tplr
 import bittensor as bt
 
 from typing import Optional, Tuple
-from tplr.chain import ChainManager
 from transformers.models.llama import LlamaForCausalLM
 from tplr import __version__
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"
+DEFAULT_EVAL_INTERVAL: int = 60 * 10  # 10 mins default interval
 
 
 def config() -> bt.Config:
@@ -66,8 +111,14 @@ def config() -> bt.Config:
     parser.add_argument(
         "--eval_interval",
         type=int,
-        default=500,
+        default=DEFAULT_EVAL_INTERVAL,
         help="Global steps between evaluations",
+    )
+    parser.add_argument(
+        "--uid",
+        type=int,
+        default=None,
+        help="Override the wallet's UID",
     )
 
     bt.subtensor.add_args(parser)
@@ -76,9 +127,35 @@ def config() -> bt.Config:
 
 
 class Evaluator:
-    """
-    Evaluator periodically checks for new checkpoints, runs benchmark evaluations, and logs results.
-    Also provides a load_model method that uses the chain to fetch the most recent global_step and block_number.
+    """Templar Model Evaluator Component
+
+    The Evaluator is responsible for automated benchmark evaluation of model checkpoints.
+    It continuously monitors for new checkpoints by window number, downloads them, runs a
+    comprehensive suite of language model evaluations, and logs results to both InfluxDB and W&B.
+
+    Key Features:
+        - Automatic checkpoint detection by window number
+        - Multi-task model evaluation
+        - Distributed metrics logging
+        - Progress tracking via W&B
+        - Resource cleanup and management
+
+    Evaluation Flow:
+        1. Monitor blockchain for new checkpoints by window number
+        2. Download and load checkpoint directly when detected
+        3. Run benchmark suite using lm-eval
+        4. Parse and log results
+        5. Clean up resources
+        6. Wait for next checkpoint
+
+    Attributes:
+        config (bt.Config): Configuration object containing CLI arguments
+        netuid (int): Network UID for the subnet
+        model (LlamaForCausalLM): The language model being evaluated
+        metrics_logger (MetricsLogger): Logger for InfluxDB metrics
+        wandb_run: Weights & Biases run instance
+        last_eval_window (int): Last evaluated window number
+        last_block_number (int): Last processed block number
     """
 
     def __init__(self) -> None:
@@ -97,18 +174,28 @@ class Evaluator:
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
         self.hparams = tplr.load_hparams()
+        self.wallet = bt.wallet(config=self.config)
+
+        # Mock for the comms class
+        self.uid = 1
+
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
 
-        self.chain_mgr = ChainManager(
+        self.tokenizer = self.hparams.tokenizer
+        self.comms = tplr.comms.Comms(
+            wallet=self.wallet,
+            save_location="/tmp",
+            key_prefix="model",
             config=self.config,
             netuid=self.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
+            uid=self.uid,
         )
 
-        self.buckets = self.chain_mgr.get_all_buckets()
-        self.last_eval_step = 0
+        self.buckets = self.comms.get_all_buckets()
+        self.last_eval_window = 0
         self.stop_event = asyncio.Event()
         self.last_block_number = 0
 
@@ -118,57 +205,120 @@ class Evaluator:
             port=8086,
             database="tplr",
             token=os.environ.get("INFLUXDB_TOKEN"),
-            org="templar",
+            org="tplr",
         )
         self.wandb_run = wandb.init(project=self.config.project)
-
-        self.start_window = getattr(
-            self, "start_window", self.subtensor.block // self.hparams.blocks_per_window
-        )
 
     async def update_state(self) -> None:
         """
         Refresh the metagraph and bucket information.
         """
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
-        self.buckets = self.chain_mgr.get_all_buckets()
+        self.buckets = self.comms.get_all_buckets()
 
-    async def load_model(self) -> Tuple[int, int]:
-        """
-        Stripped-down load_model method.
-        Uses the chain (via ChainManager and subtensor state) to return the most recent global_step and block_number.
+    async def load_latest_model(self) -> Tuple[bool, dict, int, int]:
+        """Load and prepare the latest model checkpoint for evaluation.
+
+        This method:
+        1. Fetches the latest checkpoint from storage
+        2. Verifies checkpoint validity
+        3. Loads model weights and momentum
+        4. Updates internal state trackers
 
         Returns:
-            Tuple[int, int]: (global_step, block_number)
-
-        In this implementation, global_step is defined as the difference between the current window (derived from the latest block)
-        and the start_window. Block_number is simply the latest block number.
+            Tuple containing:
+            - success (bool): Whether loading succeeded
+            - checkpoint_data (dict): Checkpoint metadata
+            - checkpoint_window (int): Window number of checkpoint
+            - global_step (int): Global training step
         """
-        current_block = self.subtensor.get_current_block()
-        current_window = current_block // self.hparams.blocks_per_window
-        global_step = current_window - self.start_window
-        return global_step, current_block
+        result = await self.comms.get_latest_checkpoint()
+
+        if not result:
+            tplr.logger.error("No valid checkpoints found")
+            return (False, {}, 0, 0)
+
+        checkpoint_data, _ = result
+
+        checkpoint_start_window = checkpoint_data.get("start_window")
+        checkpoint_current_window = checkpoint_data.get("current_window")
+
+        if checkpoint_start_window is None or checkpoint_current_window is None:
+            tplr.logger.error("Checkpoint missing start_window or current_window info")
+            return (False, checkpoint_data, 0, 0)
+
+        # Check if this checkpoint has already been evaluated
+        if checkpoint_current_window <= self.last_eval_window:
+            tplr.logger.info(
+                f"Checkpoint already evaluated (checkpoint window: {checkpoint_current_window}, "
+                f"last evaluated window: {self.last_eval_window})."
+            )
+            return (False, checkpoint_data, checkpoint_current_window, 0)
+
+        tplr.logger.info(
+            f"Loading model from checkpoint (window: {checkpoint_current_window})"
+        )
+
+        self.model.load_state_dict(
+            {
+                k: v.to(self.config.device)
+                for k, v in checkpoint_data["model_state_dict"].items()
+            }
+        )
+        self.model.to(self.config.device)  # type: ignore
+
+        self.momentum = checkpoint_data["momentum"]
+
+        # Calculate global step from window information
+        global_step = checkpoint_current_window - checkpoint_start_window
+
+        tplr.logger.info(
+            f"Loaded checkpoint (start_window={checkpoint_start_window}, "
+            f"current_window={checkpoint_current_window}, global_step={global_step})"
+        )
+
+        return (
+            True,
+            checkpoint_data,
+            checkpoint_current_window,
+            global_step,
+        )
 
     async def _evaluate(self) -> Optional[int]:
-        """
-        Run benchmark evaluation with the highest stake model checkpoint and log the results.
-        """
-        await self.update_state()
-        global_step, block_number = await self.load_model()
-        current_window = block_number // self.hparams.blocks_per_window
+        """Execute benchmark evaluation on the current model.
 
-        if block_number <= self.last_block_number:
+        Workflow:
+        1. Save model to temporary location
+        2. Run lm-eval benchmark suite
+        3. Parse results for each task
+        4. Log metrics to InfluxDB and W&B
+        5. Clean up temporary files
+
+        Returns:
+            Optional[int]: Global step number if successful, None on failure
+        """
+        self.comms.commitments = await self.comms.get_commitments()
+        self.comms.update_peers_with_buckets()
+
+        block_number = self.subtensor.get_current_block() - 1
+
+        tplr.logger.info(f"Looking for new checkpoint (block: {block_number})")
+
+        (
+            success,
+            checkpoint_data,
+            checkpoint_window,
+            global_step,
+        ) = await self.load_latest_model()
+
+        if not success:
             tplr.logger.info(
-                f"No new checkpoint available (current block: {block_number}, last: {self.last_block_number})."
+                f"No new checkpoint to evaluate (last evaluated window: {self.last_eval_window})"
             )
             return global_step
 
-        if global_step == 0 and self.last_block_number != 0:
-            tplr.logger.error("Failed to load checkpoint from highest stake neuron")
-            return None
-
         tplr.logger.info(
-            f"Starting benchmark run at global step {global_step} (block {block_number})"
+            f"Starting benchmark run at global step {global_step} (checkpoint window: {checkpoint_window})"
         )
         os.makedirs(MODEL_PATH, exist_ok=True)
         self.model.save_pretrained(MODEL_PATH)
@@ -176,7 +326,7 @@ class Evaluator:
 
         results_dir = os.path.join(MODEL_PATH, "results")
         os.makedirs(results_dir, exist_ok=True)
-        # Start benchmark timer
+
         start_time = time.time()
         lm_eval_command = (
             f"lm-eval "
@@ -187,14 +337,17 @@ class Evaluator:
             f"--batch_size {self.config.actual_batch_size} "
             f"--output_path {results_dir}"
         )
+
+        tplr.logger.info(f"Running benchmark command: {lm_eval_command}")
         exit_code = os.system(lm_eval_command)
         runtime = time.time() - start_time
+
         self.metrics_logger.log(
             measurement="templar_benchmark_metrics",
             tags={
                 "role": "evaluator",
                 "global_step": global_step,
-                "window": current_window,
+                "window": checkpoint_window,
                 "block": block_number,
                 "version": __version__,
             },
@@ -236,7 +389,7 @@ class Evaluator:
                         "task": task_name,
                         "global_step": global_step,
                         "block": block_number,
-                        "window": current_window,
+                        "window": checkpoint_window,
                         "version": __version__,
                     },
                     fields={"score": float(metric_value)},
@@ -260,7 +413,7 @@ class Evaluator:
             tags={
                 "role": "evaluator",
                 "global_step": global_step,
-                "window": current_window,
+                "window": checkpoint_window,
                 "block": block_number,
                 "version": __version__,
             },
@@ -276,28 +429,47 @@ class Evaluator:
 
         shutil.rmtree(MODEL_PATH)
         torch.cuda.empty_cache()
-        self.last_eval_step = global_step
+
+        self.last_eval_window = checkpoint_window
         self.last_block_number = block_number
+
+        tplr.logger.info(
+            f"Successfully evaluated checkpoint (window: {checkpoint_window}, "
+            f"global_step: {global_step}, block: {block_number})"
+        )
         return global_step
 
     async def run(self) -> None:
-        """
-        Main loop: periodically update state and run evaluations if new checkpoints exist.
+        """Main evaluation loop.
+
+        Continuously:
+        1. Check for new checkpoints by window number and block
+        2. Trigger evaluation when new checkpoint detected
+        3. Handle interrupts and errors
+        4. Maintain evaluation interval
         """
         try:
+            self.comms.start_commitment_fetcher()
+            self.comms.start_background_tasks()
+
             while not self.stop_event.is_set():
                 await self.update_state()
 
                 latest_block = self.subtensor.get_current_block()
+                start_window = await self.comms.get_start_window()
 
-                if latest_block > self.last_block_number:
+                if (
+                    latest_block > self.last_block_number
+                    or start_window > self.last_eval_window
+                ):
                     tplr.logger.info(
-                        f"New checkpoint detected at block {latest_block}, executing benchmark..."
+                        f"New checkpoint detected (block: {latest_block}, window: {start_window}), executing benchmark..."
                     )
                     await self._evaluate()
                 else:
                     tplr.logger.info(
-                        f"No new checkpoint available (current: {latest_block}, last: {self.last_block_number})"
+                        f"No new checkpoint available (block: {latest_block}/{self.last_block_number}, "
+                        f"window: {start_window}/{self.last_eval_window})"
                     )
                 await asyncio.sleep(self.config.eval_interval)  # type: ignore
         except KeyboardInterrupt:

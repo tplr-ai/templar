@@ -35,6 +35,7 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
+# from tplr.r2_dataset import DataPreloader
 
 # Local
 import tplr
@@ -167,6 +168,8 @@ class Miner:
             job_type='mining'
         )
 
+        self.data_preloader = tplr.r2_dataset.DataPreloader(self.tokenizer, self.hparams)
+
     # Main training loop.
     async def run(self):
         # Start background block listener
@@ -197,6 +200,9 @@ class Miner:
 
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
+
+        next_window = self.current_window + 1
+        preload_task = asyncio.create_task(self.data_preloader.preload_data(next_window, self.uid))
 
         # Proceed to load checkpoint
         success, loaded_momentum, loaded_global_step, loaded_optimizer, loaded_scheduler = await self.comms.load_checkpoint(
@@ -243,21 +249,37 @@ class Miner:
             self.peers = self.comms.peers
             tplr.logger.info(f'{tplr.P(step_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}')
 
-            # 2. Load training data for this window
+            # 2. Preload training data for this window
             data_start = tplr.T()
-            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset = step_window,
-                n_pages = self.hparams.pages_per_window,
-                seed = self.uid #type: ignore
-            )            
-            loader = await tplr.r2_dataset.R2DatasetLoader.create(
-                batch_size = self.hparams.batch_size,
-                sequence_length = self.hparams.sequence_length,
-                pages_info = pages,
-                tokenizer = self.tokenizer
-            )   
-            tplr.logger.info(f'{tplr.P(step_window, tplr.T() - data_start)} Loaded training data')
-            tplr.logger.info(f"Pages: {[p[1] for p in pages]} for  Window: {step_window}") #type: ignore
+            try:
+                loader, pages = await preload_task
+                tplr.logger.info(f"{tplr.P(step_window, tplr.T() - data_start)} Loaded training data from preload")
+            except Exception as e:
+                tplr.logger.error(f"Preload failed: {e}, falling back to sync loading")
+                pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    offset=step_window,
+                    n_pages=self.hparams.pages_per_window,
+                    seed=self.uid,
+                )
+                loader = await tplr.r2_dataset.R2DatasetLoader.create(
+                    batch_size=self.hparams.batch_size,
+                    sequence_length=self.hparams.sequence_length,
+                    pages_info=pages,
+                    tokenizer=self.tokenizer,
+                )
+                tplr.logger.info(f"{tplr.P(step_window, tplr.T() - data_start)} Loaded training data synchronously")
+
+            # init preload for next window's dataset
+            next_window = step_window + 1
+            preload_task = asyncio.create_task(self.data_preloader.preload_data(next_window, self.uid))
+            
+            tplr.logger.info(f"Pages: {[p[1] for p in pages]} for Window: {step_window}")
+            tplr.logger.info(
+                f"{tplr.P(step_window, tplr.T() - data_start)} Loaded training data"
+            )
+            tplr.logger.info(
+                f"Pages: {[p[1] for p in pages]} for  Window: {step_window}"
+            )  # type: ignore
             
             # 3. Accumulate gradients over batches
             train_start = tplr.T()

@@ -139,19 +139,19 @@ class Evaluator:
     """Templar Model Evaluator Component
 
     The Evaluator is responsible for automated benchmark evaluation of model checkpoints.
-    It continuously monitors for new checkpoints, downloads them, runs a comprehensive
-    suite of language model evaluations, and logs results to both InfluxDB and W&B.
+    It continuously monitors for new checkpoints by window number, downloads them, runs a
+    comprehensive suite of language model evaluations, and logs results to both InfluxDB and W&B.
 
     Key Features:
-        - Automatic checkpoint detection and loading
+        - Automatic checkpoint detection by window number
         - Multi-task model evaluation
         - Distributed metrics logging
         - Progress tracking via W&B
         - Resource cleanup and management
 
     Evaluation Flow:
-        1. Monitor blockchain for new checkpoints
-        2. Download and load checkpoint when detected
+        1. Monitor blockchain for new checkpoints by window number
+        2. Download and load checkpoint directly when detected
         3. Run benchmark suite using lm-eval
         4. Parse and log results
         5. Clean up resources
@@ -163,7 +163,7 @@ class Evaluator:
         model (LlamaForCausalLM): The language model being evaluated
         metrics_logger (MetricsLogger): Logger for InfluxDB metrics
         wandb_run: Weights & Biases run instance
-        last_eval_step (int): Last evaluation step
+        last_eval_window (int): Last evaluated window number
         last_block_number (int): Last processed block number
     """
 
@@ -248,7 +248,7 @@ class Evaluator:
         )
 
         self.buckets = self.comms.get_all_buckets()
-        self.last_eval_step = 0
+        self.last_eval_window = 0
         self.stop_event = asyncio.Event()
         self.last_block_number = 0
 
@@ -269,11 +269,7 @@ class Evaluator:
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
         self.buckets = self.comms.get_all_buckets()
 
-    async def load_model(
-        self,
-        block_number: int,
-        current_window: int,
-    ) -> Tuple[bool, dict, int, int]:
+    async def load_latest_model(self) -> Tuple[bool, dict, int, int]:
         """Load and prepare the latest model checkpoint for evaluation.
 
         This method:
@@ -281,10 +277,6 @@ class Evaluator:
         2. Verifies checkpoint validity
         3. Loads model weights and momentum
         4. Updates internal state trackers
-
-        Args:
-            block_number: Current blockchain block number
-            current_window: Current training window number
 
         Returns:
             Tuple containing:
@@ -301,38 +293,24 @@ class Evaluator:
 
         checkpoint_data, _ = result
 
-        if block_number <= self.last_block_number:
-            tplr.logger.info(
-                f"No new checkpoint available (current block: {block_number}, last: {self.last_block_number})."
-            )
+        checkpoint_start_window = checkpoint_data.get("start_window")
+        checkpoint_current_window = checkpoint_data.get("current_window")
+
+        if checkpoint_start_window is None or checkpoint_current_window is None:
+            tplr.logger.error("Checkpoint missing start_window or current_window info")
             return (False, checkpoint_data, 0, 0)
 
-        batch_size = int(self.config.actual_batch_size)  # type: ignore
-        windows_to_catch_up = range(
-            checkpoint_data.get("current_window"), current_window + 1
+        # Check if this checkpoint has already been evaluated
+        if checkpoint_current_window <= self.last_eval_window:
+            tplr.logger.info(
+                f"Checkpoint already evaluated (checkpoint window: {checkpoint_current_window}, "
+                f"last evaluated window: {self.last_eval_window})."
+            )
+            return (False, checkpoint_data, checkpoint_current_window, 0)
+
+        tplr.logger.info(
+            f"Loading model from checkpoint (window: {checkpoint_current_window})"
         )
-
-        for i in range(0, len(windows_to_catch_up), batch_size):
-            batch_windows = list(windows_to_catch_up)[i : i + batch_size]
-
-            # Launch gathers in parallel
-            tasks = [
-                self.comms.gather(
-                    my_uid=self.uid,
-                    uids=[str(uid) for uid in self.comms.peers if uid != self.uid],
-                    window=w,
-                    key="gradient",
-                    timeout=72,
-                    device="cpu",
-                    local=False,
-                    stale_retention=100,
-                    totalks=self.totalks,
-                )
-                for w in batch_windows
-            ]
-            await asyncio.gather(*tasks)
-
-        tplr.logger.info("Loaded commitments")
 
         self.model.load_state_dict(
             {
@@ -344,27 +322,13 @@ class Evaluator:
 
         self.momentum = checkpoint_data["momentum"]
 
-        checkpoint_start_window = checkpoint_data.get("start_window")
-        checkpoint_current_window = checkpoint_data.get("current_window")
-        if checkpoint_start_window is None or checkpoint_current_window is None:
-            tplr.logger.error("Checkpoint missing start_window or current_window info")
-            return (False, checkpoint_data, checkpoint_current_window, 0)
-
-        # Instead of computing global_step from the entire training period,
-        # compute window_difference as the number of missed windows.
-        window_difference = current_window - checkpoint_current_window
-        global_step = current_window - checkpoint_start_window
+        # Calculate global step from window information
+        global_step = checkpoint_current_window - checkpoint_start_window
 
         tplr.logger.info(
-            f"Checkpoint windows (start={checkpoint_start_window}, checkpoint_current={checkpoint_current_window}), "
-            f"local_current={current_window}, window_diff={window_difference}, global_step={global_step}"
+            f"Loaded checkpoint (start_window={checkpoint_start_window}, "
+            f"current_window={checkpoint_current_window}, global_step={global_step})"
         )
-
-        if window_difference > 0:
-            tplr.logger.error(
-                f"Missed {window_difference} windows since last checkpoint"
-            )
-            return (False, checkpoint_data, checkpoint_current_window, 0)
 
         return (
             True,
@@ -386,33 +350,28 @@ class Evaluator:
         Returns:
             Optional[int]: Global step number if successful, None on failure
         """
-        await self.update_state()
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
 
-        start_window = await self.comms.get_start_window()
         block_number = self.subtensor.get_current_block() - 1
 
-        tplr.logger.info(
-            f"Using start_window: {start_window} and block: {block_number}"
-        )
+        tplr.logger.info(f"Looking for new checkpoint (block: {block_number})")
 
         (
             success,
             checkpoint_data,
             checkpoint_window,
             global_step,
-        ) = await self.load_model(block_number, start_window)
+        ) = await self.load_latest_model()
 
         if not success:
-            tplr.logger.error(
-                f"Failed to load model checkpoint  (current block: {block_number}, last: {self.last_block_number})."
+            tplr.logger.info(
+                f"No new checkpoint to evaluate (last evaluated window: {self.last_eval_window})"
             )
-
             return global_step
 
         tplr.logger.info(
-            f"Starting benchmark run at global step {global_step} (block {block_number})"
+            f"Starting benchmark run at global step {global_step} (checkpoint window: {checkpoint_window})"
         )
         os.makedirs(MODEL_PATH, exist_ok=True)
         self.model.save_pretrained(MODEL_PATH)
@@ -420,7 +379,7 @@ class Evaluator:
 
         results_dir = os.path.join(MODEL_PATH, "results")
         os.makedirs(results_dir, exist_ok=True)
-        # Start benchmark timer
+
         start_time = time.time()
         lm_eval_command = (
             f"lm-eval "
@@ -431,9 +390,11 @@ class Evaluator:
             f"--batch_size {self.config.actual_batch_size} "
             f"--output_path {results_dir}"
         )
+
         tplr.logger.info(f"Running benchmark command: {lm_eval_command}")
         exit_code = os.system(lm_eval_command)
         runtime = time.time() - start_time
+
         self.metrics_logger.log(
             measurement="templar_benchmark_metrics",
             tags={
@@ -521,15 +482,21 @@ class Evaluator:
 
         shutil.rmtree(MODEL_PATH)
         torch.cuda.empty_cache()
-        self.last_eval_step = global_step
+
+        self.last_eval_window = checkpoint_window
         self.last_block_number = block_number
+
+        tplr.logger.info(
+            f"Successfully evaluated checkpoint (window: {checkpoint_window}, "
+            f"global_step: {global_step}, block: {block_number})"
+        )
         return global_step
 
     async def run(self) -> None:
         """Main evaluation loop.
 
         Continuously:
-        1. Check for new checkpoints
+        1. Check for new checkpoints by window number and block
         2. Trigger evaluation when new checkpoint detected
         3. Handle interrupts and errors
         4. Maintain evaluation interval
@@ -542,15 +509,20 @@ class Evaluator:
                 await self.update_state()
 
                 latest_block = self.subtensor.get_current_block()
+                start_window = await self.comms.get_start_window()
 
-                if latest_block > self.last_block_number:
+                if (
+                    latest_block > self.last_block_number
+                    or start_window > self.last_eval_window
+                ):
                     tplr.logger.info(
-                        f"New checkpoint detected at block {latest_block}, executing benchmark..."
+                        f"New checkpoint detected (block: {latest_block}, window: {start_window}), executing benchmark..."
                     )
                     await self._evaluate()
                 else:
                     tplr.logger.info(
-                        f"No new checkpoint available (current: {latest_block}, last: {self.last_block_number})"
+                        f"No new checkpoint available (block: {latest_block}/{self.last_block_number}, "
+                        f"window: {start_window}/{self.last_eval_window})"
                     )
                 await asyncio.sleep(self.config.eval_interval)  # type: ignore
         except KeyboardInterrupt:

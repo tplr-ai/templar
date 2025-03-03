@@ -9,8 +9,7 @@ import time
 import tplr
 import bittensor as bt
 
-from typing import Any, Optional, Tuple
-from tplr.metrics import MetricsLogger
+from typing import Optional, Tuple
 from tplr.chain import ChainManager
 from transformers.models.llama import LlamaForCausalLM
 from tplr import __version__

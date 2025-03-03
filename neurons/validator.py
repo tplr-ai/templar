@@ -31,7 +31,6 @@ from collections import defaultdict
 from time import perf_counter
 from logging_loki import LokiHandler
 from contextlib import contextmanager
-import os
 from io import StringIO
 from rich.console import Console
 from rich.table import Table
@@ -231,11 +230,11 @@ class Validator:
 
         # Initialize InfluxDB metrics logger
         self.metrics_logger = tplr.metrics.MetricsLogger(
-            host="uaepr2itgl-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws",
+            host=os.environ.get("INFLUXDB_URL"),
             port=8086,
             database="tplr",
             token=os.environ.get("INFLUXDB_TOKEN"),
-            org="templar",
+            org="tplr",
         )
         # Initialize WandB run for validator metrics logging
         self.wandb_run = tplr.wandb.initialize_wandb(
@@ -243,7 +242,7 @@ class Validator:
             uid=str(self.uid),
             config=self.config,
             group="validator",
-            job_type="evaluation"
+            job_type="evaluation",
         )
 
         # Initialize peers
@@ -516,7 +515,6 @@ class Validator:
                     time_min=time_min,
                 )
 
-                scoring_start = tplr.T()
                 if (
                     eval_result is not None
                     and not (
@@ -1075,7 +1073,7 @@ class Validator:
                         tplr.logger.info(f"UID {uid}:")
                         tplr.logger.info(
                             f"  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}"
-                        ) 
+                        )
 
                     # Optionally, log to WandB
                     self.wandb_run.log(
@@ -1175,11 +1173,15 @@ class Validator:
                 "evaluated_uids": len(self.evaluated_uids),
                 "learning_rate": self.scheduler.get_last_lr()[0],
                 "active_miners": len(self.valid_score_indices),
-                "gather_success_rate": gather_result.success_rate * 100 if gather_result else 0,
+                "gather_success_rate": gather_result.success_rate * 100
+                if gather_result
+                else 0,
                 "gather_peers": self.peers,
                 "skipped_peers": gather_result.skipped_uids if gather_result else [],
                 "total_peers": len(self.peers),
-                "total_skipped": len(gather_result.skipped_uids) if gather_result else 0,
+                "total_skipped": len(gather_result.skipped_uids)
+                if gather_result
+                else 0,
             }
             self.metrics_logger.log(
                 measurement="templar_metrics",

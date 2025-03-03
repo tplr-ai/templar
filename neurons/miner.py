@@ -208,7 +208,7 @@ class Miner:
             uid=str(self.uid),
             config=self.config,
             group="miner",
-            job_type="training"
+            job_type="training",
         )
 
     # Main training loop.

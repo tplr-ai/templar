@@ -46,7 +46,6 @@ Note:
 import os
 import json
 import shutil
-import sys
 import torch
 import asyncio
 import argparse
@@ -55,17 +54,9 @@ import time
 import tplr
 import bittensor as bt
 
-from typing import Any, Optional, Tuple
-from tplr.metrics import MetricsLogger
-from tplr.chain import ChainManager
+from typing import Optional, Tuple
 from transformers.models.llama import LlamaForCausalLM
 from tplr import __version__
-from torch.optim import SGD
-from torch.optim.lr_scheduler import (
-    CosineAnnealingWarmRestarts,
-    LinearLR,
-    SequentialLR,
-)
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"
@@ -185,57 +176,13 @@ class Evaluator:
         self.hparams = tplr.load_hparams()
         self.wallet = bt.wallet(config=self.config)
 
-        self.uid = (
-            self.config.uid
-            if self.config.uid is not None
-            else self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-        )
+        # Mock for the comms class
+        self.uid = 1
 
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
         self.model.to(self.config.device)
 
         self.tokenizer = self.hparams.tokenizer
-        self.compressor = tplr.compress.CompressDCT()
-        self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
-        self.transformer = tplr.compress.TransformDCT(
-            self.model, target_chunk=self.hparams.target_chunk
-        )
-
-        self.warmup_scheduler = LinearLR(
-            self.optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=250,
-        )
-        self.cosine_scheduler = CosineAnnealingWarmRestarts(
-            self.optimizer,
-            T_0=10000,
-            T_mult=2,
-            eta_min=self.hparams.learning_rate * 0.1,
-        )
-        self.scheduler = SequentialLR(
-            self.optimizer,
-            schedulers=[self.warmup_scheduler, self.cosine_scheduler],
-            milestones=[250],
-        )
-
-        # Init compression
-        self.transformer = tplr.compress.TransformDCT(
-            self.model,
-            target_chunk=self.hparams.target_chunk,
-        )
-
-        self.momentum = {}
-        self.totalks = {}
-        self.xshapes = {}
-        for n, p in self.model.named_parameters():
-            self.momentum[n] = torch.zeros_like(p)
-            _, _, xshape, totalk = self.compressor.compress(
-                self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
-            )
-            self.xshapes[n] = xshape
-            self.totalks[n] = totalk
-
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",
@@ -258,7 +205,7 @@ class Evaluator:
             port=8086,
             database="tplr",
             token=os.environ.get("INFLUXDB_TOKEN"),
-            org="templar",
+            org="tplr",
         )
         self.wandb_run = wandb.init(project=self.config.project)
 

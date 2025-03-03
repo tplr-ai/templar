@@ -25,7 +25,7 @@ PORT=3050  # Optional, defaults to 3000
 
 The InfluxDB configuration is in `src/config/influxdb.js`. Default settings:
 - URL: AWS InfluxDB instance
-- Organization: templar
+- Organization: tplr
 - Bucket: tplr
 - Default Version: 0.2.29t
 

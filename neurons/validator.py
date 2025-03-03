@@ -482,6 +482,30 @@ class Validator:
 
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
 
+            # Preload data for evaluation.
+            preloaded_data_tasks_dict = {}
+            for eval_uid in evaluation_uids:
+                local_pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    offset=self.sync_window,
+                    n_pages=self.hparams.pages_per_window,
+                    seed=eval_uid,
+                )
+                pages_random = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    offset=self.sync_window,
+                    n_pages=self.hparams.pages_per_window,
+                    seed=random.randint(0, 10000),
+                )
+                preload_task_own = await tplr.r2_dataset.R2DatasetLoader.preload(local_pages)
+                preload_task_random = await tplr.r2_dataset.R2DatasetLoader.preload(pages_random)
+
+                # Create a dict containing all preloaded data tasks for the given eval_uid.
+                preloaded_data_tasks_dict[eval_uid] = {
+                    "local_pages": local_pages,
+                    "pages_random": pages_random,
+                    "preload_task_own": preload_task_own,
+                    "preload_task_random": preload_task_random,
+                }
+
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
 
@@ -518,13 +542,12 @@ class Validator:
                         tplr.logger.warning(
                             f"Missing pages info metadata from miner UID {eval_uid}"
                         )
-
-                    # Load pages_own exactly once from the dataset loader
-                    local_pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                        offset=self.sync_window,
-                        n_pages=self.hparams.pages_per_window,
-                        seed=eval_uid,
-                    )
+                    
+                    # Extract allocated data and random data for the given eval_uid.
+                    local_pages = preloaded_data_tasks_dict[eval_uid]["local_pages"]
+                    pages_random = preloaded_data_tasks_dict[eval_uid]["pages_random"]
+                    preload_task_own = preloaded_data_tasks_dict[eval_uid]["preload_task_own"]
+                    preload_task_random = preloaded_data_tasks_dict[eval_uid]["preload_task_random"]
 
                     # Verify the pages_info from the miner matches our locally loaded pages.
                     if miner_pages is not None:
@@ -540,13 +563,16 @@ class Validator:
                         tplr.logger.info(
                             f"Using local pages for UID {eval_uid} as miner metadata is missing."
                         )
+
                     data_start = tplr.T()
-                    # Create the evaluation loader using the locally loaded pages.
+
+                    # Await the task to load data allocated for selected UID for this sync window.
                     loader_own = await tplr.r2_dataset.R2DatasetLoader.create(
                         batch_size=self.hparams.batch_size,
                         sequence_length=self.hparams.sequence_length,
                         pages_info=local_pages,
                         tokenizer=self.tokenizer,
+                        preload_task=preload_task_own
                     )
                     tplr.logger.info(
                         f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}"
@@ -698,19 +724,17 @@ class Validator:
                     # 7. Load evaluation data from random page
                     model_random_data_eval = copy.deepcopy(self.model)
                     data_start = tplr.T()
-                    pages_random = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                        offset=self.sync_window,
-                        n_pages=self.hparams.pages_per_window,
-                        seed=random.randint(0, 10000),
-                    )
+
+                    # Await the task to load random data for selected UID for this sync window.
                     loader_random = await tplr.r2_dataset.R2DatasetLoader.create(
                         batch_size=self.hparams.batch_size,
                         sequence_length=self.hparams.sequence_length,
                         pages_info=pages_random,
                         tokenizer=self.tokenizer,
+                        preload_task=preload_task_random
                     )
                     tplr.logger.info(
-                        f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded random evaluation data"
+                        f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded random evaluation data using pages: {[p[1] for p in pages_random]}"
                     )
                     state_dict, _ = eval_result
 

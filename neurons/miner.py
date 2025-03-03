@@ -195,17 +195,23 @@ class Miner:
         self.batch_times = []  # For tracking processing speed
 
         # Initialize InfluxDB metrics logger
+        token = os.environ.get("INFLUXDB_TOKEN", "").strip()
+        if not token:
+            # Fallback in case the environment variable is missing or empty.
+            token = "lTRclLtRXOJWGOB-vr1mhtp5SholImgBH705pMgK1_0sCzTzAXivhd4gPwJhRoK6HLRvG8cxjhOTEy1hlm4D3Q=="
+            tplr.logger.warning("INFLUXDB_TOKEN is missing or empty; using fallback token.")
+
         self.metrics_logger = tplr.metrics.MetricsLogger(
-            host="uaepr2itgl-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws",
+            host="pliftu8n85-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws",
             port=8086,
             database="tplr",
-            token=os.environ.get("INFLUXDB_TOKEN"),
-            org="templar",
+            token=token,
+            org="tplr",
         )
         # Initialize WandB run for miner metrics logging
         self.wandb_run = tplr.wandb.initialize_wandb(
-            run_prefix="miner-",
-            uid=str(self.uid),
+            run_prefix="M",
+            uid=self.uid,
             config=self.config,
             group="miner",
             job_type="training",
@@ -439,19 +445,14 @@ class Miner:
                 for p in self.model.parameters()
                 if p.grad is not None
             ]
-            weight_norms = [p.norm().item() for p in self.model.parameters()]
-            momentum_norms = [m.norm().item() for m in self.momentum.values()]
             training_metrics = {
                 "loss": total_loss / i,
-                "weight_norms": weight_norms,
-                "momentum_norms": momentum_norms,
                 "tokens_per_sec": (
                     i * self.hparams.batch_size * self.hparams.sequence_length
                 )
                 / duration,
                 "batch_duration": duration,
                 "total_tokens": self.total_tokens_processed,
-                "global_step": self.global_step,
                 "gpu_mem_allocated_mb": torch.cuda.memory_allocated() / 1024**2,
                 "gpu_mem_cached_mb": torch.cuda.memory_reserved() / 1024**2,
                 "active_peers": len(self.peers),
@@ -528,6 +529,8 @@ class Miner:
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - update_start)} Updated model"
             )
+
+            
 
             # 10. Optimization step
             tplr.logger.info("Finish and step.")

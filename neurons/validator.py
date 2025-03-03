@@ -230,11 +230,11 @@ class Validator:
 
         # Initialize InfluxDB metrics logger
         self.metrics_logger = tplr.metrics.MetricsLogger(
-            host="uaepr2itgl-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws",
+            host=os.environ.get("INFLUXDB_URL"),
             port=8086,
             database="tplr",
             token=os.environ.get("INFLUXDB_TOKEN"),
-            org="templar",
+            org="tplr",
         )
         # Initialize WandB run for validator metrics logging
         self.wandb_run = tplr.wandb.initialize_wandb(

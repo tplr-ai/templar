@@ -1,9 +1,10 @@
-require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const rateLimit = require('express-rate-limit');
-const metricsRoutes = require('./routes/metrics');
-const healthRoutes = require('./routes/health');
+import 'dotenv/config';
+import express from 'express';
+import cors from 'cors';
+import rateLimit from 'express-rate-limit';
+import metricsRoutes from './routes/metrics.js';
+import healthRoutes from './routes/health.js';
+import priceRoutes from './routes/price.js';
 
 const app = express();
 
@@ -20,6 +21,7 @@ app.use(limiter);
 // Routes
 app.use('/api/metrics', metricsRoutes);
 app.use('/api', healthRoutes);
+app.use('/api/price', priceRoutes);
 
 // Error handling
 app.use((err, req, res, next) => {

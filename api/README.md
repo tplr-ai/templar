@@ -18,6 +18,7 @@ npm install
 ```bash
 INFLUXDB_TOKEN=your_influxdb_token_here
 PORT=3050  # Optional, defaults to 3000
+NETWORK_URL=<some url> # Optional, Bittensor network endpoint
 ```
 
 ## Configuration
@@ -108,6 +109,25 @@ curl "http://localhost:3050/api/metrics/benchmark-scores" | json_pp
 curl "http://localhost:3050/api/metrics/benchmark-scores?timeRange=-7d" | json_pp
 ```
 
+### Get Token Price
+Retrieves the current token price for a subnet from the Bittensor network.
+
+```bash
+GET /api/price
+```
+
+Query Parameters:
+- `subnetId` (optional): The subnet ID to get price for (defaults to 3)
+
+Examples:
+```bash
+# Get price for default subnet (3)
+curl "http://localhost:3050/api/price" | json_pp
+
+# Get price for a specific subnet
+curl "http://localhost:3050/api/price?subnetId=1" | json_pp
+```
+
 ## Response Formats
 
 ### Losses Response
@@ -166,6 +186,22 @@ curl "http://localhost:3050/api/metrics/benchmark-scores?timeRange=-7d" | json_p
       "timestamp": "2024-03-21T10:00:00Z"
     }
   ],
+  "timestamp": "2024-03-21T10:01:00Z"
+}
+```
+
+### Token Price Response
+```json
+{
+  "success": true,
+  "data": {
+    "price": 0.12345,
+    "subnetId": 3,
+    "taoIn": 1000000,
+    "alphaIn": 8100000,
+    "cached": false,
+    "timestamp": "2024-03-21T10:00:00Z"
+  },
   "timestamp": "2024-03-21T10:01:00Z"
 }
 ```

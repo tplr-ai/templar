@@ -52,7 +52,6 @@ yarn-error.log*
 .npm
 .yarn
 .yarn-integrity
-package.json
 package-lock.json
 yarn.lock
 pnpm-lock.yaml

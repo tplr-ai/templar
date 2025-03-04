@@ -1,7 +1,8 @@
-const express = require('express');
+import express from 'express';
+import { InfluxDB } from '@influxdata/influxdb-client';
+import influxConfig from '../config/influxdb.js';
+
 const router = express.Router();
-const { InfluxDB } = require('@influxdata/influxdb-client');
-const influxConfig = require('../config/influxdb');
 
 // Create the InfluxDB client and Query API instance.
 const influxDB = new InfluxDB({ url: influxConfig.url, token: influxConfig.token });
@@ -41,4 +42,4 @@ router.get('/health', async (req, res) => {
     }
 });
 
-module.exports = router; 
+export default router; 

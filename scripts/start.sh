@@ -11,6 +11,6 @@ ps aux | grep Bistro
 pm2 start ecosystem.config.js
 
 
-pm2 log TM1
+pm2 log TM2
 
 

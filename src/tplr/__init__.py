@@ -32,4 +32,5 @@ from .r2_dataset import *
 from .hparams import *
 from .logging import *
 from .schemas import *
+from .metrics import *
 from .wandb import initialize_wandb

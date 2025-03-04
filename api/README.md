@@ -1,4 +1,3 @@
-
 # TPLR Metrics API
 
 API service for querying TPLR miner metrics from InfluxDB.
@@ -90,6 +89,25 @@ curl "http://localhost:3050/api/metrics/tokens-per-sec?uid=76" | json_pp
 curl "http://localhost:3050/api/metrics/tokens-per-sec?timeRange=12h" | json_pp
 ```
 
+### Get Benchmark Scores
+Retrieves the latest benchmark scores from the evaluator.
+
+```bash
+GET /api/metrics/benchmark-scores
+```
+
+Query Parameters:
+- `timeRange` (optional): Time range to query (defaults to 30d)
+
+Examples:
+```bash
+# Get latest benchmark scores
+curl "http://localhost:3050/api/metrics/benchmark-scores" | json_pp
+
+# Get benchmark scores from last 7 days
+curl "http://localhost:3050/api/metrics/benchmark-scores?timeRange=-7d" | json_pp
+```
+
 ## Response Formats
 
 ### Losses Response
@@ -122,6 +140,30 @@ curl "http://localhost:3050/api/metrics/tokens-per-sec?timeRange=12h" | json_pp
       "time": "2024-03-21T10:00:00Z",
       "tokens_per_sec": 1234.56,
       "uid": "76"  // Only present when not aggregated
+    }
+  ],
+  "timestamp": "2024-03-21T10:01:00Z"
+}
+```
+
+### Benchmark Scores Response
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "task": "arc_challenge",
+      "score": 0.42,
+      "global_step": 1234,
+      "window": 567,
+      "timestamp": "2024-03-21T10:00:00Z"
+    },
+    {
+      "task": "winogrande",
+      "score": 0.68,
+      "global_step": 1234,
+      "window": 567,
+      "timestamp": "2024-03-21T10:00:00Z"
     }
   ],
   "timestamp": "2024-03-21T10:01:00Z"

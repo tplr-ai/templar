@@ -37,7 +37,7 @@ class MetricsLogger:
         # Check for token being None or empty/whitespace.
         if not token or not token.strip():
             raise ValueError("InfluxDB token must be provided and non-empty")
-        
+
         url = f"https://{host}:{port}"
         self.client = InfluxDBClient(url=url, token=token, org=org)
         self.write_api = self.client.write_api(write_options=SYNCHRONOUS)

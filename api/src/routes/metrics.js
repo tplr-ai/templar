@@ -153,4 +153,45 @@ router.get('/tokens-per-sec', async (req, res, next) => {
   }
 });
 
+// GET /api/metrics/benchmark-scores
+router.get('/benchmark-scores', async (req, res, next) => {
+  const { timeRange } = req.query;
+  const actualTimeRange = timeRange || '-30d';
+
+  const fluxQuery = `
+    from(bucket: "${influxConfig.bucket}")
+      |> range(start: ${actualTimeRange})
+      |> filter(fn: (r) => r._measurement == "templar_benchmark")
+      |> filter(fn: (r) => r._field == "score")
+      |> filter(fn: (r) => r.role == "evaluator")
+      |> group(columns: ["task"])
+      |> last()
+      |> yield(name: "latest_scores")
+  `;
+
+  try {
+    console.debug("Sending query from /benchmark-scores endpoint...");
+    const results = await queryWithTimeout(fluxQuery, 60000);
+
+    // Transform results into a more user-friendly format
+    const formattedResults = results.map(row => ({
+      task: row.task,
+      score: row._value,
+      global_step: row.global_step,
+      window: row.window,
+      timestamp: row._time
+    }));
+
+    console.debug("Returning results from /benchmark-scores endpoint.");
+    res.json({
+      success: true,
+      data: formattedResults,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("Error in /benchmark-scores route:", err);
+    next(err);
+  }
+});
+
 module.exports = router;

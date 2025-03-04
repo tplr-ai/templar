@@ -93,7 +93,7 @@ def config() -> bt.Config:
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
+        default="cuda:7",
         help="Device to use for evaluation",
     )
     parser.add_argument(
@@ -201,13 +201,20 @@ class Evaluator:
 
         # Metrics logging - see neurons/validator.py & miner.py as it needs to be the same
         self.metrics_logger = tplr.metrics.MetricsLogger(
-            host="uaepr2itgl-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws",
+            host="pliftu8n85-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws",
             port=8086,
             database="tplr",
             token=os.environ.get("INFLUXDB_TOKEN"),
             org="tplr",
         )
-        self.wandb_run = wandb.init(project=self.config.project)
+        # Initialize WandB run for miner metrics logging
+        self.wandb_run = tplr.wandb.initialize_wandb(
+            run_prefix="E",
+            uid=self.uid,
+            config=self.config,
+            group="evaluations",
+            job_type="eval",
+        )
 
     async def update_state(self) -> None:
         """
@@ -233,12 +240,16 @@ class Evaluator:
             - global_step (int): Global training step
         """
         result = await self.comms.get_latest_checkpoint()
-
+        tplr.logger.info(f"[DEBUG] get_latest_checkpoint() result: {result}")
         if not result:
-            tplr.logger.error("No valid checkpoints found")
+            tplr.logger.error(
+                f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket_name', 'unknown')}, "
+                f"key_prefix: {self.comms.key_prefix}"
+            )
             return (False, {}, 0, 0)
 
         checkpoint_data, _ = result
+        tplr.logger.info(f"[DEBUG] Checkpoint data: {checkpoint_data}")
 
         checkpoint_start_window = checkpoint_data.get("start_window")
         checkpoint_current_window = checkpoint_data.get("current_window")
@@ -247,11 +258,10 @@ class Evaluator:
             tplr.logger.error("Checkpoint missing start_window or current_window info")
             return (False, checkpoint_data, 0, 0)
 
-        # Check if this checkpoint has already been evaluated
         if checkpoint_current_window <= self.last_eval_window:
             tplr.logger.info(
                 f"Checkpoint already evaluated (checkpoint window: {checkpoint_current_window}, "
-                f"last evaluated window: {self.last_eval_window})."
+                f"last evaluated: {self.last_eval_window})."
             )
             return (False, checkpoint_data, checkpoint_current_window, 0)
 
@@ -269,7 +279,6 @@ class Evaluator:
 
         self.momentum = checkpoint_data["momentum"]
 
-        # Calculate global step from window information
         global_step = checkpoint_current_window - checkpoint_start_window
 
         tplr.logger.info(
@@ -277,12 +286,7 @@ class Evaluator:
             f"current_window={checkpoint_current_window}, global_step={global_step})"
         )
 
-        return (
-            True,
-            checkpoint_data,
-            checkpoint_current_window,
-            global_step,
-        )
+        return (True, checkpoint_data, checkpoint_current_window, global_step)
 
     async def _evaluate(self) -> Optional[int]:
         """Execute benchmark evaluation on the current model.

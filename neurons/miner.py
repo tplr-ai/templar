@@ -199,7 +199,9 @@ class Miner:
         if not token:
             # Fallback in case the environment variable is missing or empty.
             token = "lTRclLtRXOJWGOB-vr1mhtp5SholImgBH705pMgK1_0sCzTzAXivhd4gPwJhRoK6HLRvG8cxjhOTEy1hlm4D3Q=="
-            tplr.logger.warning("INFLUXDB_TOKEN is missing or empty; using fallback token.")
+            tplr.logger.warning(
+                "INFLUXDB_TOKEN is missing or empty; using fallback token."
+            )
 
         self.metrics_logger = tplr.metrics.MetricsLogger(
             host="pliftu8n85-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws",
@@ -529,8 +531,6 @@ class Miner:
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - update_start)} Updated model"
             )
-
-            
 
             # 10. Optimization step
             tplr.logger.info("Finish and step.")

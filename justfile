@@ -21,3 +21,6 @@ test: dev
 
 bistro:
     ps aux | grep Bistro
+
+eval:
+    pm2 start "uv run ./scripts/evaluator.py" --name eval

@@ -1,0 +1,219 @@
+# TPLR Metrics API
+
+API service for querying TPLR miner metrics from InfluxDB.
+
+## Installation
+
+1. Clone the repository and navigate to the api directory:
+```bash
+cd api
+```
+
+2. Install dependencies:
+```bash
+npm install
+```
+
+3. Create a `.env` file in the api directory:
+```bash
+INFLUXDB_TOKEN=your_influxdb_token_here
+PORT=3050  # Optional, defaults to 3000
+NETWORK_URL=<some url> # Optional, Bittensor network endpoint
+```
+
+## Configuration
+
+The InfluxDB configuration is in `src/config/influxdb.js`. Default settings:
+- URL: AWS InfluxDB instance
+- Organization: tplr
+- Bucket: tplr
+- Default Version: 0.2.29t
+
+## Running the API
+
+Development mode:
+```bash
+npm run dev
+```
+
+Production mode:
+```bash
+npm start
+```
+
+## API Routes
+
+### Get Losses
+Retrieves loss metrics for miners.
+
+```bash
+GET /api/metrics/losses
+```
+
+Query Parameters:
+- `window` (optional): Filter by specific window
+- `version` (optional): Filter by version (defaults to 0.2.29t)
+- `timeRange` (optional): Time range to query (defaults to 24h)
+
+Example:
+```bash
+curl "http://localhost:3050/api/metrics/losses" | json_pp
+curl "http://localhost:3050/api/metrics/losses?window=123&timeRange=12h" | json_pp
+```
+
+### Get Tokens Per Second
+Retrieves tokens per second metrics for miners.
+
+```bash
+GET /api/metrics/tokens-per-sec
+```
+
+Query Parameters:
+- `uid` (optional): Filter by specific miner UID
+- `version` (optional): Filter by version (defaults to 0.2.29t)
+- `timeRange` (optional): Time range to query (defaults to 24h)
+- `window` (optional): Filter by specific window
+- `aggregate` (optional): If 'true', returns mean across all UIDs
+
+Examples:
+```bash
+# Get all UIDs tokens/sec
+curl "http://localhost:3050/api/metrics/tokens-per-sec" | json_pp
+
+# Get mean tokens/sec across all UIDs
+curl "http://localhost:3050/api/metrics/tokens-per-sec?aggregate=true" | json_pp
+
+# Get specific UID tokens/sec
+curl "http://localhost:3050/api/metrics/tokens-per-sec?uid=76" | json_pp
+
+# Get tokens/sec for last 12 hours
+curl "http://localhost:3050/api/metrics/tokens-per-sec?timeRange=12h" | json_pp
+```
+
+### Get Benchmark Scores
+Retrieves the latest benchmark scores from the evaluator.
+
+```bash
+GET /api/metrics/benchmark-scores
+```
+
+Query Parameters:
+- `timeRange` (optional): Time range to query (defaults to 30d)
+
+Examples:
+```bash
+# Get latest benchmark scores
+curl "http://localhost:3050/api/metrics/benchmark-scores" | json_pp
+
+# Get benchmark scores from last 7 days
+curl "http://localhost:3050/api/metrics/benchmark-scores?timeRange=-7d" | json_pp
+```
+
+### Get Token Price
+Retrieves the current token price for a subnet from the Bittensor network.
+
+```bash
+GET /api/price
+```
+
+Query Parameters:
+- `subnetId` (optional): The subnet ID to get price for (defaults to 3)
+
+Examples:
+```bash
+# Get price for default subnet (3)
+curl "http://localhost:3050/api/price" | json_pp
+
+# Get price for a specific subnet
+curl "http://localhost:3050/api/price?subnetId=1" | json_pp
+```
+
+## Response Formats
+
+### Losses Response
+```json
+{
+  "losses": [
+    {
+      "time": "2024-03-21T10:00:00Z",
+      "window": 205245,
+      "losses": {
+        "76": 0.834,
+        "77": 0.756
+      }
+    }
+  ],
+  "version": "0.2.29t",
+  "params": {
+    "window": null,
+    "timeRange": "24h"
+  }
+}
+```
+
+### Tokens Per Second Response
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "time": "2024-03-21T10:00:00Z",
+      "tokens_per_sec": 1234.56,
+      "uid": "76"  // Only present when not aggregated
+    }
+  ],
+  "timestamp": "2024-03-21T10:01:00Z"
+}
+```
+
+### Benchmark Scores Response
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "task": "arc_challenge",
+      "score": 0.42,
+      "global_step": 1234,
+      "window": 567,
+      "timestamp": "2024-03-21T10:00:00Z"
+    },
+    {
+      "task": "winogrande",
+      "score": 0.68,
+      "global_step": 1234,
+      "window": 567,
+      "timestamp": "2024-03-21T10:00:00Z"
+    }
+  ],
+  "timestamp": "2024-03-21T10:01:00Z"
+}
+```
+
+### Token Price Response
+```json
+{
+  "success": true,
+  "data": {
+    "price": 0.12345,
+    "subnetId": 3,
+    "taoIn": 1000000,
+    "alphaIn": 8100000,
+    "cached": false,
+    "timestamp": "2024-03-21T10:00:00Z"
+  },
+  "timestamp": "2024-03-21T10:01:00Z"
+}
+```
+
+## Error Handling
+
+All endpoints return appropriate HTTP status codes and error messages:
+
+```json
+{
+  "success": false,
+  "error": "Error message here",
+  "timestamp": "2024-03-21T10:01:00Z"
+}
+```

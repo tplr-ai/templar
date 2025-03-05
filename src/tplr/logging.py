@@ -21,6 +21,8 @@ import logging
 from rich.logging import RichHandler
 from rich.highlighter import NullHighlighter
 import bittensor as bt
+from . import __version__
+from logging_loki import LokiHandler
 
 
 def T() -> float:
@@ -70,9 +72,6 @@ logger = logging.getLogger("templar")
 logger.setLevel(logging.INFO)
 
 
-# -----------------------------------------------------------------------------
-# Custom Logging Filter to silence subtensor warnings
-# -----------------------------------------------------------------------------
 class NoSubtensorWarning(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         # Return False if the record contains the undesired subtensor warning
@@ -129,5 +128,22 @@ logger.addHandler(
         show_path=False,
     )
 )
+
+
+try:
+    loki_handler = LokiHandler(
+        url="http://localhost:3100/loki/api/v1/push",
+        tags={
+            "app": "templar",
+            "env": "prod",
+            "version": __version__,
+            "uid": "default_uid",
+        },
+        version="1",
+    )
+    loki_handler.setLevel(logging.INFO)
+    logger.addHandler(loki_handler)
+except Exception as e:
+    logger.error(f"Failed to add LokiHandler: {e}")
 
 __all__ = ["logger", "debug", "trace", "P", "T"]

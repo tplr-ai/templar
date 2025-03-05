@@ -315,6 +315,9 @@ class Validator:
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
 
+        # Initialize next evaluation UIDs
+        next_window_evaluation_uids = [] # This will ensure genesis window has no uids evaluated.
+        next_window_preloaded_task_dict = {}
         while True:
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
@@ -459,14 +462,18 @@ class Validator:
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
 
+            # Select UIDs to evaluate.
             candidate_uids = list(self.eval_peers.keys())
             candidate_weights = [
                 self.eval_candidates_counter[uid] for uid in candidate_uids
             ]
             k = min(self.hparams.uids_per_window, len(candidate_uids))
-            evaluation_uids = self.comms.weighted_random_sample_no_replacement(
+            evaluation_uids = next_window_evaluation_uids
+            next_window_evaluation_uids = self.comms.weighted_random_sample_no_replacement(
                 candidate_uids, candidate_weights, k
             )
+            tplr.logger.info(f"Evaluating UIDs current window: {evaluation_uids}")
+            tplr.logger.info(f"Evaluation UIDs next window: {next_window_evaluation_uids}")
 
             # Reset counters for chosen peers
             for uid in evaluation_uids:
@@ -480,18 +487,16 @@ class Validator:
                     self.eval_candidates_counter[uid] += 1
             self.comms.eval_peers = self.eval_peers
 
-            tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
-
-            # Preload data for evaluation.
-            preloaded_data_tasks_dict = {}
-            for eval_uid in evaluation_uids:
+            # Preload data for next window.
+            current_window_preloaded_task_dict = next_window_preloaded_task_dict
+            for eval_uid in next_window_evaluation_uids:
                 local_pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                    offset=self.sync_window,
+                    offset=self.sync_window + 1,
                     n_pages=self.hparams.pages_per_window,
                     seed=eval_uid,
                 )
                 pages_random = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                    offset=self.sync_window,
+                    offset=self.sync_window + 1,
                     n_pages=self.hparams.pages_per_window,
                     seed=random.randint(0, 10000),
                 )
@@ -499,7 +504,7 @@ class Validator:
                 preload_task_random = await tplr.r2_dataset.R2DatasetLoader.preload(pages_random)
 
                 # Create a dict containing all preloaded data tasks for the given eval_uid.
-                preloaded_data_tasks_dict[eval_uid] = {
+                next_window_preloaded_task_dict[eval_uid] = {
                     "local_pages": local_pages,
                     "pages_random": pages_random,
                     "preload_task_own": preload_task_own,
@@ -544,10 +549,10 @@ class Validator:
                         )
                     
                     # Extract allocated data and random data for the given eval_uid.
-                    local_pages = preloaded_data_tasks_dict[eval_uid]["local_pages"]
-                    pages_random = preloaded_data_tasks_dict[eval_uid]["pages_random"]
-                    preload_task_own = preloaded_data_tasks_dict[eval_uid]["preload_task_own"]
-                    preload_task_random = preloaded_data_tasks_dict[eval_uid]["preload_task_random"]
+                    local_pages = current_window_preloaded_task_dict[eval_uid]["local_pages"]
+                    pages_random = current_window_preloaded_task_dict[eval_uid]["pages_random"]
+                    preload_task_own = current_window_preloaded_task_dict[eval_uid]["preload_task_own"]
+                    preload_task_random = current_window_preloaded_task_dict[eval_uid]["preload_task_random"]
 
                     # Verify the pages_info from the miner matches our locally loaded pages.
                     if miner_pages is not None:

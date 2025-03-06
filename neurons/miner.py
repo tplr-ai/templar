@@ -26,6 +26,7 @@ import argparse
 import threading
 import os
 import itertools
+import json  # Add this import at the top of the file
 
 # Third party
 import torch
@@ -447,7 +448,7 @@ class Miner:
                 for p in self.model.parameters()
                 if p.grad is not None
             ]
-            
+
             # ---------------------------------------------------------------------
             # 6. Await both gather and put tasks concurrently
             # ---------------------------------------------------------------------
@@ -460,14 +461,6 @@ class Miner:
             gather_result = await gather_task
             tplr.logger.info("Gather task completed!")
 
-            if gather_result is None:
-                tplr.logger.error(
-                    "Failed to gather gradients from peers. Waiting for next window."
-                )
-                while self.current_window == step_window:
-                    await asyncio.sleep(0.1)
-                continue
-            
             training_metrics = {
                 "loss": total_loss / i,
                 "tokens_per_sec": (
@@ -489,12 +482,14 @@ class Miner:
                 "gather_success_rate": gather_result.success_rate * 100
                 if gather_result
                 else 0,
-                "gather_peers": self.peers,
-                "skipped_peers": gather_result.skipped_uids if gather_result else [],
+                "gather_peers": json.dumps(self.peers),
+                "skipped_peers": json.dumps(
+                    gather_result.skipped_uids if gather_result else []
+                ),
             }
 
             self.metrics_logger.log(
-                measurement="templar_metrics",
+                measurement="templar_metrics_v2",
                 tags={
                     "role": "miner",
                     "uid": self.uid,
@@ -504,7 +499,15 @@ class Miner:
                 fields=training_metrics,
             )
             # Also log metrics to WandB
-            self.wandb_run.log(training_metrics, step=self.global_step)         
+            self.wandb_run.log(training_metrics, step=self.global_step)
+
+            if gather_result is None:
+                tplr.logger.error(
+                    "Failed to gather gradients from peers. Waiting for next window."
+                )
+                while self.current_window == step_window:
+                    await asyncio.sleep(0.1)
+                continue
 
             # 8. Apply gathered gradients
             update_start = tplr.T()
@@ -549,7 +552,7 @@ class Miner:
             )
 
             self.metrics_logger.log(
-                measurement="miner_window_timing",
+                measurement="templar_metrics_v2",
                 tags={"uid": self.uid, "window": step_window},
                 fields={
                     "window_total": tplr.T() - window_start,

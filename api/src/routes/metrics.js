@@ -59,7 +59,7 @@ router.get('/losses', async (req, res, next) => {
   const fluxQuery = `
     from(bucket: "${influxConfig.bucket}")
       |> range(start: -1h)
-      |> filter(fn: (r) => r["_measurement"] == "templar_metrics")
+      |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
       |> filter(fn: (r) => r["role"] == "miner" and r["version"] == "${minerVersion}")
       |> filter(fn: (r) => r["_field"] == "loss")
       |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
@@ -96,7 +96,7 @@ router.get('/tokens-per-sec', async (req, res, next) => {
     fluxQuery = `
       from(bucket: "${influxConfig.bucket}")
         |> range(start: ${actualTimeRange})
-        |> filter(fn: (r) => r["_measurement"] == "templar_metrics")
+        |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
         |> filter(fn: (r) => r["_field"] == "tokens_per_sec")
         |> filter(fn: (r) => r["version"] == "${minerVersion}")
         |> group()
@@ -107,7 +107,7 @@ router.get('/tokens-per-sec', async (req, res, next) => {
     fluxQuery = `
       from(bucket: "${influxConfig.bucket}")
         |> range(start: ${actualTimeRange})
-        |> filter(fn: (r) => r["_measurement"] == "templar_metrics")
+        |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
         |> filter(fn: (r) => r["uid"] == "${uid}")
         |> filter(fn: (r) => r["_field"] == "tokens_per_sec")
         |> group()   // keep original grouping to separate series
@@ -119,7 +119,7 @@ router.get('/tokens-per-sec', async (req, res, next) => {
     fluxQuery = `
       from(bucket: "${influxConfig.bucket}")
         |> range(start: ${actualTimeRange})
-        |> filter(fn: (r) => r["_measurement"] == "templar_metrics")
+        |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
         |> filter(fn: (r) => r["_field"] == "tokens_per_sec")
         |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
         |> yield(name: "mean")

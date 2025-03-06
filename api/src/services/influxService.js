@@ -11,7 +11,7 @@ class InfluxService {
     let fluxQuery = `
       from(bucket: "${config.bucket}")
         |> range(start: -${timeRange})
-        |> filter(fn: (r) => r["_measurement"] == "templar_metrics")
+        |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
         |> filter(fn: (r) => r["role"] == "miner")
         |> filter(fn: (r) => r["version"] == "${version}")
         |> filter(fn: (r) => r["_field"] == "loss")
@@ -36,14 +36,14 @@ class InfluxService {
           window: o.window,
           losses: {}
         };
-        
+
         // Extract losses for each UID
         Object.keys(o).forEach(key => {
           if (key.match(/^\d+$/)) { // If the key is a number (UID)
             timepoint.losses[key] = o[key];
           }
         });
-        
+
         data.push(timepoint);
       }
       return data;
@@ -57,7 +57,7 @@ class InfluxService {
     const fluxQuery = `
       from(bucket: "${config.bucket}")
         |> range(start: -24h)
-        |> filter(fn: (r) => r["_measurement"] == "templar_metrics")
+        |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
         |> filter(fn: (r) => r["role"] == "miner")
         |> group(columns: ["version"])
         |> distinct(column: "version")
@@ -80,7 +80,7 @@ class InfluxService {
     let fluxQuery = `
       from(bucket: "${config.bucket}")
         |> range(start: -${timeRange})
-        |> filter(fn: (r) => r["_measurement"] == "templar_metrics")
+        |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
         |> filter(fn: (r) => r["role"] == "miner")
         |> filter(fn: (r) => r["version"] == "${version}")
         |> filter(fn: (r) => r["_field"] == "tokens_per_sec")

@@ -22,6 +22,7 @@ import os
 import sys
 import copy
 import time
+import json
 import random
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -993,7 +994,7 @@ class Validator:
 
                     # Log individual UID metrics
                     self.metrics_logger.log(
-                        measurement="templar_metrics",
+                        measurement="templar_metrics_v2",
                         tags={
                             "role": "validator",
                             "eval_uid": eval_uid,
@@ -1176,15 +1177,17 @@ class Validator:
                 "gather_success_rate": gather_result.success_rate * 100
                 if gather_result
                 else 0,
-                "gather_peers": self.peers,
-                "skipped_peers": gather_result.skipped_uids if gather_result else [],
+                "gather_peers": json.dumps(self.peers),
+                "skipped_peers": json.dumps(
+                    gather_result.skipped_uids if gather_result else []
+                ),
                 "total_peers": len(self.peers),
                 "total_skipped": len(gather_result.skipped_uids)
                 if gather_result
                 else 0,
             }
             self.metrics_logger.log(
-                measurement="templar_metrics",
+                measurement="templar_metrics_v2",
                 tags={
                     "role": "validator",
                     "uid": self.uid,
@@ -1352,7 +1355,7 @@ class Validator:
                 "validator/timing/model_update": tplr.T() - update_start,
             }
             self.metrics_logger.log(
-                measurement="templar_metrics",
+                measurement="templar_metrics_v2",
                 tags={
                     "role": "validator",
                     "uid": str(self.uid),

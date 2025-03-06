@@ -233,8 +233,23 @@ class R2DatasetLoader(DatasetLoader):
         return result
 
     @staticmethod
+    async def preload(pages_info):
+        """Preload data asynchronously and return a task."""
+        loader = R2DatasetLoader()
+        sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
+        tasks = [
+            asyncio.create_task(loader._process_page(page, sem)) for page in pages_info
+        ]
+        return tasks
+
+    @staticmethod
     async def create(
-        batch_size, sequence_length, pages_info, tokenizer, pack_samples=True
+        batch_size,
+        sequence_length,
+        pages_info,
+        tokenizer,
+        pack_samples=True,
+        preload_task=None,
     ):
         """Create loader with proper initialization"""
         loader = R2DatasetLoader(
@@ -248,14 +263,19 @@ class R2DatasetLoader(DatasetLoader):
         loader.buffer = []
         loader.pages = pages_info.copy()
 
-        # Process all pages first
-        sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
-        tasks = [
-            asyncio.create_task(loader._process_page(page, sem)) for page in pages_info
-        ]
+        # Use preloaded tasks if provided
+        if preload_task:
+            results = await asyncio.gather(*preload_task)
+        else:
+            # Process all pages first
+            sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
+            tasks = [
+                asyncio.create_task(loader._process_page(page, sem))
+                for page in pages_info
+            ]
+            results = await asyncio.gather(*tasks)
 
         # Gather all tokens
-        results = await asyncio.gather(*tasks)
         for tokens in results:
             if tokens:
                 loader.buffer.extend(tokens)

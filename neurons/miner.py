@@ -289,6 +289,14 @@ class Miner:
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
 
+        # Start the initial preload task for the allocated data, required for first window
+        pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+            offset=self.current_window,
+            n_pages=self.hparams.pages_per_window,
+            seed=self.uid,  # type: ignore
+        )
+        preload_task_pages = await tplr.r2_dataset.R2DatasetLoader.preload(pages)
+
         while True:
             # 1. Initialize window and update peers
             window_start = tplr.T()
@@ -311,17 +319,26 @@ class Miner:
 
             # 2. Load training data for this window
             data_start = tplr.T()
-            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset=step_window,
-                n_pages=self.hparams.pages_per_window,
-                seed=self.uid,  # type: ignore
-            )
             loader = await tplr.r2_dataset.R2DatasetLoader.create(
                 batch_size=self.hparams.batch_size,
                 sequence_length=self.hparams.sequence_length,
                 pages_info=pages,
                 tokenizer=self.tokenizer,
+                preload_task=preload_task_pages,
             )
+
+            # Preload the allocated pages for window + 1
+            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                offset=step_window + 1,
+                n_pages=self.hparams.pages_per_window,
+                seed=self.uid,  # type: ignore
+            )
+
+            # Cancel all preload tasks for the current window
+            for task in preload_task_pages:
+                task.cancel()
+            preload_task_pages = await tplr.r2_dataset.R2DatasetLoader.preload(pages)
+
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - data_start)} Loaded training data"
             )

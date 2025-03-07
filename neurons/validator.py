@@ -496,7 +496,6 @@ class Validator:
                     uid=str(eval_uid),
                     window=self.sync_window,
                     key="gradient",
-                    timeout=15,
                     local=False,
                     stale_retention=10,
                     time_max=time_max,

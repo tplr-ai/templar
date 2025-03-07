@@ -333,7 +333,7 @@ class Comms(ChainManager):
         self,
         key: str,
         bucket: Bucket = None,
-        timeout: int = 5,
+        timeout: int = 10,
         time_min: datetime = None,
         time_max: datetime = None,
     ):

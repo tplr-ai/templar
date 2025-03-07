@@ -1285,6 +1285,9 @@ class Comms(ChainManager):
 
     async def _get_bucket_checkpoint(self, bucket, uid):
         """Helper to get checkpoint from a specific bucket."""
+        tplr.logger.info(
+            f"Attempting to get checkpoint from bucket {bucket.name} for uid {uid}"
+        )
         async with self.session.create_client(
             "s3",
             endpoint_url=self.get_base_url(bucket.account_id),
@@ -1294,33 +1297,71 @@ class Comms(ChainManager):
             aws_secret_access_key=bucket.secret_access_key,
         ) as s3_client:
             pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{__version__}\.pt$")
+            tplr.logger.debug(f"Using checkpoint pattern: {pattern.pattern}")
 
+            tplr.logger.debug(
+                f"Listing objects in bucket {bucket.name} with prefix 'checkpoint'"
+            )
             response = await s3_client.list_objects_v2(
                 Bucket=bucket.name, Prefix="checkpoint", MaxKeys=1000
             )
 
             if not response.get("Contents"):
+                tplr.logger.debug(
+                    f"No checkpoint objects found in bucket {bucket.name}"
+                )
                 return None
 
+            tplr.logger.debug(
+                f"Found {len(response.get('Contents', []))} objects with prefix 'checkpoint'"
+            )
             valid_checkpoints = []
             for obj in response.get("Contents", []):
                 key = obj.get("Key", "")
                 match = pattern.match(key)
                 if match:
+                    window_num = int(match.group(1))
+                    tplr.logger.debug(
+                        f"Found valid checkpoint: {key} (window: {window_num}, modified: {obj['LastModified']})"
+                    )
                     valid_checkpoints.append(
                         {
                             "key": key,
-                            "window": int(match.group(1)),
+                            "window": window_num,
                             "last_modified": obj["LastModified"],
                         }
                     )
+                else:
+                    tplr.logger.debug(f"Skipping non-matching object: {key}")
 
             if valid_checkpoints:
+                tplr.logger.debug(f"Found {len(valid_checkpoints)} valid checkpoints")
                 latest = max(valid_checkpoints, key=lambda x: int(x["window"]))
+                tplr.logger.debug(
+                    f"Selected latest checkpoint: {latest['key']} (window: {latest['window']})"
+                )
+
+                tplr.logger.debug(
+                    f"Downloading checkpoint object {latest['key']} from bucket {bucket.name}"
+                )
                 loaded_data = await self.s3_get_object(key=latest["key"], bucket=bucket)
                 if loaded_data:
+                    tplr.logger.debug(
+                        f"Successfully loaded checkpoint data for window {latest['window']}"
+                    )
                     return loaded_data, latest["window"]
+                else:
+                    tplr.logger.debug(
+                        f"Failed to load checkpoint data for {latest['key']}"
+                    )
+            else:
+                tplr.logger.debug(
+                    f"No valid checkpoints found matching pattern in bucket {bucket.name}"
+                )
 
+            tplr.logger.debug(
+                "Returning None as no valid checkpoint was found or loaded"
+            )
             return None
 
     async def load_checkpoint(

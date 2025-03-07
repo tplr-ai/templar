@@ -25,7 +25,10 @@ dependencies = [
     "s3fs",
     "pyarrow",
     "scipy",
-    "rich>=13.0.0"
+    "influxdb",
+    "python-logging-loki-v2",
+    "influxdb-client",
+    "lm-eval>=0.4.7",
 ]
 
 [project.optional-dependencies]

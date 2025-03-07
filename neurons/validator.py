@@ -18,18 +18,20 @@
 # type: ignore
 
 # Standard library
+import os
 import sys
 import copy
 import time
+import json
 import random
 import asyncio
 from datetime import datetime, timedelta, timezone
 import argparse
 import threading
-from contextlib import contextmanager
 from collections import defaultdict
 from time import perf_counter
-import os
+from logging_loki import LokiHandler
+from contextlib import contextmanager
 from io import StringIO
 from rich.console import Console
 from rich.table import Table
@@ -117,6 +119,14 @@ class Validator:
             )
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+
+        # Update Loki handler's tag with the dynamic UID from the validator.
+        try:
+            for handler in tplr.logger.handlers:
+                if isinstance(handler, LokiHandler):
+                    handler.tags["uid"] = str(self.uid)
+        except Exception as e:
+            tplr.logger.error(f"Failed to update Loki handler UID tag: {e}")
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
@@ -219,13 +229,21 @@ class Validator:
         self.window_step = 0
         self.eval_count = 0
 
-        # Initialize WandB
-        self.wandb = tplr.initialize_wandb(
-            run_prefix="V",
-            uid=self.uid,
+        # Initialize InfluxDB metrics logger
+        self.metrics_logger = tplr.metrics.MetricsLogger(
+            host=os.environ.get("INFLUXDB_URL"),
+            port=8086,
+            database="tplr",
+            token=os.environ.get("INFLUXDB_TOKEN"),
+            org="tplr",
+        )
+        # Initialize WandB run for validator metrics logging
+        self.wandb_run = tplr.wandb.initialize_wandb(
+            run_prefix="validator-",
+            uid=str(self.uid),
             config=self.config,
             group="validator",
-            job_type="validation",
+            job_type="evaluation",
         )
 
         # Initialize peers
@@ -240,6 +258,7 @@ class Validator:
         self.inactivity_slash_rate = 0.25  # 25% slash per window
 
     async def run(self):
+        gather_result = None
         # Start background block listener
         self.loop = asyncio.get_running_loop()
         self.listener = threading.Thread(
@@ -384,12 +403,13 @@ class Validator:
                 )
 
                 # Log slash metrics
-                self.wandb.log(
-                    {
-                        f"validator/inactivity/{uid}/score_before": old_score,
-                        f"validator/inactivity/{uid}/score_after": new_score,
+                self.metrics_logger.log(
+                    measurement="validator_inactivity",
+                    tags={"uid": uid, "window": current_window},
+                    fields={
+                        "score_before": old_score,
+                        "score_after": new_score,
                     },
-                    step=self.global_step,
                 )
 
             # Calculate time window for this sync window
@@ -496,7 +516,6 @@ class Validator:
                     time_min=time_min,
                 )
 
-                scoring_start = tplr.T()
                 if (
                     eval_result is not None
                     and not (
@@ -637,7 +656,7 @@ class Validator:
                                 )
                     except Exception as e:
                         tplr.logger.error(
-                            f"Failed to apply gradient for uid {uid}: {str(e)}"
+                            f"Failed to apply gradient for uid {eval_uid}: {str(e)}"
                         )
                         continue
 
@@ -973,6 +992,33 @@ class Validator:
                         f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
                     )
 
+                    # Log individual UID metrics
+                    self.metrics_logger.log(
+                        measurement="templar_metrics_v2",
+                        tags={
+                            "role": "validator",
+                            "eval_uid": eval_uid,
+                            "uid": self.uid,
+                            "window": self.sync_window,
+                        },
+                        fields={
+                            "gradient_score": self.gradient_scores[eval_uid].item(),
+                            "binary_indicator": self.binary_indicator_scores[
+                                eval_uid
+                            ].item(),
+                            "binary_moving_avg": self.binary_moving_averages[
+                                eval_uid
+                            ].item(),
+                            "normalised_binary": self.normalised_binary_moving_averages[
+                                eval_uid
+                            ].item(),
+                            "final_moving_avg": self.final_moving_avg_scores[
+                                eval_uid
+                            ].item(),
+                            "weight": self.weights[eval_uid].item(),
+                        },
+                    )
+
                 else:
                     tplr.logger.info(
                         f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%."
@@ -1024,27 +1070,29 @@ class Validator:
                     tplr.logger.info(
                         "Updated scores for evaluated UIDs after slashing:"
                     )
-                    # Log evaluated UID scores (fixed join call)
-                    line = " | ".join(
-                        f"UID {uid}: {self.final_moving_avg_scores[uid]:.4f}"
-                        for uid in sorted(self.evaluated_uids)
-                    )
-                    tplr.logger.info(line)
+                    for uid in self.evaluated_uids:
+                        tplr.logger.info(f"UID {uid}:")
+                        tplr.logger.info(
+                            f"  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}"
+                        )
 
                     # Optionally, log to WandB
-                    self.wandb.log(
+                    self.wandb_run.log(
                         {
                             f"validator/final_moving_avg_scores/{eval_uid}": self.final_moving_avg_scores[
                                 eval_uid
                             ].item(),
-                            f"validator/weights/{eval_uid}": self.weights[
+                            "binary_moving_avg": self.binary_moving_averages[
                                 eval_uid
                             ].item(),
+                            "normalised_binary": self.normalised_binary_moving_averages[
+                                eval_uid
+                            ].item(),
+                            "final_moving_avg": self.final_moving_avg_scores[
+                                eval_uid
+                            ].item(),
+                            "weight": self.weights[eval_uid].item(),
                         },
-                        step=self.global_step,
-                    )
-                    tplr.logger.info(
-                        f"{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights"
                     )
 
                 tplr.logger.info(
@@ -1112,29 +1160,44 @@ class Validator:
 
             tplr.logger.info("Updated scores for evaluated UIDs:\n" + table_str)
 
-            # Log WandB metrics per UID
-            for uid in sorted(self.evaluated_uids):
-                self.wandb.log(
-                    {
-                        f"validator/gradient_scores/{uid}": self.gradient_scores[
-                            uid
-                        ].item(),
-                        f"validator/binary_indicators/{uid}": self.binary_indicator_scores[
-                            uid
-                        ].item(),
-                        f"validator/binary_moving_averages/{uid}": self.binary_moving_averages[
-                            uid
-                        ].item(),
-                        f"validator/normalised_binary_scores/{uid}": self.normalised_binary_moving_averages[
-                            uid
-                        ].item(),
-                        f"validator/final_moving_avg_scores/{uid}": self.final_moving_avg_scores[
-                            uid
-                        ].item(),
-                        f"validator/weights/{uid}": self.weights[uid].item(),
-                    },
-                    step=self.global_step,
-                )
+            # Log overall evaluation metrics
+            evaluation_metrics = {
+                "loss_own_before": self.loss_before_per_batch_own,
+                "loss_own_after": self.loss_after_per_batch_own,
+                "loss_random_before": self.loss_before_per_batch_random,
+                "loss_random_after": self.loss_after_per_batch_random,
+                "improvement_own": self.relative_improvement_own,
+                "improvement_random": self.relative_improvement_random,
+                "current_block": self.current_block,
+                "current_window": self.sync_window,
+                "global_step": self.global_step,
+                "evaluated_uids": len(self.evaluated_uids),
+                "learning_rate": self.scheduler.get_last_lr()[0],
+                "active_miners": len(self.valid_score_indices),
+                "gather_success_rate": gather_result.success_rate * 100
+                if gather_result
+                else 0,
+                "gather_peers": json.dumps(self.peers),
+                "skipped_peers": json.dumps(
+                    gather_result.skipped_uids if gather_result else []
+                ),
+                "total_peers": len(self.peers),
+                "total_skipped": len(gather_result.skipped_uids)
+                if gather_result
+                else 0,
+            }
+            self.metrics_logger.log(
+                measurement="templar_metrics_v2",
+                tags={
+                    "role": "validator",
+                    "uid": self.uid,
+                    "window": self.sync_window,
+                    "global_step": self.global_step,
+                },
+                fields=evaluation_metrics,
+            )
+            # Also log evaluation metrics to WandB
+            self.wandb_run.log(evaluation_metrics, step=self.global_step)
 
             # 17. Set weights periodically
             if self.sync_window % self.hparams.windows_per_weights == 0:
@@ -1154,7 +1217,7 @@ class Validator:
 
             # 15. Create checkpoints periodically
             if (
-                self.global_step % self.hparams.checkpoint_frequency == 0
+                self.global_step % self.hparams.validator_checkpoint_frequency == 0
                 and self.global_step != 0
             ):
                 tplr.logger.info(
@@ -1257,7 +1320,7 @@ class Validator:
                 self.comms.put(
                     state_dict=debug_dict,
                     uid=str(self.uid),
-                    window=self.current_window,
+                    window=self.sync_window,
                     key="debug",
                     local=False,
                 )
@@ -1291,7 +1354,17 @@ class Validator:
                 "validator/timing/evaluation": tplr.T() - eval_start,
                 "validator/timing/model_update": tplr.T() - update_start,
             }
-            self.wandb.log(evaluation_metrics, step=self.global_step)
+            self.metrics_logger.log(
+                measurement="templar_metrics_v2",
+                tags={
+                    "role": "validator",
+                    "uid": str(self.uid),
+                    "window": self.sync_window,
+                },
+                fields=evaluation_metrics,
+            )
+            # Also log evaluation metrics to WandB
+            self.wandb_run.log(evaluation_metrics, step=self.global_step)
 
             # 18. Increment global step
             self.global_step += 1

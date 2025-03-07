@@ -334,6 +334,10 @@ class Validator:
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
 
+        # Initialize next evaluation UIDs
+        next_window_evaluation_uids = []  # This will ensure genesis window has no uids evaluated.
+        next_local_pages = []
+        next_random_pages = []
         while True:
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
@@ -361,9 +365,6 @@ class Validator:
             tplr.logger.info(
                 f"{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}, eval:{len(self.eval_peers)}"
             )
-
-            tplr.logger.info(f"Current gather peers: {self.peers}")
-            tplr.logger.info(f"Current evaluation peers: {self.eval_peers}")
 
             tplr.logger.info(f"Current gather peers: {self.peers}")
             tplr.logger.info(
@@ -423,6 +424,35 @@ class Validator:
                 seconds=self.hparams.time_window_delta_seconds
             )
 
+            # Select UIDs to evaluate.
+            candidate_uids = list(self.eval_peers.keys())
+            candidate_weights = [
+                self.eval_candidates_counter[uid] for uid in candidate_uids
+            ]
+            k = min(self.hparams.uids_per_window, len(candidate_uids))
+            evaluation_uids = next_window_evaluation_uids
+            next_window_evaluation_uids = (
+                self.comms.weighted_random_sample_no_replacement(
+                    candidate_uids, candidate_weights, k
+                )
+            )
+            tplr.logger.info(f"Evaluating UIDs current window: {evaluation_uids}")
+            tplr.logger.info(f"Evaluation UIDs next window: {next_window_evaluation_uids}")
+
+            local_pages = next_local_pages
+            pages_random = next_random_pages
+            for eval_uid in next_window_evaluation_uids:
+                next_local_pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    offset=self.sync_window + 1,
+                    n_pages=self.hparams.pages_per_window,
+                    seed=eval_uid,
+                )
+                next_random_pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    offset=self.sync_window + 1,
+                    n_pages=self.hparams.pages_per_window,
+                    seed=random.randint(0, 10000),
+                )
+
             # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
             tplr.logger.info(f"We are using peers {self.peers}")
@@ -479,14 +509,6 @@ class Validator:
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
 
-            candidate_uids = list(self.eval_peers.keys())
-            candidate_weights = [
-                self.eval_candidates_counter[uid] for uid in candidate_uids
-            ]
-            k = min(self.hparams.uids_per_window, len(candidate_uids))
-            evaluation_uids = self.comms.weighted_random_sample_no_replacement(
-                candidate_uids, candidate_weights, k
-            )
 
             # Reset counters for chosen peers
             for uid in evaluation_uids:
@@ -500,7 +522,6 @@ class Validator:
                     self.eval_candidates_counter[uid] += 1
             self.comms.eval_peers = self.eval_peers
 
-            tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
 
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
@@ -538,13 +559,6 @@ class Validator:
                             f"Missing pages info metadata from miner UID {eval_uid}"
                         )
 
-                    # Load pages_own exactly once from the dataset loader
-                    local_pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                        offset=self.sync_window,
-                        n_pages=self.hparams.pages_per_window,
-                        seed=eval_uid,
-                    )
-
                     # Verify the pages_info from the miner matches our locally loaded pages.
                     if miner_pages is not None:
                         if local_pages != miner_pages:
@@ -560,7 +574,8 @@ class Validator:
                             f"Using local pages for UID {eval_uid} as miner metadata is missing."
                         )
                     data_start = tplr.T()
-                    # Create the evaluation loader using the locally loaded pages.
+
+                    # Await the task to load data allocated for the selected UID for this sync window.
                     loader_own = await tplr.r2_dataset.R2DatasetLoader.create(
                         batch_size=self.hparams.batch_size,
                         sequence_length=self.hparams.sequence_length,
@@ -717,11 +732,6 @@ class Validator:
                     # 7. Load evaluation data from random page
                     model_random_data_eval = copy.deepcopy(self.model)
                     data_start = tplr.T()
-                    pages_random = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                        offset=self.sync_window,
-                        n_pages=self.hparams.pages_per_window,
-                        seed=random.randint(0, 10000),
-                    )
                     loader_random = await tplr.r2_dataset.R2DatasetLoader.create(
                         batch_size=self.hparams.batch_size,
                         sequence_length=self.hparams.sequence_length,
@@ -729,7 +739,7 @@ class Validator:
                         tokenizer=self.tokenizer,
                     )
                     tplr.logger.info(
-                        f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded random evaluation data"
+                        f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded random evaluation data using pages: {[p[1] for p in pages_random]}"
                     )
                     state_dict, _ = eval_result
 

@@ -24,7 +24,6 @@ import random
 import asyncio
 import argparse
 import threading
-import itertools
 
 # Third party
 import torch
@@ -308,14 +307,8 @@ class Miner:
             self.model.zero_grad()
             total_loss = 0
             batch_tokens = 0
-            i = 0
 
-            # Use itertools.cycle to repeatedly loop over the same loader.
-            for batch in itertools.cycle(loader):
-                if self.current_window != step_window:
-                    tplr.logger.info("<Exhausted window during batch processing>")
-                    break
-
+            for i, batch in enumerate(loader):
                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                 labels = input_ids.clone()
                 labels = torch.where(
@@ -329,11 +322,21 @@ class Miner:
 
                 total_loss += outputs.loss.item()
                 outputs.loss.backward()
-                tokens_in_batch = (labels != -100).sum().item()
-                batch_tokens += tokens_in_batch
-                i += 1
-                tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {i}]")
+                batch_tokens += (labels != -100).sum().item()
+                tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {i + 1}]")
+                if self.current_window != step_window:
+                    tplr.logger.info("<Exhausted window>")
+                    break
 
+            # If training completes before the window is exhausted, wait until the window ends.
+            if self.current_window == step_window:
+                tplr.logger.info(
+                    "Training complete; waiting for window to be exhausted..."
+                )
+                while self.current_window == step_window:
+                    await asyncio.sleep(
+                        0.1
+                    )  # TODO: Consider adding a timeout safeguard here.
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - train_start)} Completed training"
             )
@@ -356,16 +359,14 @@ class Miner:
                     processed_state_dict[k] = v
 
             # Launch the put operation as a background task
-            put_task = asyncio.create_task(
-                self.comms.put(
-                    state_dict=processed_state_dict,
-                    uid=str(self.uid),
-                    window=step_window,
-                    key="gradient",
-                    global_step=self.global_step,
-                    local=False,
-                    stale_retention=100,
-                )
+            await self.comms.put(
+                state_dict=processed_state_dict,
+                uid=str(self.uid),
+                window=step_window,
+                key="gradient",
+                global_step=self.global_step,
+                local=False,
+                stale_retention=100,
             )
 
             upload_size = sum(
@@ -377,9 +378,7 @@ class Miner:
                 f"Uploading {upload_size} bytes of own state for UID: {self.uid}"
             )
 
-            tplr.logger.info(
-                f"Stopped accumulating: {i} batches with {i * self.hparams.batch_size * self.hparams.sequence_length} tokens"
-            )
+            tplr.logger.info(f"Stopped accumulating: {batch_tokens} tokens")
 
             sync_block = self.current_window * self.hparams.blocks_per_window
             time_min = datetime.fromtimestamp(
@@ -394,6 +393,13 @@ class Miner:
             # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
 
+            # Refresh the peers list immediately before gathering
+            tplr.logger.info("Refreshing peers before gather task...")
+            self.comms.update_peers_with_buckets()
+            self.peers = self.comms.peers
+            tplr.logger.info(f"Peers for gather: {self.peers}")
+
+            # Create a task for gathering gradients asynchronously
             gather_task = asyncio.create_task(
                 self.comms.gather(
                     my_uid=self.uid,
@@ -410,6 +416,9 @@ class Miner:
                 )
             )
 
+            # Await the task to get the result
+            gather_result = await gather_task
+
             # 5. Calculate and log metrics
             duration = time.time() - train_start
             self.batch_times.append(duration)
@@ -425,11 +434,8 @@ class Miner:
             self.wandb.log(
                 {
                     # Training metrics
-                    "miner/loss": total_loss / i,
-                    "miner/tokens_per_sec": (
-                        i * self.hparams.batch_size * self.hparams.sequence_length
-                    )
-                    / duration,
+                    "miner/loss": total_loss / batch_tokens,
+                    "miner/tokens_per_sec": batch_tokens / duration,
                     "miner/batch_duration": duration,
                     "miner/total_tokens": self.total_tokens_processed,
                     "miner/batch_tokens": batch_tokens,
@@ -462,11 +468,9 @@ class Miner:
             )
 
             # ---------------------------------------------------------------------
-            # 6. Await both gather and put tasks concurrently
+            # 6. Await both gather
             # ---------------------------------------------------------------------
 
-            tplr.logger.info("Waiting on put task...")
-            await put_task
             tplr.logger.info("Put task completed!")
 
             tplr.logger.info("Waiting on gather task...")
@@ -534,11 +538,8 @@ class Miner:
                     "miner/timing/gather": tplr.T() - gather_start,
                     "miner/timing/model_update": tplr.T() - update_start,
                     # Existing metrics
-                    "miner/loss": total_loss / i,
-                    "miner/tokens_per_sec": (
-                        i * self.hparams.batch_size * self.hparams.sequence_length
-                    )
-                    / duration,
+                    "miner/loss": total_loss / batch_tokens,
+                    "miner/tokens_per_sec": batch_tokens / duration,
                     "miner/total_tokens": self.total_tokens_processed,
                     "miner/batch_tokens": batch_tokens,
                     "miner/global_step": self.global_step,

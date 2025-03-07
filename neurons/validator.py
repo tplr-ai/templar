@@ -408,6 +408,13 @@ class Validator:
             tplr.logger.info(f"We are using peers {self.peers}")
 
             gather_start = tplr.T()
+            # Refresh peers explicitly before starting gather to avoid missing updated active peers.
+            tplr.logger.info("Refreshing peers before gather task in validator...")
+            self.comms.update_peers_with_buckets()
+            self.peers = self.comms.peers
+            self.eval_peers = self.comms.eval_peers
+            tplr.logger.info(f"Validator gather peers: {self.peers}")
+
             gather_result = await self.comms.gather(
                 my_uid=self.uid,
                 uids=self.peers,

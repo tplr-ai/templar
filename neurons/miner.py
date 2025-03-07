@@ -305,8 +305,8 @@ class Miner:
             tplr.logger.info("Start accumulating...")
             self.optimizer.zero_grad()
             self.model.zero_grad()
-            total_loss = 0
-            batch_tokens = 0
+            total_loss = 0.0
+            n_batches = 0
 
             for i, batch in enumerate(loader):
                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
@@ -322,7 +322,7 @@ class Miner:
 
                 total_loss += outputs.loss.item()
                 outputs.loss.backward()
-                batch_tokens += (labels != -100).sum().item()
+                n_batches += 1
                 tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {i + 1}]")
                 if self.current_window != step_window:
                     tplr.logger.info("<Exhausted window>")
@@ -378,7 +378,7 @@ class Miner:
                 f"Uploading {upload_size} bytes of own state for UID: {self.uid}"
             )
 
-            tplr.logger.info(f"Stopped accumulating: {batch_tokens} tokens")
+            tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
 
             sync_block = self.current_window * self.hparams.blocks_per_window
             time_min = datetime.fromtimestamp(
@@ -422,7 +422,7 @@ class Miner:
             # 5. Calculate and log metrics
             duration = time.time() - train_start
             self.batch_times.append(duration)
-            self.total_tokens_processed += batch_tokens
+            self.total_tokens_processed += n_batches
 
             grad_norms = [
                 p.grad.norm().item()
@@ -434,11 +434,11 @@ class Miner:
             self.wandb.log(
                 {
                     # Training metrics
-                    "miner/loss": total_loss / batch_tokens,
-                    "miner/tokens_per_sec": batch_tokens / duration,
+                    "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
+                    "miner/tokens_per_sec": n_batches / duration,
                     "miner/batch_duration": duration,
                     "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": batch_tokens,
+                    "miner/batch_tokens": n_batches,
                     "miner/global_step": self.global_step,
                     # Resource metrics
                     "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
@@ -538,10 +538,10 @@ class Miner:
                     "miner/timing/gather": tplr.T() - gather_start,
                     "miner/timing/model_update": tplr.T() - update_start,
                     # Existing metrics
-                    "miner/loss": total_loss / batch_tokens,
-                    "miner/tokens_per_sec": batch_tokens / duration,
+                    "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
+                    "miner/tokens_per_sec": n_batches / duration,
                     "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": batch_tokens,
+                    "miner/batch_tokens": n_batches,
                     "miner/global_step": self.global_step,
                     "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
                     / 1024**2,  # MB

@@ -1320,7 +1320,7 @@ class Validator:
                 self.comms.put(
                     state_dict=debug_dict,
                     uid=str(self.uid),
-                    window=self.current_window,
+                    window=self.sync_window,
                     key="debug",
                     local=False,
                 )

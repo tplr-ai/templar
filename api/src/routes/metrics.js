@@ -54,20 +54,20 @@ function queryWithTimeout(query, timeoutMs = 60000) {
 
 // GET /api/metrics/losses
 router.get('/losses', async (req, res, next) => {
-  // Use the version parsed from __init__.py if not defined in environment variables.
+  // Use a 2h time range and include the version filter.
   const minerVersion = influxConfig.version;
   const fluxQuery = `
     from(bucket: "${influxConfig.bucket}")
-      |> range(start: -1h)
+      |> range(start: -2h)
       |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
       |> filter(fn: (r) => r["role"] == "miner" and r["version"] == "${minerVersion}")
       |> filter(fn: (r) => r["_field"] == "loss")
-      |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
+      |> aggregateWindow(every: 5m, fn: mean, createEmpty: true)
       |> yield(name: "mean")
   `;
 
   try {
-    console.debug("Sending query from /losses endpoint...");
+    console.debug("Sending query from /losses endpoint with updated query...");
     const results = await queryWithTimeout(fluxQuery, 60000);
     console.debug("Returning results from /losses endpoint.");
     res.json(results);

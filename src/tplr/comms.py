@@ -769,7 +769,6 @@ class Comms(ChainManager):
         uid: str,
         window: int,
         key: str,
-        timeout: int = 10,
         local: bool = True,
         stale_retention: int = 10,
         time_min: datetime = None,
@@ -807,7 +806,6 @@ class Comms(ChainManager):
             loaded_data = await self.s3_get_object(
                 key=filename,
                 bucket=peer_bucket,
-                timeout=timeout,
                 time_min=time_min,
                 time_max=time_max,
             )

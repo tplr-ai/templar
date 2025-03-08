@@ -359,7 +359,7 @@ class Miner:
                     processed_state_dict[k] = v
 
             # Launch the put operation as a background task
-            await self.comms.put(
+            put_completion_time = await self.comms.put(
                 state_dict=processed_state_dict,
                 uid=str(self.uid),
                 window=step_window,
@@ -536,6 +536,7 @@ class Miner:
                     "miner/timing/training": tplr.T() - train_start,
                     "miner/timing/compression": tplr.T() - compress_start,
                     "miner/timing/gather": tplr.T() - gather_start,
+                    "miner/timing/put": put_completion_time,
                     "miner/timing/model_update": tplr.T() - update_start,
                     # Existing metrics
                     "miner/loss": total_loss / n_batches if n_batches > 0 else 0,

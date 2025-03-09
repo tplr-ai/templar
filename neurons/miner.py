@@ -143,13 +143,6 @@ class Miner:
             milestones=[250],
         )
 
-        # Init compression
-        self.transformer = tplr.compress.TransformDCT(
-            self.model,
-            target_chunk=self.hparams.target_chunk,
-        )
-        self.compressor = tplr.compress.CompressDCT()
-
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,

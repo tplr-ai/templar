@@ -559,7 +559,7 @@ class Miner:
             tplr.logger.info(f"Stored debug values for window {self.current_window}")
             # Log total window time and metrics
             tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
+                f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"
             )
 
             self.wandb.log(

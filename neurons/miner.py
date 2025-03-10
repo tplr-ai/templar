@@ -562,7 +562,6 @@ class Miner:
                 f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
             )
 
-            
             self.wandb.log(
                 {
                     # Add timing metrics

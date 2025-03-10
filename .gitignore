@@ -77,3 +77,4 @@ model_state.pt
 influxdb_data/
 data/
 chain-specs/
+.env.backup

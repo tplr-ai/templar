@@ -394,11 +394,31 @@ class Validator:
 
             # Calculate time window for this sync window
             sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
-            time_min = datetime.fromtimestamp(
-                self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
-                / 1000,
-                tz=timezone.utc,
-            )
+            retries = 0
+            delay = 1
+            max_retries = 5
+            max_delay = 60
+            while True:
+                try:
+                    response = self.subtensor.query_module(
+                        "Timestamp", "Now", block=sync_block
+                    )
+                    ts_value = response.value / 1000  # convert ms to seconds
+                    break
+                except Exception as e:
+                    tplr.logger.error(
+                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
+                    )
+                    retries += 1
+                    if retries > max_retries:
+                        tplr.logger.error(
+                            "Exceeded maximum retries for timestamp query."
+                        )
+                        raise e
+                    time.sleep(delay)
+                    delay = min(delay * 2, max_delay)
+
+            time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
             time_max = time_min + timedelta(
                 seconds=self.hparams.time_window_delta_seconds
             )

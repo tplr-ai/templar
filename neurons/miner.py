@@ -73,6 +73,11 @@ class Miner:
             action="store_true",
             help="Store gathered gradients in R2",
         )
+        parser.add_argument(
+            "--test",
+            action="store_true",
+            help="Test mode - use all peers without filtering",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -415,9 +420,44 @@ class Miner:
 
             # Refresh the peers list immediately before gathering
             tplr.logger.info("Refreshing peers before gather task...")
-            self.comms.update_peers_with_buckets()
-            self.peers = self.comms.peers
-            tplr.logger.info(f"Peers for gather: {self.peers}")
+
+            if self.config.test:
+                # In test mode, use all UIDs from metagraph except self
+                tplr.logger.info("Test mode active: Using all peers from metagraph.")
+                all_uids = list(range(len(self.metagraph.S)))
+                self.peers = [uid for uid in all_uids if uid != self.uid]
+            else:
+                # Normal operation - update and filter peers
+                self.comms.update_peers_with_buckets()
+                self.peers = self.comms.peers
+
+                # If we still have no peers, try a fallback
+                if not self.peers or len(self.peers) <= 1:  # Only self or empty
+                    tplr.logger.warning(
+                        "Peer list is empty or contains only self after filtering."
+                    )
+
+                    # Fallback to active peers in comms
+                    if hasattr(self.comms, "active_peers") and self.comms.active_peers:
+                        tplr.logger.info(
+                            f"Falling back to {len(self.comms.active_peers)} active peers from comms"
+                        )
+                        self.peers = list(self.comms.active_peers)
+
+                    # If still empty, use top peers by stake
+                    if not self.peers or len(self.peers) <= 1:
+                        tplr.logger.info("Falling back to top peers by stake")
+                        # Get top 10 peers by stake (excluding self)
+                        stakes = self.metagraph.S.tolist()
+                        uids = list(range(len(stakes)))
+                        uid_stake_pairs = [
+                            (uid, stakes[uid]) for uid in uids if uid != self.uid
+                        ]
+                        uid_stake_pairs.sort(key=lambda x: x[1], reverse=True)
+                        top_peers = [uid for uid, _ in uid_stake_pairs[:10]]
+                        self.peers = top_peers
+
+            tplr.logger.info(f"Final peers for gather: {self.peers}")
 
             # Create a task for gathering gradients asynchronously
             gather_task = asyncio.create_task(

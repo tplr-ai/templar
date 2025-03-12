@@ -29,6 +29,8 @@ dependencies = [
     "python-logging-loki-v2",
     "influxdb-client",
     "lm-eval>=0.4.7",
+    "gputil>=1.4.0",
+    "psutil>=7.0.0",
 ]
 
 [project.optional-dependencies]

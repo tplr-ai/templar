@@ -1094,6 +1094,12 @@ wheels = [
 ]
 
 [[package]]
+name = "gputil"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ed/0e/5c61eedde9f6c87713e89d794f01e378cfd9565847d4576fa627d758c554/GPUtil-1.4.0.tar.gz", hash = "sha256:099e52c65e512cdfa8c8763fca67f5a5c2afb63469602d5dcb4d296b3661efb9", size = 5545 }
+
+[[package]]
 name = "h11"
 version = "0.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3499,10 +3505,12 @@ dependencies = [
     { name = "boto3" },
     { name = "bt-decode" },
     { name = "einops" },
+    { name = "gputil" },
     { name = "influxdb" },
     { name = "influxdb-client" },
     { name = "lm-eval" },
     { name = "pip" },
+    { name = "psutil" },
     { name = "pyarrow" },
     { name = "python-dotenv" },
     { name = "python-logging-loki-v2" },
@@ -3537,6 +3545,7 @@ requires-dist = [
     { name = "boto3" },
     { name = "bt-decode" },
     { name = "einops" },
+    { name = "gputil", specifier = ">=1.4.0" },
     { name = "influxdb" },
     { name = "influxdb-client" },
     { name = "ipykernel", marker = "extra == 'dev'" },
@@ -3545,6 +3554,7 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'dev'" },
     { name = "pandas", marker = "extra == 'dev'" },
     { name = "pip" },
+    { name = "psutil", specifier = ">=7.0.0" },
     { name = "pyarrow" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'" },

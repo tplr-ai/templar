@@ -638,6 +638,37 @@ class Validator:
                         self.optimizer.zero_grad()
                         model_own_data_eval.zero_grad()
 
+                        # First validate all gradients before applying any
+                        for n, p in model_own_data_eval.named_parameters():
+                            idxs_key = n + "idxs"
+                            vals_key = n + "vals"
+                            idxs = state_dict.get(idxs_key, None)
+                            vals = state_dict.get(vals_key, None)
+
+                            if idxs is not None and vals is not None:
+                                # Move tensors to device
+                                idxs = idxs.to(self.config.device)
+                                vals = vals.to(self.config.device)
+                                
+                                # Validate indices are within bounds
+                                if self.totalks.get(n) is None:
+                                    tplr.logger.warning(f"Missing totalk for parameter {n}, skipping peer {eval_uid}")
+                                    raise ValueError(f"Invalid gradient data from peer {eval_uid}: Missing totalk for parameter {n}")
+                                
+                                # Check compressed indices are valid
+                                self.comms.check_compressed_indices(
+                                    idxs_key, 
+                                    idxs, 
+                                    self.totalks[n],
+                                    allowed_topk=self.hparams.topk_compression
+                                )
+                                
+                                # Check for NaN or Inf values
+                                if torch.isnan(vals).any() or torch.isinf(vals).any():
+                                    tplr.logger.warning(f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {eval_uid}")
+                                    raise ValueError(f"Invalid gradient data from peer {eval_uid}: NaN or Inf values in {vals_key}")
+
+                        # If all validations pass, apply the gradients
                         for n, p in model_own_data_eval.named_parameters():
                             idxs_key = n + "idxs"
                             vals_key = n + "vals"
@@ -647,7 +678,7 @@ class Validator:
                             if idxs is not None and vals is not None:
                                 idxs = idxs.to(self.config.device)
                                 vals = vals.to(self.config.device)
-
+                                
                                 grad = self.transformer.decode(
                                     self.compressor.decompress(
                                         p.to(self.config.device),
@@ -657,14 +688,37 @@ class Validator:
                                         self.totalks[n],
                                     )
                                 ).to(self.config.device)
-
+                                
+                                # Final safety check on the gradient itself
+                                if torch.isnan(grad).any() or torch.isinf(grad).any():
+                                    tplr.logger.warning(f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}")
+                                    raise ValueError(f"Invalid gradient from peer {eval_uid}: NaN or Inf in decompressed gradient for {n}")
+                                
                                 p.data.sub_(
                                     grad.sign(), alpha=self.scheduler.get_last_lr()[0]
                                 )
                     except Exception as e:
-                        tplr.logger.error(
-                            f"Failed to apply gradient for uid {uid}: {str(e)}"
+                        tplr.logger.error(f"Failed to apply gradient for UID {eval_uid}: {str(e)}")
+                        
+                        # Set score to exactly zero - full penalty for invalid gradients
+                        old_score = self.final_moving_avg_scores[eval_uid].item()
+                        self.final_moving_avg_scores[eval_uid] = 0.0  # Set to zero - no partial credit
+                        tplr.logger.warning(f"Set score of UID {eval_uid} from {old_score:.4f} to 0.0 - invalid gradient data")
+                        
+                        # Include in evaluated UIDs so it gets logged in metrics
+                        self.evaluated_uids.add(eval_uid)
+                        
+                        # Log to WandB
+                        self.wandb.log(
+                            {
+                                f"validator/slash/{eval_uid}/score_before": old_score,
+                                f"validator/slash/{eval_uid}/score_after": 0.0,
+                                f"validator/slash/{eval_uid}/reason": str(e),
+                            },
+                            step=self.global_step,
                         )
+                        
+                        # Skip the rest of processing for this peer
                         continue
 
                     # 10. Compute loss after gradient application

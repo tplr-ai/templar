@@ -387,22 +387,28 @@ class Miner:
             max_delay = 60
             while True:
                 try:
-                    response = self.subtensor.query_module("Timestamp", "Now", block=sync_block)
+                    response = self.subtensor.query_module(
+                        "Timestamp", "Now", block=sync_block
+                    )
                     ts_value = response.value / 1000  # convert milliseconds to seconds
                     break
                 except Exception as e:
                     tplr.logger.error(
-                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries+1}/{max_retries}"
+                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
                     )
                     retries += 1
                     if retries > max_retries:
-                        tplr.logger.error("Exceeded maximum retries for timestamp query.")
+                        tplr.logger.error(
+                            "Exceeded maximum retries for timestamp query."
+                        )
                         raise e
                     time.sleep(delay)
                     delay = min(delay * 2, max_delay)
-                    
+
             time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
-            time_max = time_min + timedelta(seconds=self.hparams.time_window_delta_seconds)
+            time_max = time_min + timedelta(
+                seconds=self.hparams.time_window_delta_seconds
+            )
 
             # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")

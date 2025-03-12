@@ -998,7 +998,10 @@ class Comms(ChainManager):
                             tensor_to_check = tensor.to(device)
                             try:
                                 # Check for NaN or Inf values only - these are never valid
-                                if torch.isnan(tensor_to_check).any() or torch.isinf(tensor_to_check).any():
+                                if (
+                                    torch.isnan(tensor_to_check).any()
+                                    or torch.isinf(tensor_to_check).any()
+                                ):
                                     tplr.logger.warning(
                                         f"Values contain NaN or Inf for parameter {param_name} from UID {uid}, skipping UID."
                                     )

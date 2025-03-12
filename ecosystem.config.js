@@ -12,7 +12,7 @@ module.exports = {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
-            args: `--wallet.name Bistro --wallet.hotkey M2 --device cuda:3 --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}"`
+            args: `--wallet.name Bistro --wallet.hotkey M1 --device cuda:3 --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}" --debug --test`
         },
         {
             name: "TM2",
@@ -22,7 +22,7 @@ module.exports = {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
-            args: `--wallet.name Bistro --wallet.hotkey M1 --device cuda:1 --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}"`
+            args: `--wallet.name Bistro --wallet.hotkey M2 --device cuda:1 --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}" --test`
         },
         {
             name: "TV1",
@@ -32,7 +32,7 @@ module.exports = {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
-            args: `--wallet.name Bistro --wallet.hotkey V1 --device cuda:2 --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}"`
+            args: `--wallet.name Bistro --wallet.hotkey V1 --device cuda:2 --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}" --test`
         }
         // {
         //     name: "TA1",

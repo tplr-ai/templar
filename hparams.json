@@ -27,8 +27,7 @@
     "alpha_f": 0.1,
     "t_max": 20000,
     "validator_offset": 1,
-    "validator_checkpoint_frequency": 250,
-    "miner_checkpoint_frequency": 100,
+    "checkpoint_frequency": 50,
     "topk_peers": 20,
     "max_topk_peers": 15,
     "minimum_peers": 5,
@@ -40,5 +39,5 @@
     "catch_up_batch_size": 5,
     "catch_up_timeout": 300,
     "uids_per_window": 2,
-    "time_window_delta_seconds": 15
+    "time_window_delta_seconds": 20
 }

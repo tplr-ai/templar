@@ -333,7 +333,7 @@ class Comms(ChainManager):
         self,
         key: str,
         bucket: Bucket = None,
-        timeout: int = 5,
+        timeout: int = 10,
         time_min: datetime = None,
         time_max: datetime = None,
     ):
@@ -769,7 +769,6 @@ class Comms(ChainManager):
         uid: str,
         window: int,
         key: str,
-        timeout: int = 10,
         local: bool = True,
         stale_retention: int = 10,
         time_min: datetime = None,
@@ -807,7 +806,6 @@ class Comms(ChainManager):
             loaded_data = await self.s3_get_object(
                 key=filename,
                 bucket=peer_bucket,
-                timeout=timeout,
                 time_min=time_min,
                 time_max=time_max,
             )
@@ -970,7 +968,7 @@ class Comms(ChainManager):
                         skipped_uids.append(uid)
                         continue
 
-                    # ---------- Begin Compressed Indices Check ----------
+                    # ---------- Begin Compressed Indices and Values Check ----------
                     valid_response = True
                     for param_name, tensor in state_dict_resp.items():
                         if param_name.endswith("idxs"):
@@ -995,10 +993,35 @@ class Comms(ChainManager):
                                 )
                                 valid_response = False
                                 break
+                        # Check if values are valid (not NaN, not Inf)
+                        elif param_name.endswith("vals"):
+                            tensor_to_check = tensor.to(device)
+                            try:
+                                # Check for NaN or Inf values only - these are never valid
+                                if (
+                                    torch.isnan(tensor_to_check).any()
+                                    or torch.isinf(tensor_to_check).any()
+                                ):
+                                    tplr.logger.warning(
+                                        f"Values contain NaN or Inf for parameter {param_name} from UID {uid}, skipping UID."
+                                    )
+                                    valid_response = False
+                                    break
+                            except Exception as e:
+                                tplr.logger.warning(
+                                    f"Values check failed for parameter {param_name} from UID {uid}: {e}"
+                                )
+                                valid_response = False
+                                break
+
+                    # If any check failed, skip this UID entirely
                     if not valid_response:
+                        tplr.logger.info(
+                            f"Skipping UID {uid} due to validation failures"
+                        )
                         skipped_uids.append(uid)
                         continue
-                    # ---------- End Compressed Indices Check ----------
+                    # ---------- End Compressed Indices and Values Check ----------
 
                     # Process tensors (with normalization on 'vals' keys).
                     for param_name, tensor in state_dict_resp.items():

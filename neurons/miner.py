@@ -76,6 +76,11 @@ class Miner:
             action="store_true",
             help="Store gathered gradients in R2",
         )
+        parser.add_argument(
+            "--test",
+            action="store_true",
+            help="Test mode - use all peers without filtering",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -334,16 +339,10 @@ class Miner:
             tplr.logger.info("Start accumulating...")
             self.optimizer.zero_grad()
             self.model.zero_grad()
-            total_loss = 0
-            batch_tokens = 0
-            i = 0
+            total_loss = 0.0
+            n_batches = 0
 
-            # Use itertools.cycle to repeatedly loop over the same loader.
-            for batch in itertools.cycle(loader):
-                if self.current_window != step_window:
-                    tplr.logger.info("<Exhausted window during batch processing>")
-                    break
-
+            for i, batch in enumerate(loader):
                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                 labels = input_ids.clone()
                 labels = torch.where(
@@ -357,11 +356,21 @@ class Miner:
 
                 total_loss += outputs.loss.item()
                 outputs.loss.backward()
-                tokens_in_batch = (labels != -100).sum().item()
-                batch_tokens += tokens_in_batch
-                i += 1
-                tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {i}]")
+                n_batches += 1
+                tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {i + 1}]")
+                if self.current_window != step_window:
+                    tplr.logger.info("<Exhausted window>")
+                    break
 
+            # If training completes before the window is exhausted, wait until the window ends.
+            if self.current_window == step_window:
+                tplr.logger.info(
+                    "Training complete; waiting for window to be exhausted..."
+                )
+                while self.current_window == step_window:
+                    await asyncio.sleep(
+                        0.1
+                    )  # TODO: Consider adding a timeout safeguard here.
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - train_start)} Completed training"
             )
@@ -384,16 +393,14 @@ class Miner:
                     processed_state_dict[k] = v
 
             # Launch the put operation as a background task
-            put_task = asyncio.create_task(
-                self.comms.put(
-                    state_dict=processed_state_dict,
-                    uid=str(self.uid),
-                    window=step_window,
-                    key="gradient",
-                    global_step=self.global_step,
-                    local=False,
-                    stale_retention=100,
-                )
+            await self.comms.put(
+                state_dict=processed_state_dict,
+                uid=str(self.uid),
+                window=step_window,
+                key="gradient",
+                global_step=self.global_step,
+                local=False,
+                stale_retention=100,
             )
 
             upload_size = sum(
@@ -405,16 +412,34 @@ class Miner:
                 f"Uploading {upload_size} bytes of own state for UID: {self.uid}"
             )
 
-            tplr.logger.info(
-                f"Stopped accumulating: {i} batches with {i * self.hparams.batch_size * self.hparams.sequence_length} tokens"
-            )
+            tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
 
             sync_block = self.current_window * self.hparams.blocks_per_window
-            time_min = datetime.fromtimestamp(
-                self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
-                / 1000,
-                tz=timezone.utc,
-            )
+            retries = 0
+            delay = 1
+            max_retries = 5
+            max_delay = 60
+            while True:
+                try:
+                    response = self.subtensor.query_module(
+                        "Timestamp", "Now", block=sync_block
+                    )
+                    ts_value = response.value / 1000  # convert milliseconds to seconds
+                    break
+                except Exception as e:
+                    tplr.logger.error(
+                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
+                    )
+                    retries += 1
+                    if retries > max_retries:
+                        tplr.logger.error(
+                            "Exceeded maximum retries for timestamp query."
+                        )
+                        raise e
+                    time.sleep(delay)
+                    delay = min(delay * 2, max_delay)
+
+            time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
             time_max = time_min + timedelta(
                 seconds=self.hparams.time_window_delta_seconds
             )
@@ -422,6 +447,48 @@ class Miner:
             # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
 
+            # Refresh the peers list immediately before gathering
+            tplr.logger.info("Refreshing peers before gather task...")
+
+            if self.config.test:
+                # In test mode, use all UIDs from metagraph except self
+                tplr.logger.info("Test mode active: Using all peers from metagraph.")
+                all_uids = list(range(len(self.metagraph.S)))
+                self.peers = [uid for uid in all_uids if uid != self.uid]
+            else:
+                # Normal operation - update and filter peers
+                self.comms.update_peers_with_buckets()
+                self.peers = self.comms.peers
+
+                # If we still have no peers, try a fallback
+                if not self.peers or len(self.peers) <= 1:  # Only self or empty
+                    tplr.logger.warning(
+                        "Peer list is empty or contains only self after filtering."
+                    )
+
+                    # Fallback to active peers in comms
+                    if hasattr(self.comms, "active_peers") and self.comms.active_peers:
+                        tplr.logger.info(
+                            f"Falling back to {len(self.comms.active_peers)} active peers from comms"
+                        )
+                        self.peers = list(self.comms.active_peers)
+
+                    # If still empty, use top peers by stake
+                    if not self.peers or len(self.peers) <= 1:
+                        tplr.logger.info("Falling back to top peers by stake")
+                        # Get top 10 peers by stake (excluding self)
+                        stakes = self.metagraph.S.tolist()
+                        uids = list(range(len(stakes)))
+                        uid_stake_pairs = [
+                            (uid, stakes[uid]) for uid in uids if uid != self.uid
+                        ]
+                        uid_stake_pairs.sort(key=lambda x: x[1], reverse=True)
+                        top_peers = [uid for uid, _ in uid_stake_pairs[:10]]
+                        self.peers = top_peers
+
+            tplr.logger.info(f"Final peers for gather: {self.peers}")
+
+            # Create a task for gathering gradients asynchronously
             gather_task = asyncio.create_task(
                 self.comms.gather(
                     my_uid=self.uid,
@@ -438,23 +505,61 @@ class Miner:
                 )
             )
 
+            # Await the task to get the result
+            gather_result = await gather_task
+
             # 5. Calculate and log metrics
             duration = time.time() - train_start
             self.batch_times.append(duration)
-            self.total_tokens_processed += batch_tokens
+            self.total_tokens_processed += n_batches
 
             grad_norms = [
                 p.grad.norm().item()
                 for p in self.model.parameters()
                 if p.grad is not None
             ]
+            weight_norms = [p.norm().item() for p in self.model.parameters()]
+            momentum_norms = [m.norm().item() for m in self.momentum.values()]
+            self.wandb.log(
+                {
+                    # Training metrics
+                    "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
+                    "miner/tokens_per_sec": n_batches / duration,
+                    "miner/batch_duration": duration,
+                    "miner/total_tokens": self.total_tokens_processed,
+                    "miner/batch_tokens": n_batches,
+                    "miner/global_step": self.global_step,
+                    # Resource metrics
+                    "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
+                    / 1024**2,  # MB
+                    "miner/gpu_memory_cached": torch.cuda.memory_reserved()
+                    / 1024**2,  # MB
+                    # Network metrics
+                    "miner/active_peers": len(self.peers),
+                    "miner/effective_batch_size": len(self.peers)
+                    * self.hparams.batch_size,
+                    # Optimization metrics
+                    "miner/learning_rate": self.scheduler.get_last_lr()[0],
+                    # Gradient statistics as points
+                    "miner/mean_grad_norm": (
+                        sum(grad_norms) / len(grad_norms) if grad_norms else 0
+                    ),
+                    "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
+                    "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
+                    "miner/grad_norm_std": (
+                        torch.tensor(grad_norms).std().item() if grad_norms else 0
+                    ),
+                    "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
+                    "miner/mean_momentum_norm": sum(momentum_norms)
+                    / len(momentum_norms),
+                },
+                step=self.global_step,
+            )
 
             # ---------------------------------------------------------------------
-            # 6. Await both gather and put tasks concurrently
+            # 6. Await both gather
             # ---------------------------------------------------------------------
 
-            tplr.logger.info("Waiting on put task...")
-            await put_task
             tplr.logger.info("Put task completed!")
 
             tplr.logger.info("Waiting on gather task...")
@@ -474,14 +579,14 @@ class Miner:
                 "active_peers": len(self.peers),
                 "effective_batch_size": len(self.peers) * self.hparams.batch_size,
                 "learning_rate": self.scheduler.get_last_lr()[0],
-                "mean_grad_norm": sum(grad_norms) / len(grad_norms)
-                if grad_norms
-                else 0,
+                "mean_grad_norm": (
+                    sum(grad_norms) / len(grad_norms) if grad_norms else 0
+                ),
                 "max_grad_norm": max(grad_norms) if grad_norms else 0,
                 "min_grad_norm": min(grad_norms) if grad_norms else 0,
-                "gather_success_rate": gather_result.success_rate * 100
-                if gather_result
-                else 0,
+                "gather_success_rate": (
+                    gather_result.success_rate * 100 if gather_result else 0
+                ),
                 "gather_peers": json.dumps(self.peers),
                 "skipped_peers": json.dumps(
                     gather_result.skipped_uids if gather_result else []
@@ -551,17 +656,78 @@ class Miner:
                 f"{tplr.P(step_window, tplr.T() - window_start)} Completed window iteration"
             )
 
-            self.metrics_logger.log(
-                measurement="templar_metrics_v2",
-                tags={"uid": self.uid, "window": step_window},
-                fields={
-                    "window_total": tplr.T() - window_start,
-                    "peer_update": tplr.T() - peer_start,
-                    "data_loading": tplr.T() - data_start,
-                    "training_time": tplr.T() - train_start,
-                    "compression_time": tplr.T() - compress_start,
-                    "gather_time": tplr.T() - gather_start,
-                    "model_update_time": tplr.T() - update_start,
+            # Add debug data including successfully gathered peers
+            debug_dict = {}
+
+            # Add model parameters debug info
+            for name, param in self.model.named_parameters():
+                if (
+                    param is not None and param.numel() >= 2
+                ):  # Check if tensor has at least 2 elements
+                    debug_dict[name + "_debug"] = (
+                        param.flatten()[:2].detach().cpu().tolist()
+                    )
+
+            # Add successful peers information
+            if gather_result is not None:
+                debug_dict["successful_peers"] = sorted(
+                    list(set(self.peers) - set(gather_result.skipped_uids))
+                )
+                debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
+
+            # Store the debug dictionary
+            asyncio.create_task(
+                self.comms.put(
+                    state_dict=debug_dict,
+                    uid=str(self.uid),
+                    window=step_window,
+                    key="debug",
+                    local=False,
+                )
+            )
+            tplr.logger.info(f"Stored debug values for window {self.current_window}")
+            # Log total window time and metrics
+            tplr.logger.info(
+                f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"
+            )
+
+            self.wandb.log(
+                {
+                    # Add timing metrics
+                    "miner/timing/window_total": tplr.T() - window_start,
+                    "miner/timing/peer_update": tplr.T() - peer_start,
+                    "miner/timing/data_loading": tplr.T() - data_start,
+                    "miner/timing/training": tplr.T() - train_start,
+                    "miner/timing/compression": tplr.T() - compress_start,
+                    "miner/timing/gather": tplr.T() - gather_start,
+                    "miner/timing/model_update": tplr.T() - update_start,
+                    # Existing metrics
+                    "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
+                    "miner/tokens_per_sec": n_batches / duration,
+                    "miner/total_tokens": self.total_tokens_processed,
+                    "miner/batch_tokens": n_batches,
+                    "miner/global_step": self.global_step,
+                    "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
+                    / 1024**2,  # MB
+                    "miner/gpu_memory_cached": torch.cuda.memory_reserved()
+                    / 1024**2,  # MB
+                    "miner/active_peers": len(self.peers),
+                    "miner/effective_batch_size": len(self.peers)
+                    * self.hparams.batch_size,
+                    "miner/learning_rate": self.scheduler.get_last_lr()[0],
+                    "miner/mean_grad_norm": (
+                        sum(grad_norms) / len(grad_norms) if grad_norms else 0
+                    ),
+                    "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
+                    "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
+                    "miner/grad_norm_std": (
+                        torch.tensor(grad_norms).std().item() if grad_norms else 0
+                    ),
+                    "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
+                    "miner/mean_momentum_norm": sum(momentum_norms)
+                    / len(momentum_norms),
+                    # Added gather success rate in %
+                    "miner/gather/success_rate": gather_result.success_rate * 100,
                 },
             )
 

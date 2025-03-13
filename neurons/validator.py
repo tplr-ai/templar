@@ -445,13 +445,11 @@ class Validator:
                 all_uids = list(range(len(self.metagraph.S)))
                 self.peers = [uid for uid in all_uids if uid != self.uid]
 
-                # For evaluation, also use all peers but track separately
-                self.eval_peers = {uid: 0 for uid in self.peers}
-
-                # Initialize evaluation candidate counters for new peers
+                # For evaluation, also use all peers but track separately with equal initial weight
+                self.eval_peers = {uid: 1 for uid in self.peers}
                 for uid in self.peers:
                     if uid not in self.eval_candidates_counter:
-                        self.eval_candidates_counter[uid] = 0
+                        self.eval_candidates_counter[uid] = 1
             else:
                 # Normal operation - update and filter peers
                 self.comms.update_peers_with_buckets()
@@ -1052,15 +1050,20 @@ class Validator:
                         max(0, self.gradient_scores[eval_uid])
                         * self.normalised_binary_moving_averages[eval_uid]
                     )
-                    tplr.logger.debug(f"Computed Final Score for UID {eval_uid}: {final_score}")
-                    
+                    tplr.logger.debug(
+                        f"Computed Final Score for UID {eval_uid}: {final_score}"
+                    )
+
                     # Sliding window update for the final moving average score
                     self.final_score_history[eval_uid].append(final_score)
-                    if len(self.final_score_history[eval_uid]) > self.hparams.moving_average_window:
+                    if (
+                        len(self.final_score_history[eval_uid])
+                        > self.hparams.moving_average_window
+                    ):
                         self.final_score_history[eval_uid].pop(0)
-                    self.final_moving_avg_scores[eval_uid] = (
-                        sum(self.final_score_history[eval_uid]) / len(self.final_score_history[eval_uid])
-                    )
+                    self.final_moving_avg_scores[eval_uid] = sum(
+                        self.final_score_history[eval_uid]
+                    ) / len(self.final_score_history[eval_uid])
                     tplr.logger.debug(
                         f"Updated Final Moving Average Score for UID {eval_uid}: {self.final_moving_avg_scores[eval_uid]}"
                     )

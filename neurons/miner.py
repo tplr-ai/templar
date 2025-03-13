@@ -24,8 +24,6 @@ import random
 import asyncio
 import argparse
 import threading
-import os
-import itertools
 import json  # Add this import at the top of the file
 
 # Third party

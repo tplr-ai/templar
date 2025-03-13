@@ -16,7 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 import os
-from typing import Any, Dict, Final, List
+from typing import Any, Dict, Final
 from influxdb_client.client.influxdb_client import InfluxDBClient
 from influxdb_client.client.write.point import Point
 from influxdb_client.domain.write_precision import WritePrecision

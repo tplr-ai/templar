@@ -51,7 +51,6 @@ import bittensor as bt
 
 from typing import Optional, Tuple
 from transformers.models.llama import LlamaForCausalLM
-from tplr import __version__
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"

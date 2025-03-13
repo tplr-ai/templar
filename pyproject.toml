@@ -9,7 +9,7 @@ description = "Incentivised Internet-Wide Training"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "bittensor==9.0.3",
+    "bittensor==9.0.4",
     "bt-decode",
     "torch",
     "boto3",
@@ -28,8 +28,7 @@ dependencies = [
     "influxdb",
     "python-logging-loki-v2",
     "influxdb-client",
-    "lm-eval>=0.4.7",
-    "gputil>=1.4.0",
+    "lm-eval>=0.4.8",
     "psutil>=7.0.0",
 ]
 
@@ -45,8 +44,7 @@ dev = [
     "matplotlib",
     "seaborn",
     "ruff",
-    "pytest-xdist"
-
+    "pytest-xdist",
 ]
 
 [tool.pytest.ini_options]
@@ -54,9 +52,7 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 addopts = "-v -s --capture=no --log-cli-level=INFO"
 asyncio_mode = "auto"
-markers = [
-    "asyncio: mark test as async",
-]
+markers = ["asyncio: mark test as async"]
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::PendingDeprecationWarning",
@@ -83,5 +79,5 @@ exclude = [
     "downloads",
     "eggs",
     ".eggs",
-    "influxdb_data"
+    "influxdb_data",
 ]

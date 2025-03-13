@@ -15,6 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import os
 from typing import Any, Dict, Final, List
 from influxdb_client.client.influxdb_client import InfluxDBClient
 from influxdb_client.client.write.point import Point
@@ -23,7 +24,7 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 import time
 import logging
 import psutil
-import GPUtil
+import torch
 from threading import Lock
 import statistics
 from . import __version__
@@ -37,6 +38,16 @@ RUNTIME_ID: Final[str] = str(uuid.uuid4())
 
 CACHED_GPU_METRICS_INTERVAL: Final[int] = 2
 
+DEFAULT_HOST: Final[str] = (
+    "pliftu8n85-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws"
+)
+DEFAULT_PORT: Final[int] = 8086
+DEFAULT_DATABASE: Final[str] = "tplr"
+DEFAULT_ORG: Final[str] = "tplr"
+FALLBACK_INFLUXDB_TOKEN: Final[str] = (
+    "lTRclLtRXOJWGOB-vr1mhtp5SholImgBH705pMgK1_0sCzTzAXivhd4gPwJhRoK6HLRvG8cxjhOTEy1hlm4D3Q=="
+)
+
 
 class MetricsLogger:
     """
@@ -46,15 +57,16 @@ class MetricsLogger:
 
     def __init__(
         self,
-        host: str = "localhost",
-        port: int = 8086,
-        database: str = "tplr_metrics",
-        token: str | None = None,
-        org: str = "templar",
+        host: str = DEFAULT_HOST,
+        port: int = DEFAULT_PORT,
+        database: str = DEFAULT_DATABASE,
+        token: str | None = os.environ.get("INFLUXDB_TOKEN"),
+        org: str = DEFAULT_ORG,
         prefix: str = "",
         uid: str | None = None,
         version: str = __version__,
         runtime_id: str = RUNTIME_ID,
+        role: str = "",
         config: BT_Config | None = None,
         group: str = "",
         job_type: str = "",
@@ -72,13 +84,15 @@ class MetricsLogger:
             uid (str, optional): Unique identifier for the training run. Defaults to None.
             version (str, optional): Version of the templar library. Defaults to __version__.
             runtime_id (str, optional): Unique identifier for the runtime. Defaults to RUNTIME_ID.
+            role (str, optional): Role of the node (e.g., "miner", "validator", "evaluator"). Defaults to "".
             config (BT_Config, optional): Bittensor configuration object. Defaults to None.
             group (str, optional): Group name for the run. Defaults to "".
             job_type (str, optional): Job type for the run. Defaults to "".
         """
 
         if not token or not token.strip():
-            raise ValueError("InfluxDB token must be provided and non-empty")
+            token = FALLBACK_INFLUXDB_TOKEN
+            logger.warning("INFLUXDB_TOKEN is missing or empty; using fallback token.")
 
         url = f"https://{host}:{port}"
         self.client = InfluxDBClient(url=url, token=token, org=org)
@@ -90,6 +104,7 @@ class MetricsLogger:
         self.version = version
         self.runtime_id = runtime_id
         self.config = config
+        self.role = role
         self.group = group
         self.job_type = job_type
         self.lock = Lock()
@@ -175,32 +190,14 @@ class MetricsLogger:
         for key, value in system_metrics.items():
             fields[f"sys_{key}"] = value
 
-    def _get_cached_gpu_metrics(self) -> List[Dict[str, Any]]:
-        """Get cached GPU metrics
-        Cache GPU metrics for `CACHED_GPU_METRICS_INTERVAL` seconds to improve
-        performance during rapid logging.
-        """
-        current_time = time.time()
-        if (
-            not hasattr(self, "_gpu_metrics_cache")
-            or not hasattr(self, "_gpu_metrics_last_update")
-            or current_time - self._gpu_metrics_last_update
-            >= CACHED_GPU_METRICS_INTERVAL
-        ):
-            self._gpu_metrics_cache = get_gpu_metrics()
-            self._gpu_metrics_last_update = current_time
-
-        return self._gpu_metrics_cache
-
     def _add_gpu_metrics(self, tags, fields):
         """Add GPU metrics to fields and tags"""
-        gpu_metrics_list = self._get_cached_gpu_metrics()
-        for i, gpu_metrics in enumerate(gpu_metrics_list):
-            for key, value in gpu_metrics.items():
-                if key in ("gpu_id", "gpu_name"):
-                    tags[key] = value
-                else:
-                    fields[f"gpu{i}_{key}"] = value
+        gpu_metrics = get_gpu_metrics()
+        for key, value in gpu_metrics.items():
+            if key in ("gpu_id", "gpu_name"):
+                tags[key] = value
+            else:
+                fields[key] = value
 
     def _add_tags(self, point, tags):
         """Add custom tags to point"""
@@ -215,6 +212,7 @@ class MetricsLogger:
             "prefix": self.prefix,
             "version": self.version,
             "runtime_id": self.runtime_id,
+            "role": self.role,
             "group": self.group,
             "job_type": self.job_type,
         }
@@ -242,38 +240,25 @@ class MetricsLogger:
         return point
 
 
-def get_gpu_metrics() -> List[Dict[str, Any]]:
+def get_gpu_metrics() -> Dict[str, Any]:
     """
-    Retrieves real-time GPU utilization metrics for all available GPUs.
+    Retrieves real-time GPU utilization metrics.
 
     Returns:
-    List[Dict[str, Any]]: List of GPU utilization metrics for each GPU.
+    Dict[str, Any]: GPU utilization metrics for each GPU.
     """
-    gpus = GPUtil.getGPUs()
-    if not gpus:
-        return [
-            {
-                "gpu_usage": 0.0,
-                "gpu_mem_used": 0.0,
-                "gpu_mem_total": 0.0,
-                "gpu_name": "",
-                "gpu_id": 0,
-            }
-        ]
+    current_device = torch.cuda.current_device()
 
-    result = []
-    for i, gpu in enumerate(gpus):
-        result.append(
-            {
-                "gpu_id": i,
-                "gpu_usage": gpu.load * 100,
-                "gpu_mem_used": gpu.memoryUsed,
-                "gpu_mem_total": gpu.memoryTotal,
-                "gpu_name": gpu.name,
-            }
-        )
-
-    return result
+    return {
+        "gpu_mem_segments": torch.cuda.memory_stats(current_device).get(
+            "segment.all.current", 0
+        ),
+        "gpu_mem_allocated_mb": torch.cuda.memory_allocated(current_device) / 1024**2,
+        "gpu_mem_cached_mb": torch.cuda.memory_reserved(current_device) / 1024**2,
+        "gpu_mem_total_mb": torch.cuda.max_memory_allocated(current_device) / 1024**2,
+        "gpu_name": f"CUDA:{current_device}",
+        "gpu_id": current_device,
+    }
 
 
 def get_system_metrics() -> Dict[str, Any]:

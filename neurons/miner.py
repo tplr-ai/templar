@@ -200,27 +200,11 @@ class Miner:
         self.total_tokens_processed = 0
         self.batch_times = []  # For tracking processing speed
 
-        # Initialize InfluxDB metrics logger
-        token = os.environ.get("INFLUXDB_TOKEN", "").strip()
-        if not token:
-            # Fallback in case the environment variable is missing or empty.
-            token = "lTRclLtRXOJWGOB-vr1mhtp5SholImgBH705pMgK1_0sCzTzAXivhd4gPwJhRoK6HLRvG8cxjhOTEy1hlm4D3Q=="
-            tplr.logger.warning(
-                "INFLUXDB_TOKEN is missing or empty; using fallback token."
-            )
-
         self.metrics_logger = tplr.metrics.MetricsLogger(
-            host="pliftu8n85-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws",
-            port=8086,
-            database="tplr",
-            token=token,
-            org="tplr",
-        )
-        # Initialize WandB run for miner metrics logging
-        self.wandb_run = tplr.wandb.initialize_wandb(
-            run_prefix="M",
+            prefix="M",
             uid=self.uid,
-            config=self.config,
+            config=self.config,  # type: ignore
+            role="miner",
             group="miner",
             job_type="training",
         )
@@ -234,7 +218,8 @@ class Miner:
             args=(self.loop,),
             daemon=True,
         )
-        self.listener.start()  #
+        self.listener.start()
+
         # Load Peers
         if not self.config.peers:
             self.peers = self.comms.peers
@@ -520,41 +505,6 @@ class Miner:
             ]
             weight_norms = [p.norm().item() for p in self.model.parameters()]
             momentum_norms = [m.norm().item() for m in self.momentum.values()]
-            self.wandb.log(
-                {
-                    # Training metrics
-                    "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
-                    "miner/tokens_per_sec": n_batches / duration,
-                    "miner/batch_duration": duration,
-                    "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": n_batches,
-                    "miner/global_step": self.global_step,
-                    # Resource metrics
-                    "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                    / 1024**2,  # MB
-                    "miner/gpu_memory_cached": torch.cuda.memory_reserved()
-                    / 1024**2,  # MB
-                    # Network metrics
-                    "miner/active_peers": len(self.peers),
-                    "miner/effective_batch_size": len(self.peers)
-                    * self.hparams.batch_size,
-                    # Optimization metrics
-                    "miner/learning_rate": self.scheduler.get_last_lr()[0],
-                    # Gradient statistics as points
-                    "miner/mean_grad_norm": (
-                        sum(grad_norms) / len(grad_norms) if grad_norms else 0
-                    ),
-                    "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
-                    "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                    "miner/grad_norm_std": (
-                        torch.tensor(grad_norms).std().item() if grad_norms else 0
-                    ),
-                    "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
-                    "miner/mean_momentum_norm": sum(momentum_norms)
-                    / len(momentum_norms),
-                },
-                step=self.global_step,
-            )
 
             # ---------------------------------------------------------------------
             # 6. Await both gather
@@ -565,46 +515,6 @@ class Miner:
             tplr.logger.info("Waiting on gather task...")
             gather_result = await gather_task
             tplr.logger.info("Gather task completed!")
-
-            training_metrics = {
-                "loss": total_loss / i,
-                "tokens_per_sec": (
-                    i * self.hparams.batch_size * self.hparams.sequence_length
-                )
-                / duration,
-                "batch_duration": duration,
-                "total_tokens": self.total_tokens_processed,
-                "gpu_mem_allocated_mb": torch.cuda.memory_allocated() / 1024**2,
-                "gpu_mem_cached_mb": torch.cuda.memory_reserved() / 1024**2,
-                "active_peers": len(self.peers),
-                "effective_batch_size": len(self.peers) * self.hparams.batch_size,
-                "learning_rate": self.scheduler.get_last_lr()[0],
-                "mean_grad_norm": (
-                    sum(grad_norms) / len(grad_norms) if grad_norms else 0
-                ),
-                "max_grad_norm": max(grad_norms) if grad_norms else 0,
-                "min_grad_norm": min(grad_norms) if grad_norms else 0,
-                "gather_success_rate": (
-                    gather_result.success_rate * 100 if gather_result else 0
-                ),
-                "gather_peers": json.dumps(self.peers),
-                "skipped_peers": json.dumps(
-                    gather_result.skipped_uids if gather_result else []
-                ),
-            }
-
-            self.metrics_logger.log(
-                measurement="templar_metrics_v2",
-                tags={
-                    "role": "miner",
-                    "uid": self.uid,
-                    "window": self.current_window,
-                    "global_step": self.global_step,
-                },
-                fields=training_metrics,
-            )
-            # Also log metrics to WandB
-            self.wandb_run.log(training_metrics, step=self.global_step)
 
             if gather_result is None:
                 tplr.logger.error(
@@ -691,43 +601,58 @@ class Miner:
                 f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"
             )
 
-            self.wandb.log(
-                {
-                    # Add timing metrics
-                    "miner/timing/window_total": tplr.T() - window_start,
-                    "miner/timing/peer_update": tplr.T() - peer_start,
-                    "miner/timing/data_loading": tplr.T() - data_start,
-                    "miner/timing/training": tplr.T() - train_start,
-                    "miner/timing/compression": tplr.T() - compress_start,
-                    "miner/timing/gather": tplr.T() - gather_start,
-                    "miner/timing/model_update": tplr.T() - update_start,
-                    # Existing metrics
-                    "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
-                    "miner/tokens_per_sec": n_batches / duration,
-                    "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": n_batches,
-                    "miner/global_step": self.global_step,
-                    "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                    / 1024**2,  # MB
-                    "miner/gpu_memory_cached": torch.cuda.memory_reserved()
-                    / 1024**2,  # MB
-                    "miner/active_peers": len(self.peers),
-                    "miner/effective_batch_size": len(self.peers)
-                    * self.hparams.batch_size,
-                    "miner/learning_rate": self.scheduler.get_last_lr()[0],
-                    "miner/mean_grad_norm": (
+            # Calculate any additional metrics needed
+            grad_norm_std = torch.tensor(grad_norms).std().item() if grad_norms else 0
+            mean_weight_norm = (
+                sum(weight_norms) / len(weight_norms) if weight_norms else 0
+            )
+            mean_momentum_norm = (
+                sum(momentum_norms) / len(momentum_norms) if momentum_norms else 0
+            )
+
+            # Log all metrics with the metrics_logger
+            self.metrics_logger.log(
+                measurement="training_step",
+                tags={
+                    "window": self.current_window,
+                    "global_step": self.global_step,
+                },
+                fields={
+                    "loss": total_loss / n_batches if n_batches > 0 else 0,
+                    "tokens_per_sec": (
+                        n_batches
+                        * self.hparams.batch_size
+                        * self.hparams.sequence_length
+                    )
+                    / duration,
+                    "batch_tokens": n_batches,
+                    "grad_norm_std": grad_norm_std,
+                    "mean_weight_norm": mean_weight_norm,
+                    "mean_momentum_norm": mean_momentum_norm,
+                    "batch_duration": duration,
+                    "total_tokens": self.total_tokens_processed,
+                    "active_peers": len(self.peers),
+                    "effective_batch_size": len(self.peers) * self.hparams.batch_size,
+                    "learning_rate": self.scheduler.get_last_lr()[0],
+                    "mean_grad_norm": (
                         sum(grad_norms) / len(grad_norms) if grad_norms else 0
                     ),
-                    "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
-                    "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                    "miner/grad_norm_std": (
-                        torch.tensor(grad_norms).std().item() if grad_norms else 0
+                    "gather_success_rate": (
+                        gather_result.success_rate * 100 if gather_result else 0
                     ),
-                    "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
-                    "miner/mean_momentum_norm": sum(momentum_norms)
-                    / len(momentum_norms),
-                    # Added gather success rate in %
-                    "miner/gather/success_rate": gather_result.success_rate * 100,
+                    "max_grad_norm": max(grad_norms) if grad_norms else 0,
+                    "min_grad_norm": min(grad_norms) if grad_norms else 0,
+                    "gather_peers": json.dumps(self.peers),
+                    "skipped_peers": json.dumps(
+                        gather_result.skipped_uids if gather_result else []
+                    ),
+                    "window_total_time": tplr.T() - window_start,
+                    "peer_update_time": tplr.T() - peer_start,
+                    "data_loading_time": tplr.T() - data_start,
+                    "training_time": tplr.T() - train_start,
+                    "compression_time": tplr.T() - compress_start,
+                    "gather_time": tplr.T() - gather_start,
+                    "model_update_time": tplr.T() - update_start,
                 },
             )
 

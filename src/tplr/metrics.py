@@ -15,7 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-from typing import Any, Dict, List
+from typing import Any, Dict, Final, List
 from influxdb_client.client.influxdb_client import InfluxDBClient
 from influxdb_client.client.write.point import Point
 from influxdb_client.domain.write_precision import WritePrecision
@@ -33,7 +33,9 @@ from bittensor import Config as BT_Config
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-RUNTIME_ID = str(uuid.uuid4())
+RUNTIME_ID: Final[str] = str(uuid.uuid4())
+
+CACHED_GPU_METRICS_INTERVAL: Final[int] = 2
 
 
 class MetricsLogger:
@@ -173,9 +175,26 @@ class MetricsLogger:
         for key, value in system_metrics.items():
             fields[f"sys_{key}"] = value
 
+    def _get_cached_gpu_metrics(self) -> List[Dict[str, Any]]:
+        """Get cached GPU metrics
+        Cache GPU metrics for `CACHED_GPU_METRICS_INTERVAL` seconds to improve
+        performance during rapid logging.
+        """
+        current_time = time.time()
+        if (
+            not hasattr(self, "_gpu_metrics_cache")
+            or not hasattr(self, "_gpu_metrics_last_update")
+            or current_time - self._gpu_metrics_last_update
+            >= CACHED_GPU_METRICS_INTERVAL
+        ):
+            self._gpu_metrics_cache = get_gpu_metrics()
+            self._gpu_metrics_last_update = current_time
+
+        return self._gpu_metrics_cache
+
     def _add_gpu_metrics(self, tags, fields):
         """Add GPU metrics to fields and tags"""
-        gpu_metrics_list = get_gpu_metrics()
+        gpu_metrics_list = self._get_cached_gpu_metrics()
         for i, gpu_metrics in enumerate(gpu_metrics_list):
             for key, value in gpu_metrics.items():
                 if key in ("gpu_id", "gpu_name"):

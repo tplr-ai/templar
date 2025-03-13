@@ -3,7 +3,7 @@
 This script implements an autonomous service that continuously evaluates the latest
 model checkpoints using standardized benchmark tasks. It runs on a fixed interval
 (default 10 minutes), downloads the latest model checkpoint, executes evaluations,
-and logs results to both InfluxDB and Weights & Biases.
+and logs results to InfluxDB.
 
 Key Features:
     - Automatic checkpoint detection and evaluation
@@ -15,16 +15,14 @@ Key Features:
 Environment Requirements:
     - Registered Bittensor wallet
     - InfluxDB API access
-    - Weights & Biases API key
     - R2 Dataset access credentials
 
 Required Environment Variables:
-    WANDB_API_KEY: Weights & Biases API key (see miner documentation)
     R2_DATASET_ACCOUNT_ID: R2 dataset account identifier (see miner documentation)
     R2_DATASET_BUCKET_NAME: R2 storage bucket name (see miner documentation)
     R2_DATASET_READ_ACCESS_KEY_ID: R2 read access key (see miner documentation)
     R2_DATASET_READ_SECRET_ACCESS_KEY: R2 secret access key (see miner documentation)
-    INFLUXDB_TOKEN: InfluxDB API token (this is new)
+    INFLUXDB_TOKEN: InfluxDB API token (optional, uses default if not provided)
 
 Usage Examples:
     Basic run:
@@ -37,10 +35,8 @@ Usage Examples:
             --tasks "arc_challenge,winogrande" \\
             --eval_interval 300
 
-Note:
-    WandB integration is temporary and scheduled for deprecation.
-    For additional environment setup, refer to the miner documentation:
-    https://github.com/tplr-ai/templar/blob/main/docs/miner.md
+For additional environment setup, refer to the miner documentation:
+https://github.com/tplr-ai/templar/blob/main/docs/miner.md
 """
 
 import os
@@ -49,7 +45,6 @@ import shutil
 import torch
 import asyncio
 import argparse
-import wandb
 import time
 import tplr
 import bittensor as bt
@@ -72,12 +67,7 @@ def config() -> bt.Config:
         description="Evaluator script. Use --help to display options.",
         add_help=True,
     )
-    parser.add_argument(
-        "--project",
-        type=str,
-        default="templar",
-        help="Optional wandb project name",
-    )
+    # Removed wandb project argument
     parser.add_argument(
         "--netuid",
         type=int,
@@ -199,19 +189,12 @@ class Evaluator:
         self.stop_event = asyncio.Event()
         self.last_block_number = 0
 
-        # Metrics logging - see neurons/validator.py & miner.py as it needs to be the same
+        # Initialize metrics logger with consistent patterns
         self.metrics_logger = tplr.metrics.MetricsLogger(
-            host="pliftu8n85-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws",
-            port=8086,
-            database="tplr",
-            token=os.environ.get("INFLUXDB_TOKEN"),
-            org="tplr",
-        )
-        # Initialize WandB run for miner metrics logging
-        self.wandb_run = tplr.wandb.initialize_wandb(
-            run_prefix="E",
-            uid=self.uid,
+            prefix="E",
+            uid=str(self.uid),
             config=self.config,
+            role="evaluator",
             group="evaluations",
             job_type="eval",
         )
@@ -347,24 +330,16 @@ class Evaluator:
         runtime = time.time() - start_time
 
         self.metrics_logger.log(
-            measurement="templar_benchmark_metrics",
+            measurement="benchmark_metrics",
             tags={
-                "role": "evaluator",
                 "global_step": global_step,
                 "window": checkpoint_window,
                 "block": block_number,
-                "version": __version__,
             },
             fields={
                 "lm_eval_exit_code": float(exit_code),
                 "benchmark_runtime_s": runtime,
             },
-        )
-        wandb.log(
-            {
-                "evaluator/lm_eval_exit_code": exit_code,
-                "evaluator/benchmark_runtime_s": runtime,
-            }
         )
         if exit_code != 0:
             tplr.logger.error("Benchmarking command failed")
@@ -387,48 +362,28 @@ class Evaluator:
             if (metric_value := task_results.get(metric_name)) is not None:
                 tplr.logger.info(f"Benchmark for {task_name}: {metric_value}")
                 self.metrics_logger.log(
-                    measurement="templar_benchmark",
+                    measurement="benchmark_task",
                     tags={
-                        "role": "evaluator",
                         "task": task_name,
                         "global_step": global_step,
                         "block": block_number,
                         "window": checkpoint_window,
-                        "version": __version__,
                     },
                     fields={"score": float(metric_value)},
                 )
-                wandb.log(
-                    {
-                        "task": task_name,
-                        "global_step": global_step,
-                        "block": block_number,
-                        "score": float(metric_value),
-                    }
-                )
 
-        overall_benchmark = {
-            "num_tasks": len(results["results"]),
-            "global_step": global_step,
-            "block_number": block_number,
-        }
         self.metrics_logger.log(
-            measurement="templar_benchmark_summary",
+            measurement="benchmark_summary",
             tags={
-                "role": "evaluator",
                 "global_step": global_step,
                 "window": checkpoint_window,
                 "block": block_number,
-                "version": __version__,
             },
-            fields=overall_benchmark,
-        )
-        wandb.log(
-            {
-                "overall_num_tasks": overall_benchmark["num_tasks"],
-                "overall_global_step": overall_benchmark["global_step"],
-                "overall_block_number": overall_benchmark["block_number"],
-            }
+            fields={
+                "num_tasks": len(results["results"]),
+                "global_step": global_step,
+                "block_number": block_number,
+            },
         )
 
         shutil.rmtree(MODEL_PATH)

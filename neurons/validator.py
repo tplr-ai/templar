@@ -568,14 +568,22 @@ class Validator:
                             f"Missing pages info metadata from miner UID {eval_uid}"
                         )
 
-                    # Load pages_own exactly once from the dataset loader
-                    local_pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    # Load local pages exactly once from the dataset loader with retry handling.
+                    local_pages = await retry_call(
+                        tplr.r2_dataset.R2DatasetLoader.next_pages,
                         offset=self.sync_window,
                         n_pages=self.hparams.pages_per_window,
                         seed=eval_uid,
+                        attempts=3,
+                        delay=1,
+                        context=f"local pages for UID {eval_uid}",
+                        **{},
                     )
-
-                    # Verify the pages_info from the miner matches our locally loaded pages.
+                    if local_pages is None:
+                        tplr.logger.error(
+                            f"Failed to load local pages for UID {eval_uid}. Skipping evaluation for this peer."
+                        )
+                        continue
                     if miner_pages is not None:
                         if local_pages != miner_pages:
                             tplr.logger.warning(
@@ -591,12 +599,22 @@ class Validator:
                         )
                     data_start = tplr.T()
                     # Create the evaluation loader using the locally loaded pages.
-                    loader_own = await tplr.r2_dataset.R2DatasetLoader.create(
+                    loader_own = await retry_call(
+                        tplr.r2_dataset.R2DatasetLoader.create,
                         batch_size=self.hparams.batch_size,
                         sequence_length=self.hparams.sequence_length,
                         pages_info=local_pages,
                         tokenizer=self.tokenizer,
+                        attempts=3,
+                        delay=1,
+                        context=f"own loader for UID {eval_uid}",
+                        **{},
                     )
+                    if loader_own is None:
+                        tplr.logger.error(
+                            f"Failed to create loader for own data for UID {eval_uid}. Skipping evaluation."
+                        )
+                        continue
                     tplr.logger.info(
                         f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}"
                     )
@@ -819,17 +837,38 @@ class Validator:
                     # 7. Load evaluation data from random page
                     model_random_data_eval = copy.deepcopy(self.model)
                     data_start = tplr.T()
-                    pages_random = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    pages_random = await retry_call(
+                        tplr.r2_dataset.R2DatasetLoader.next_pages,
                         offset=self.sync_window,
                         n_pages=self.hparams.pages_per_window,
                         seed=random.randint(0, 10000),
+                        attempts=3,
+                        delay=1,
+                        context="random pages",
+                        **{},
                     )
-                    loader_random = await tplr.r2_dataset.R2DatasetLoader.create(
+                    if pages_random is None:
+                        tplr.logger.error(
+                            "Failed to load random pages. Skipping evaluation."
+                        )
+                        continue
+
+                    loader_random = await retry_call(
+                        tplr.r2_dataset.R2DatasetLoader.create,
                         batch_size=self.hparams.batch_size,
                         sequence_length=self.hparams.sequence_length,
                         pages_info=pages_random,
                         tokenizer=self.tokenizer,
+                        attempts=3,
+                        delay=1,
+                        context="random loader",
+                        **{},
                     )
+                    if loader_random is None:
+                        tplr.logger.error(
+                            "Failed to create random loader. Skipping evaluation."
+                        )
+                        continue
                     tplr.logger.info(
                         f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded random evaluation data"
                     )
@@ -1487,6 +1526,33 @@ def min_power_normalization(logits, power=2.0, epsilon=1e-8):
         probabilities = torch.zeros_like(powered_logits)
 
     return probabilities
+
+
+async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
+    """
+    Calls an async function with retries.
+
+    Args:
+        func (Callable): An async function.
+        *args: Positional arguments to pass to func.
+        attempts (int): Number of retries.
+        delay (int): Delay between attempts in seconds.
+        context (str): Context description for logging.
+        **kwargs: Keyword arguments to pass to func.
+
+    Returns:
+        The result of func(*args, **kwargs) or None if all attempts fail.
+    """
+    for attempt in range(attempts):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            tplr.logger.error(
+                f"Attempt {attempt + 1}/{attempts} failed for {context}: {e}"
+            )
+            await asyncio.sleep(delay)
+    tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
+    return None
 
 
 if __name__ == "__main__":

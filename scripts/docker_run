@@ -34,13 +34,12 @@ echo "-------------------------------------"
 NODE_TYPE=$(prompt_with_default "Enter node type (miner/validator)" "miner")
 WALLET_NAME=$(prompt_required "Enter wallet name")
 WALLET_HOTKEY=$(prompt_required "Enter wallet hotkey")
-WANDB_API_KEY=$(prompt_required "Enter Weights & Biases API key")
 NETWORK=$(prompt_with_default "Enter network" "test")
 CUDA_DEVICE=$(prompt_with_default "Enter CUDA device" "cuda:0")
 DEBUG=$(prompt_with_default "Enable debug mode? (true/false)" "false")
 
 # Export variables for docker-compose
-export WALLET_NAME WALLET_HOTKEY WANDB_API_KEY NETWORK CUDA_DEVICE DEBUG
+export WALLET_NAME WALLET_HOTKEY NETWORK CUDA_DEVICE DEBUG
 
 # Choose compose file based on node type
 COMPOSE_FILE="docker/compose.${NODE_TYPE}.yml"

@@ -19,7 +19,6 @@ dependencies = [
     "aioboto3==13.2.0",
     "transformers",
     "pip",
-    "wandb",
     "python-dotenv",
     "zstandard",
     "s3fs",

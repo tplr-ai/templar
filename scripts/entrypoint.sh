@@ -2,7 +2,7 @@
 set -e
 
 # Check required environment variables
-for var in WALLET_NAME WALLET_HOTKEY NODE_TYPE WANDB_API_KEY NETUID; do
+for var in WALLET_NAME WALLET_HOTKEY NODE_TYPE NETUID; do
     if [ -z "${!var}" ]; then
         echo "Error: $var environment variable is required"
         exit 1
@@ -21,8 +21,6 @@ if ! python3 -c "import torch; assert torch.cuda.is_available(), 'CUDA not avail
     exit 1
 fi
 
-# Login to wandb non-interactively
-wandb login ${WANDB_API_KEY} --relogin
 
 # Convert DEBUG to --debug flag if true
 DEBUG_FLAG=""
@@ -45,7 +43,6 @@ if [ "$NODE_TYPE" = "miner" ]; then
         --netuid ${NETUID} \
         --device ${CUDA_DEVICE} \
         --subtensor.network ${NETWORK} \
-        --use_wandb \
         ${DEBUG_FLAG}
 elif [ "$NODE_TYPE" = "validator" ]; then
     echo "Starting validator..."
@@ -55,7 +52,6 @@ elif [ "$NODE_TYPE" = "validator" ]; then
         --netuid ${NETUID} \
         --device ${CUDA_DEVICE} \
         --subtensor.network ${NETWORK} \
-        --use_wandb \
         # --store-gathers \
         ${DEBUG_FLAG}
 else

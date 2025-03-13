@@ -2,6 +2,10 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import io
+import asyncio
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # Find and load the correct .env file
 env_path = Path(__file__).parent.parent / ".env"
@@ -292,3 +296,132 @@ async def test_seed_consistency():
     logger.success(
         f"[green]Seed consistency test completed successfully ({T() - start_time:.2f}s)[/green]"
     )
+
+
+# --- Test: Transient failures recover (retry succeeds) ---
+@pytest.mark.asyncio
+async def test_retry_mechanism_success(monkeypatch):
+    """
+    Ensure that transient errors during fs.open are retried and eventually succeed.
+    Edge case: The dummy filesystem fails a fixed number of times (2), then returns valid data.
+    """
+    # Create a minimal parquet file in memory
+    table = pa.table({"text": ["Testing retry", "More testing"]})
+    parquet_buffer = io.BytesIO()
+    pq.write_table(table, parquet_buffer)
+    parquet_bytes = parquet_buffer.getvalue()
+
+    # Define a buffer factory that returns a new BytesIO each time
+    def buffer_factory():
+        return io.BytesIO(parquet_bytes)
+
+    # DummyFS simulates transient failures before finally succeeding.
+    class DummyFS:
+        def __init__(self, real_fs, fail_times=2, buffer_factory=None):
+            self.real_fs = real_fs
+            self.fail_times = fail_times
+            self.call_count = 0
+            self.buffer_factory = buffer_factory
+
+        def open(self, *args, **kwargs):
+            if self.call_count < self.fail_times:
+                self.call_count += 1
+                raise Exception("Simulated transient error")
+            return self.buffer_factory()
+
+        def __getattr__(self, attr):
+            return getattr(self.real_fs, attr)
+
+    # Patch R2DatasetLoader._get_fs to return our DummyFS; note the lambda accepts self
+    real_fs = R2DatasetLoader._get_fs()
+    dummy_fs = DummyFS(real_fs, fail_times=2, buffer_factory=buffer_factory)
+    monkeypatch.setattr(R2DatasetLoader, "_get_fs", lambda self: dummy_fs)
+
+    # Setup dummy metadata to bypass actual R2 calls.
+    dummy_config = "dummy_config"
+    dummy_shard = {"path": "dummy/path", "num_rows": 2}
+
+    async def dummy_load_r2_metadata(self):
+        return (
+            {
+                dummy_config: {
+                    "total_rows": 2,
+                    "split": "train",
+                    "shards": [dummy_shard],
+                }
+            },
+            {"configs": [{"config_name": dummy_config}]},
+        )
+
+    monkeypatch.setattr(R2DatasetLoader, "_load_r2_metadata", dummy_load_r2_metadata)
+
+    # Initialize a basic tokenizer.
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Create a loader instance.
+    loader = R2DatasetLoader(
+        batch_size=1, sequence_length=10, tokenizer=tokenizer, pack_samples=False
+    )
+    loader.num_rows_per_page = 2
+
+    # Trigger processing a page.
+    tokens = await loader._process_page(
+        (dummy_config, 0, "train"), asyncio.Semaphore(1)
+    )
+    assert isinstance(tokens, list), "Tokens should be a list"
+    assert len(tokens) > 0, "Tokens list should not be empty"
+    # The DummyFS should have failed exactly 2 times before succeeding.
+    assert dummy_fs.call_count == 2, (
+        "DummyFS did not simulate the expected number of transient errors"
+    )
+
+
+# --- Test: Persistent failure raises exception ---
+@pytest.mark.asyncio
+async def test_retry_mechanism_failure(monkeypatch):
+    """
+    Ensure that persistent errors in fs.open eventually raise an exception after max retries.
+    Edge case: The dummy filesystem always fails.
+    """
+
+    # AlwaysFailFS simulates persistent errors by always raising an Exception.
+    class AlwaysFailFS:
+        def open(self, *args, **kwargs):
+            raise Exception("Persistent transient error")
+
+        def __getattr__(self, attr):
+            return lambda *args, **kwargs: None
+
+    monkeypatch.setattr(R2DatasetLoader, "_get_fs", lambda self: AlwaysFailFS())
+
+    # Setup dummy metadata (with "self" parameter).
+    dummy_config = "dummy_config"
+    dummy_shard = {"path": "dummy/path", "num_rows": 2}
+
+    async def dummy_load_r2_metadata(self):
+        return (
+            {
+                dummy_config: {
+                    "total_rows": 2,
+                    "split": "train",
+                    "shards": [dummy_shard],
+                }
+            },
+            {"configs": [{"config_name": dummy_config}]},
+        )
+
+    monkeypatch.setattr(R2DatasetLoader, "_load_r2_metadata", dummy_load_r2_metadata)
+
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    loader = R2DatasetLoader(
+        batch_size=1, sequence_length=10, tokenizer=tokenizer, pack_samples=False
+    )
+    loader.num_rows_per_page = 2
+
+    with pytest.raises(Exception, match="Persistent transient error"):
+        await loader._process_page((dummy_config, 0, "train"), asyncio.Semaphore(1))

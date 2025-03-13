@@ -63,13 +63,17 @@ torch.backends.cudnn.allow_tf32 = True
 
 
 @contextmanager
-def timer(name: str, wandb_obj=None, step=None):
+def timer(name: str, metrics_logger=None, step=None):
     start = perf_counter()
     yield
     duration = perf_counter() - start
     tplr.logger.debug(f"{name} took {duration:.2f}s")
-    if wandb_obj and step is not None:
-        wandb_obj.log({f"validator/{name}": duration}, step=step)
+    if metrics_logger and step is not None:
+        metrics_logger.log(
+            measurement="timing",
+            tags={"window": step},
+            fields={name: duration}
+        )
 
 
 class Validator:
@@ -236,17 +240,10 @@ class Validator:
 
         # Initialize InfluxDB metrics logger
         self.metrics_logger = tplr.metrics.MetricsLogger(
-            host=os.environ.get("INFLUXDB_URL"),
-            port=8086,
-            database="tplr",
-            token=os.environ.get("INFLUXDB_TOKEN"),
-            org="tplr",
-        )
-        # Initialize WandB run for validator metrics logging
-        self.wandb_run = tplr.wandb.initialize_wandb(
-            run_prefix="validator-",
+            prefix="V",
             uid=str(self.uid),
             config=self.config,
+            role="validator",
             group="validator",
             job_type="evaluation",
         )
@@ -767,14 +764,20 @@ class Validator:
                         # Include in evaluated UIDs so it gets logged in metrics
                         self.evaluated_uids.add(eval_uid)
 
-                        # Log to WandB
-                        self.wandb.log(
-                            {
-                                f"validator/slash/{eval_uid}/score_before": old_score,
-                                f"validator/slash/{eval_uid}/score_after": 0.0,
-                                f"validator/slash/{eval_uid}/reason": str(e),
+                        # Log to metrics
+                        self.metrics_logger.log(
+                            measurement="validator_slash",
+                            tags={
+                                "eval_uid": eval_uid,
+                                "window": self.sync_window,
+                                "global_step": self.global_step,
+                                "reason_code": "invalid_gradient" 
                             },
-                            step=self.global_step,
+                            fields={
+                                "score_before": old_score,
+                                "score_after": 0.0,
+                                "reason": str(e)[:255],  # Truncate long error messages
+                            }
                         )
 
                         # Skip the rest of processing for this peer
@@ -1197,21 +1200,18 @@ class Validator:
                             f"  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}"
                         )
 
-                    # Optionally, log to WandB
-                    self.wandb_run.log(
-                        {
-                            f"validator/final_moving_avg_scores/{eval_uid}": self.final_moving_avg_scores[
-                                eval_uid
-                            ].item(),
-                            "binary_moving_avg": self.binary_moving_averages[
-                                eval_uid
-                            ].item(),
-                            "normalised_binary": self.normalised_binary_moving_averages[
-                                eval_uid
-                            ].item(),
-                            "final_moving_avg": self.final_moving_avg_scores[
-                                eval_uid
-                            ].item(),
+                    # Log metrics
+                    self.metrics_logger.log(
+                        measurement="validator_scores",
+                        tags={
+                            "eval_uid": eval_uid,
+                            "window": self.sync_window,
+                            "global_step": self.global_step,
+                        },
+                        fields={
+                            "final_moving_avg_score": self.final_moving_avg_scores[eval_uid].item(),
+                            "binary_moving_avg": self.binary_moving_averages[eval_uid].item(),
+                            "normalised_binary": self.normalised_binary_moving_averages[eval_uid].item(),
                             "weight": self.weights[eval_uid].item(),
                         },
                     )
@@ -1453,39 +1453,33 @@ class Validator:
             )
 
             # 13. Log evaluation metrics once all evaluations are done
-            evaluation_metrics = {
-                "validator/loss/own/before": self.loss_before_per_batch_own,
-                "validator/loss/own/after": self.loss_after_per_batch_own,
-                "validator/loss/random/before": self.loss_before_per_batch_random,
-                "validator/loss/random/after": self.loss_after_per_batch_random,
-                "validator/loss/own/improvement": self.relative_improvement_own,
-                "validator/loss/random/improvement": self.relative_improvement_random,
-                "validator/network/block": self.current_block,
-                "validator/network/window": self.sync_window,
-                "validator/network/step": self.global_step,
-                "validator/network/evaluated_uids": len(self.evaluated_uids),
-                "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
-                "validator/network/active_miners": len(self.valid_score_indices),
-                "validator/gather/success_rate": (
-                    gather_result.success_rate * 100 if gather_result else 0
-                ),  # Success percentage
-                "validator/timing/window_total": tplr.T() - window_start,
-                "validator/timing/peer_update": tplr.T() - peer_start,
-                "validator/timing/gather": tplr.T() - gather_start,
-                "validator/timing/evaluation": tplr.T() - eval_start,
-                "validator/timing/model_update": tplr.T() - update_start,
-            }
             self.metrics_logger.log(
-                measurement="templar_metrics_v2",
+                measurement="validator_window",
                 tags={
-                    "role": "validator",
-                    "uid": str(self.uid),
                     "window": self.sync_window,
+                    "global_step": self.global_step,
                 },
-                fields=evaluation_metrics,
+                fields={
+                    "loss_own_before": self.loss_before_per_batch_own,
+                    "loss_own_after": self.loss_after_per_batch_own,
+                    "loss_random_before": self.loss_before_per_batch_random,
+                    "loss_random_after": self.loss_after_per_batch_random,
+                    "loss_own_improvement": self.relative_improvement_own,
+                    "loss_random_improvement": self.relative_improvement_random,
+                    "current_block": self.current_block,
+                    "evaluated_uids_count": len(self.evaluated_uids),
+                    "learning_rate": self.scheduler.get_last_lr()[0],
+                    "active_miners_count": len(self.valid_score_indices),
+                    "gather_success_rate": gather_result.success_rate * 100 if gather_result else 0,
+                    "window_total_time": tplr.T() - window_start,
+                    "peer_update_time": tplr.T() - peer_start,
+                    "gather_time": tplr.T() - gather_start,
+                    "evaluation_time": tplr.T() - eval_start,
+                    "model_update_time": tplr.T() - update_start,
+                    "total_peers": len(self.peers),
+                    "total_skipped": len(gather_result.skipped_uids) if gather_result else 0,
+                },
             )
-            # Also log evaluation metrics to WandB
-            self.wandb_run.log(evaluation_metrics, step=self.global_step)
 
             # 18. Increment global step
             self.global_step += 1

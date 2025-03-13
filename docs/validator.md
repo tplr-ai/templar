@@ -114,10 +114,6 @@ This guide will help you set up and run a validator for **τemplar**. Validators
    Populate the `.env` file with your configuration. Variables to set:
 
    ```dotenv:docker/.env
-   # Add your Weights & Biases API key
-   WANDB_API_KEY=<your_wandb_api_key>
-
-
    # Cloudflare R2 Credentials - Add your R2 credentials below
    R2_GRADIENTS_ACCOUNT_ID=<your_r2_account_id>
    R2_GRADIENTS_BUCKET_NAME=<your_r2_bucket_name>
@@ -200,13 +196,13 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
 4. **Set Up Python Environment**:
 
    ```bash
-   export WANDB_API_KEY=your_wandb_api_key
    export NODE_TYPE=your_node_type
    export WALLET_NAME=your_wallet_name
    export WALLET_HOTKEY=your_wallet_hotkey
    export CUDA_DEVICE=your_cuda_device
    export NETWORK=your_network
    export NETUID=your_netuid
+   export INFLUXDB_TOKEN=your_influxdb_token  # Optional, falls back to default if not provided
    export DEBUG=your_debug_setting
    
    # Gradients R2 credentials
@@ -237,13 +233,7 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
    btcli subnet pow_register --wallet.name default --wallet.hotkey validator --netuid <netuid> --subtensor.network <network>
    ```
 
-6. **Log into Weights & Biases (WandB)**:
-
-   ```bash
-   wandb login your_wandb_api_key
-   ```
-
-7. **Set Environment Variables**:
+6. **Set Environment Variables**:
 
    Export necessary environment variables as in the miner setup.
 
@@ -255,7 +245,6 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
      --wallet.name default \
      --wallet.hotkey validator \
      --device cuda \
-     --use_wandb \
      --netuid <netuid> \
      --subtensor.network <network> \
      --sync_state
@@ -270,13 +259,14 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
 Set the following in the `docker/.env` file when using Docker Compose:
 
 ```dotenv:docker/.env
-WANDB_API_KEY=your_wandb_api_key
-
 # Cloudflare R2 Credentials
 R2_ACCOUNT_ID=your_r2_account_id
 
 R2_READ_ACCESS_KEY_ID=your_r2_read_access_key_id
 R2_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
+
+# InfluxDB Configuration (optional, falls back to default if not provided)
+INFLUXDB_TOKEN=your_influxdb_token
 
 R2_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
 R2_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
@@ -333,10 +323,9 @@ DEBUG=false
   docker logs -f templar-validator-${WALLET_HOTKEY}
   ```
 
-- **Weights & Biases**:
+- **Metrics Dashboard**:
 
-  - Ensure `--use_wandb` is enabled
-  - Monitor evaluation metrics and network statistics
+  - Monitor evaluation metrics and network statistics through InfluxDB
 
 ### Performance
 

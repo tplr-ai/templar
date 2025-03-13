@@ -269,9 +269,9 @@ async def test_seed_consistency():
     batch2 = torch.tensor(next(iter(loader2)))
 
     # Test content consistency
-    assert torch.equal(batch1, batch2), (
-        "Same seed should produce identical batch content"
-    )
+    assert torch.equal(
+        batch1, batch2
+    ), "Same seed should produce identical batch content"
 
     # Test seed range
     seeds = [random.randint(0, 10000) for _ in range(10)]

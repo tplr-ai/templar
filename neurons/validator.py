@@ -18,35 +18,36 @@
 # type: ignore
 
 # Standard library
-import os
-import sys
-import copy
-import time
-import json
-import random
-import asyncio
-from datetime import datetime, timedelta, timezone
 import argparse
+import asyncio
+import copy
+import json
+import os
+import random
+import sys
 import threading
+import time
 from collections import defaultdict
-from time import perf_counter
-from logging_loki import LokiHandler
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from io import StringIO
-from rich.console import Console
-from rich.table import Table
+from time import perf_counter
+
+import bittensor as bt
+import numpy as np
 
 # Third party
 import torch
-import numpy as np
-import bittensor as bt
+from logging_loki import LokiHandler
+from rich.console import Console
+from rich.table import Table
 from torch.optim import SGD
-from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
     LinearLR,
     SequentialLR,
 )
+from transformers import LlamaForCausalLM
 
 # Local
 import tplr
@@ -70,9 +71,7 @@ def timer(name: str, metrics_logger=None, step=None):
     tplr.logger.debug(f"{name} took {duration:.2f}s")
     if metrics_logger and step is not None:
         metrics_logger.log(
-            measurement="timing",
-            tags={"window": step},
-            fields={name: duration}
+            measurement="timing", tags={"window": step}, fields={name: duration}
         )
 
 
@@ -771,13 +770,13 @@ class Validator:
                                 "eval_uid": eval_uid,
                                 "window": self.sync_window,
                                 "global_step": self.global_step,
-                                "reason_code": "invalid_gradient" 
+                                "reason_code": "invalid_gradient",
                             },
                             fields={
                                 "score_before": old_score,
                                 "score_after": 0.0,
                                 "reason": str(e)[:255],  # Truncate long error messages
-                            }
+                            },
                         )
 
                         # Skip the rest of processing for this peer
@@ -1050,20 +1049,19 @@ class Validator:
                     # new_avg = (1-alpha) * old_avg + alpha * new_value
                     # where alpha is binary_score_ma_alpha hyperparameter
                     self.binary_moving_averages[eval_uid] = (
-                        1 - self.hparams.binary_score_ma_alpha
-                    ) * self.binary_moving_averages[
-                        eval_uid
-                    ] + self.hparams.binary_score_ma_alpha * self.binary_indicator_scores[
-                        eval_uid
-                    ]
+                        (1 - self.hparams.binary_score_ma_alpha)
+                        * self.binary_moving_averages[eval_uid]
+                        + self.hparams.binary_score_ma_alpha
+                        * self.binary_indicator_scores[eval_uid]
+                    )
                     tplr.logger.debug(
                         f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}"
                     )
 
                     # Normalize binary moving average to [0,1] range
                     self.normalised_binary_moving_averages[eval_uid] = (
-                        self.binary_moving_averages[eval_uid]
-                    ) / 2
+                        (self.binary_moving_averages[eval_uid]) / 2
+                    )
                     tplr.logger.debug(
                         f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[eval_uid]}"
                     )
@@ -1209,9 +1207,15 @@ class Validator:
                             "global_step": self.global_step,
                         },
                         fields={
-                            "final_moving_avg_score": self.final_moving_avg_scores[eval_uid].item(),
-                            "binary_moving_avg": self.binary_moving_averages[eval_uid].item(),
-                            "normalised_binary": self.normalised_binary_moving_averages[eval_uid].item(),
+                            "final_moving_avg_score": self.final_moving_avg_scores[
+                                eval_uid
+                            ].item(),
+                            "binary_moving_avg": self.binary_moving_averages[
+                                eval_uid
+                            ].item(),
+                            "normalised_binary": self.normalised_binary_moving_averages[
+                                eval_uid
+                            ].item(),
                             "weight": self.weights[eval_uid].item(),
                         },
                     )
@@ -1470,14 +1474,18 @@ class Validator:
                     "evaluated_uids_count": len(self.evaluated_uids),
                     "learning_rate": self.scheduler.get_last_lr()[0],
                     "active_miners_count": len(self.valid_score_indices),
-                    "gather_success_rate": gather_result.success_rate * 100 if gather_result else 0,
+                    "gather_success_rate": (
+                        gather_result.success_rate * 100 if gather_result else 0
+                    ),
                     "window_total_time": tplr.T() - window_start,
                     "peer_update_time": tplr.T() - peer_start,
                     "gather_time": tplr.T() - gather_start,
                     "evaluation_time": tplr.T() - eval_start,
                     "model_update_time": tplr.T() - update_start,
                     "total_peers": len(self.peers),
-                    "total_skipped": len(gather_result.skipped_uids) if gather_result else 0,
+                    "total_skipped": (
+                        len(gather_result.skipped_uids) if gather_result else 0
+                    ),
                 },
             )
 

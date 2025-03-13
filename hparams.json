@@ -14,6 +14,7 @@
     "gradient_score_ma_alpha": 0.6,
     "binary_score_ma_alpha": 0.05,
     "final_score_ma_alpha": 0.75,
+    "moving_average_window": 5,
     "tokenizer_name": "togethercomputer/LLaMA-2-7B-32K",
     "hidden_size": 2048,
     "num_hidden_layers": 16,

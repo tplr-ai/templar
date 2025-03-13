@@ -244,6 +244,9 @@ class Validator:
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
 
+        # Initialize final score history (for sliding-window averaging)
+        self.final_score_history = defaultdict(list)
+
     async def run(self):
         # Start background block listener
         self.loop = asyncio.get_running_loop()
@@ -442,13 +445,11 @@ class Validator:
                 all_uids = list(range(len(self.metagraph.S)))
                 self.peers = [uid for uid in all_uids if uid != self.uid]
 
-                # For evaluation, also use all peers but track separately
-                self.eval_peers = {uid: 0 for uid in self.peers}
-
-                # Initialize evaluation candidate counters for new peers
+                # For evaluation, also use all peers but track separately with equal initial weight
+                self.eval_peers = {uid: 1 for uid in self.peers}
                 for uid in self.peers:
                     if uid not in self.eval_candidates_counter:
-                        self.eval_candidates_counter[uid] = 0
+                        self.eval_candidates_counter[uid] = 1
             else:
                 # Normal operation - update and filter peers
                 self.comms.update_peers_with_buckets()
@@ -1050,18 +1051,21 @@ class Validator:
                         * self.normalised_binary_moving_averages[eval_uid]
                     )
                     tplr.logger.debug(
-                        f"Final Score : {self.final_moving_avg_scores[eval_uid]}"
+                        f"Computed Final Score for UID {eval_uid}: {final_score}"
                     )
 
-                    # Ensure moving average score is non-negative
-                    self.final_moving_avg_scores[eval_uid] = max(
-                        self.hparams.final_score_ma_alpha
-                        * self.final_moving_avg_scores[eval_uid]
-                        + (1 - self.hparams.final_score_ma_alpha) * final_score,
-                        0.0,
-                    )
+                    # Sliding window update for the final moving average score
+                    self.final_score_history[eval_uid].append(final_score)
+                    if (
+                        len(self.final_score_history[eval_uid])
+                        > self.hparams.moving_average_window
+                    ):
+                        self.final_score_history[eval_uid].pop(0)
+                    self.final_moving_avg_scores[eval_uid] = sum(
+                        self.final_score_history[eval_uid]
+                    ) / len(self.final_score_history[eval_uid])
                     tplr.logger.debug(
-                        f"Final Moving Average Score : {self.final_moving_avg_scores[eval_uid]}"
+                        f"Updated Final Moving Average Score for UID {eval_uid}: {self.final_moving_avg_scores[eval_uid]}"
                     )
 
                     self.evaluated_uids.add(eval_uid)

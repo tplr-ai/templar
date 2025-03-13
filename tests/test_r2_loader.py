@@ -1,5 +1,8 @@
 # ruff: noqa
 import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from pathlib import Path
 from dotenv import load_dotenv
 import io
@@ -45,6 +48,7 @@ from tplr.r2_dataset import R2DatasetLoader
 from tplr.hparams import load_hparams
 import torch
 import random
+from neurons.validator import retry_call
 
 
 # Enable debug logging for tests
@@ -425,3 +429,99 @@ async def test_retry_mechanism_failure(monkeypatch):
 
     with pytest.raises(Exception, match="Persistent transient error"):
         await loader._process_page((dummy_config, 0, "train"), asyncio.Semaphore(1))
+
+
+# --- New Tests for the retry_call helper ---
+
+
+@pytest.mark.asyncio
+async def test_retry_call_immediate_success():
+    """
+    Test that retry_call returns immediately if the provided async function succeeds on the first attempt.
+    """
+    call_count = 0
+
+    async def immediate_func(val):
+        nonlocal call_count
+        call_count += 1
+        return val + 1
+
+    result = await retry_call(
+        immediate_func, 5, attempts=3, delay=0.1, context="immediate_func"
+    )
+    assert result == 6
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_call_success_after_failures():
+    """
+    Test that retry_call eventually succeeds after a few transient failures.
+    """
+    call_count = 0
+
+    async def flaky_func(val):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise Exception("Transient error")
+        return val * 2
+
+    result = await retry_call(
+        flaky_func, 5, attempts=5, delay=0.1, context="flaky_func"
+    )
+    assert result == 10
+    assert call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_call_exhaust_failures():
+    """
+    Test that retry_call returns None after exhausting all attempts when the function always fails.
+    """
+    call_count = 0
+
+    async def always_fail():
+        nonlocal call_count
+        call_count += 1
+        raise Exception("Persistent error")
+
+    result = await retry_call(always_fail, attempts=3, delay=0.1, context="always_fail")
+    assert result is None
+    assert call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_retry_in_next_pages(monkeypatch):
+    """
+    Test integration of retry_call with R2DatasetLoader.next_pages.
+    Simulate transient failures before success.
+    """
+    call_count = 0
+
+    async def dummy_next_pages(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise Exception("Simulated transient failure in next_pages")
+        return [("dummy_config", 0, "train")]
+
+    # Monkey-patch R2DatasetLoader.next_pages to use our dummy function.
+    from tplr.r2_dataset import R2DatasetLoader
+
+    original_next_pages = R2DatasetLoader.next_pages
+    R2DatasetLoader.next_pages = dummy_next_pages
+
+    result = await retry_call(
+        R2DatasetLoader.next_pages,
+        offset=0,
+        n_pages=1,
+        seed=42,
+        attempts=4,
+        delay=0.1,
+        context="dummy next pages",
+    )
+    assert result == [("dummy_config", 0, "train")]
+
+    # Restore the original method to avoid side effects.
+    R2DatasetLoader.next_pages = original_next_pages

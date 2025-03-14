@@ -415,10 +415,10 @@ class Miner:
             tplr.logger.info("Refreshing peers before gather task...")
 
             if self.config.test:
-                # In test mode, use all UIDs from metagraph except self
+                # In test mode, use all UIDs from metagraph except self and validator (uid 0)
                 tplr.logger.info("Test mode active: Using all peers from metagraph.")
                 all_uids = list(range(len(self.metagraph.S)))
-                self.peers = [uid for uid in all_uids if uid != self.uid]
+                self.peers = [uid for uid in all_uids if uid != self.uid and uid != 0]
             else:
                 # Normal operation - update and filter peers
                 self.comms.set_gather_peers()

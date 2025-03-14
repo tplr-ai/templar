@@ -247,6 +247,7 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
      --device cuda \
      --netuid <netuid> \
      --subtensor.network <network> \
+     --enable-loki \
      --sync_state
    ```
 
@@ -287,6 +288,8 @@ NODE_TYPE=validator
 
 # Additional Settings
 DEBUG=false
+# Loki Logging (optional)
+ENABLE_LOKI=false
 ```
 
 **Note**: The R2 permissions remain unchanged.
@@ -322,6 +325,13 @@ DEBUG=false
   ```bash
   docker logs -f templar-validator-${WALLET_HOTKEY}
   ```
+
+- **Loki Logs**:
+
+  Loki logging is disabled by default. To enable:
+
+  - Set `ENABLE_LOKI=true` in your environment or `.env` file
+  - Or use the `--enable-loki` flag when running the validator
 
 - **Metrics Dashboard**:
 

@@ -18,6 +18,7 @@
 # Global imports
 import time
 import logging
+import os
 from rich.logging import RichHandler
 from rich.highlighter import NullHighlighter
 import bittensor as bt
@@ -130,20 +131,28 @@ logger.addHandler(
 )
 
 
-try:
-    loki_handler = LokiHandler(
-        url="http://localhost:3100/loki/api/v1/push",
-        tags={
-            "app": "templar",
-            "env": "prod",
-            "version": __version__,
-            "uid": "default_uid",
-        },
-        version="1",
-    )
-    loki_handler.setLevel(logging.INFO)
-    logger.addHandler(loki_handler)
-except Exception as e:
-    logger.error(f"Failed to add LokiHandler: {e}")
+# Check if Loki logging is enabled via environment variable (default is disabled)
+enable_loki = os.environ.get("ENABLE_LOKI", "false").lower() in ["true", "1", "yes"]
+
+# Only add LokiHandler if explicitly enabled
+if enable_loki:
+    try:
+        loki_handler = LokiHandler(
+            url="http://localhost:3100/loki/api/v1/push",
+            tags={
+                "app": "templar",
+                "env": "prod",
+                "version": __version__,
+                "uid": "default_uid",
+            },
+            version="1",
+        )
+        loki_handler.setLevel(logging.INFO)
+        logger.addHandler(loki_handler)
+        logger.info("Loki logging enabled")
+    except Exception as e:
+        logger.error(f"Failed to add LokiHandler: {e}")
+else:
+    logger.debug("Loki logging disabled")
 
 __all__ = ["logger", "debug", "trace", "P", "T"]

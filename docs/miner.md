@@ -285,6 +285,7 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
      --device cuda \
      --netuid <netuid> \
      --subtensor.network <network> \
+     --enable-loki \
      --sync_state
    ```
 
@@ -334,6 +335,8 @@ CUDA_DEVICE=cuda:0
 
 # Additional Settings
 DEBUG=false
+# Loki Logging (optional)
+ENABLE_LOKI=false
 ```
 
 **Note**: The R2 permissions remain unchanged from previous configurations.
@@ -368,6 +371,13 @@ DEBUG=false
   ```bash
   docker logs -f templar-miner-${WALLET_HOTKEY}
   ```
+
+- **Loki Logs**:
+
+  Loki logging is disabled by default. To enable:
+
+  - Set `ENABLE_LOKI=true` in your environment or `.env` file
+  - Or use the `--enable-loki` flag when running the miner
 
 - **Metrics Dashboard**:
 

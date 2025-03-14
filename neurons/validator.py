@@ -100,6 +100,11 @@ class Validator:
             action="store_true",
             help="Test mode - use all peers without filtering",
         )
+        parser.add_argument(
+            "--enable-loki",
+            action="store_true",
+            help="Enable Loki logging (disabled by default)",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -108,6 +113,11 @@ class Validator:
             tplr.debug()
         if config.trace:
             tplr.trace()
+
+        # Set Loki environment variable based on CLI arg
+        if config.enable_loki:
+            os.environ["ENABLE_LOKI"] = "true"
+
         return config
 
     def __init__(self):
@@ -128,13 +138,14 @@ class Validator:
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
 
-        # Update Loki handler's tag with the dynamic UID from the validator.
-        try:
-            for handler in tplr.logger.handlers:
-                if isinstance(handler, LokiHandler):
-                    handler.tags["uid"] = str(self.uid)
-        except Exception as e:
-            tplr.logger.error(f"Failed to update Loki handler UID tag: {e}")
+        # Update Loki handler's tag with the dynamic UID from the validator if Loki is enabled
+        if os.environ.get("ENABLE_LOKI", "false").lower() in ["true", "1", "yes"]:
+            try:
+                for handler in tplr.logger.handlers:
+                    if isinstance(handler, LokiHandler):
+                        handler.tags["uid"] = str(self.uid)
+            except Exception as e:
+                tplr.logger.error(f"Failed to update Loki handler UID tag: {e}")
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)

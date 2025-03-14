@@ -24,7 +24,8 @@ import random
 import asyncio
 import argparse
 import threading
-import json  # Add this import at the top of the file
+import json
+import os
 
 # Third party
 import torch
@@ -79,6 +80,11 @@ class Miner:
             action="store_true",
             help="Test mode - use all peers without filtering",
         )
+        parser.add_argument(
+            "--enable-loki",
+            action="store_true",
+            help="Enable Loki logging (disabled by default)",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -87,6 +93,11 @@ class Miner:
             tplr.debug()
         if config.trace:
             tplr.trace()
+
+        # Set Loki environment variable based on CLI arg
+        if config.enable_loki:
+            os.environ["ENABLE_LOKI"] = "true"
+
         return config
 
     def __init__(self):
@@ -106,16 +117,6 @@ class Miner:
             )
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-
-        # Ensure miners do not send logs to Loki.
-        try:
-            from logging_loki import LokiHandler
-
-            tplr.logger.handlers = [
-                h for h in tplr.logger.handlers if not isinstance(h, LokiHandler)
-            ]
-        except Exception as e:
-            tplr.logger.error(f"Error removing LokiHandler for miner: {e}")
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)

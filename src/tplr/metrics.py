@@ -48,6 +48,12 @@ FALLBACK_INFLUXDB_TOKEN: Final[str] = (
     "lTRclLtRXOJWGOB-vr1mhtp5SholImgBH705pMgK1_0sCzTzAXivhd4gPwJhRoK6HLRvG8cxjhOTEy1hlm4D3Q=="
 )
 
+# Allow overriding defaults with environment variables
+INFLUXDB_HOST: Final[str] = os.environ.get("INFLUXDB_HOST", DEFAULT_HOST)
+INFLUXDB_PORT: Final[int] = int(os.environ.get("INFLUXDB_PORT", str(DEFAULT_PORT)))
+INFLUXDB_DATABASE: Final[str] = os.environ.get("INFLUXDB_DATABASE", DEFAULT_DATABASE)
+INFLUXDB_ORG: Final[str] = os.environ.get("INFLUXDB_ORG", DEFAULT_ORG)
+
 
 class MetricsLogger:
     """
@@ -57,11 +63,11 @@ class MetricsLogger:
 
     def __init__(
         self,
-        host: str = DEFAULT_HOST,
-        port: int = DEFAULT_PORT,
-        database: str = DEFAULT_DATABASE,
+        host: str = INFLUXDB_HOST,
+        port: int = INFLUXDB_PORT,
+        database: str = INFLUXDB_DATABASE,
         token: str | None = os.environ.get("INFLUXDB_TOKEN"),
-        org: str = DEFAULT_ORG,
+        org: str = INFLUXDB_ORG,
         prefix: str = "",
         uid: str | None = None,
         version: str = __version__,
@@ -75,11 +81,11 @@ class MetricsLogger:
         Initializes the InfluxDB client and prepares metadata for logging.
 
         Args:
-            host (str, optional): Hostname of the InfluxDB server. Defaults to "localhost".
-            port (int, optional): Port number of the InfluxDB server. Defaults to 8086.
-            database (str, optional): Name of the InfluxDB database. Defaults to "tplr_metrics".
-            token (str, optional): InfluxDB token. Defaults to None.
-            org (str, optional): InfluxDB organization. Defaults to "templar".
+            host (str, optional): Hostname of the InfluxDB server. Can be overridden with INFLUXDB_HOST env variable.
+            port (int, optional): Port number of the InfluxDB server. Can be overridden with INFLUXDB_PORT env variable.
+            database (str, optional): Name of the InfluxDB database. Can be overridden with INFLUXDB_DATABASE env variable.
+            token (str, optional): InfluxDB token. Can be overridden with INFLUXDB_TOKEN env variable.
+            org (str, optional): InfluxDB organization. Can be overridden with INFLUXDB_ORG env variable.
             prefix (str, optional): Prefix to add to all metric names. Defaults to ""
             uid (str, optional): Unique identifier for the training run. Defaults to None.
             version (str, optional): Version of the templar library. Defaults to __version__.

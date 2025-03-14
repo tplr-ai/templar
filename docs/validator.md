@@ -290,6 +290,12 @@ NODE_TYPE=validator
 DEBUG=false
 # Loki Logging (optional)
 ENABLE_LOKI=false
+# InfluxDB Configuration (optional)
+INFLUXDB_HOST=custom-influxdb-host.example.com
+INFLUXDB_PORT=8086
+INFLUXDB_DATABASE=custom-database
+INFLUXDB_ORG=custom-org
+INFLUXDB_TOKEN=your-influxdb-token
 ```
 
 **Note**: The R2 permissions remain unchanged.

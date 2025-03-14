@@ -16,14 +16,16 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Global imports
-import time
 import logging
 import os
-from rich.logging import RichHandler
-from rich.highlighter import NullHighlighter
+import time
+
 import bittensor as bt
-from . import __version__
 from logging_loki import LokiHandler
+from rich.highlighter import NullHighlighter
+from rich.logging import RichHandler
+
+from . import __version__
 
 
 def T() -> float:
@@ -110,7 +112,7 @@ def trace() -> None:
         if self.isEnabledFor(TRACE_LEVEL_NUM):
             self._log(TRACE_LEVEL_NUM, message, args, **kws)
 
-    logging.Logger.trace = trace_method
+    logging.Logger.trace = trace_method  # type: ignore
     logger.setLevel(TRACE_LEVEL_NUM)
 
 

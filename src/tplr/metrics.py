@@ -15,21 +15,23 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-import os
-from typing import Any, Dict, Final
-from influxdb_client.client.influxdb_client import InfluxDBClient
-from influxdb_client.client.write.point import Point
-from influxdb_client.domain.write_precision import WritePrecision
-from influxdb_client.client.write_api import SYNCHRONOUS
-import time
 import logging
+import os
+import statistics
+import time
+import uuid
+from threading import Lock
+from typing import Any, Dict, Final
+
 import psutil
 import torch
-from threading import Lock
-import statistics
-from . import __version__
-import uuid
 from bittensor import Config as BT_Config
+from influxdb_client.client.influxdb_client import InfluxDBClient
+from influxdb_client.client.write.point import Point
+from influxdb_client.client.write_api import SYNCHRONOUS
+from influxdb_client.domain.write_precision import WritePrecision
+
+from . import __version__
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

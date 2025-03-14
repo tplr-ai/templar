@@ -17,16 +17,17 @@
 # type: ignore
 
 # Global imports
-import time
-import torch
 import asyncio
-import numpy as np
-import bittensor as bt
-from bittensor import Wallet
-from typing import Dict, Optional
-from pydantic import ValidationError
-from bittensor.core.chain_data import decode_account_id
+import time
 from collections import defaultdict
+from typing import Dict, Optional
+
+import bittensor as bt
+import numpy as np
+import torch
+from bittensor import Wallet
+from bittensor.core.chain_data import decode_account_id
+from pydantic import ValidationError
 
 # Local imports
 from .logging import logger

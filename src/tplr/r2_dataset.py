@@ -16,14 +16,15 @@
 # DEALINGS IN THE SOFTWARE.
 
 
-import json
-import yaml
-import s3fs
 import asyncio
-import numpy as np
-from pathlib import Path
-import pyarrow.parquet as pq
+import json
 from functools import lru_cache
+from pathlib import Path
+
+import numpy as np
+import pyarrow.parquet as pq
+import s3fs
+import yaml
 
 from tplr import logger
 from tplr.config import BUCKET_SECRETS

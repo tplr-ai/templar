@@ -18,6 +18,7 @@
 
 # Global imports
 import os
+
 import botocore.config
 
 # Local imports

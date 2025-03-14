@@ -15,38 +15,36 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 # type: ignore
+import asyncio
+import json
+import math
 import os
 import random
 import re
-import math
-import json
 import time
-import torch
-import asyncio
-import aiofiles
-import botocore
 from datetime import datetime, timezone
-import bittensor as bt
 
-from tqdm import tqdm as std_tqdm
-from typing import List, Dict, Optional, TypeVar, Any
-from aiobotocore.session import get_session
-
-from . import __version__
-from .config import client_config, BUCKET_SECRETS
-from .chain import ChainManager
-from .schemas import Bucket
-
-import tplr as tplr
 # from .hparams import HParams
-
 from types import SimpleNamespace
-from typing import Tuple
-from transformers import LlamaForCausalLM
+from typing import Any, Dict, List, Optional, Tuple, TypeVar
+
+import aiofiles
+import bittensor as bt
+import botocore
+import torch
+from aiobotocore.session import get_session
 from torch.optim import SGD
 from torch.optim.lr_scheduler import SequentialLR
-from .compress import TransformDCT, CompressDCT
+from tqdm import tqdm as std_tqdm
+from transformers import LlamaForCausalLM
 
+import tplr as tplr
+
+from . import __version__
+from .chain import ChainManager
+from .compress import CompressDCT, TransformDCT
+from .config import BUCKET_SECRETS, client_config
+from .schemas import Bucket
 
 # Constants
 CF_REGION_NAME: str = "enam"

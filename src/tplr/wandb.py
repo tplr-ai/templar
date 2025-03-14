@@ -11,8 +11,10 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE,
 import os
+
 import wandb
 from wandb.sdk.wandb_run import Run
+
 from . import __version__
 from .logging import logger
 

@@ -1,180 +1,337 @@
 import express from 'express';
-import { InfluxDB } from '@influxdata/influxdb-client';
 import influxConfig from '../config/influxdb.js';
+import influxService from '../services/influxService.js';
 
 const router = express.Router();
 
-// Create InfluxDB client & Query API instance
-const influxDB = new InfluxDB({ url: influxConfig.url, token: influxConfig.token });
-const queryApi = influxDB.getQueryApi(influxConfig.org);
+// GET /api/metrics/training-step
+router.get('/training-step', async (req, res, next) => {
+  const { timeRange, uid, window, global_step } = req.query;
+  const actualTimeRange = timeRange || '-2h';
+  
+  try {
+    const response = await influxService.queryMetrics('training_step', {
+      uid,
+      window,
+      global_step
+    }, actualTimeRange);
+    
+    res.json(response);
+  } catch (err) {
+    console.error("Error in /training-step route:", err);
+    next(err);
+  }
+});
 
-/**
- * Query InfluxDB, with detailed debug logging for each callback.
- *
- * @param {string} query - The Flux query.
- * @param {number} timeoutMs - Timeout in milliseconds.
- * @returns {Promise<Array<any>>} Resolves when the query completes.
- */
-function queryWithTimeout(query, timeoutMs = 60000) {
-  return new Promise((resolve, reject) => {
-    const results = [];
-    const startTime = Date.now();
-    console.debug("=== Starting query ===");
-    console.debug("Timeout set to:", timeoutMs, "ms");
-    console.debug("Query:", query);
+// GET /api/metrics/validator-scores
+router.get('/validator-scores', async (req, res, next) => {
+  const { timeRange, eval_uid, window, global_step } = req.query;
+  const actualTimeRange = timeRange || '-6h';
+  
+  try {
+    const response = await influxService.queryMetrics('validator_scores', {
+      eval_uid,
+      window,
+      global_step
+    }, actualTimeRange);
+    
+    res.json(response);
+  } catch (err) {
+    console.error("Error in /validator-scores route:", err);
+    next(err);
+  }
+});
 
-    const timer = setTimeout(() => {
-      const elapsed = Date.now() - startTime;
-      console.error(`Query timed out after ${elapsed} ms`);
-      reject(new Error('Query timed out'));
-    }, timeoutMs);
+// GET /api/metrics/validator-window
+router.get('/validator-window', async (req, res, next) => {
+  const { timeRange, window, global_step } = req.query;
+  const actualTimeRange = timeRange || '-6h';
+  
+  try {
+    const response = await influxService.queryMetrics('validator_window', {
+      window,
+      global_step
+    }, actualTimeRange);
+    
+    res.json(response);
+  } catch (err) {
+    console.error("Error in /validator-window route:", err);
+    next(err);
+  }
+});
 
-    queryApi.queryRows(query, {
-      next(row, tableMeta) {
-        const elapsed = Date.now() - startTime;
-        const obj = tableMeta.toObject(row);
-        results.push(obj);
-        console.debug(`Row received at ${elapsed} ms:`, obj);
-      },
-      error(err) {
-        clearTimeout(timer);
-        const elapsed = Date.now() - startTime;
-        console.error(`Error after ${elapsed} ms:`, err);
-        reject(err);
-      },
-      complete() {
-        clearTimeout(timer);
-        const duration = Date.now() - startTime;
-        console.debug(`Query complete after ${duration} ms; total rows: ${results.length}`);
-        resolve(results);
-      },
+// GET /api/metrics/benchmark-task
+router.get('/benchmark-task', async (req, res, next) => {
+  const { timeRange, task, global_step, window, block } = req.query;
+  const actualTimeRange = timeRange || '-30d';
+  
+  try {
+    // Special case with custom query for benchmark task scores
+    let fluxQuery = `
+      from(bucket: "${influxConfig.bucket}")
+        |> range(start: ${actualTimeRange})
+        |> filter(fn: (r) => r["_measurement"] == "benchmark_task")
+        |> filter(fn: (r) => r["_field"] == "score")
+    `;
+    
+    if (task) {
+      fluxQuery += `|> filter(fn: (r) => r["task"] == "${task}")`;
+    }
+    
+    if (global_step) {
+      fluxQuery += `|> filter(fn: (r) => r["global_step"] == "${global_step}")`;
+    }
+    
+    if (window) {
+      fluxQuery += `|> filter(fn: (r) => r["window"] == "${window}")`;
+    }
+    
+    if (block) {
+      fluxQuery += `|> filter(fn: (r) => r["block"] == "${block}")`;
+    }
+    
+    fluxQuery += `
+      |> group(columns: ["task"])
+      |> last()
+    `;
+    
+    const results = await influxService.queryWithTimeout(fluxQuery);
+    
+    const formattedResults = results.map(row => ({
+      task: row.task,
+      score: row._value,
+      global_step: row.global_step,
+      window: row.window,
+      block: row.block,
+      timestamp: row._time
+    }));
+    
+    res.json({
+      success: true,
+      data: formattedResults,
+      timestamp: new Date().toISOString()
     });
-  });
-}
+  } catch (err) {
+    console.error("Error in /benchmark-task route:", err);
+    next(err);
+  }
+});
 
+// GET /api/metrics/benchmark-metrics
+router.get('/benchmark-metrics', async (req, res, next) => {
+  const { timeRange, global_step, window, block } = req.query;
+  const actualTimeRange = timeRange || '-30d';
+  
+  try {
+    const response = await influxService.queryMetrics('benchmark_metrics', {
+      global_step,
+      window,
+      block
+    }, actualTimeRange);
+    
+    res.json(response);
+  } catch (err) {
+    console.error("Error in /benchmark-metrics route:", err);
+    next(err);
+  }
+});
+
+// GET /api/metrics/benchmark-summary
+router.get('/benchmark-summary', async (req, res, next) => {
+  const { timeRange, global_step, window, block } = req.query;
+  const actualTimeRange = timeRange || '-30d';
+  
+  try {
+    const response = await influxService.queryMetrics('benchmark_summary', {
+      global_step,
+      window,
+      block
+    }, actualTimeRange);
+    
+    res.json(response);
+  } catch (err) {
+    console.error("Error in /benchmark-summary route:", err);
+    next(err);
+  }
+});
+
+// GET /api/metrics/similarity
+router.get('/similarity', async (req, res, next) => {
+  const { timeRange, peer_uid, step } = req.query;
+  const actualTimeRange = timeRange || '-6h';
+  
+  try {
+    const response = await influxService.queryMetrics('similarity', {
+      peer_uid,
+      step
+    }, actualTimeRange);
+    
+    res.json(response);
+  } catch (err) {
+    console.error("Error in /similarity route:", err);
+    next(err);
+  }
+});
+
+// GET /api/metrics/gradient-analysis
+router.get('/gradient-analysis', async (req, res, next) => {
+  const { timeRange, peer_uid, window, step } = req.query;
+  const actualTimeRange = timeRange || '-6h';
+  
+  try {
+    const response = await influxService.queryMetrics('gradient_analysis', {
+      peer_uid,
+      window,
+      step
+    }, actualTimeRange);
+    
+    res.json(response);
+  } catch (err) {
+    console.error("Error in /gradient-analysis route:", err);
+    next(err);
+  }
+});
+
+// GET /api/metrics/validator-inactivity
+router.get('/validator-inactivity', async (req, res, next) => {
+  const { timeRange, uid, window } = req.query;
+  const actualTimeRange = timeRange || '-6h';
+  
+  try {
+    const response = await influxService.queryMetrics('validator_inactivity', {
+      uid,
+      window
+    }, actualTimeRange);
+    
+    res.json(response);
+  } catch (err) {
+    console.error("Error in /validator-inactivity route:", err);
+    next(err);
+  }
+});
+
+// GET /api/metrics/validator-slash
+router.get('/validator-slash', async (req, res, next) => {
+  const { timeRange, eval_uid, window, global_step, reason_code } = req.query;
+  const actualTimeRange = timeRange || '-6h';
+  
+  try {
+    const response = await influxService.queryMetrics('validator_slash', {
+      eval_uid,
+      window,
+      global_step,
+      reason_code
+    }, actualTimeRange);
+    
+    res.json(response);
+  } catch (err) {
+    console.error("Error in /validator-slash route:", err);
+    next(err);
+  }
+});
+
+// GET /api/metrics/templar-metrics-v2
+router.get('/templar-metrics-v2', async (req, res, next) => {
+  const { timeRange, uid, role, window, global_step, eval_uid, field } = req.query;
+  const actualTimeRange = timeRange || '-6h';
+  
+  try {
+    const response = await influxService.queryMetrics('templar_metrics_v2', {
+      uid,
+      role,
+      window,
+      global_step,
+      eval_uid,
+      field
+    }, actualTimeRange);
+    
+    res.json(response);
+  } catch (err) {
+    console.error("Error in /templar-metrics-v2 route:", err);
+    next(err);
+  }
+});
+
+// For backward compatibility
 // GET /api/metrics/losses
 router.get('/losses', async (req, res, next) => {
-  // Use a 2h time range and include the version filter.
-  const minerVersion = influxConfig.version;
-  const fluxQuery = `
-    from(bucket: "${influxConfig.bucket}")
-      |> range(start: -2h)
-      |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
-      |> filter(fn: (r) => r["role"] == "miner" and r["version"] == "${minerVersion}")
-      |> filter(fn: (r) => r["_field"] == "loss")
-      |> aggregateWindow(every: 5m, fn: mean, createEmpty: true)
-      |> yield(name: "mean")
-  `;
-
+  const { timeRange, uid, window } = req.query;
+  const actualTimeRange = timeRange || '-2h';
+  
   try {
-    console.debug("Sending query from /losses endpoint with updated query...");
-    const results = await queryWithTimeout(fluxQuery, 60000);
-    console.debug("Returning results from /losses endpoint.");
-    res.json(results);
+    // Use legacy method in service
+    const result = await influxService.getLosses({
+      window,
+      timeRange: actualTimeRange,
+      uid
+    });
+    
+    res.json(result);
   } catch (err) {
     console.error("Error in /losses route:", err);
     next(err);
   }
 });
 
-/**
- * GET /api/metrics/tokens-per-sec
- * Returns tokens per second metrics.
- * Query Parameters:
- * - uid (optional)
- * - timeRange (optional, default '-1h')
- * - aggregate (optional): if 'true', returns aggregated mean across all series, versions, and uids.
- */
+// For backward compatibility
+// GET /api/metrics/tokens-per-sec
 router.get('/tokens-per-sec', async (req, res, next) => {
   const { uid, timeRange, aggregate } = req.query;
   const actualTimeRange = timeRange || '-1h';
-  const minerVersion = influxConfig.version; // use parsed version from __init__.py if available
-  let fluxQuery = '';
-
-  if (aggregate === 'true') {
-    // This query resets grouping and calculates the global mean
-    fluxQuery = `
-      from(bucket: "${influxConfig.bucket}")
-        |> range(start: ${actualTimeRange})
-        |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
-        |> filter(fn: (r) => r["_field"] == "tokens_per_sec")
-        |> filter(fn: (r) => r["version"] == "${minerVersion}")
-        |> group()
-        |> mean()
-        |> yield(name: "mean")
-    `;
-  } else if (uid) {
-    fluxQuery = `
-      from(bucket: "${influxConfig.bucket}")
-        |> range(start: ${actualTimeRange})
-        |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
-        |> filter(fn: (r) => r["uid"] == "${uid}")
-        |> filter(fn: (r) => r["_field"] == "tokens_per_sec")
-        |> group()   // keep original grouping to separate series
-        |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
-        |> yield(name: "mean")
-    `;
-  } else {
-    // If no UID or aggregate specified, use the simple windowed query.
-    fluxQuery = `
-      from(bucket: "${influxConfig.bucket}")
-        |> range(start: ${actualTimeRange})
-        |> filter(fn: (r) => r["_measurement"] == "templar_metrics_v2")
-        |> filter(fn: (r) => r["_field"] == "tokens_per_sec")
-        |> aggregateWindow(every: 5m, fn: mean, createEmpty: false)
-        |> yield(name: "mean")
-    `;
-  }
-
-  console.debug("Tokens-per-sec query:", fluxQuery);
-
-  let results = [];
+  
   try {
-    await new Promise((resolve, reject) => {
-      queryApi.queryRows(fluxQuery, {
-        next(row, tableMeta) {
-          results.push(tableMeta.toObject(row));
-        },
-        error(err) {
-          console.error("Error in tokens-per-sec query:", err);
-          reject(err);
-        },
-        complete() {
-          resolve();
-        }
-      });
+    // Use legacy method in service
+    const result = await influxService.getTokensPerSec({
+      uid,
+      timeRange: actualTimeRange,
+      aggregate: aggregate === 'true'
     });
-    res.json({
-      success: true,
-      data: results,
-      timestamp: new Date().toISOString()
-    });
+    
+    res.json(result);
   } catch (err) {
+    console.error("Error in /tokens-per-sec route:", err);
     next(err);
   }
 });
 
-// GET /api/metrics/benchmark-scores
+// For backward compatibility
+// GET /api/metrics/benchmark-scores - Redirects to benchmark-task for compatibility
 router.get('/benchmark-scores', async (req, res, next) => {
-  const { timeRange } = req.query;
+  const { timeRange, task, global_step, window, block } = req.query;
   const actualTimeRange = timeRange || '-30d';
-
-  const fluxQuery = `
-    from(bucket: "${influxConfig.bucket}")
-      |> range(start: ${actualTimeRange})
-      |> filter(fn: (r) => r._measurement == "templar_benchmark")
-      |> filter(fn: (r) => r._field == "score")
-      |> filter(fn: (r) => r.role == "evaluator")
+  
+  try {
+    // Using the same implementation as benchmark-task
+    let fluxQuery = `
+      from(bucket: "${influxConfig.bucket}")
+        |> range(start: ${actualTimeRange})
+        |> filter(fn: (r) => r["_measurement"] == "benchmark_task")
+        |> filter(fn: (r) => r["_field"] == "score")
+    `;
+    
+    if (task) {
+      fluxQuery += `|> filter(fn: (r) => r["task"] == "${task}")`;
+    }
+    
+    if (global_step) {
+      fluxQuery += `|> filter(fn: (r) => r["global_step"] == "${global_step}")`;
+    }
+    
+    if (window) {
+      fluxQuery += `|> filter(fn: (r) => r["window"] == "${window}")`;
+    }
+    
+    if (block) {
+      fluxQuery += `|> filter(fn: (r) => r["block"] == "${block}")`;
+    }
+    
+    fluxQuery += `
       |> group(columns: ["task"])
       |> last()
-      |> yield(name: "latest_scores")
-  `;
-
-  try {
-    console.debug("Sending query from /benchmark-scores endpoint...");
-    const results = await queryWithTimeout(fluxQuery, 60000);
-
-    // Transform results into a more user-friendly format
+    `;
+    
+    const results = await influxService.queryWithTimeout(fluxQuery);
+    
     const formattedResults = results.map(row => ({
       task: row.task,
       score: row._value,
@@ -182,8 +339,7 @@ router.get('/benchmark-scores', async (req, res, next) => {
       window: row.window,
       timestamp: row._time
     }));
-
-    console.debug("Returning results from /benchmark-scores endpoint.");
+    
     res.json({
       success: true,
       data: formattedResults,
@@ -191,6 +347,24 @@ router.get('/benchmark-scores', async (req, res, next) => {
     });
   } catch (err) {
     console.error("Error in /benchmark-scores route:", err);
+    next(err);
+  }
+});
+
+// GET /api/metrics/timing
+router.get('/timing', async (req, res, next) => {
+  const { timeRange, window, uid } = req.query;
+  const actualTimeRange = timeRange || '-6h';
+  
+  try {
+    const response = await influxService.queryMetrics('timing', {
+      window,
+      uid
+    }, actualTimeRange);
+    
+    res.json(response);
+  } catch (err) {
+    console.error("Error in /timing route:", err);
     next(err);
   }
 });

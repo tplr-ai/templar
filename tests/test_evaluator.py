@@ -35,7 +35,6 @@ def setup_evaluator_with_mocks():
         patch("torch.optim.lr_scheduler.SequentialLR"),
         patch("tplr.compress.TransformDCT"),
         patch("tplr.comms.Comms"),
-        patch("wandb.init"),
     ):
         evaluator = Evaluator.__new__(Evaluator)
         evaluator.last_eval_window = 100

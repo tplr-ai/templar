@@ -83,9 +83,6 @@ class Validator:
             "--netuid", type=int, default=268, help="Bittensor network UID."
         )
         parser.add_argument(
-            "--project", type=str, default="templar", help="Wandb project."
-        )
-        parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
         )
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -1332,8 +1329,6 @@ class Validator:
                 },
                 fields=evaluation_metrics,
             )
-            # Also log evaluation metrics to WandB
-            self.wandb_run.log(evaluation_metrics, step=self.global_step)
 
             # 17. Set weights periodically
             if self.sync_window % self.hparams.windows_per_weights == 0:

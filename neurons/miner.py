@@ -63,9 +63,6 @@ class Miner:
             "--netuid", type=int, default=268, help="Bittensor network UID."
         )
         parser.add_argument(
-            "--project", type=str, default="templar", help="Wandb project."
-        )
-        parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
         )
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -560,7 +557,7 @@ class Miner:
             self.optimizer.step()
             self.scheduler.step()
 
-            # Log total window time and add timing metrics to existing wandb logging
+            # Log total window time
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - window_start)} Completed window iteration"
             )

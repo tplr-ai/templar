@@ -258,7 +258,7 @@ wheels = [
 
 [[package]]
 name = "bittensor"
-version = "9.0.4"
+version = "9.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -288,9 +288,9 @@ dependencies = [
     { name = "websockets" },
     { name = "wheel" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/85/c6/be2b9b8a54a58d1afaeafd667dac8a43892f7dd9680aa01d23bc04285db6/bittensor-9.0.4.tar.gz", hash = "sha256:2968ad7764e71071584e1f871ebfbd3dd3af8f1d71d69700b161b7ac90dccc71", size = 222212 }
+sdist = { url = "https://files.pythonhosted.org/packages/47/5e/1ecb75a7d1f28bf610be5fa03eea9c4353e05f027ff739e3ce87c1d57e87/bittensor-9.1.0.tar.gz", hash = "sha256:32f963a5bdb1e0ba0603da3bd963b5c108407b1348a6728593f6bd75c848da2a", size = 228001 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/37/25/0b21911275c4a4fd80b2b007ab33f7039df510b5496184453767dbef04ac/bittensor-9.0.4-py3-none-any.whl", hash = "sha256:bf0a131b2b9acf50d4ec6784a4f975de139ee92a015fff8e211b975d7e853d1a", size = 262895 },
+    { url = "https://files.pythonhosted.org/packages/0a/a3/91365f318072cd9f166da4f8e49d109632fd834b1c067e42a33bdf183241/bittensor-9.1.0-py3-none-any.whl", hash = "sha256:7af67b38efebbe7084bd58f26205fc25783fea9d3161714e5a784861d856f628", size = 270472 },
 ]
 
 [[package]]
@@ -3417,7 +3417,7 @@ requires-dist = [
     { name = "aioboto3", specifier = "==13.2.0" },
     { name = "aiofiles" },
     { name = "aiofiles", specifier = "==24.1.0" },
-    { name = "bittensor", specifier = "==9.0.4" },
+    { name = "bittensor", specifier = "==9.1.0" },
     { name = "boto3" },
     { name = "bt-decode" },
     { name = "einops" },

@@ -18,35 +18,36 @@
 # type: ignore
 
 # Standard library
-import os
-import sys
-import copy
-import time
-import json
-import random
-import asyncio
-from datetime import datetime, timedelta, timezone
 import argparse
+import asyncio
+import copy
+import json
+import os
+import random
+import sys
 import threading
+import time
 from collections import defaultdict
-from time import perf_counter
-from logging_loki import LokiHandler
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from io import StringIO
-from rich.console import Console
-from rich.table import Table
+from time import perf_counter
+
+import bittensor as bt
+import numpy as np
 
 # Third party
 import torch
-import numpy as np
-import bittensor as bt
+from logging_loki import LokiHandler
+from rich.console import Console
+from rich.table import Table
 from torch.optim import SGD
-from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
     LinearLR,
     SequentialLR,
 )
+from transformers import LlamaForCausalLM
 
 # Local
 import tplr
@@ -63,13 +64,15 @@ torch.backends.cudnn.allow_tf32 = True
 
 
 @contextmanager
-def timer(name: str, wandb_obj=None, step=None):
+def timer(name: str, metrics_logger=None, step=None):
     start = perf_counter()
     yield
     duration = perf_counter() - start
     tplr.logger.debug(f"{name} took {duration:.2f}s")
-    if wandb_obj and step is not None:
-        wandb_obj.log({f"validator/{name}": duration}, step=step)
+    if metrics_logger and step is not None:
+        metrics_logger.log(
+            measurement="timing", tags={"window": step}, fields={name: duration}
+        )
 
 
 class Validator:
@@ -78,9 +81,6 @@ class Validator:
         parser = argparse.ArgumentParser(description="Validator script")
         parser.add_argument(
             "--netuid", type=int, default=268, help="Bittensor network UID."
-        )
-        parser.add_argument(
-            "--project", type=str, default="templar", help="Wandb project."
         )
         parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
@@ -92,6 +92,16 @@ class Validator:
             action="store_true",
             help="Store gathered gradients in R2",
         )
+        parser.add_argument(
+            "--test",
+            action="store_true",
+            help="Test mode - use all peers without filtering",
+        )
+        parser.add_argument(
+            "--enable-loki",
+            action="store_true",
+            help="Enable Loki logging (disabled by default)",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -100,6 +110,11 @@ class Validator:
             tplr.debug()
         if config.trace:
             tplr.trace()
+
+        # Set Loki environment variable based on CLI arg
+        if config.enable_loki:
+            os.environ["ENABLE_LOKI"] = "true"
+
         return config
 
     def __init__(self):
@@ -120,13 +135,14 @@ class Validator:
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
 
-        # Update Loki handler's tag with the dynamic UID from the validator.
-        try:
-            for handler in tplr.logger.handlers:
-                if isinstance(handler, LokiHandler):
-                    handler.tags["uid"] = str(self.uid)
-        except Exception as e:
-            tplr.logger.error(f"Failed to update Loki handler UID tag: {e}")
+        # Update Loki handler's tag with the dynamic UID from the validator if Loki is enabled
+        if os.environ.get("ENABLE_LOKI", "false").lower() in ["true", "1", "yes"]:
+            try:
+                for handler in tplr.logger.handlers:
+                    if isinstance(handler, LokiHandler):
+                        handler.tags["uid"] = str(self.uid)
+            except Exception as e:
+                tplr.logger.error(f"Failed to update Loki handler UID tag: {e}")
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
@@ -231,17 +247,10 @@ class Validator:
 
         # Initialize InfluxDB metrics logger
         self.metrics_logger = tplr.metrics.MetricsLogger(
-            host=os.environ.get("INFLUXDB_URL"),
-            port=8086,
-            database="tplr",
-            token=os.environ.get("INFLUXDB_TOKEN"),
-            org="tplr",
-        )
-        # Initialize WandB run for validator metrics logging
-        self.wandb_run = tplr.wandb.initialize_wandb(
-            run_prefix="validator-",
+            prefix="V",
             uid=str(self.uid),
             config=self.config,
+            role="validator",
             group="validator",
             job_type="evaluation",
         )
@@ -414,11 +423,31 @@ class Validator:
 
             # Calculate time window for this sync window
             sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
-            time_min = datetime.fromtimestamp(
-                self.subtensor.query_module("Timestamp", "Now", block=sync_block).value
-                / 1000,
-                tz=timezone.utc,
-            )
+            retries = 0
+            delay = 1
+            max_retries = 5
+            max_delay = 60
+            while True:
+                try:
+                    response = self.subtensor.query_module(
+                        "Timestamp", "Now", block=sync_block
+                    )
+                    ts_value = response.value / 1000  # convert ms to seconds
+                    break
+                except Exception as e:
+                    tplr.logger.error(
+                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
+                    )
+                    retries += 1
+                    if retries > max_retries:
+                        tplr.logger.error(
+                            "Exceeded maximum retries for timestamp query."
+                        )
+                        raise e
+                    time.sleep(delay)
+                    delay = min(delay * 2, max_delay)
+
+            time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
             time_max = time_min + timedelta(
                 seconds=self.hparams.time_window_delta_seconds
             )
@@ -428,6 +457,30 @@ class Validator:
             tplr.logger.info(f"We are using peers {self.peers}")
 
             gather_start = tplr.T()
+            # Refresh peers explicitly before starting gather to avoid missing updated active peers.
+            tplr.logger.info("Refreshing peers before gather task in validator...")
+
+            if self.config.test:
+                # In test mode, use all UIDs from metagraph except self
+                tplr.logger.info("Test mode active: Using all peers from metagraph.")
+                all_uids = list(range(len(self.metagraph.S)))
+                self.peers = [uid for uid in all_uids if uid != self.uid]
+
+                # For evaluation, also use all peers but track separately
+                self.eval_peers = {uid: 0 for uid in self.peers}
+
+                # Initialize evaluation candidate counters for new peers
+                for uid in self.peers:
+                    if uid not in self.eval_candidates_counter:
+                        self.eval_candidates_counter[uid] = 0
+            else:
+                # Normal operation - update and filter peers
+                self.comms.update_peers_with_buckets()
+                self.peers = self.comms.peers
+                self.eval_peers = self.comms.eval_peers
+
+            tplr.logger.info(f"Validator gather peers: {self.peers}")
+
             gather_result = await self.comms.gather(
                 my_uid=self.uid,
                 uids=self.peers,
@@ -509,7 +562,6 @@ class Validator:
                     uid=str(eval_uid),
                     window=self.sync_window,
                     key="gradient",
-                    timeout=15,
                     local=False,
                     stale_retention=10,
                     time_max=time_max,
@@ -631,6 +683,45 @@ class Validator:
                         self.optimizer.zero_grad()
                         model_own_data_eval.zero_grad()
 
+                        # First validate all gradients before applying any
+                        for n, p in model_own_data_eval.named_parameters():
+                            idxs_key = n + "idxs"
+                            vals_key = n + "vals"
+                            idxs = state_dict.get(idxs_key, None)
+                            vals = state_dict.get(vals_key, None)
+
+                            if idxs is not None and vals is not None:
+                                # Move tensors to device
+                                idxs = idxs.to(self.config.device)
+                                vals = vals.to(self.config.device)
+
+                                # Validate indices are within bounds
+                                if self.totalks.get(n) is None:
+                                    tplr.logger.warning(
+                                        f"Missing totalk for parameter {n}, skipping peer {eval_uid}"
+                                    )
+                                    raise ValueError(
+                                        f"Invalid gradient data from peer {eval_uid}: Missing totalk for parameter {n}"
+                                    )
+
+                                # Check compressed indices are valid
+                                self.comms.check_compressed_indices(
+                                    idxs_key,
+                                    idxs,
+                                    self.totalks[n],
+                                    allowed_topk=self.hparams.topk_compression,
+                                )
+
+                                # Check for NaN or Inf values
+                                if torch.isnan(vals).any() or torch.isinf(vals).any():
+                                    tplr.logger.warning(
+                                        f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {eval_uid}"
+                                    )
+                                    raise ValueError(
+                                        f"Invalid gradient data from peer {eval_uid}: NaN or Inf values in {vals_key}"
+                                    )
+
+                        # If all validations pass, apply the gradients
                         for n, p in model_own_data_eval.named_parameters():
                             idxs_key = n + "idxs"
                             vals_key = n + "vals"
@@ -651,13 +742,52 @@ class Validator:
                                     )
                                 ).to(self.config.device)
 
+                                # Final safety check on the gradient itself
+                                if torch.isnan(grad).any() or torch.isinf(grad).any():
+                                    tplr.logger.warning(
+                                        f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}"
+                                    )
+                                    raise ValueError(
+                                        f"Invalid gradient from peer {eval_uid}: NaN or Inf in decompressed gradient for {n}"
+                                    )
+
                                 p.data.sub_(
                                     grad.sign(), alpha=self.scheduler.get_last_lr()[0]
                                 )
                     except Exception as e:
                         tplr.logger.error(
-                            f"Failed to apply gradient for uid {eval_uid}: {str(e)}"
+                            f"Failed to apply gradient for UID {eval_uid}: {str(e)}"
                         )
+
+                        # Set score to exactly zero - full penalty for invalid gradients
+                        old_score = self.final_moving_avg_scores[eval_uid].item()
+                        self.final_moving_avg_scores[eval_uid] = (
+                            0.0  # Set to zero - no partial credit
+                        )
+                        tplr.logger.warning(
+                            f"Set score of UID {eval_uid} from {old_score:.4f} to 0.0 - invalid gradient data"
+                        )
+
+                        # Include in evaluated UIDs so it gets logged in metrics
+                        self.evaluated_uids.add(eval_uid)
+
+                        # Log to metrics
+                        self.metrics_logger.log(
+                            measurement="validator_slash",
+                            tags={
+                                "eval_uid": eval_uid,
+                                "window": self.sync_window,
+                                "global_step": self.global_step,
+                                "reason_code": "invalid_gradient",
+                            },
+                            fields={
+                                "score_before": old_score,
+                                "score_after": 0.0,
+                                "reason": str(e)[:255],  # Truncate long error messages
+                            },
+                        )
+
+                        # Skip the rest of processing for this peer
                         continue
 
                     # 10. Compute loss after gradient application
@@ -1076,19 +1206,22 @@ class Validator:
                             f"  - Moving avg score: {self.final_moving_avg_scores[uid]:.4f}"
                         )
 
-                    # Optionally, log to WandB
-                    self.wandb_run.log(
-                        {
-                            f"validator/final_moving_avg_scores/{eval_uid}": self.final_moving_avg_scores[
+                    # Log metrics
+                    self.metrics_logger.log(
+                        measurement="validator_scores",
+                        tags={
+                            "eval_uid": eval_uid,
+                            "window": self.sync_window,
+                            "global_step": self.global_step,
+                        },
+                        fields={
+                            "final_moving_avg_score": self.final_moving_avg_scores[
                                 eval_uid
                             ].item(),
                             "binary_moving_avg": self.binary_moving_averages[
                                 eval_uid
                             ].item(),
                             "normalised_binary": self.normalised_binary_moving_averages[
-                                eval_uid
-                            ].item(),
-                            "final_moving_avg": self.final_moving_avg_scores[
                                 eval_uid
                             ].item(),
                             "weight": self.weights[eval_uid].item(),
@@ -1174,17 +1307,17 @@ class Validator:
                 "evaluated_uids": len(self.evaluated_uids),
                 "learning_rate": self.scheduler.get_last_lr()[0],
                 "active_miners": len(self.valid_score_indices),
-                "gather_success_rate": gather_result.success_rate * 100
-                if gather_result
-                else 0,
+                "gather_success_rate": (
+                    gather_result.success_rate * 100 if gather_result else 0
+                ),
                 "gather_peers": json.dumps(self.peers),
                 "skipped_peers": json.dumps(
                     gather_result.skipped_uids if gather_result else []
                 ),
                 "total_peers": len(self.peers),
-                "total_skipped": len(gather_result.skipped_uids)
-                if gather_result
-                else 0,
+                "total_skipped": (
+                    len(gather_result.skipped_uids) if gather_result else 0
+                ),
             }
             self.metrics_logger.log(
                 measurement="templar_metrics_v2",
@@ -1196,8 +1329,6 @@ class Validator:
                 },
                 fields=evaluation_metrics,
             )
-            # Also log evaluation metrics to WandB
-            self.wandb_run.log(evaluation_metrics, step=self.global_step)
 
             # 17. Set weights periodically
             if self.sync_window % self.hparams.windows_per_weights == 0:
@@ -1332,39 +1463,37 @@ class Validator:
             )
 
             # 13. Log evaluation metrics once all evaluations are done
-            evaluation_metrics = {
-                "validator/loss/own/before": self.loss_before_per_batch_own,
-                "validator/loss/own/after": self.loss_after_per_batch_own,
-                "validator/loss/random/before": self.loss_before_per_batch_random,
-                "validator/loss/random/after": self.loss_after_per_batch_random,
-                "validator/loss/own/improvement": self.relative_improvement_own,
-                "validator/loss/random/improvement": self.relative_improvement_random,
-                "validator/network/block": self.current_block,
-                "validator/network/window": self.sync_window,
-                "validator/network/step": self.global_step,
-                "validator/network/evaluated_uids": len(self.evaluated_uids),
-                "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
-                "validator/network/active_miners": len(self.valid_score_indices),
-                "validator/gather/success_rate": gather_result.success_rate * 100
-                if gather_result
-                else 0,  # Success percentage
-                "validator/timing/window_total": tplr.T() - window_start,
-                "validator/timing/peer_update": tplr.T() - peer_start,
-                "validator/timing/gather": tplr.T() - gather_start,
-                "validator/timing/evaluation": tplr.T() - eval_start,
-                "validator/timing/model_update": tplr.T() - update_start,
-            }
             self.metrics_logger.log(
-                measurement="templar_metrics_v2",
+                measurement="validator_window",
                 tags={
-                    "role": "validator",
-                    "uid": str(self.uid),
                     "window": self.sync_window,
+                    "global_step": self.global_step,
                 },
-                fields=evaluation_metrics,
+                fields={
+                    "loss_own_before": self.loss_before_per_batch_own,
+                    "loss_own_after": self.loss_after_per_batch_own,
+                    "loss_random_before": self.loss_before_per_batch_random,
+                    "loss_random_after": self.loss_after_per_batch_random,
+                    "loss_own_improvement": self.relative_improvement_own,
+                    "loss_random_improvement": self.relative_improvement_random,
+                    "current_block": self.current_block,
+                    "evaluated_uids_count": len(self.evaluated_uids),
+                    "learning_rate": self.scheduler.get_last_lr()[0],
+                    "active_miners_count": len(self.valid_score_indices),
+                    "gather_success_rate": (
+                        gather_result.success_rate * 100 if gather_result else 0
+                    ),
+                    "window_total_time": tplr.T() - window_start,
+                    "peer_update_time": tplr.T() - peer_start,
+                    "gather_time": tplr.T() - gather_start,
+                    "evaluation_time": tplr.T() - eval_start,
+                    "model_update_time": tplr.T() - update_start,
+                    "total_peers": len(self.peers),
+                    "total_skipped": (
+                        len(gather_result.skipped_uids) if gather_result else 0
+                    ),
+                },
             )
-            # Also log evaluation metrics to WandB
-            self.wandb_run.log(evaluation_metrics, step=self.global_step)
 
             # 18. Increment global step
             self.global_step += 1

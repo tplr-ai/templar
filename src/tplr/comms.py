@@ -15,38 +15,36 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 # type: ignore
+import asyncio
+import json
+import math
 import os
 import random
 import re
-import math
-import json
 import time
-import torch
-import asyncio
-import aiofiles
-import botocore
 from datetime import datetime, timezone
-import bittensor as bt
 
-from tqdm import tqdm as std_tqdm
-from typing import List, Dict, Optional, TypeVar, Any
-from aiobotocore.session import get_session
-
-from . import __version__
-from .config import client_config, BUCKET_SECRETS
-from .chain import ChainManager
-from .schemas import Bucket
-
-import tplr as tplr
 # from .hparams import HParams
-
 from types import SimpleNamespace
-from typing import Tuple
-from transformers import LlamaForCausalLM
+from typing import Any, Dict, List, Optional, Tuple, TypeVar
+
+import aiofiles
+import bittensor as bt
+import botocore
+import torch
+from aiobotocore.session import get_session
 from torch.optim import SGD
 from torch.optim.lr_scheduler import SequentialLR
-from .compress import TransformDCT, CompressDCT
+from tqdm import tqdm as std_tqdm
+from transformers import LlamaForCausalLM
 
+import tplr as tplr
+
+from . import __version__
+from .chain import ChainManager
+from .compress import CompressDCT, TransformDCT
+from .config import BUCKET_SECRETS, client_config
+from .schemas import Bucket
 
 # Constants
 CF_REGION_NAME: str = "enam"
@@ -333,7 +331,7 @@ class Comms(ChainManager):
         self,
         key: str,
         bucket: Bucket = None,
-        timeout: int = 5,
+        timeout: int = 10,
         time_min: datetime = None,
         time_max: datetime = None,
     ):
@@ -769,7 +767,6 @@ class Comms(ChainManager):
         uid: str,
         window: int,
         key: str,
-        timeout: int = 10,
         local: bool = True,
         stale_retention: int = 10,
         time_min: datetime = None,
@@ -807,7 +804,6 @@ class Comms(ChainManager):
             loaded_data = await self.s3_get_object(
                 key=filename,
                 bucket=peer_bucket,
-                timeout=timeout,
                 time_min=time_min,
                 time_max=time_max,
             )
@@ -970,7 +966,7 @@ class Comms(ChainManager):
                         skipped_uids.append(uid)
                         continue
 
-                    # ---------- Begin Compressed Indices Check ----------
+                    # ---------- Begin Compressed Indices and Values Check ----------
                     valid_response = True
                     for param_name, tensor in state_dict_resp.items():
                         if param_name.endswith("idxs"):
@@ -995,10 +991,35 @@ class Comms(ChainManager):
                                 )
                                 valid_response = False
                                 break
+                        # Check if values are valid (not NaN, not Inf)
+                        elif param_name.endswith("vals"):
+                            tensor_to_check = tensor.to(device)
+                            try:
+                                # Check for NaN or Inf values only - these are never valid
+                                if (
+                                    torch.isnan(tensor_to_check).any()
+                                    or torch.isinf(tensor_to_check).any()
+                                ):
+                                    tplr.logger.warning(
+                                        f"Values contain NaN or Inf for parameter {param_name} from UID {uid}, skipping UID."
+                                    )
+                                    valid_response = False
+                                    break
+                            except Exception as e:
+                                tplr.logger.warning(
+                                    f"Values check failed for parameter {param_name} from UID {uid}: {e}"
+                                )
+                                valid_response = False
+                                break
+
+                    # If any check failed, skip this UID entirely
                     if not valid_response:
+                        tplr.logger.info(
+                            f"Skipping UID {uid} due to validation failures"
+                        )
                         skipped_uids.append(uid)
                         continue
-                    # ---------- End Compressed Indices Check ----------
+                    # ---------- End Compressed Indices and Values Check ----------
 
                     # Process tensors (with normalization on 'vals' keys).
                     for param_name, tensor in state_dict_resp.items():

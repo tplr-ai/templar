@@ -131,7 +131,7 @@ class CompressDCT:
         if topk < 1:
             topk = 1
         return topk
-    
+
     @torch.no_grad()
     def compress(self, x, topk):
         xshape = x.shape

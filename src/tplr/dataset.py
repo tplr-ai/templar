@@ -18,13 +18,14 @@
 # type: ignore
 
 # Global imports
+import asyncio
 import random
 import typing
-import asyncio
+
 import aiohttp
 import numpy as np
-from transformers import AutoTokenizer
 from torch.utils.data import IterableDataset
+from transformers import AutoTokenizer
 
 
 class SubsetLoader(IterableDataset):

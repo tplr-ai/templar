@@ -68,7 +68,7 @@ To securely store sensitive environment variables (e.g., API keys, wallet creden
 
    ```yaml
    env_vars:
-     WANDB_API_KEY: "your_wandb_key"
+     INFLUXDB_TOKEN: "your_influxdb_token"  # Optional, falls back to default if not provided
      R2_ACCOUNT_ID: "your_r2_account_id"
      R2_GRADIENTS_ACCOUNT_ID: "your_r2_gradients_account_id"
      # ... other env vars ...

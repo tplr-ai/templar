@@ -40,9 +40,7 @@ class Analyzer:
         parser = argparse.ArgumentParser(description="Analyzer script")
         parser.add_argument("--debug", action="store_true", help="Enable debug mode")
         parser.add_argument("--trace", action="store_true", help="Enable trace mode")
-        parser.add_argument(
-            "--project", type=str, default="templar", help="Wandb project name"
-        )
+        # Removed wandb project argument
         parser.add_argument(
             "--analysis_interval",
             type=int,
@@ -94,11 +92,12 @@ class Analyzer:
                 self.xshapes[n] = transformed.shape
                 self.totalks[n] = transformed.numel()
 
-            # Initialize WandB
-            self.wandb = tplr.initialize_wandb(
-                run_prefix="A",  # 'A' for Analyzer
-                uid=0,
+            # Initialize metrics logger with consistent pattern
+            self.metrics_logger = tplr.metrics.MetricsLogger(
+                prefix="A",  # 'A' for Analyzer
+                uid="0",
                 config=self.config,
+                role="analyzer",
                 group="analyzer",
                 job_type="analysis",
             )
@@ -245,19 +244,17 @@ class Analyzer:
                     avg_similarities[uid1] = similarities.sum() / (len(uids) - 1)
 
                 # Log similarity metrics
-                self.wandb.log(
-                    {
-                        f"analyzer/similarity/{uid}/avg_peer_similarity": avg_similarities[
-                            uid
-                        ],
-                        f"analyzer/similarity/{uid}/max_peer_similarity": sim_matrix[
-                            uids.index(uid)
-                        ].max(),
-                        f"analyzer/similarity/{uid}/min_peer_similarity": sim_matrix[
-                            uids.index(uid)
-                        ].min(),
+                self.metrics_logger.log(
+                    measurement="similarity",
+                    tags={
+                        "peer_uid": str(uid),
+                        "step": self.current_step,
                     },
-                    step=self.current_step,
+                    fields={
+                        "avg_peer_similarity": float(avg_similarities[uid]),
+                        "max_peer_similarity": float(sim_matrix[uids.index(uid)].max()),
+                        "min_peer_similarity": float(sim_matrix[uids.index(uid)].min()),
+                    },
                 )
 
             # Analyze this peer's gradients
@@ -266,20 +263,20 @@ class Analyzer:
             )
 
             # Log metrics
-            self.wandb.log(
-                {
-                    f"analyzer/gradients/{uid}/norm": metrics["gradient_norm"],
-                    f"analyzer/indices/{uid}/reuse_ratio": metrics["index_reuse_ratio"],
-                    f"analyzer/indices/{uid}/unique_count": metrics[
-                        "unique_indices_count"
-                    ],
-                    f"analyzer/indices/{uid}/total_count": metrics[
-                        "total_indices_count"
-                    ],
-                    f"analyzer/metadata/{uid}/window": window,
-                    f"analyzer/metadata/{uid}/timestamp": timestamp,
+            self.metrics_logger.log(
+                measurement="gradient_analysis",
+                tags={
+                    "peer_uid": str(uid),
+                    "window": window,
+                    "step": self.current_step,
                 },
-                step=self.current_step,
+                fields={
+                    "gradient_norm": float(metrics["gradient_norm"]),
+                    "index_reuse_ratio": float(metrics["index_reuse_ratio"]),
+                    "unique_indices_count": int(metrics["unique_indices_count"]),
+                    "total_indices_count": int(metrics["total_indices_count"]),
+                    "timestamp": float(timestamp),
+                },
             )
 
             # Cleanup old window data

@@ -5,7 +5,7 @@ After=network.target
 [Service]
 WorkingDirectory={{ templar_dir }}
 EnvironmentFile={{ templar_dir }}/.env
-ExecStart={{ templar_dir }}/.venv/bin/python neurons/miner.py --actual_batch_size {{ actual_batch_size }} --wallet.name {{ wallet_name }} --wallet.hotkey {{ wallet_hotkey }} --device {{ device }} --use_wandb --netuid "{{ netuid }}" --subtensor.network "{{ subtensor_network }}" --sync_state
+ExecStart={{ templar_dir }}/.venv/bin/python neurons/miner.py --actual_batch_size {{ actual_batch_size }} --wallet.name {{ wallet_name }} --wallet.hotkey {{ wallet_hotkey }} --device {{ device }} --netuid "{{ netuid }}" --subtensor.network "{{ subtensor_network }}" --sync_state
 Restart=always
 RestartSec=5s
 StartLimitIntervalSec=60

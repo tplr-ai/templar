@@ -39,7 +39,6 @@ class TestInactivitySlashing:
         validator.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         validator.inactivity_slash_rate = 0.25
         validator.sync_window = 1
-        validator.wandb = Mock()
         validator.global_step = 0
         validator.comms = Mock()
         return validator

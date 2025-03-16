@@ -18,6 +18,7 @@
 # Global imports
 import json
 from types import SimpleNamespace
+
 from transformers import AutoTokenizer, LlamaConfig
 
 # Local imports

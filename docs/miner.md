@@ -109,10 +109,6 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    Populate the `.env` file with your configuration. The variables that need to be set are:
 
    ```dotenv:docker/.env
-   # Add your Weights & Biases API key
-   WANDB_API_KEY=<your_wandb_api_key>
-
-
    # Cloudflare R2 Credentials - Add your R2 credentials below
    R2_GRADIENTS_ACCOUNT_ID=<your_r2_account_id>
    R2_GRADIENTS_BUCKET_NAME=<your_r2_bucket_name>
@@ -123,10 +119,10 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    R2_GRADIENTS_WRITE_ACCESS_KEY_ID=<your_r2_write_access_key_id>
    R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=<your_r2_write_secret_access_key>
 
-   R2_DATASET_ACCOUNT_ID=80f15715bb0b882c9e967c13e677ed7d
-   R2_DATASET_BUCKET_NAME=80f15715bb0b882c9e967c13e677ed7d
-   R2_DATASET_READ_ACCESS_KEY_ID=88548d962edc9a1f4416cbb3453d914a
-   R2_DATASET_READ_SECRET_ACCESS_KEY=4934ae848465113a75babf7d0a88efd9112aa49296c900744268e91f1d31998f
+   R2_DATASET_ACCOUNT_ID=dd08f378791881bf6bbb7f161c78a220
+   R2_DATASET_BUCKET_NAME=edu-dataset
+   R2_DATASET_READ_ACCESS_KEY_ID=7cadbe19f880785e46898b558ef70ce8
+   R2_DATASET_READ_SECRET_ACCESS_KEY=9787434d676b05dce69cc4e76c6af74d795b606feafd031944444780d5f72272
 
    # Wallet Configuration
    WALLET_NAME=<your_wallet_name>
@@ -249,23 +245,17 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    btcli subnet pow_register --wallet.name default --wallet.hotkey miner --netuid <netuid> --subtensor.network <network>
    ```
 
-6. **Log into Weights & Biases (WandB)**:
-
-   ```bash
-   wandb login your_wandb_api_key
-   ```
-
-7. **Set Environment Variables**:
+6. **Set Environment Variables**:
 
    Export necessary environment variables or create a `.env` file in the project root.
    ```bash
-   export WANDB_API_KEY=your_wandb_api_key
    export NODE_TYPE=your_node_type
    export WALLET_NAME=your_wallet_name
    export WALLET_HOTKEY=your_wallet_hotkey
    export CUDA_DEVICE=your_cuda_device
    export NETWORK=your_network
    export NETUID=your_netuid
+   export INFLUXDB_TOKEN=your_influxdb_token  # Optional, falls back to default if not provided
    export DEBUG=your_debug_setting
    
    # Gradients R2 credentials
@@ -277,10 +267,10 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    export R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
 
    # Dataset R2 credentials
-   export R2_DATASET_ACCOUNT_ID=80f15715bb0b882c9e967c13e677ed7d
-   export R2_DATASET_BUCKET_NAME=80f15715bb0b882c9e967c13e677ed7d
-   export R2_DATASET_READ_ACCESS_KEY_ID=88548d962edc9a1f4416cbb3453d914a
-   export R2_DATASET_READ_SECRET_ACCESS_KEY=4934ae848465113a75babf7d0a88efd9112aa49296c900744268e91f1d31998f
+   export R2_DATASET_ACCOUNT_ID=dd08f378791881bf6bbb7f161c78a220
+   export R2_DATASET_BUCKET_NAME=edu-dataset
+   export R2_DATASET_READ_ACCESS_KEY_ID=7cadbe19f880785e46898b558ef70ce8
+   export R2_DATASET_READ_SECRET_ACCESS_KEY=9787434d676b05dce69cc4e76c6af74d795b606feafd031944444780d5f72272
    
    export GITHUB_USER=your_github_username
    ```
@@ -293,9 +283,9 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
      --wallet.name default \
      --wallet.hotkey miner \
      --device cuda \
-     --use_wandb \
      --netuid <netuid> \
      --subtensor.network <network> \
+     --enable-loki \
      --sync_state
    ```
 
@@ -320,13 +310,14 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
 When using Docker Compose, set the following variables in the `docker/.env` file:
 
 ```dotenv:docker/.env
-WANDB_API_KEY=your_wandb_api_key
-
 # Cloudflare R2 Credentials
 R2_ACCOUNT_ID=your_r2_account_id
 
 R2_READ_ACCESS_KEY_ID=your_r2_read_access_key_id
 R2_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
+
+# InfluxDB Configuration (optional, falls back to default if not provided)
+INFLUXDB_TOKEN=your_influxdb_token
 
 R2_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
 R2_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
@@ -344,6 +335,14 @@ CUDA_DEVICE=cuda:0
 
 # Additional Settings
 DEBUG=false
+# Loki Logging (optional)
+ENABLE_LOKI=false
+# InfluxDB Configuration (optional)
+INFLUXDB_HOST=custom-influxdb-host.example.com
+INFLUXDB_PORT=8086
+INFLUXDB_DATABASE=custom-database
+INFLUXDB_ORG=custom-org
+INFLUXDB_TOKEN=your-influxdb-token
 ```
 
 **Note**: The R2 permissions remain unchanged from previous configurations.
@@ -379,10 +378,16 @@ DEBUG=false
   docker logs -f templar-miner-${WALLET_HOTKEY}
   ```
 
-- **Weights & Biases**:
+- **Loki Logs**:
 
-  - Ensure `--use_wandb` is enabled
-  - Monitor training metrics and performance on your WandB dashboard
+  Loki logging is disabled by default. To enable:
+
+  - Set `ENABLE_LOKI=true` in your environment or `.env` file
+  - Or use the `--enable-loki` flag when running the miner
+
+- **Metrics Dashboard**:
+
+  - Monitor training metrics and performance through InfluxDB
 
 ### Performance
 

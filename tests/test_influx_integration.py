@@ -9,7 +9,6 @@ import asyncio
 import json
 import os
 import random
-import sys
 import time
 from unittest.mock import MagicMock
 
@@ -62,11 +61,14 @@ class MinerSimulator:
             action="store_true",
             help="Enable Loki logging (disabled by default)",
         )
+        parser.add_argument(
+            "--uid",
+            type=int,
+            help="Specific UID to use for testing (random if not specified)",
+        )
 
-        if "--help" in sys.argv or "-h" in sys.argv:
-            config = parser.parse_args()
-        else:
-            config = parser.parse_args([])
+        # Always parse args from command line when running the script
+        config = parser.parse_args()
 
         if config.debug:
             tplr.debug()
@@ -91,7 +93,9 @@ class MinerSimulator:
         self.hparams.learning_rate = 0.001
         self.hparams.time_window_delta_seconds = 60
 
-        self.uid = random.randint(0, 100)
+        self.uid = (
+            self.config.uid if self.config.uid is not None else random.randint(0, 100)
+        )
 
         self.current_block = 1000000
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
@@ -409,6 +413,12 @@ def test_influxdb_integration():
     4. Verifies data was written successfully
 
     Run with: pytest -xvs tests/test_influx_integration.py
+
+    Optional arguments (when running directly):
+    - --uid: Specify a particular UID to use for the test (otherwise a random one is selected)
+    - --test-duration: Duration of the test in seconds (default: 60)
+    - --window-interval: Interval between windows in seconds (default: 5.0)
+    - --num-peers: Number of simulated peers (default: 10)
 
     Environment variables:
     - INFLUXDB_HOST: Override the default InfluxDB host

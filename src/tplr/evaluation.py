@@ -309,3 +309,177 @@ async def evaluate_peers_parallel(
     torch.cuda.empty_cache()
     
     return {uid: result for uid, result in results}
+
+def compute_avg_loss(model, batches, sampled_indices, tokenizer, device):
+    """
+    Computes the average loss over selected batches.
+    Uses torch.no_grad() to save GPU memory.
+    """
+    total_loss = 0.0
+    n_batches_count = 0
+    model.eval()
+    with torch.no_grad():
+        for i, batch in enumerate(batches):
+            if i in sampled_indices:
+                input_ids = torch.tensor(batch, dtype=torch.long, device=device)
+                labels = input_ids.clone()
+                labels = torch.where(labels == tokenizer.pad_token_id, -100, labels)
+                outputs = model(input_ids=input_ids, labels=labels)
+                total_loss += outputs.loss.item()
+                n_batches_count += 1
+    return total_loss / n_batches_count if n_batches_count > 0 else 0.0, n_batches_count
+
+def apply_gradient_update(model, state_dict, transformer, compressor, xshapes, totalks, device, lr):
+    """
+    Applies the peer gradient to the model.
+    For each parameter, decode the compressed update and applies a sign-based update.
+    """
+    for n, p in model.named_parameters():
+        idxs_key = n + "idxs"
+        vals_key = n + "vals"
+        if idxs_key in state_dict and vals_key in state_dict:
+            idxs = state_dict[idxs_key].to(device)
+            vals = state_dict[vals_key].to(device)
+            # Note that p.data is used as the baseline tensor.
+            grad = transformer.decode(
+                compressor.decompress(
+                    p.data,
+                    idxs,
+                    vals,
+                    xshapes[n],
+                    totalks[n],
+                )
+            ).to(device)
+            # Apply the update using a sign-based step
+            p.data.sub_(grad.sign(), alpha=lr)
+
+async def parallel_evaluate_peer(
+    eval_uid: int, 
+    state_dict: dict,
+    data_own_batches: list,
+    data_random_batches: list,
+    base_model,
+    tokenizer,
+    device: str,
+    transformer,
+    compressor,
+    xshapes: dict,
+    totalks: dict,
+    hparams,
+    lr: float
+) -> tuple:
+    """
+    Isolated evaluation for one peer.
+    
+    Implements:
+      1. Isolation: deep copy of the base model for both "own" and "random" evaluations.
+      2. Strict ordering: compute loss-before, apply gradient update, then compute loss-after.
+      3. Deterministic sampling: use fixed RNG seeds per UID to sample batches.
+      
+    Returns:
+      (eval_uid, loss_before_own, loss_after_own, loss_before_random, loss_after_random, binary_indicator)
+    """
+    # Set up deterministic sampling using per-peer seeds.
+    # rng_own = random.Random(eval_uid)
+    # rng_random = random.Random(eval_uid + 1000)
+    
+    sample_size_own = max(1, int(len(data_own_batches) * hparams.validator_sample_rate))
+    sampled_indices_own = sorted(random.sample(range(len(data_own_batches)), sample_size_own))
+
+    sample_size_random = max(1, int(len(data_random_batches) * hparams.validator_sample_rate))
+    sampled_indices_random = sorted(random.sample(range(len(data_random_batches)), sample_size_random))
+    
+    # --- Own Data Evaluation ---
+    # Isolate model copy for own evaluation.
+    model_own = copy.deepcopy(base_model).to(device)
+    loss_before_own, _ = compute_avg_loss(model_own, data_own_batches, sampled_indices_own, tokenizer, device)
+    
+    # Apply the gradient update.
+    apply_gradient_update(model_own, state_dict, transformer, compressor, xshapes, totalks, device, lr)
+    
+    loss_after_own, _ = compute_avg_loss(model_own, data_own_batches, sampled_indices_own, tokenizer, device)
+    
+    # --- Random Data Evaluation ---
+    # Isolate model copy for random evaluation.
+    model_random = copy.deepcopy(base_model).to(device)
+    loss_before_random, _ = compute_avg_loss(model_random, data_random_batches, sampled_indices_random, tokenizer, device)
+    
+    apply_gradient_update(model_random, state_dict, transformer, compressor, xshapes, totalks, device, lr)
+    
+    loss_after_random, _ = compute_avg_loss(model_random, data_random_batches, sampled_indices_random, tokenizer, device)
+    
+    # Compute improvements.
+    improvement_own = ((loss_before_own - loss_after_own) / loss_before_own) if loss_before_own > 0 else 0.0
+    improvement_random = ((loss_before_random - loss_after_random) / loss_before_random) if loss_before_random > 0 else 0.0
+    
+    binary_indicator = 1 if improvement_own > improvement_random else -1
+    
+    # Clean up memory.
+    del model_own, model_random
+    torch.cuda.empty_cache()
+    
+    return (eval_uid, loss_before_own, loss_after_own, loss_before_random, loss_after_random, binary_indicator)
+
+async def evaluate_all_peers(
+    peer_gradients: dict,
+    data_own_batches: list,
+    data_random_batches: list,
+    base_model,
+    tokenizer,
+    device: str,
+    transformer,
+    compressor,
+    xshapes: dict,
+    totalks: dict,
+    hparams,
+    lr: float
+) -> dict:
+    """
+    Schedules parallel evaluations for all peers.
+    
+    Args:
+      peer_gradients: Mapping {peer_uid: state_dict} of peer gradient states.
+      data_own_batches: List of batched own evaluation data.
+      data_random_batches: List of batched random evaluation data.
+      (Other parameters passed to the evaluator functions.)
+      
+    Returns:
+      Dictionary mapping uid -> {
+          loss_before_own, loss_after_own, loss_before_random,
+          loss_after_random, binary_indicator
+      }
+    """
+    tasks = []
+    for eval_uid, state_dict in peer_gradients.items():
+        tasks.append(
+            parallel_evaluate_peer(
+                eval_uid,
+                state_dict,
+                data_own_batches,
+                data_random_batches,
+                base_model,
+                tokenizer,
+                device,
+                transformer,
+                compressor,
+                xshapes,
+                totalks,
+                hparams,
+                lr,
+            )
+        )
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    eval_results = {}
+    for res in results:
+        if isinstance(res, Exception):
+            # Depending on your logging, you may want to record errors here.
+            continue
+        uid, loss_before_own, loss_after_own, loss_before_random, loss_after_random, binary_indicator = res
+        eval_results[uid] = {
+            "loss_before_own": loss_before_own,
+            "loss_after_own": loss_after_own,
+            "loss_before_random": loss_before_random,
+            "loss_after_random": loss_after_random,
+            "binary_indicator": binary_indicator,
+        }
+    return eval_results

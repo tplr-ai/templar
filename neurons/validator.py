@@ -447,20 +447,31 @@ class Validator:
                 tplr.logger.debug(f"Computing average for {len(metric_list)} values: {avg}")
                 return avg
             
+            # Returns the last value instead of averaging.
+            def safe_last(metric_list):
+                """Return the last metric value in the list or 0.0 if empty.
+                
+                This replaces the averaging logic so we report a single miner's loss—as in the original behavior.
+                """
+                if not metric_list:
+                    tplr.logger.warning("Empty metric list!")
+                    return 0.0
+                return metric_list[-1]
+            
             evaluation_metrics = {
-                "validator/loss/own/before": safe_avg(self.eval_metrics_collection['own_before']),
-                "validator/loss/own/after": safe_avg(self.eval_metrics_collection['own_after']),
-                "validator/loss/random/before": safe_avg(self.eval_metrics_collection['random_before']),
-                "validator/loss/random/after": safe_avg(self.eval_metrics_collection['random_after']),
-                "validator/loss/own/improvement": safe_avg(self.eval_metrics_collection['own_improvement']),
-                "validator/loss/random/improvement": safe_avg(self.eval_metrics_collection['random_improvement']),
+                "validator/loss/own/before": safe_last(self.eval_metrics_collection['own_before']),
+                "validator/loss/own/after": safe_last(self.eval_metrics_collection['own_after']),
+                "validator/loss/random/before": safe_last(self.eval_metrics_collection['random_before']),
+                "validator/loss/random/after": safe_last(self.eval_metrics_collection['random_after']),
+                "validator/loss/own/improvement": safe_last(self.eval_metrics_collection['own_improvement']),
+                "validator/loss/random/improvement": safe_last(self.eval_metrics_collection['random_improvement']),
                 "validator/network/block": self.current_block,
                 "validator/network/window": self.sync_window,
                 "validator/network/step": self.global_step,
                 "validator/network/evaluated_uids": len(self.evaluated_uids),
                 "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
                 "validator/network/active_miners": len(self.valid_score_indices),
-                "validator/gather/success_rate": gather_result.success_rate * 100 if gather_result and hasattr(gather_result, 'success_rate') else 0,
+                "validator/gather/success_rate": gather_result.success_rate * 100 if gather_result else 0,
                 "validator/timing/window_total": tplr.T() - window_start,
                 "validator/timing/peer_update": tplr.T() - peer_start,
                 "validator/timing/gather": tplr.T() - gather_start,
@@ -634,8 +645,7 @@ class Validator:
                                 vals,
                                 self.xshapes[n],
                                 self.totalks[n],
-                            )
-                        )
+                            ))
                         # Store pre-sign gradient in momentum
                         self.momentum[n] = new_grad.clone()
                         if p.grad is None:

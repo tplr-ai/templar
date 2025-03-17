@@ -37,5 +37,7 @@
     "catch_up_threshold": 15,
     "catch_up_batch_size": 5,
     "catch_up_timeout": 300,
-    "uids_per_window": 4
+    "uids_per_window": 4,
+    "max_eval_peers": 6,
+    "peers_per_eval_round": 3
 }

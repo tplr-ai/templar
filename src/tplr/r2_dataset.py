@@ -24,7 +24,6 @@ import numpy as np
 from pathlib import Path
 import pyarrow.parquet as pq
 from functools import lru_cache
-import threading
 
 from tplr import logger
 from tplr.config import BUCKET_SECRETS

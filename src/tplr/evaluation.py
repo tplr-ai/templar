@@ -4,7 +4,6 @@ from tplr.logging import logger
 import tplr
 from .r2_dataset import R2DatasetLoader
 import asyncio
-import random
 import copy
 
 
@@ -106,7 +105,9 @@ def compute_average_loss(model, batches, tokenizer, device, sample_rate):
             input_ids = torch.tensor(batch, dtype=torch.long).to(device)
             labels = input_ids.clone()
             labels = torch.where(labels == tokenizer.pad_token_id, -100, labels)
-            outputs = model(input_ids=input_ids, labels=labels)
+            # Use autocast for mixed precision during the forward pass:
+            with torch.amp.autocast('cuda'):
+                outputs = model(input_ids=input_ids, labels=labels)
             total_loss += outputs.loss.item()
             count += 1
             del input_ids, labels, outputs
@@ -122,7 +123,7 @@ def evaluate_loss_change(model, batches, tokenizer, device, sample_rate,
     )
     logger.info(f"Loss before gradient: {loss_before} on {count_before}/{total_batches} batches")
     
-    # Use the current learning rate from scheduler (as in the old code)
+    # Use the current learning rate from scheduler 
     current_lr = scheduler.get_last_lr()[0]
     
     # Apply the compressed gradient update to the model copy
@@ -146,7 +147,7 @@ def compute_improvement_metrics(loss_before_own, loss_after_own, loss_before_ran
     loss_improvement_random = loss_before_random - loss_after_random
     relative_improvement_random = (loss_improvement_random / loss_before_random) if loss_before_random > 0 else 0.0
 
-    gradient_score = (loss_improvement_own / loss_before_own) if loss_before_own > 0 else 0.0
+    gradient_score = relative_improvement_random
     binary_indicator = 1 if relative_improvement_own > relative_improvement_random else -1
     return relative_improvement_own, relative_improvement_random, gradient_score, binary_indicator
 
@@ -158,10 +159,10 @@ async def evaluate_peer(uid, state_dict, sync_window, hparams, tokenizer,
     """
     start_time = tplr.T()
     
-    # OWN EVALUATION: load and prepare own evaluation batches.
+    # load and prepare own evaluation batches.
     loader_own, _ = await R2DatasetLoader.get_loader(
         window=sync_window, hparams=hparams, tokenizer=tokenizer,
-        data_type="own", seed=uid
+        data_type="own", seed=int(uid)
     )
     batches_own = [batch for batch in loader_own]
     del loader_own

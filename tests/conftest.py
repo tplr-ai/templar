@@ -13,6 +13,36 @@ from tests.mocks import (
 )
 from tests.utils.env_setup import setup_test_environment
 from tests.mocks.bittensor import mock_bt
+import sys
+from pathlib import Path
+import sysconfig
+import importlib
+
+# Remove the current directory from sys.path to avoid local module shadowing.
+if '' in sys.path:
+    sys.path.remove('')
+
+# Force the virtualenv's site-packages to be first.
+venv_site_packages = sysconfig.get_paths()["purelib"]
+if venv_site_packages not in sys.path:
+    sys.path.insert(0, venv_site_packages)
+
+# Diagnostic: Locate the bittensor package.
+import bittensor  # This is the installed package in your venv
+
+try:
+    spec = importlib.util.find_spec("bittensor")
+except ValueError:
+    spec = None  # Editable installs can cause __spec__ to be None
+
+if spec and spec.origin:
+    print("Using bittensor from:", spec.origin)
+else:
+    origin = getattr(bittensor, '__file__', None)
+    if origin:
+        print("Using bittensor from (fallback):", origin)
+    else:
+        print("Could not determine bittensor package location.")
 
 @pytest.fixture(autouse=True)
 def mock_config():

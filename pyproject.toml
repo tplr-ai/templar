@@ -9,7 +9,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "bittensor==9.0.0",
+    "bittensor==9.1.0",
     "bt-decode",
     "torch",
     "boto3",
@@ -41,7 +41,8 @@ dev = [
     "matplotlib",
     "seaborn",
     "ruff",
-    "pytest-xdist"
+    "pytest-xdist",
+    "bittensor==9.1.0"
 
 ]
 

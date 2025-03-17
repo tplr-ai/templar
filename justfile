@@ -19,7 +19,7 @@ dev:
     uv pip install --pre -e ".[dev]"
 
 test: dev
-    uv run pytest -sv --prerelease=allow --pre
+    uv run pytest -sv --prerelease=allow
 
 # Run specific test file
 test-file file:

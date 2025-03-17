@@ -17,10 +17,6 @@
 
 
 from tplr.logging import logger
-import copy
-import torch
-import random
-import tplr
 
 
 def prepare_gradient_dict(miner, pages, step_window):

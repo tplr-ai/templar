@@ -715,8 +715,22 @@ class Comms(ChainManager):
         global_step: int = 0,
         local: bool = True,
         stale_retention: int = 10,
-    ):
-        """PUT operation: Store the state_dict and global_step."""
+    ) -> float:
+        """
+        Saves the data locally or uploads to S3, then cleans up stale files.
+
+        Args:
+            state_dict (dict): Data to save.
+            uid (str): Target user/miner identifier.
+            window (int): Current training window.
+            key (str): Label for the data (e.g., "gradient").
+            global_step (int, optional): Global step counter. Defaults to 0.
+            local (bool, optional): If True, store locally; otherwise upload to S3. Defaults to True.
+            stale_retention (int, optional): Number of windows to keep before cleanup. Defaults to 10.
+
+        Returns:
+            float: The elapsed time (in seconds) for the PUT operation.
+        """
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         tplr.logger.debug(f"PUT {filename} -->")
 
@@ -762,7 +776,9 @@ class Comms(ChainManager):
             if os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
 
-        tplr.logger.info(f"{tplr.P(window, tplr.T() - put_start)} PUT {filename} <--")
+        put_end = tplr.T()
+        tplr.logger.info(f"{tplr.P(window, put_end - put_start)} PUT {filename} <--")
+        return put_end - put_start
 
     async def get(
         self,

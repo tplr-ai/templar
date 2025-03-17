@@ -384,6 +384,9 @@ class Validator:
                 # Apply flat 25% penalty instead of exponential decay
                 old_score = self.final_moving_avg_scores[uid].item()
                 self.final_moving_avg_scores[uid] *= 0.75  # Apply flat 25% reduction
+                self.final_score_history[uid] = [
+                    final_score * 0.75 for final_score in self.final_score_history[uid]
+                ]
                 new_score = self.final_moving_avg_scores[uid].item()
 
                 tplr.logger.info(
@@ -488,6 +491,10 @@ class Validator:
                 if uid in self.final_moving_avg_scores:
                     old_score = self.final_moving_avg_scores[uid].item()
                     self.final_moving_avg_scores[uid] *= 0.5  # Apply 50% reduction
+                    self.final_score_history[uid] = [
+                        final_score * 0.5
+                        for final_score in self.final_score_history[uid]
+                    ]
                     new_score = self.final_moving_avg_scores[uid].item()
                     tplr.logger.info(
                         f"Reduced moving average score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient in gather."
@@ -1145,6 +1152,11 @@ class Validator:
                         eval_uid
                     ].item()  # Get the actual value
                     self.final_moving_avg_scores[eval_uid] *= 0.5  # Apply 50% reduction
+                    self.final_score_history[uid] = [
+                        final_score * 0.5
+                        for final_score in self.final_score_history[uid]
+                    ]
+
                     new_score = self.final_moving_avg_scores[
                         eval_uid
                     ].item()  # Get new value for logging

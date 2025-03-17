@@ -381,6 +381,22 @@ class Validator:
                     tplr.logger.info(f"UID {uid} became active again")
                     continue
 
+                if self.current_window - inactive_since > 25:
+                    self.final_score_history[uid] = []
+                    self.final_moving_avg_scores[uid] = 0.0
+                    self.weights[uid] = 0.0
+                    self.gradient_scores[uid] = 0.0
+                    self.gradient_moving_avg_scores[uid] = 0.0
+                    self.binary_moving_averages[uid] = 0.0
+                    self.binary_indicator_scores[uid] = 0.0
+                    self.normalised_binary_moving_averages[uid] = 0.0
+                    self.eval_candidates_counter[uid] = 0
+                    if uid in self.eval_peers:
+                        self.eval_peers[uid] = 0
+                    del self.inactive_scores[uid]
+                    tplr.logger.info(f"UID {uid} fully reset after extended inactivity")
+                    continue
+
                 # Apply flat 25% penalty instead of exponential decay
                 old_score = self.final_moving_avg_scores[uid].item()
                 self.final_moving_avg_scores[uid] *= 0.75  # Apply flat 25% reduction

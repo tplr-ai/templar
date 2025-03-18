@@ -510,7 +510,7 @@ class Validator:
                 tplr.logger.info(
                     f"No gradient gathered from UID {uid}. Slashing moving average score by 50%."
                 )
-                if uid in self.final_moving_avg_scores:
+                if 0 <= uid < self.final_moving_avg_scores.size(0):
                     old_score = self.final_moving_avg_scores[uid].item()
                     self.final_moving_avg_scores[uid] *= 0.5  # Apply 50% reduction
                     self.final_score_history[uid] = [

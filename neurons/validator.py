@@ -340,7 +340,7 @@ class Validator:
 
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
-
+        time_min = None
         while True:
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
@@ -429,8 +429,9 @@ class Validator:
             sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
             retries = 0
             delay = 1
-            max_retries = 5
+            max_retries = 2
             max_delay = 60
+            incremented_time_min = False
             while True:
                 try:
                     response = self.subtensor.query_module(
@@ -443,15 +444,18 @@ class Validator:
                         f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
                     )
                     retries += 1
-                    if retries > max_retries:
+                    if retries > max_retries and time_min is not None:
                         tplr.logger.error(
                             "Exceeded maximum retries for timestamp query."
                         )
-                        raise e
-                    time.sleep(delay)
-                    delay = min(delay * 2, max_delay)
+                        time_min += timedelta(
+                            seconds=12 * self.hparams.blocks_per_window
+                        )
+                        break
 
-            time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
+                    delay = min(delay * 2, max_delay)
+            if not incremented_time_min:
+                time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
             time_max = time_min + timedelta(
                 seconds=self.hparams.time_window_delta_seconds
             )

@@ -1053,10 +1053,9 @@ class Validator:
                     )
 
                     # Calculate original performance score (gradient quality)
-                    self.gradient_scores[eval_uid] = (
-                        (loss_before_random - loss_after_random) / loss_before_random
-                        if loss_before_random > 0
-                        else 0
+                    self.gradient_scores[eval_uid] = min(
+                        self.hparams.max_gradient_score,
+                        (loss_before_random - loss_after_random) / loss_before_random,
                     )
                     tplr.logger.debug(
                         f"Gradient Score: {self.gradient_scores[eval_uid]}"
@@ -1114,9 +1113,9 @@ class Validator:
                         f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[eval_uid]}"
                     )
                     # Calculate final score incorporating both metrics
-                    final_score = (
-                        max(0, self.gradient_scores[eval_uid])
-                        * self.normalised_binary_moving_averages[eval_uid]
+                    final_score = sign_preserving_multiplication(
+                        self.gradient_moving_avg_scores[eval_uid],
+                        self.normalised_binary_moving_averages[eval_uid],
                     )
                     tplr.logger.debug(
                         f"Computed Final Score for UID {eval_uid}: {final_score}"
@@ -1587,6 +1586,10 @@ async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
             await asyncio.sleep(delay)
     tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
     return None
+
+
+def sign_preserving_multiplication(a, b):
+    return -abs(a) * abs(b) if a < 0 or b < 0 else a * b
 
 
 if __name__ == "__main__":

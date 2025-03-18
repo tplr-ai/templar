@@ -209,7 +209,7 @@ class Miner:
             self.peers.append(self.uid)
 
         self.comms.commitments = await self.comms.get_commitments()
-        self.comms.update_peers_with_buckets()
+        self.comms.set_gather_peers()
         tplr.logger.info("Loaded commitments")
 
         # Fetch start_window from highest stake validator
@@ -234,7 +234,7 @@ class Miner:
             compressor=self.compressor,
             current_window=self.current_window,
             device=self.config.device,
-            peers=self.peers,
+            peers=[],
             uid=self.uid,
             totalks=self.totalks,
         )
@@ -272,7 +272,7 @@ class Miner:
             )
 
             peer_start = tplr.T()
-            self.comms.update_peers_with_buckets()
+            self.comms.set_gather_peers()
             self.peers = self.comms.peers
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}"
@@ -421,34 +421,8 @@ class Miner:
                 self.peers = [uid for uid in all_uids if uid != self.uid]
             else:
                 # Normal operation - update and filter peers
-                self.comms.update_peers_with_buckets()
+                self.comms.set_gather_peers()
                 self.peers = self.comms.peers
-
-                # If we still have no peers, try a fallback
-                if not self.peers or len(self.peers) <= 1:  # Only self or empty
-                    tplr.logger.warning(
-                        "Peer list is empty or contains only self after filtering."
-                    )
-
-                    # Fallback to active peers in comms
-                    if hasattr(self.comms, "active_peers") and self.comms.active_peers:
-                        tplr.logger.info(
-                            f"Falling back to {len(self.comms.active_peers)} active peers from comms"
-                        )
-                        self.peers = list(self.comms.active_peers)
-
-                    # If still empty, use top peers by stake
-                    if not self.peers or len(self.peers) <= 1:
-                        tplr.logger.info("Falling back to top peers by stake")
-                        # Get top 10 peers by stake (excluding self)
-                        stakes = self.metagraph.S.tolist()
-                        uids = list(range(len(stakes)))
-                        uid_stake_pairs = [
-                            (uid, stakes[uid]) for uid in uids if uid != self.uid
-                        ]
-                        uid_stake_pairs.sort(key=lambda x: x[1], reverse=True)
-                        top_peers = [uid for uid, _ in uid_stake_pairs[:10]]
-                        self.peers = top_peers
 
             tplr.logger.info(f"Final peers for gather: {self.peers}")
 
@@ -499,7 +473,7 @@ class Miner:
                     "miner/gpu_memory_cached": torch.cuda.memory_reserved()
                     / 1024**2,  # MB
                     # Network metrics
-                    "miner/active_peers": len(self.peers),
+                    "miner/gather_peers": len(self.peers),
                     "miner/effective_batch_size": len(self.peers)
                     * self.hparams.batch_size,
                     # Optimization metrics
@@ -636,7 +610,7 @@ class Miner:
                     / 1024**2,  # MB
                     "miner/gpu_memory_cached": torch.cuda.memory_reserved()
                     / 1024**2,  # MB
-                    "miner/active_peers": len(self.peers),
+                    "miner/gather_peers": len(self.peers),
                     "miner/effective_batch_size": len(self.peers)
                     * self.hparams.batch_size,
                     "miner/learning_rate": self.scheduler.get_last_lr()[0],

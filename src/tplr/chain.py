@@ -450,9 +450,6 @@ class ChainManager:
         uid_to_stake = dict(
             zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist())
         )
-        uid_to_incentive = dict(
-            zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist())
-        )
 
         # Get currently active peers
         active_peers = set(int(uid) for uid in self.active_peers)
@@ -466,7 +463,7 @@ class ChainManager:
 
         logger.debug(f"Active peers: {active_peers}")
         logger.info(f"Newly inactive peers: {newly_inactive}")
-        logger.debug(f"Stakes: {uid_to_stake}")
+        logger.trace(f"Stakes: {uid_to_stake}")
 
         if not active_peers:
             logger.warning("No active peers found. Skipping update.")
@@ -484,19 +481,33 @@ class ChainManager:
 
         logger.debug(f"Filtered eval peers: {list(self.eval_peers.keys())}")
 
-        # If total miners is less than minimum_peers, use all for aggregator
-        if len(self.eval_peers) < self.hparams.minimum_peers:
-            self.peers = list(self.eval_peers.keys())  # aggregator uses all
-            logger.warning(
-                f"Total active miners ({len(self.eval_peers)}) below minimum_peers "
-                f"({self.hparams.minimum_peers}). Using all available miners as peers."
-            )
-            return
+        self.set_gather_peers()
+
+        logger.info(
+            f"Updated gather peers (top {self.hparams.topk_peers}% or "
+            f"minimum {self.hparams.minimum_peers}): {self.peers}"
+        )
+        logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
+        logger.info(f"Total inactive peers: {len(self.inactive_peers)}")
+
+    def set_gather_peers(self) -> None:
+        """Determines and sets the list of peers for gradient gathering based
+        on incentive scores.
+
+        Uses the metagraph incentive scores to select peers, among all 256
+        neurons, taking either:
+        - Top k% of peers (specified by hparams.topk_peers)
+        - Minimum number of peers (specified by hparams.minimum_peers)
+          whichever is larger.
+
+        The selected peers are stored in self.peers.
+        """
+        uid_to_incentive = dict(
+            zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist())
+        )
 
         # Select based on incentive scores for gradient gathering
-        miner_incentives = [
-            (uid, uid_to_incentive.get(uid, 0)) for uid in self.eval_peers
-        ]
+        miner_incentives = [(uid, uid_to_incentive.get(uid, 0)) for uid in range(256)]
         miner_incentives.sort(key=lambda x: x[1], reverse=True)
 
         # Determine the number of top-k peers based on percentage
@@ -507,10 +518,3 @@ class ChainManager:
 
         # Take top n_peers by incentive for gradient gathering
         self.peers = [uid for uid, _ in miner_incentives[:n_peers]]
-
-        logger.info(
-            f"Updated gather peers (top {self.hparams.topk_peers}% or "
-            f"minimum {self.hparams.minimum_peers}): {self.peers}"
-        )
-        logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
-        logger.info(f"Total inactive peers: {len(self.inactive_peers)}")

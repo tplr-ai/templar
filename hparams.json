@@ -41,5 +41,6 @@
     "catch_up_timeout": 300,
     "uids_per_window": 2,
     "time_window_delta_seconds": 20,
-    "reset_inactivity_windows": 25
+    "reset_inactivity_windows": 25,
+    "max_gradient_score": 0.05
 }

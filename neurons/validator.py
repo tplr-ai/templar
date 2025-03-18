@@ -403,38 +403,13 @@ class Validator:
                     step=self.global_step,
                 )
 
-            # Calculate time window for this sync window
+            # Calculate time window for gather using the resilient timestamp_query.
             sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
-            retries = 0
-            delay = 1
-            max_retries = 5
-            max_delay = 60
-            while True:
-                try:
-                    response = self.subtensor.query_module(
-                        "Timestamp", "Now", block=sync_block
-                    )
-                    ts_value = response.value / 1000  # convert ms to seconds
-                    break
-                except Exception as e:
-                    tplr.logger.error(
-                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
-                    )
-                    retries += 1
-                    if retries > max_retries:
-                        tplr.logger.error(
-                            "Exceeded maximum retries for timestamp query."
-                        )
-                        raise e
-                    time.sleep(delay)
-                    delay = min(delay * 2, max_delay)
-
+            ts_value = self.timestamp_query(sync_block)
             time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
             time_max = time_min + timedelta(
                 seconds=self.hparams.time_window_delta_seconds
             )
-
-            # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
             tplr.logger.info(f"We are using peers {self.peers}")
 
@@ -1507,6 +1482,34 @@ class Validator:
             except Exception as e:
                 tplr.logger.error(
                     f"Block subscription error: {e}. Retrying in {backoff} seconds."
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+    def timestamp_query(self, sync_block: int) -> float:
+        """
+        Queries the Timestamp module for a given sync_block with exponential backoff.
+        This version does not patch websocket settings; it simply retries indefinitely
+        to ensure that transient failures never crash the application.
+
+        Returns:
+            float: The timestamp (in seconds) corresponding to the queried block.
+        """
+        backoff = 1  # initial delay in seconds
+        max_backoff = 60  # maximum delay in seconds
+        while True:
+            try:
+                response = self.subtensor.query_module(
+                    "Timestamp", "Now", block=sync_block
+                )
+                ts_value = response.value / 1000.0  # convert ms -> s
+                tplr.logger.info(
+                    f"Timestamp query successful for block {sync_block}: {ts_value}"
+                )
+                return ts_value
+            except Exception as e:
+                tplr.logger.error(
+                    f"Failed to query timestamp for block {sync_block}: {e}. Retrying in {backoff} seconds."
                 )
                 time.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)

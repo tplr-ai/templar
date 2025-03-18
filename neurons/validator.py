@@ -247,6 +247,24 @@ class Validator:
         # Initialize final score history (for sliding-window averaging)
         self.final_score_history = defaultdict(list)
 
+    def reset_peer(self, inactive_since: int, uid: int) -> bool:
+        if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
+            self.final_score_history[uid] = []
+            self.final_moving_avg_scores[uid] = 0.0
+            self.weights[uid] = 0.0
+            self.gradient_scores[uid] = 0.0
+            self.gradient_moving_avg_scores[uid] = 0.0
+            self.binary_moving_averages[uid] = 0.0
+            self.binary_indicator_scores[uid] = 0.0
+            self.normalised_binary_moving_averages[uid] = 0.0
+            self.eval_candidates_counter[uid] = 0
+            if uid in self.eval_peers:
+                self.eval_peers[uid] = 0
+            del self.inactive_scores[uid]
+            tplr.logger.info(f"UID {uid} fully reset after extended inactivity")
+            return True
+        return False
+
     async def run(self):
         # Start background block listener
         self.loop = asyncio.get_running_loop()
@@ -381,23 +399,8 @@ class Validator:
                     tplr.logger.info(f"UID {uid} became active again")
                     continue
 
-                if (
-                    self.current_window - inactive_since
-                    > self.hparams.reset_inactivity_windows
-                ):
-                    self.final_score_history[uid] = []
-                    self.final_moving_avg_scores[uid] = 0.0
-                    self.weights[uid] = 0.0
-                    self.gradient_scores[uid] = 0.0
-                    self.gradient_moving_avg_scores[uid] = 0.0
-                    self.binary_moving_averages[uid] = 0.0
-                    self.binary_indicator_scores[uid] = 0.0
-                    self.normalised_binary_moving_averages[uid] = 0.0
-                    self.eval_candidates_counter[uid] = 0
-                    if uid in self.eval_peers:
-                        self.eval_peers[uid] = 0
-                    del self.inactive_scores[uid]
-                    tplr.logger.info(f"UID {uid} fully reset after extended inactivity")
+                peer_reset = self.reset_peer(inactive_since, uid)
+                if peer_reset:
                     continue
 
                 # Apply flat 25% penalty instead of exponential decay

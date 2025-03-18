@@ -381,7 +381,10 @@ class Validator:
                     tplr.logger.info(f"UID {uid} became active again")
                     continue
 
-                if self.current_window - inactive_since > 25:
+                if (
+                    self.current_window - inactive_since
+                    > self.hparams.reset_inactivity_windows
+                ):
                     self.final_score_history[uid] = []
                     self.final_moving_avg_scores[uid] = 0.0
                     self.weights[uid] = 0.0

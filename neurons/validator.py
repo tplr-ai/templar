@@ -1025,7 +1025,7 @@ class Validator:
 
                     # Calculate original performance score (gradient quality)
                     self.gradient_scores[eval_uid] = min(
-                        0.02,
+                        self.hparams.max_gradient_score,
                         (loss_before_random - loss_after_random) / loss_before_random,
                     )
                     tplr.logger.debug(

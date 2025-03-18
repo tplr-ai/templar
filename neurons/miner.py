@@ -424,25 +424,6 @@ class Miner:
                 self.comms.set_gather_peers()
                 self.peers = self.comms.peers
 
-                # If we still have no peers, try a fallback
-                if not self.peers or len(self.peers) <= 1:  # Only self or empty
-                    tplr.logger.warning(
-                        "Peer list is empty or contains only self after filtering."
-                    )
-
-                    # If empty, use top peers by stake
-                    if not self.peers or len(self.peers) <= 1:
-                        tplr.logger.info("Falling back to top peers by stake")
-                        # Get top 10 peers by stake (excluding self)
-                        stakes = self.metagraph.S.tolist()
-                        uids = list(range(len(stakes)))
-                        uid_stake_pairs = [
-                            (uid, stakes[uid]) for uid in uids if uid != self.uid
-                        ]
-                        uid_stake_pairs.sort(key=lambda x: x[1], reverse=True)
-                        top_peers = [uid for uid, _ in uid_stake_pairs[:10]]
-                        self.peers = top_peers
-
             tplr.logger.info(f"Final peers for gather: {self.peers}")
 
             # Create a task for gathering gradients asynchronously

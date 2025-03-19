@@ -189,6 +189,11 @@ class Validator:
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         self.start_window = self.current_window  # Record the start window
+        self.start_window_start_time = tplr.neurons.get_window_start_time(
+            subtensor=self.subtensor,
+            window=self.start_window,
+            blocks_per_window=self.hparams.blocks_per_window,
+        )
         self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window
         self.sync_window = self.current_window
@@ -448,9 +453,12 @@ class Validator:
                         tplr.logger.error(
                             "Exceeded maximum retries for timestamp query."
                         )
-                        time_min += timedelta(
-                            seconds=12 * self.hparams.blocks_per_window
+                        time_min = self.start_window_start_time + timedelta(
+                            seconds=12
+                            * self.hparams.blocks_per_window
+                            * (self.sync_window - self.start_window)
                         )
+                        incremented_time_min = True
                         break
 
                     delay = min(delay * 2, max_delay)

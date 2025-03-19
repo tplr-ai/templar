@@ -16,6 +16,9 @@
 # DEALINGS IN THE SOFTWARE.
 
 
+from datetime import datetime, timezone
+import time
+
 from tplr.logging import logger
 
 
@@ -75,3 +78,45 @@ def prepare_gradient_dict(miner, pages, step_window):
     logger.info(f"Attached metadata to gradient: {gradient['metadata']}")
 
     return gradient, xshapes, totalks, transmitted
+
+
+def get_window_start_time(subtensor, window: int, blocks_per_window: int) -> datetime:
+    """
+    Gets the start time of a specific window by querying the blockchain timestamp.
+
+    Retries indefinitely.
+
+    Args:
+        subtensor: The subtensor instance used to query the blockchain
+        window (int): The window number to query
+        blocks_per_window (int): Number of blocks per window
+
+    Returns:
+        datetime: The UTC timestamp of the window start time
+
+    Raises:
+        websockets.exceptions.InvalidStatus: If there is an error querying the blockchain,
+            will retry with exponential backoff
+    """
+    retry_delay = 1
+    max_delay = 32
+    retry_count = 0
+    while True:
+        try:
+            return datetime.fromtimestamp(
+                subtensor.query_module(
+                    "Timestamp",
+                    "Now",
+                    block=window * blocks_per_window,
+                ).value
+                / 1000,
+                tz=timezone.utc,
+            )
+        except Exception as e:
+            retry_count += 1
+            logger.error(
+                f"Got error, retry {retry_count} in {retry_delay}s: {e}",
+                exc_info=True,
+            )
+            time.sleep(retry_delay)
+            retry_delay = min(max_delay, 2 * retry_delay)

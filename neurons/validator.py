@@ -431,12 +431,9 @@ class Validator:
             delay = 1
             max_retries = 2
             max_delay = 60
-            incremented_time_min = False
             while True:
                 try:
-                    response = self.subtensor.query_module(
-                        "Timestamp", "Now", block=sync_block
-                    )
+                    response = self.subtensor.query_module("Timestamp", "Now", block=sync_block)
                     ts_value = response.value / 1000  # convert ms to seconds
                     break
                 except Exception as e:
@@ -444,18 +441,15 @@ class Validator:
                         f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
                     )
                     retries += 1
-                    if retries > max_retries and time_min is not None:
+                    if retries > max_retries:
                         tplr.logger.error(
-                            "Exceeded maximum retries for timestamp query."
+                            "Exceeded maximum retries for timestamp query. Falling back to current system time."
                         )
-                        time_min += timedelta(
-                            seconds=12 * self.hparams.blocks_per_window
-                        )
+                        ts_value = time.time()  # Fallback: use current system time as timestamp
                         break
-
+                    await asyncio.sleep(delay)
                     delay = min(delay * 2, max_delay)
-            if not incremented_time_min:
-                time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
+            time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
             time_max = time_min + timedelta(
                 seconds=self.hparams.time_window_delta_seconds
             )

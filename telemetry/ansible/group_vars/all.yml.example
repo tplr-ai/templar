@@ -1,0 +1,72 @@
+---
+# Global variables
+ansible_user: ubuntu
+ansible_become: true
+
+# Grafana configuration
+grafana_version: "10.4.0"
+grafana_system_user: "grafana"
+grafana_system_group: "grafana"
+
+# Server configuration
+grafana_http_port: 3000
+grafana_domain: "{{ ansible_host }}"
+grafana_protocol: "http"
+
+# Paths
+grafana_data_dir: "/var/lib/grafana"
+grafana_logs_dir: "/var/log/grafana"
+grafana_plugins_dir: "/var/lib/grafana/plugins"
+grafana_provisioning_dir: "/etc/grafana/provisioning"
+grafana_dashboards_local_path: "/etc/grafana/dashboards"
+
+# Connection timeouts
+grafana_query_timeout: 60
+grafana_max_connections: 500
+grafana_concurrent_render_limit: 30
+
+# Authentication settings
+# Anonymous access allows users to view dashboards without logging in
+grafana_auth_anonymous_enabled: "true"
+grafana_auth_anonymous_org_name: "Templar AI"
+grafana_auth_anonymous_org_role: "Viewer"
+grafana_auth_anonymous_hide_version: "true"
+
+# Login form control - independent from anonymous access
+# Set to "true" to show the login form, "false" to hide it
+# NOTE: Even when the login form is hidden, admins can still access /login directly
+grafana_show_login_form: "true"  # Controls login form visibility (true=show, false=hide)
+grafana_disable_login_form: "{{ 'false' if grafana_show_login_form == 'true' else 'true' }}"
+grafana_home_dashboard: "templar_metrics"
+
+# Security settings
+grafana_security_admin_user: "admin"
+grafana_security_admin_password: "CHANGE_ME"  # Change this in vault
+grafana_security_secret_key: "CHANGE_ME"  # Change this in vault
+grafana_security_cookie_secure: "false"
+grafana_security_cookie_samesite: "lax"
+grafana_security_disable_gravatar: "true"
+grafana_security_strict_transport_security: "false"
+
+# InfluxDB connection
+grafana_influxdb_host: "localhost"  # Change to your InfluxDB host
+grafana_influxdb_port: "8086"
+grafana_influxdb_database: "metrics"
+grafana_influxdb_token: "CHANGE_ME"  # Add your InfluxDB authentication token here
+grafana_influxdb_protocol: "http"  # Can be overridden to https in host_vars
+grafana_influxdb_use_api_config: false  # Whether to also configure datasource via API
+
+# Dashboard settings
+grafana_dashboards_min_refresh_interval: "5s"
+grafana_dashboards_folder: "Templar"
+
+# NGINX settings
+nginx_enabled: true
+nginx_ssl_enabled: false
+nginx_worker_processes: "auto"
+nginx_worker_connections: 4096
+nginx_proxy_connect_timeout: 60
+nginx_proxy_send_timeout: 60
+nginx_proxy_read_timeout: 60
+nginx_client_max_body_size: "1m"
+nginx_proxy_buffers: "32 4k"

@@ -1,0 +1,143 @@
+---
+# Tasks for NGINX setup
+
+- name: Install NGINX
+  apt:
+    name: nginx
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Create NGINX configuration directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: 0755
+  loop:
+    - /etc/nginx/conf.d
+    - /etc/nginx/sites-available
+    - /etc/nginx/sites-enabled
+
+- name: Configure NGINX global settings
+  template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: 0644
+  notify: restart nginx
+
+- name: Configure NGINX for Grafana
+  template:
+    src: grafana-nginx.conf.j2
+    dest: /etc/nginx/sites-available/grafana.conf
+    owner: root
+    group: root
+    mode: 0644
+  notify: restart nginx
+
+- name: Enable Grafana site
+  file:
+    src: /etc/nginx/sites-available/grafana.conf
+    dest: /etc/nginx/sites-enabled/grafana.conf
+    state: link
+  notify: restart nginx
+  
+- name: Check if default NGINX site exists
+  stat:
+    path: /etc/nginx/sites-enabled/default
+  register: default_site
+
+- name: Remove default NGINX site
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: restart nginx
+  when: default_site.stat.exists
+
+- name: Create SSL directory if not exists
+  file:
+    path: /etc/nginx/ssl
+    state: directory
+    owner: root
+    group: root
+    mode: 0700
+  when: nginx_ssl_enabled
+
+- name: Install SSL certificates (if available)
+  copy:
+    src: "{{ item }}"
+    dest: "/etc/nginx/ssl/{{ item }}"
+    owner: root
+    group: root
+    mode: 0600
+  loop:
+    - nginx_cert.pem
+    - nginx_key.pem
+  when: nginx_ssl_enabled
+
+- name: Ensure UFW is installed
+  apt:
+    name: ufw
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Allow SSH through UFW before doing anything else
+  ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+  when: ansible_os_family == "Debian"
+
+- name: Configure UFW rules for Grafana and HTTP/HTTPS
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "80"  # NGINX
+    - "443" # NGINX with SSL
+    - "{{ grafana_http_port }}"  # Direct Grafana access
+  when: ansible_os_family == "Debian"
+
+- name: Enable UFW with caution
+  block:
+    - name: Check if UFW is already enabled
+      command: ufw status
+      register: ufw_status
+      changed_when: false
+      
+    - name: Enable UFW if not already enabled
+      ufw:
+        state: enabled
+        policy: deny
+      when: "'Status: active' not in ufw_status.stdout"
+  when: ansible_os_family == "Debian"
+
+- name: Start and enable NGINX
+  service:
+    name: nginx
+    state: started
+    enabled: yes
+
+- name: Test NGINX configuration
+  shell: nginx -t
+  register: nginx_test
+  changed_when: false
+  
+- name: Display NGINX configuration test results
+  debug:
+    var: nginx_test.stdout_lines
+
+- name: Check NGINX status
+  shell: |
+    systemctl status nginx || echo "NGINX service issue"
+    netstat -tulpn | grep 80 || echo "NGINX not listening on port 80"
+  register: nginx_debug
+  changed_when: false
+  
+- name: Display NGINX debug info
+  debug:
+    var: nginx_debug.stdout_lines

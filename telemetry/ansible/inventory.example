@@ -1,0 +1,5 @@
+[all]
+grafana_server ansible_host=YOUR_SERVER_IP ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/id_rsa
+
+[grafana_servers]
+grafana_server

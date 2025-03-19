@@ -1,0 +1,92 @@
+---
+# Main playbook for Grafana deployment
+- name: Deploy Grafana with InfluxDB integration
+  hosts: all
+  become: true
+  vars_files:
+    - group_vars/all.yml
+    - group_vars/vault.yml
+  
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+  roles:
+    - role: grafana
+      tags: [grafana]
+    
+    - role: dashboards
+      tags: [dashboards]
+    
+    - role: nginx
+      tags: [nginx, proxy]
+      
+  post_tasks:
+    - name: Verify Grafana is healthy
+      uri:
+        url: "http://localhost:{{ grafana_http_port }}/api/health"
+        method: GET
+        status_code: 200
+      register: health_result
+      retries: 5
+      delay: 5
+      until: health_result.status == 200
+      failed_when: false
+      
+    - name: Report Grafana health status
+      debug:
+        msg: "{{ 'Grafana is healthy and running properly!' if health_result.status == 200 else 'WARNING: Grafana health check failed. Please check the server.' }}"
+      
+    - name: Verify anonymous access works
+      uri:
+        url: "http://localhost:{{ grafana_http_port }}/api/org"
+        method: GET
+        status_code: 200
+      register: anon_access
+      failed_when: false
+      when: health_result.status == 200
+      
+    - name: Report anonymous access status
+      debug:
+        msg: "{{ 'Anonymous access is properly configured!' if health_result.status == 200 and anon_access.status == 200 and anon_access.json.name == grafana_auth_anonymous_org_name else 'WARNING: Anonymous access is not working correctly.' }}"
+      when: health_result.status == 200
+      
+    - name: Verify NGINX is correctly proxying Grafana
+      uri:
+        url: http://localhost:80/api/health
+        method: GET
+        status_code: 200
+      register: nginx_proxy
+      failed_when: false
+      when: health_result.status == 200
+      
+    - name: Report NGINX proxy status
+      debug:
+        msg: "{{ 'NGINX proxy is working correctly!' if nginx_proxy.status == 200 else 'WARNING: NGINX proxy is not working correctly. Check the configuration.' }}"
+      when: health_result.status == 200
+      
+    - name: Verify InfluxDB datasource is available
+      uri:
+        url: "http://localhost:{{ grafana_http_port }}/api/datasources"
+        method: GET
+        status_code: 200
+      register: datasources
+      failed_when: false
+      when: health_result.status == 200
+      
+    - name: Report InfluxDB datasource status
+      debug:
+        msg: "{{ 'InfluxDB datasource is properly configured!' if datasources.status == 200 and 'InfluxDB' in (datasources.json | map(attribute='name') | list) else 'WARNING: InfluxDB datasource is not configured correctly.' }}"
+      when: health_result.status == 200
+      
+    - name: Output success message
+      debug:
+        msg: |
+          Grafana deployment complete! Your Grafana instance is now:
+          - Running on http://{{ ansible_host }}:80 (via NGINX) and http://{{ ansible_host }}:{{ grafana_http_port }} (direct)
+          - Configured for anonymous access without login
+          - Connected to InfluxDB at {{ grafana_influxdb_host }}
+          - Displaying your dashboards from the configured location

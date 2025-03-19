@@ -1,0 +1,144 @@
+---
+# Main tasks for Grafana installation and configuration
+
+- name: Add Grafana apt key
+  ansible.builtin.get_url:
+    url: https://packages.grafana.com/gpg.key
+    dest: /usr/share/keyrings/grafana-archive-keyring.asc
+    mode: '0644'
+  when: ansible_os_family == "Debian"
+
+- name: Add Grafana apt key to keyring
+  ansible.builtin.shell: cat /usr/share/keyrings/grafana-archive-keyring.asc | gpg --dearmor > /usr/share/keyrings/grafana-archive-keyring.gpg
+  args:
+    creates: /usr/share/keyrings/grafana-archive-keyring.gpg
+  when: ansible_os_family == "Debian"
+
+- name: Add Grafana repository
+  apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/grafana-archive-keyring.gpg] https://packages.grafana.com/oss/deb stable main"
+    state: present
+    filename: grafana
+  when: ansible_os_family == "Debian"
+
+- name: Install Grafana package
+  apt:
+    name: "grafana{% if grafana_version != 'latest' %}={{ grafana_version }}{% endif %}"
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+  notify: restart grafana
+
+- name: Create Grafana configuration directory
+  file:
+    path: "/etc/grafana"
+    state: directory
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0755
+
+- name: Create Grafana provisioning directories
+  file:
+    path: "{{ grafana_provisioning_dir }}/{{ item }}"
+    state: directory
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0755
+  loop:
+    - "datasources"
+    - "dashboards"
+    - "notifiers"
+    - "plugins"
+
+- name: Configure Grafana server
+  template:
+    src: grafana.ini.j2
+    dest: /etc/grafana/grafana.ini
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0640
+  notify: restart grafana
+
+- name: Create Grafana environment file
+  template:
+    src: grafana-env.j2
+    dest: /etc/default/grafana-server
+    owner: root
+    group: root
+    mode: 0644
+  notify: restart grafana
+
+- name: Configure InfluxDB data source
+  template:
+    src: influxdb-datasource.yml.j2
+    dest: "{{ grafana_provisioning_dir }}/datasources/influxdb.yml"
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0640
+  notify: restart grafana
+
+- name: Configure dashboard provider
+  template:
+    src: dashboard-provider.yml.j2
+    dest: "{{ grafana_provisioning_dir }}/dashboards/default.yml"
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0640
+  notify: restart grafana
+
+- name: Fix permissions on Grafana directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    recurse: yes
+    mode: 0755
+  loop:
+    - "/var/lib/grafana"
+    - "/etc/grafana"
+    - "/var/log/grafana"
+  notify: restart grafana
+
+- name: Reload systemd
+  systemd:
+    daemon_reload: yes
+  changed_when: false
+
+- name: Create PID directory for Grafana
+  file:
+    path: /var/run/grafana
+    state: directory
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0755
+
+- name: Check if Grafana systemd service file needs updating
+  command: grep -q '\${PID_FILE_DIR}/grafana-server.pid' /usr/lib/systemd/system/grafana-server.service
+  register: service_check
+  changed_when: false
+  failed_when: false
+
+- name: Update Grafana systemd service file
+  replace:
+    path: /usr/lib/systemd/system/grafana-server.service
+    regexp: '--pidfile=\${PID_FILE_DIR}/grafana-server.pid'
+    replace: '--pidfile=/var/run/grafana/grafana-server.pid'
+  notify: systemd daemon reload
+  when: service_check.rc == 0
+
+- name: Start and enable Grafana service
+  systemd:
+    name: grafana-server
+    state: started
+    enabled: yes
+
+- name: Wait for Grafana API to become available
+  uri:
+    url: "http://localhost:{{ grafana_http_port }}/api/health"
+    method: GET
+    status_code: 200
+  register: result
+  until: result.status == 200
+  retries: 60
+  delay: 1

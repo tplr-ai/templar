@@ -1,0 +1,19 @@
+---
+- name: check nginx configuration
+  shell: nginx -t
+  changed_when: false
+  listen: check nginx configuration
+
+- name: restart nginx
+  service:
+    name: nginx
+    state: restarted
+  listen: restart nginx
+  notify: check nginx configuration
+
+- name: reload nginx
+  service:
+    name: nginx
+    state: reloaded
+  listen: reload nginx
+  notify: check nginx configuration

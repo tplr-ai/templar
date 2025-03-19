@@ -78,3 +78,4 @@ influxdb_data/
 data/
 chain-specs/
 .env.backup
+CLAUDE.md

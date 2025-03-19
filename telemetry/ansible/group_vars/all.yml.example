@@ -56,6 +56,12 @@ grafana_influxdb_token: "CHANGE_ME"  # Add your InfluxDB authentication token he
 grafana_influxdb_protocol: "http"  # Can be overridden to https in host_vars
 grafana_influxdb_use_api_config: false  # Whether to also configure datasource via API
 
+# UI appearance settings
+grafana_hide_top_nav_bar: "true"  # Hide top navigation bar for anonymous users
+grafana_hide_sidebar: "true"      # Hide sidebar for anonymous users
+grafana_hide_footer: "true"       # Hide footer for anonymous users
+grafana_kiosk_mode: "true"        # Enable kiosk mode for clean dashboard presentation
+
 # Dashboard settings
 grafana_dashboards_min_refresh_interval: "5s"
 grafana_dashboards_folder: "Templar"

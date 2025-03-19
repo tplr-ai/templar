@@ -34,3 +34,31 @@ disable_login_form = {{ grafana_disable_login_form }}
 # Set home dashboard
 [dashboards]
 default_home_dashboard_path = {{ grafana_dashboards_local_path }}/{{ grafana_home_dashboard }}.json
+
+# UI appearance settings
+[users]
+auto_assign_org_role = Viewer
+
+# Hide UI elements for anonymous users
+[analytics]
+reporting_enabled = false
+check_for_updates = false
+
+[feature_toggles]
+# Hide elements and enable kiosk mode for cleaner UI
+publicDashboards = true
+
+[panels]
+disable_sanitize_html = false
+
+[analytics.google]
+analytics_enabled = false
+
+[kiosk]
+enabled = {{ grafana_kiosk_mode }}
+
+[pure_kiosk]
+enabled = {{ grafana_kiosk_mode }}
+hide_top_nav_bar = {{ grafana_hide_top_nav_bar }}
+hide_sidebar = {{ grafana_hide_sidebar }}
+hide_footer = {{ grafana_hide_footer }}

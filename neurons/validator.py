@@ -405,16 +405,21 @@ class Validator:
 
                 # Apply flat 25% penalty instead of exponential decay
                 old_score = self.final_moving_avg_scores[uid].item()
-                self.final_moving_avg_scores[uid] *= 0.75  # Apply flat 25% reduction
-                self.final_score_history[uid] = [
-                    final_score * 0.75 for final_score in self.final_score_history[uid]
-                ]
-                new_score = self.final_moving_avg_scores[uid].item()
+                if self.final_moving_avg_scores[uid] > 0:
+                    self.final_moving_avg_scores[uid] *= (
+                        0.75  # Apply flat 25% reduction for positive scores only
+                    )
 
-                tplr.logger.info(
-                    f"UID {uid} penalized for inactivity: "
-                    f"{old_score:.4f} -> {new_score:.4f}"
-                )
+                    self.final_score_history[uid] = [
+                        final_score * 0.75 if final_score > 0 else final_score
+                        for final_score in self.final_score_history[uid]
+                    ]
+                    new_score = self.final_moving_avg_scores[uid].item()
+
+                    tplr.logger.info(
+                        f"UID {uid} penalized for inactivity: "
+                        f"{old_score:.4f} -> {new_score:.4f}"
+                    )
 
                 # Log slash metrics
                 self.wandb.log(
@@ -433,7 +438,9 @@ class Validator:
             max_delay = 60
             while True:
                 try:
-                    response = self.subtensor.query_module("Timestamp", "Now", block=sync_block)
+                    response = self.subtensor.query_module(
+                        "Timestamp", "Now", block=sync_block
+                    )
                     ts_value = response.value / 1000  # convert ms to seconds
                     break
                 except Exception as e:
@@ -445,7 +452,9 @@ class Validator:
                         tplr.logger.error(
                             "Exceeded maximum retries for timestamp query. Falling back to current system time."
                         )
-                        ts_value = time.time()  # Fallback: use current system time as timestamp
+                        ts_value = (
+                            time.time()
+                        )  # Fallback: use current system time as timestamp
                         break
                     await asyncio.sleep(delay)
                     delay = min(delay * 2, max_delay)
@@ -510,15 +519,25 @@ class Validator:
                 )
                 if 0 <= uid < self.final_moving_avg_scores.size(0):
                     old_score = self.final_moving_avg_scores[uid].item()
-                    self.final_moving_avg_scores[uid] *= 0.5  # Apply 50% reduction
-                    self.final_score_history[uid] = [
-                        final_score * 0.5
-                        for final_score in self.final_score_history[uid]
-                    ]
-                    new_score = self.final_moving_avg_scores[uid].item()
-                    tplr.logger.info(
-                        f"Reduced moving average score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient in gather."
-                    )
+
+                    # Only reduce positive scores
+                    if self.final_moving_avg_scores[uid] > 0:
+                        self.final_moving_avg_scores[uid] *= 0.5
+                        self.final_score_history[uid] = [
+                            final_score * 0.5 if final_score > 0 else final_score
+                            for final_score in self.final_score_history[uid]
+                        ]
+
+                        new_score = self.final_moving_avg_scores[uid].item()
+                        tplr.logger.info(
+                            f"Reduced moving average score of UID {uid} from {old_score:.4f} to {new_score:.4f} "
+                            f"due to missing gradient in gather."
+                        )
+                    else:
+                        tplr.logger.info(
+                            f"Skipped reducing moving average score of UID {uid} (current score: {old_score:.4f}) "
+                            f"due to negative or zero value."
+                        )
                     self.evaluated_uids.add(uid)
                 else:
                     tplr.logger.info(
@@ -778,18 +797,20 @@ class Validator:
                                     grad.sign(), alpha=self.scheduler.get_last_lr()[0]
                                 )
                     except Exception as e:
-                        tplr.logger.error(
-                            f"Failed to apply gradient for UID {eval_uid}: {str(e)}"
-                        )
-
-                        # Set score to exactly zero - full penalty for invalid gradients
                         old_score = self.final_moving_avg_scores[eval_uid].item()
-                        self.final_moving_avg_scores[eval_uid] = (
-                            0.0  # Set to zero - no partial credit
-                        )
-                        tplr.logger.warning(
-                            f"Set score of UID {eval_uid} from {old_score:.4f} to 0.0 - invalid gradient data"
-                        )
+
+                        if old_score > 0:
+                            # Reset positive scores to zero explicitly
+                            self.final_moving_avg_scores[eval_uid] = 0.0
+                            self.final_score_history[eval_uid] = []
+                            tplr.logger.warning(
+                                f"Set positive score of UID {eval_uid} from {old_score:.4f} to 0.0 - invalid gradient data"
+                            )
+                        else:
+                            # Negative score is worse than zero; keep it as-is.
+                            tplr.logger.warning(
+                                f"UID {eval_uid} had negative score {old_score:.4f}; retaining due to invalid gradient data"
+                            )
 
                         # Include in evaluated UIDs so it gets logged in metrics
                         self.evaluated_uids.add(eval_uid)
@@ -798,7 +819,9 @@ class Validator:
                         self.wandb.log(
                             {
                                 f"validator/slash/{eval_uid}/score_before": old_score,
-                                f"validator/slash/{eval_uid}/score_after": 0.0,
+                                f"validator/slash/{eval_uid}/score_after": self.final_moving_avg_scores[
+                                    eval_uid
+                                ].item(),
                                 f"validator/slash/{eval_uid}/reason": str(e),
                             },
                             step=self.global_step,
@@ -1166,22 +1189,22 @@ class Validator:
                     tplr.logger.info(
                         f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%."
                     )
-                    # Reduce the moving average score by 50%
-                    old_score = self.final_moving_avg_scores[
-                        eval_uid
-                    ].item()  # Get the actual value
-                    self.final_moving_avg_scores[eval_uid] *= 0.5  # Apply 50% reduction
-                    self.final_score_history[uid] = [
-                        final_score * 0.5
-                        for final_score in self.final_score_history[uid]
-                    ]
+                    old_score = self.final_moving_avg_scores[eval_uid].item()
 
-                    new_score = self.final_moving_avg_scores[
-                        eval_uid
-                    ].item()  # Get new value for logging
-                    tplr.logger.info(
-                        f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient."
-                    )
+                    if self.final_moving_avg_scores[eval_uid] > 0:
+                        self.final_moving_avg_scores[eval_uid] *= 0.5
+                        self.final_score_history[eval_uid] = [
+                            final_score * 0.5 if final_score > 0 else final_score
+                            for final_score in self.final_score_history[eval_uid]
+                        ]
+                        new_score = self.final_moving_avg_scores[eval_uid].item()
+                        tplr.logger.info(
+                            f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient."
+                        )
+                    else:
+                        tplr.logger.info(
+                            f"Skipped reducing moving average score of UID {eval_uid} (current score: {old_score:.4f}) due to negative or zero value."
+                        )
 
                     # Ensure the UID is included in evaluated_uids
                     self.evaluated_uids.add(eval_uid)

@@ -15,20 +15,42 @@
       }
     ]
   },
-  "uid": "templar-metrics",
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
+  "id": 4,
   "links": [],
   "liveNow": true,
   "panels": [
+    {
+      "description": "",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 26,
+      "options": {
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "# Templar Version: v0.2.48\n\n<p style=\"text-align: center; font-size: 1em; color: #aaa;\">Last updated: 2025-03-20 00:29:00<br>Version data is periodically updated via the version API</p>",
+        "mode": "markdown"
+      },
+      "pluginVersion": "10.4.0",
+      "transparent": true,
+      "type": "text"
+    },
     {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 0
+        "y": 4
       },
       "id": 1,
       "panels": [],
@@ -99,7 +121,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 1
+        "y": 5
       },
       "id": 2,
       "options": {
@@ -120,7 +142,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"active_peers\" or r._field == \"gather_peers\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"active_peers\" or r._field == \"gather_peers\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"miner\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -191,7 +213,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 1
+        "y": 5
       },
       "id": 3,
       "options": {
@@ -217,7 +239,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\" or r._measurement == \"validator_window\")\n  |> filter(fn: (r) => r._field == \"gather_success_rate\")\n  |> map(fn: (r) => ({ r with _value: r._value * 100.0 }))\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\" or r._measurement == \"validator_window\")\n  |> filter(fn: (r) => r._field == \"gather_success_rate\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> map(fn: (r) => ({ r with _value: r._value * 100.0 }))\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -287,7 +309,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 9
+        "y": 13
       },
       "id": 4,
       "options": {
@@ -308,7 +330,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"loss\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"loss\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -378,7 +400,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 9
+        "y": 13
       },
       "id": 5,
       "options": {
@@ -404,7 +426,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"tokens_per_sec\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"tokens_per_sec\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -417,7 +439,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 21
       },
       "id": 6,
       "panels": [],
@@ -487,7 +509,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 18
+        "y": 22
       },
       "id": 7,
       "options": {
@@ -508,7 +530,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"validator_window\")\n  |> filter(fn: (r) => r._field == \"loss_own_before\" or r._field == \"loss_own_after\" or r._field == \"loss_random_before\" or r._field == \"loss_random_after\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"validator_window\")\n  |> filter(fn: (r) => r._field == \"loss_own_before\" or r._field == \"loss_own_after\" or r._field == \"loss_random_before\" or r._field == \"loss_random_after\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -578,7 +600,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 18
+        "y": 22
       },
       "id": 8,
       "options": {
@@ -604,7 +626,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"validator_window\")\n  |> filter(fn: (r) => r._field == \"loss_own_improvement\" or r._field == \"loss_random_improvement\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"validator_window\")\n  |> filter(fn: (r) => r._field == \"loss_own_improvement\" or r._field == \"loss_random_improvement\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -674,7 +696,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 30
       },
       "id": 9,
       "options": {
@@ -697,11 +719,104 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"templar_metrics_v2\")\n  |> filter(fn: (r) => r._field == \"weight\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"templar_metrics_v2\")\n  |> filter(fn: (r) => r._field == \"weight\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
       "title": "Validator Assigned Weights",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influx"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": true,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "id": 29,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influx"
+          },
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"templar_metrics_v2\")\n  |> filter(fn: (r) => r._field == \"binary_indicator\" or r._field == \"binary_moving_avg\" or r._field == \"normalised_binary\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Validator Binary Indicators",
       "type": "timeseries"
     },
     {
@@ -768,7 +883,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 26
+        "y": 30
       },
       "id": 10,
       "options": {
@@ -794,11 +909,107 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"validator_window\")\n  |> filter(fn: (r) => r._field == \"gather_time\" or r._field == \"evaluation_time\" or r._field == \"model_update_time\" or r._field == \"peer_update_time\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"validator_window\")\n  |> filter(fn: (r) => r._field == \"gather_time\" or r._field == \"evaluation_time\" or r._field == \"model_update_time\" or r._field == \"peer_update_time\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
       "title": "Validator Operation Times",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influx"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "id": 27,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "min",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influx"
+          },
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"validator_inactivity\" or r._measurement == \"validator_slash\")\n  |> filter(fn: (r) => r._field == \"score_before\" or r._field == \"score_after\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Validator Slashing Activity",
       "type": "timeseries"
     },
     {
@@ -807,7 +1018,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 34
+        "y": 38
       },
       "id": 11,
       "panels": [],
@@ -877,7 +1088,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 35
+        "y": 39
       },
       "id": 12,
       "options": {
@@ -898,7 +1109,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"mean_grad_norm\" or r._field == \"max_grad_norm\" or r._field == \"min_grad_norm\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"mean_grad_norm\" or r._field == \"max_grad_norm\" or r._field == \"min_grad_norm\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -968,7 +1179,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 35
+        "y": 39
       },
       "id": 13,
       "options": {
@@ -994,7 +1205,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"learning_rate\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"learning_rate\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1065,7 +1276,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 43
+        "y": 47
       },
       "id": 14,
       "options": {
@@ -1091,7 +1302,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"data_loading_time\" or r._field == \"training_time\" or r._field == \"compression_time\" or r._field == \"gather_time\" or r._field == \"model_update_time\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"data_loading_time\" or r._field == \"training_time\" or r._field == \"compression_time\" or r._field == \"gather_time\" or r._field == \"model_update_time\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1161,7 +1372,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 43
+        "y": 47
       },
       "id": 15,
       "options": {
@@ -1187,7 +1398,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"batch_tokens\" or r._field == \"total_tokens\" or r._field == \"effective_batch_size\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"batch_tokens\" or r._field == \"total_tokens\" or r._field == \"effective_batch_size\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1200,7 +1411,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 51
+        "y": 55
       },
       "id": 16,
       "panels": [],
@@ -1254,8 +1465,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1270,7 +1480,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 52
+        "y": 56
       },
       "id": 17,
       "options": {
@@ -1293,7 +1503,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"benchmark_task\")\n  |> filter(fn: (r) => r._field == \"score\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"benchmark_task\")\n  |> filter(fn: (r) => r._field == \"score\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1347,8 +1557,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1364,7 +1573,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 52
+        "y": 56
       },
       "id": 18,
       "options": {
@@ -1390,7 +1599,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"benchmark_metrics\")\n  |> filter(fn: (r) => r._field == \"benchmark_runtime_s\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"benchmark_metrics\")\n  |> filter(fn: (r) => r._field == \"benchmark_runtime_s\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1444,8 +1653,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1458,11 +1666,11 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
-        "y": 60
+        "y": 64
       },
-      "id": 19,
+      "id": 28,
       "options": {
         "legend": {
           "calcs": [
@@ -1486,11 +1694,11 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"similarity\")\n  |> filter(fn: (r) => r._field == \"avg_peer_similarity\" or r._field == \"max_peer_similarity\" or r._field == \"min_peer_similarity\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"benchmark_task\")\n  |> filter(fn: (r) => r._field == \"score\")\n  |> filter(fn: (r) => r[\"task\"] == \"arc_challenge\" or r[\"task\"] == \"arc_easy\" or r[\"task\"] == \"openbookqa\" or r[\"task\"] == \"winogrande\" or r[\"task\"] == \"piqa\" or r[\"task\"] == \"hellaswag\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
-      "title": "Gradient Peer Similarity",
+      "title": "Task-Specific Benchmark Scores",
       "type": "timeseries"
     },
     {
@@ -1540,8 +1748,102 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "id": 19,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max",
+            "min",
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influx"
+          },
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"gather_success_rate\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Miner Gather Success Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influx"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1556,7 +1858,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 60
+        "y": 64
       },
       "id": 20,
       "options": {
@@ -1582,11 +1884,11 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"gradient_analysis\")\n  |> filter(fn: (r) => r._field == \"gradient_norm\" or r._field == \"index_reuse_ratio\" or r._field == \"unique_indices_count\" or r._field == \"total_indices_count\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"training_step\")\n  |> filter(fn: (r) => r._field == \"mean_grad_norm\" or r._field == \"max_grad_norm\" or r._field == \"min_grad_norm\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
-      "title": "Gradient Analysis",
+      "title": "Gradient Norm Metrics",
       "type": "timeseries"
     },
     {
@@ -1595,7 +1897,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 68
+        "y": 72
       },
       "id": 21,
       "panels": [],
@@ -1649,8 +1951,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1666,7 +1967,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 69
+        "y": 73
       },
       "id": 22,
       "options": {
@@ -1692,7 +1993,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._field == \"sys_cpu_usage\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._field == \"sys_cpu_usage\" or r._field == \"cpu_usage\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1746,8 +2047,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1763,7 +2063,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 69
+        "y": 73
       },
       "id": 23,
       "options": {
@@ -1789,7 +2089,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._field == \"sys_mem_used\" or r._field == \"sys_mem_total\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._field == \"sys_mem_used\" or r._field == \"sys_mem_total\" or r._field == \"mem_used\" or r._field == \"mem_total\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1843,8 +2143,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1860,7 +2159,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 77
+        "y": 81
       },
       "id": 24,
       "options": {
@@ -1886,7 +2185,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._field == \"gpu_mem_allocated_mb\" or r._field == \"gpu_mem_cached_mb\" or r._field == \"gpu_mem_total_mb\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._field == \"gpu_mem_allocated_mb\" or r._field == \"gpu_mem_cached_mb\" or r._field == \"gpu_mem_total_mb\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1908,8 +2207,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
-                "value": null
+                "color": "green"
               },
               {
                 "color": "red",
@@ -1924,7 +2222,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 77
+        "y": 81
       },
       "id": 25,
       "options": {
@@ -1952,7 +2250,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._field == \"gpu_mem_segments\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> last()\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._field == \"gpu_mem_segments\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${uid}\" or \"${uid}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"role\"] == \"${role}\" or \"${role}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"group\"] == \"${group}\" or \"${group}\" == \"$__all\")\n  |> filter(fn: (r) => r[\"version\"] == \"${version}\" or \"${version}\" == \"$__all\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> last()\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1960,11 +2258,108 @@
       "type": "bargauge"
     }
   ],
-  "refresh": "5s",
+  "refresh": "1m",
   "schemaVersion": 39,
   "tags": [],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influx"
+        },
+        "definition": "import \"influxdata/influxdb/v1\"\nv1.tagValues(bucket: \"tplr\", tag: \"uid\")",
+        "hide": 0,
+        "includeAll": true,
+        "label": "UID",
+        "multi": false,
+        "name": "uid",
+        "options": [],
+        "query": "import \"influxdata/influxdb/v1\"\nv1.tagValues(bucket: \"tplr\", tag: \"uid\")",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influx"
+        },
+        "definition": "import \"influxdata/influxdb/v1\"\nv1.tagValues(bucket: \"tplr\", tag: \"version\")",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Version",
+        "multi": false,
+        "name": "version",
+        "options": [],
+        "query": "import \"influxdata/influxdb/v1\"\nv1.tagValues(bucket: \"tplr\", tag: \"version\")",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influx"
+        },
+        "definition": "import \"influxdata/influxdb/v1\"\nv1.tagValues(bucket: \"tplr\", tag: \"role\")",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Role",
+        "multi": false,
+        "name": "role",
+        "options": [],
+        "query": "import \"influxdata/influxdb/v1\"\nv1.tagValues(bucket: \"tplr\", tag: \"role\")",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influx"
+        },
+        "definition": "import \"influxdata/influxdb/v1\"\nv1.tagValues(bucket: \"tplr\", tag: \"group\")",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Group",
+        "multi": false,
+        "name": "group",
+        "options": [],
+        "query": "import \"influxdata/influxdb/v1\"\nv1.tagValues(bucket: \"tplr\", tag: \"group\")",
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-12h",
@@ -1972,8 +2367,8 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "Templar Metrics Dashboard",
+  "title": "Templar Miner Dashboard",
   "uid": "8f2e6e4d-6b4f-4e50-9db4-9e82c93fcdac",
-  "version": 1,
+  "version": 8,
   "weekStart": ""
 }

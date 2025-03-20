@@ -44,7 +44,7 @@
     dest: /etc/nginx/sites-enabled/grafana.conf
     state: link
   notify: restart nginx
-  
+
 - name: Check if default NGINX site exists
   stat:
     path: /etc/nginx/sites-enabled/default
@@ -108,7 +108,7 @@
       command: ufw status
       register: ufw_status
       changed_when: false
-      
+
     - name: Enable UFW if not already enabled
       ufw:
         state: enabled
@@ -126,7 +126,7 @@
   shell: nginx -t
   register: nginx_test
   changed_when: false
-  
+
 - name: Display NGINX configuration test results
   debug:
     var: nginx_test.stdout_lines
@@ -137,7 +137,121 @@
     netstat -tulpn | grep 80 || echo "NGINX not listening on port 80"
   register: nginx_debug
   changed_when: false
-  
+
 - name: Display NGINX debug info
   debug:
     var: nginx_debug.stdout_lines
+
+# Version API setup
+- name: Create directory for Version API
+  file:
+    path: /opt/templar
+    state: directory
+    mode: '0755'
+    owner: www-data
+    group: www-data
+
+- name: Copy Version API script
+  copy:
+    src: version_api.py
+    dest: /opt/templar/version_api.py
+    mode: '0755'
+    owner: www-data
+    group: www-data
+
+- name: Install Python3 and venv
+  apt:
+    name:
+      - python3
+      - python3-venv
+      - python3-setuptools
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Check if virtual environment exists
+  stat:
+    path: /opt/templar/venv
+  register: venv_dir
+
+- name: Create virtual environment for Version API
+  command: python3 -m venv /opt/templar/venv
+  args:
+    creates: /opt/templar/venv
+  when: not ansible_check_mode and not venv_dir.stat.exists
+
+- name: Install required Python packages for Version API
+  pip:
+    name:
+      - requests
+    state: present
+    virtualenv: /opt/templar/venv
+  when: not ansible_check_mode
+
+- name: Copy Version API systemd service file
+  template:
+    src: version-api.service.j2
+    dest: /etc/systemd/system/templar-version-api.service
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Configure UFW rule for Version API (localhost only)
+  ufw:
+    rule: allow
+    port: "8585"
+    proto: tcp
+    from_ip: 127.0.0.1
+    direction: in
+  when: ansible_os_family == "Debian"
+
+- name: Enable and start Version API service
+  systemd:
+    name: templar-version-api
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  when: not ansible_check_mode
+
+- name: Wait for Version API to start
+  wait_for:
+    host: 127.0.0.1
+    port: 8585
+    timeout: 30
+  register: version_api_status
+  ignore_errors: true
+  when: not ansible_check_mode
+
+- name: Check Version API status
+  uri:
+    url: http://127.0.0.1:8585/health
+    method: GET
+  register: version_api_health
+  ignore_errors: true
+  when: not ansible_check_mode
+
+- name: Display Version API status
+  debug:
+    msg: "Version API status: {{ version_api_health.status | default('Not running or skipped in check mode') }}"
+
+- name: Create log file for Version API
+  file:
+    path: /var/log/templar-version-api.log
+    state: touch
+    owner: root
+    group: root
+    mode: 0644
+  changed_when: false
+
+- name: Ensure dashboard directories are writable by version API
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: grafana
+    group: grafana
+    mode: 0775
+  with_items:
+    - /etc/grafana/dashboards
+    - /var/lib/grafana/dashboards
+  ignore_errors: true
+  changed_when: false

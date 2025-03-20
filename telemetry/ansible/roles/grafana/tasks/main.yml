@@ -139,6 +139,7 @@
     method: GET
     status_code: 200
   register: result
-  until: result.status == 200
+  until: result is defined and result.status is defined and result.status == 200
   retries: 60
   delay: 1
+  when: not ansible_check_mode

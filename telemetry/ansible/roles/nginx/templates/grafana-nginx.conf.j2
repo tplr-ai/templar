@@ -82,4 +82,36 @@ server {
         proxy_send_timeout {{ nginx_proxy_send_timeout | default(60) }}s;
         proxy_read_timeout {{ nginx_proxy_read_timeout | default(60) }}s;
     }
+    
+    # Version API endpoints
+    location /api/templar/version {
+        proxy_pass http://127.0.0.1:8585/version;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        
+        # Enable CORS
+        add_header 'Access-Control-Allow-Origin' '*' always;
+        add_header 'Access-Control-Allow-Methods' 'GET, OPTIONS' always;
+        add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
+        
+        # Cache version info for 1 hour
+        proxy_cache_valid 200 1h;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+    }
+
+    # Plain text version API
+    location /api/templar/version/plain {
+        proxy_pass http://127.0.0.1:8585/version/plain;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        
+        # Enable CORS
+        add_header 'Access-Control-Allow-Origin' '*' always;
+        add_header 'Access-Control-Allow-Methods' 'GET, OPTIONS' always;
+        add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
+        
+        # Cache version info for 1 hour
+        proxy_cache_valid 200 1h;
+        proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+    }
 }

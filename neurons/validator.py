@@ -579,6 +579,9 @@ class Validator:
 
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
 
+            attempted_uids = set(evaluation_uids)
+            max_attempts = 2 * self.hparams.uids_per_window
+
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
 
@@ -621,6 +624,39 @@ class Validator:
                             f"Skipped reducing moving average score of UID {eval_uid} (current score: {old_score:.4f}) due to negative or zero value."
                         )
                     self.evaluated_uids.add(uid)
+
+                    # Try to sample a replacement UID if we haven't reached the maximum attempts
+                    if len(attempted_uids) < max_attempts:
+                        # Get candidates that weren't already attempted
+                        remaining_candidates = [
+                            uid for uid in candidate_uids if uid not in attempted_uids
+                        ]
+
+                        if remaining_candidates:
+                            # Get their weights
+                            remaining_weights = [
+                                self.eval_candidates_counter[uid]
+                                for uid in remaining_candidates
+                            ]
+
+                            # Sample a new UID
+                            replacement_uid = (
+                                self.comms.weighted_random_sample_no_replacement(
+                                    remaining_candidates, remaining_weights, 1
+                                )[0]
+                            )
+
+                            # Add it to our tracking set and evaluation list
+                            attempted_uids.add(replacement_uid)
+                            evaluation_uids.append(replacement_uid)
+
+                            # Update counters for this peer
+                            self.eval_peers[replacement_uid] = 0
+                            self.eval_candidates_counter[replacement_uid] = 0
+
+                            tplr.logger.info(
+                                f"Sampled replacement UID: {replacement_uid} after {eval_uid} failed"
+                            )
                     continue
 
                 # Now we know we have a valid gradient

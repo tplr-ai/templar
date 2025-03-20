@@ -405,6 +405,7 @@ class Validator:
 
                 # Apply flat 25% penalty instead of exponential decay
                 old_score = self.final_moving_avg_scores[uid].item()
+                new_score = old_score  # Initialize new_score with old_score value
                 if self.final_moving_avg_scores[uid] > 0:
                     self.final_moving_avg_scores[uid] *= (
                         0.75  # Apply flat 25% reduction for positive scores only

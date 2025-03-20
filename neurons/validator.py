@@ -496,7 +496,7 @@ class Validator:
                 uids=self.peers,
                 window=self.sync_window,
                 key="gradient",
-                timeout=30,
+                timeout=35,
                 device=self.config.device,
                 local=False,
                 totalks=self.totalks,

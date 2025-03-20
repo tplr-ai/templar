@@ -624,7 +624,7 @@ class Validator:
                     continue
 
                 # Now we know we have a valid gradient
-                scoring_start = tplr.T()
+                eval_uid_start = tplr.T()
                 state_dict, _ = eval_result
 
                 # Pull miner-sent pages info from metadata
@@ -1177,27 +1177,30 @@ class Validator:
                 )
 
                 self.evaluated_uids.add(eval_uid)
-
-                # 12. Calculate weights using min power norm
-                self.weights = torch.zeros_like(self.final_moving_avg_scores)
-                evaluated_mask = torch.zeros_like(
-                    self.final_moving_avg_scores, dtype=torch.bool
+                tplr.logger.info(
+                    f"{tplr.P(self.sync_window, tplr.T() - eval_uid_start)} Completed evaluation for {eval_uid}"
                 )
-                evaluated_mask[list(self.evaluated_uids)] = True
-                positive_mask = (self.final_moving_avg_scores > 0) & evaluated_mask
-                if positive_mask.any():
-                    self.weights[positive_mask] = min_power_normalization(
-                        self.final_moving_avg_scores[positive_mask],
-                        power=self.hparams.power_normalisation,
+
+            # 12. Calculate weights using min power norm
+            self.weights = torch.zeros_like(self.final_moving_avg_scores)
+            evaluated_mask = torch.zeros_like(
+                self.final_moving_avg_scores, dtype=torch.bool
+            )
+            evaluated_mask[list(self.evaluated_uids)] = True
+            positive_mask = (self.final_moving_avg_scores > 0) & evaluated_mask
+            if positive_mask.any():
+                self.weights[positive_mask] = min_power_normalization(
+                    self.final_moving_avg_scores[positive_mask],
+                    power=self.hparams.power_normalisation,
+                )
+                weight_sum = self.weights.sum().item()
+                tplr.logger.debug(f"Weight sum: {weight_sum}")
+                if abs(weight_sum - 1.0) > 1e-6:
+                    tplr.logger.warning(
+                        f"Weights sum to {weight_sum}, expected close to 1.0"
                     )
-                    weight_sum = self.weights.sum().item()
-                    tplr.logger.debug(f"Weight sum: {weight_sum}")
-                    if abs(weight_sum - 1.0) > 1e-6:
-                        tplr.logger.warning(
-                            f"Weights sum to {weight_sum}, expected close to 1.0"
-                        )
-                else:
-                    tplr.logger.info("No positive scores found, all weights set to 0")
+            else:
+                tplr.logger.info("No positive scores found, all weights set to 0")
 
             tplr.logger.info(
                 f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"

@@ -433,7 +433,7 @@ class Miner:
                     uids=[uid for uid in self.peers if uid != self.uid],
                     window=step_window,
                     key="gradient",
-                    timeout=30,
+                    timeout=35,
                     device="cpu",
                     local=False,
                     stale_retention=100,

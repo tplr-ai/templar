@@ -27,9 +27,9 @@ import argparse
 import threading
 from io import StringIO
 from rich.table import Table  
-from time import perf_counter
 from rich.console import Console
-from contextlib import contextmanager 
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 
 # Third party
 import torch
@@ -56,16 +56,6 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-
-
-@contextmanager
-def timer(name: str, wandb_obj=None, step=None):
-    start = perf_counter()
-    yield
-    duration = perf_counter() - start
-    tplr.logger.debug(f"{name} took {duration:.2f}s")
-    if wandb_obj and step is not None:
-        wandb_obj.log({f"validator/{name}": duration}, step=step)
 
 
 class Validator:
@@ -175,7 +165,6 @@ class Validator:
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
         self.comms.try_commit(self.wallet, self.bucket)
-        # self.comms.fetch_commitments()
 
         # Init state params
         self.stop_event = asyncio.Event()
@@ -197,8 +186,8 @@ class Validator:
         self.relative_improvement_random = 0.0
         self.valid_score_indices = []
         self.gradient_scores = torch.zeros(self.metagraph.n, dtype=torch.float32)
-        self.binary_indicator_scores = torch.full(
-            (self.metagraph.n,), 0.5, dtype=torch.float32
+        self.binary_indicator_scores = torch.zeros(
+            self.metagraph.n, dtype=torch.float32
         )
         self.gradient_moving_avg_scores = torch.zeros(
             self.metagraph.n, dtype=torch.float32
@@ -228,11 +217,36 @@ class Validator:
 
         # Initialize peers
         self.peers = []
-        self.eval_peers = []
+        # Weighted selection counters for fair picking of eval peers
+        self.eval_peers = defaultdict(int)
+        # Track candidate weights separately
+        self.eval_candidates_counter = defaultdict(int)
 
         # Track inactive peer scores
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
+
+        # Initialize final score history (for sliding-window averaging)
+        self.final_score_history = defaultdict(list)
+
+        #  TODO: Move out 
+        def reset_peer(self, inactive_since: int, uid: int) -> bool:
+            if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
+                self.final_score_history[uid] = []
+                self.final_moving_avg_scores[uid] = 0.0
+                self.weights[uid] = 0.0
+                self.gradient_scores[uid] = 0.0
+                self.gradient_moving_avg_scores[uid] = 0.0
+                self.binary_moving_averages[uid] = 0.0
+                self.binary_indicator_scores[uid] = 0.0
+                self.normalised_binary_moving_averages[uid] = 0.0
+                self.eval_candidates_counter[uid] = 0
+                if uid in self.eval_peers:
+                    self.eval_peers[uid] = 0
+                del self.inactive_scores[uid]
+                tplr.logger.info(f"UID {uid} fully reset after extended inactivity")
+                return True
+            return False
 
         # Add lock for metrics and initialize evaluation metrics collection
         self.metrics_lock = asyncio.Lock()
@@ -320,7 +334,7 @@ class Validator:
 
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
-
+        time_min = None
         while True:
 
             # Wait for validator offset before continuing
@@ -346,21 +360,171 @@ class Validator:
                 f"{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - gather: {len(self.peers)}, eval: {len(self.eval_peers)}"
             )
 
-    
-            gather_start = tplr.T()
-            gather_task = asyncio.create_task(
-                self.comms.gather(
-                    my_uid=self.uid,
-                    uids=self.peers,
-                    window=self.sync_window,
-                    key="gradient",
-                    timeout=25,
-                    device=self.config.device,
-                    local=False,
-                    totalks=self.totalks,
-                )
+            tplr.logger.info(f"Current gather peers: {self.peers}")
+            tplr.logger.info(f"Current evaluation peers: {self.eval_peers}")
+
+            tplr.logger.info(f"Current gather peers: {self.peers}")
+            tplr.logger.info(
+                f"Current evaluation peers: {list(self.eval_peers.keys())}"
             )
 
+            newly_inactive = self.comms.inactive_peers
+            current_window = self.sync_window
+
+            # Process newly inactive peers
+            for uid in newly_inactive:
+                if uid not in self.inactive_scores:
+                    self.inactive_scores[uid] = (
+                        current_window,
+                        self.final_moving_avg_scores[uid].item(),
+                    )
+                    tplr.logger.info(
+                        f"UID {uid} became inactive at window {current_window} with score {self.final_moving_avg_scores[uid].item():.4f}"
+                    )
+
+            # Apply penalties to all inactive peers
+            for uid, (inactive_since, _) in list(self.inactive_scores.items()):
+                # If peer became active again, remove from inactive tracking
+                if uid in self.eval_peers.keys():
+                    del self.inactive_scores[uid]
+                    tplr.logger.info(f"UID {uid} became active again")
+                    continue
+
+                peer_reset = self.reset_peer(inactive_since, uid)
+                if peer_reset:
+                    continue
+
+                # Apply flat 25% penalty instead of exponential decay
+                old_score = self.final_moving_avg_scores[uid].item()
+                new_score = old_score  # Initialize new_score with old_score value
+                if self.final_moving_avg_scores[uid] > 0:
+                    self.final_moving_avg_scores[uid] *= (
+                        0.75  # Apply flat 25% reduction for positive scores only
+                    )
+
+                    self.final_score_history[uid] = [
+                        final_score * 0.75 if final_score > 0 else final_score
+                        for final_score in self.final_score_history[uid]
+                    ]
+                    new_score = self.final_moving_avg_scores[uid].item()
+
+                    tplr.logger.info(
+                        f"UID {uid} penalized for inactivity: "
+                        f"{old_score:.4f} -> {new_score:.4f}"
+                    )
+
+                # Log slash metrics
+                self.wandb.log(
+                    {
+                        f"validator/inactivity/{uid}/score_before": old_score,
+                        f"validator/inactivity/{uid}/score_after": new_score,
+                    },
+                    step=self.global_step,
+                )
+
+            # Calculate time window for this sync window
+            sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
+            retries = 0
+            delay = 1
+            max_retries = 2
+            max_delay = 60
+            while True:
+                try:
+                    response = self.subtensor.query_module(
+                        "Timestamp", "Now", block=sync_block
+                    )
+                    ts_value = response.value / 1000  # convert ms to seconds
+                    break
+                except Exception as e:
+                    tplr.logger.error(
+                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
+                    )
+                    retries += 1
+                    if retries > max_retries:
+                        tplr.logger.error(
+                            "Exceeded maximum retries for timestamp query. Falling back to current system time."
+                        )
+                        ts_value = (
+                            time.time()
+                        )  # Fallback: use current system time as timestamp
+                        break
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, max_delay)
+            time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
+            time_max = time_min + timedelta(
+                seconds=self.hparams.time_window_delta_seconds
+            )
+
+            # Log the time window we're using
+            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
+            tplr.logger.info(f"We are using peers {self.peers}")
+
+            gather_start = tplr.T()
+            # Refresh peers explicitly before starting gather to avoid missing updated active peers.
+            tplr.logger.info("Refreshing peers before gather task in validator...")
+
+            self.comms.update_peers_with_buckets()
+            self.peers = self.comms.peers
+            self.eval_peers = self.comms.eval_peers
+
+            tplr.logger.info(f"Validator gather peers: {self.peers}")
+
+            gather_start = tplr.T()
+            gather_result = await self.comms.gather(
+                my_uid=self.uid,
+                uids=self.peers,
+                window=self.sync_window,
+                key="gradient",
+                timeout=35,
+                device=self.config.device,
+                local=False,
+                totalks=self.totalks,
+                time_min=time_min,
+                time_max=time_max,
+            )
+
+            if gather_result is None:
+                tplr.logger.error(
+                    "Failed to gather gradients from peers. Waiting for next window."
+                )
+                self.global_step += 1
+                continue
+
+            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
+
+            # Slash peers failing to submit gradients (penalize 50%)
+            for uid in gather_result.skipped_uids:
+                tplr.logger.info(
+                    f"No gradient gathered from UID {uid}. Slashing moving average score by 50%."
+                )
+                if 0 <= uid < self.final_moving_avg_scores.size(0):
+                    old_score = self.final_moving_avg_scores[uid].item()
+
+                    # Only reduce positive scores
+                    if self.final_moving_avg_scores[uid] > 0:
+                        self.final_moving_avg_scores[uid] *= 0.5
+                        self.final_score_history[uid] = [
+                            final_score * 0.5 if final_score > 0 else final_score
+                            for final_score in self.final_score_history[uid]
+                        ]
+
+                        new_score = self.final_moving_avg_scores[uid].item()
+                        tplr.logger.info(
+                            f"Reduced moving average score of UID {uid} from {old_score:.4f} to {new_score:.4f} "
+                            f"due to missing gradient in gather."
+                        )
+                    else:
+                        tplr.logger.info(
+                            f"Skipped reducing moving average score of UID {uid} (current score: {old_score:.4f}) "
+                            f"due to negative or zero value."
+                        )
+                    self.evaluated_uids.add(uid)
+                else:
+                    tplr.logger.info(
+                        f"UID {uid} not found in final_moving_avg_scores; skipping penalty."
+                    )
+
+            # Add check for empty peers (evaluating all peer uids)
             if not self.peers:
                 tplr.logger.warning(
                     f"No peers available for evaluation in window {self.sync_window}. Waiting for next window."
@@ -370,17 +534,33 @@ class Validator:
 
             # 5. Evaluate peers in parallel using modular evaluation logic.
             eval_start = tplr.T()
-            max_eval_peers = self.hparams.max_eval_peers
+            # Use weighted candidate selection instead of random sampling.
+            candidate_uids = list(self.eval_peers.keys())
+            candidate_weights = [self.eval_candidates_counter[uid] for uid in candidate_uids]
+            k = min(self.hparams.uids_per_window, len(candidate_uids))
+            evaluation_uids = evaluation.weighted_random_sample_no_replacement(candidate_uids, candidate_weights, k)
+
+            # Reset counters for chosen peers.
+            for uid in evaluation_uids:
+                self.eval_peers[uid] = 0
+                self.eval_candidates_counter[uid] = 0
+
+            # Increment counters for peers not chosen.
+            for uid in candidate_uids:
+                if uid not in evaluation_uids:
+                    self.eval_peers[uid] += 1
+                    self.eval_candidates_counter[uid] += 1
+            self.comms.eval_peers = self.eval_peers
+
+            tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
+
             peers_per_round = self.hparams.peers_per_eval_round
-            num_eval = min(max_eval_peers, len(self.eval_peers))
-            if num_eval == 0:
+            eval_results = {}
+            if not evaluation_uids:
                 tplr.logger.warning("No eval peers available.")
-                eval_results = {}
             else:
-                selected_eval_peers = random.sample(self.eval_peers, num_eval)
-                eval_results = {}
-                for i in range(0, num_eval, peers_per_round):
-                    current_batch = selected_eval_peers[i:i+peers_per_round]
+                for i in range(0, len(evaluation_uids), peers_per_round):
+                    current_batch = evaluation_uids[i:i+peers_per_round]
                     tplr.logger.info(f"Evaluating batch {i // peers_per_round + 1}: {current_batch}")
                     batch_results = await evaluation.evaluate_peers_parallel(
                         current_batch,
@@ -397,7 +577,9 @@ class Validator:
                         self.config.device,
                         self.scheduler.get_last_lr()[0],
                         self.optimizer,
-                        self.scheduler
+                        self.scheduler,
+                        time_min,
+                        time_max
                     )
                     eval_results.update(batch_results)
             # Process evaluation results.
@@ -416,13 +598,23 @@ class Validator:
                         + self.hparams.binary_score_ma_alpha * result["binary_indicator"]
                     )
                     self.normalised_binary_moving_averages[eval_uid] = self.binary_moving_averages[eval_uid] / 2
-                    final_score = self.gradient_scores[eval_uid] * self.normalised_binary_moving_averages[eval_uid]
-                    self.final_moving_avg_scores[eval_uid] = max(
-                        self.hparams.final_score_ma_alpha * self.final_moving_avg_scores[eval_uid]
-                        + (1 - self.hparams.final_score_ma_alpha) * final_score,
-                        0.0
+                    final_score = sign_preserving_multiplication(
+                        self.gradient_moving_avg_scores[eval_uid],
+                        self.normalised_binary_moving_averages[eval_uid],
                     )
-                    tplr.logger.debug(f"UID {eval_uid} - Final Moving Average Score: {self.final_moving_avg_scores[eval_uid]}")
+                    tplr.logger.debug(
+                        f"Computed Final Score for UID {eval_uid}: {final_score}"
+                    )
+
+                    # Sliding window update for the final moving average score
+                    self.final_score_history[eval_uid].append(final_score)
+                    if len(self.final_score_history[eval_uid]) > self.hparams.moving_average_window:
+                        self.final_score_history[eval_uid].pop(0)
+                    self.final_moving_avg_scores[eval_uid] = sum(self.final_score_history[eval_uid]) / len(self.final_score_history[eval_uid])
+                    tplr.logger.debug(
+                        f"Updated Final Moving Average Score for UID {eval_uid}: {self.final_moving_avg_scores[eval_uid]}"
+                    )
+
                     self.evaluated_uids.add(eval_uid)
                     tplr.logger.debug(f"Random metrics for peer {eval_uid}: before={self.loss_before_per_batch_random:.4f}, after={self.loss_after_per_batch_random:.4f}")
                     async with self.metrics_lock:
@@ -436,35 +628,15 @@ class Validator:
                     tplr.logger.info(f"No evaluation result for UID {eval_uid}.")
 
             tplr.logger.info(f"Evaluation phase took {tplr.T() - eval_start:.2f}s")
-            # Await the gather task result now so that we can log its metrics.
-            gather_result = await gather_task
-            # Define safe_avg locally to compute metrics safely.
-            def safe_avg(metric_list):
-                if not metric_list:
-                    tplr.logger.warning("Empty metric list!")
-                    return 0.0
-                avg = sum(metric_list) / len(metric_list)
-                tplr.logger.debug(f"Computing average for {len(metric_list)} values: {avg}")
-                return avg
             
-            # Returns the last value instead of averaging.
-            def safe_last(metric_list):
-                """Return the last metric value in the list or 0.0 if empty.
-                
-                This replaces the averaging logic so we report a single miner's loss—as in the original behavior.
-                """
-                if not metric_list:
-                    tplr.logger.warning("Empty metric list!")
-                    return 0.0
-                return metric_list[-1]
             
             evaluation_metrics = {
-                "validator/loss/own/before": safe_last(self.eval_metrics_collection['own_before']),
-                "validator/loss/own/after": safe_last(self.eval_metrics_collection['own_after']),
-                "validator/loss/random/before": safe_last(self.eval_metrics_collection['random_before']),
-                "validator/loss/random/after": safe_last(self.eval_metrics_collection['random_after']),
-                "validator/loss/own/improvement": safe_last(self.eval_metrics_collection['own_improvement']),
-                "validator/loss/random/improvement": safe_last(self.eval_metrics_collection['random_improvement']),
+                "validator/loss/own/before": evaluation.safe_last(self.eval_metrics_collection['own_before']),
+                "validator/loss/own/after": evaluation.safe_last(self.eval_metrics_collection['own_after']),
+                "validator/loss/random/before": evaluation.safe_last(self.eval_metrics_collection['random_before']),
+                "validator/loss/random/after": evaluation.safe_last(self.eval_metrics_collection['random_after']),
+                "validator/loss/own/improvement": evaluation.safe_last(self.eval_metrics_collection['own_improvement']),
+                "validator/loss/random/improvement": evaluation.safe_last(self.eval_metrics_collection['random_improvement']),
                 "validator/network/block": self.current_block,
                 "validator/network/window": self.sync_window,
                 "validator/network/step": self.global_step,
@@ -665,6 +837,37 @@ class Validator:
             self.scheduler.step()
             torch.cuda.empty_cache()
 
+            # Add debug data including successfully gathered peers
+            debug_dict = {}
+
+            # Add model parameters debug info
+            for name, param in self.model.named_parameters():
+                if (
+                    param is not None and param.numel() >= 2
+                ):  # Check if tensor has at least 2 elements
+                    debug_dict[name + "_debug"] = (
+                        param.flatten()[:2].detach().cpu().tolist()
+                    )
+
+            # Add successful peers information
+            if gather_result is not None:
+                debug_dict["successful_peers"] = sorted(
+                    list(set(self.peers) - set(gather_result.skipped_uids))
+                )
+                debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
+
+            # Store the debug dictionary
+            asyncio.create_task(
+                self.comms.put(
+                    state_dict=debug_dict,
+                    uid=str(self.uid),
+                    window=self.current_window,
+                    key="debug",
+                    local=False,
+                )
+            )
+            tplr.logger.info(f"Stored debug values for window {self.current_window}")
+
             tplr.logger.info(
                     f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
                 )
@@ -673,24 +876,43 @@ class Validator:
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
+        import websockets.exceptions  # Ensure we catch websockets errors
+
         def handler(event):
-            self.current_block = int(event["header"]["number"])  # type: ignore
-            new_window = int(self.current_block / self.hparams.blocks_per_window)
-            if new_window != self.current_window:
-                self.current_window = new_window
-                self.comms.current_window = self.current_window
-                tplr.logger.info(
-                    f"New block received. Current window updated to: {self.current_window}"
-                )
+            try:
+                self.current_block = int(event["header"]["number"])
+                new_window = int(self.current_block / self.hparams.blocks_per_window)
+                if new_window != self.current_window:
+                    self.current_window = new_window
+                    self.comms.current_window = self.current_window
+                    tplr.logger.info(
+                        f"New block received. Current window updated to: {self.current_window}"
+                    )
+            except Exception as e:
+                tplr.logger.error(f"Error processing block event: {e}")
+
+        backoff = 1  # initial backoff in seconds
+        max_backoff = 60  # maximum backoff limit
 
         while not self.stop_event.is_set():
             try:
+                # This call subscribes to block headers and might throw keepalive errors
                 bt.subtensor(config=self.config).substrate.subscribe_block_headers(
                     handler
                 )
+                backoff = 1  # reset backoff if subscription exits without exception
+            except websockets.exceptions.ConnectionClosedError as e:
+                tplr.logger.warning(
+                    f"Websocket ConnectionClosedError caught: {e}. Retrying in {backoff} seconds."
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
             except Exception as e:
-                tplr.logger.error(f"Block subscription error: {e}")
-                time.sleep(1)
+                tplr.logger.error(
+                    f"Block subscription error: {e}. Retrying in {backoff} seconds."
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
 
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):
@@ -719,6 +941,10 @@ def min_power_normalization(logits, power=2.0, epsilon=1e-8):
         probabilities = torch.zeros_like(powered_logits)
 
     return probabilities
+
+
+def sign_preserving_multiplication(a, b):
+    return -abs(a) * abs(b) if a < 0 or b < 0 else a * b
 
 
 if __name__ == "__main__":

@@ -250,7 +250,9 @@ async def evaluate_peers_parallel(
     device, 
     lr, 
     optimizer, 
-    scheduler
+    scheduler,
+    time_min,
+    time_max
 ):
     """
     Evaluates multiple peers concurrently.
@@ -271,9 +273,10 @@ async def evaluate_peers_parallel(
             uid=str(uid),
             window=sync_window,
             key='gradient',
-            timeout=30,
             local=False,
-            stale_retention=10
+            stale_retention=10,
+            time_min=time_min,
+            time_max=time_max,
         )
         if eval_result is not None and eval_result[0] is not None:
             state_dict, _ = eval_result
@@ -483,3 +486,62 @@ async def evaluate_all_peers(
             "binary_indicator": binary_indicator,
         }
     return eval_results
+
+
+def weighted_random_sample_no_replacement(candidates: list[str], weights: list[int], k: int) -> list[str]:
+    tplr.logger.debug("Starting weighted random sampling.")
+    tplr.logger.debug(f"Candidates: {candidates}")
+    tplr.logger.debug(f"Weights: {weights}")
+    tplr.logger.debug(f"Sample size (k): {k}")
+
+    # Safety checks.
+    if not candidates or not weights or k <= 0:
+        tplr.logger.warning("Invalid input detected. Returning empty list.")
+        return []
+
+    # If the number of candidates is less than or equal to k, return all.
+    if len(candidates) <= k:
+        tplr.logger.info("Candidate count is within limit. Returning all candidates.")
+        return candidates
+
+    pool = list(zip(candidates, weights))
+    total_w = float(sum(weights))
+    # Fall back to unweighted random sampling if total weight is zero.
+    if total_w <= 0:
+        tplr.logger.warning("Total weight is zero, selecting random sample instead.")
+        return random.sample(candidates, k)
+    
+    tplr.logger.debug(f"Initial total weight: {total_w}")
+    selected = []
+
+    for _ in range(k):
+        if total_w <= 0 or len(pool) == 0:
+            tplr.logger.info("No more items to sample. Stopping early.")
+            break
+
+        r = random.uniform(0.0, total_w)
+        tplr.logger.debug(f"Random threshold: {r}")
+        cumulative = 0.0
+        for idx, (uid, w) in enumerate(pool):
+            cumulative += w
+            if cumulative >= r:
+                selected.append(uid)
+                tplr.logger.info(f"Selected candidate: {uid} with weight: {w}")
+                total_w -= w
+                pool.pop(idx)
+                tplr.logger.debug(f"Updated total weight: {total_w}")
+                break
+
+    tplr.logger.debug(f"Final selected candidates: {selected}")
+    return selected
+
+# Returns the last value instead of averaging.
+def safe_last(metric_list):
+    """Return the last metric value in the list or 0.0 if empty.
+    
+    This replaces the averaging logic so we report a single miner's loss—as in the original behavior.
+    """
+    if not metric_list:
+        tplr.logger.warning("Empty metric list!")
+        return 0.0
+    return metric_list[-1]

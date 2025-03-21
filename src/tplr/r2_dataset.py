@@ -30,6 +30,8 @@ from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
 from tplr.logging import T, P  # Use timing utilities
 
+import tplr
+
 
 class R2DatasetLoader(DatasetLoader):
     """
@@ -582,3 +584,28 @@ class R2DatasetLoader(DatasetLoader):
         elapsed = T() - start_time
         logger.info(f"Loaded {data_type} data for window {window} with seed: {seed_val}, pages: {[p[1] for p in pages]} " + P(window, elapsed))
         return loader, pages
+
+
+async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
+    """
+    Calls an async function with retries.
+    Args:
+        func (Callable): An async function.
+        *args: Positional arguments to pass to func.
+        attempts (int): Number of retries.
+        delay (int): Delay between attempts in seconds.
+        context (str): Context description for logging.
+        **kwargs: Keyword arguments to pass to func.
+    Returns:
+        The result of func(*args, **kwargs) or None if all attempts fail.
+    """
+    for attempt in range(attempts):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            tplr.logger.error(
+                f"Attempt {attempt + 1}/{attempts} failed for {context}: {e}"
+            )
+            await asyncio.sleep(delay)
+    tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
+    return None

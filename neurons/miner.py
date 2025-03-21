@@ -430,7 +430,7 @@ class Miner:
             gather_task = asyncio.create_task(
                 self.comms.gather(
                     my_uid=self.uid,
-                    uids=[uid for uid in self.peers if uid != self.uid],
+                    uids=self.peers,
                     window=step_window,
                     key="gradient",
                     timeout=35,

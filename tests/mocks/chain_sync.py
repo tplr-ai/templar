@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 from collections import defaultdict
 from typing import Dict, Optional, Tuple
 from .base import BaseMock
+from .subtensor import MockSubtensor
+from tplr.schemas import Bucket
 
 
 class MockChainSync(BaseMock):
@@ -17,12 +19,14 @@ class MockChainSync(BaseMock):
         hparams=None,
         fetch_interval=600,
         wallet=None,
+        subtensor=None,
     ):
         super().__init__()
         self.config = config or MagicMock()
         self.netuid = netuid
         self.metagraph = metagraph or MagicMock()
         self.hparams = hparams or MagicMock()
+        self.subtensor = subtensor or MockSubtensor()
 
         # Set default hparams if not provided
         if not hasattr(self.hparams, "blocks_per_window"):
@@ -35,7 +39,7 @@ class MockChainSync(BaseMock):
             self.hparams.max_topk_peers = 10
 
         # Block and window tracking
-        self.current_block = 1000
+        self.current_block = self.subtensor.get_current_block()
         self.current_window = 10
         self.window_duration = self.hparams.blocks_per_window
         self.start_window = 0
@@ -55,14 +59,25 @@ class MockChainSync(BaseMock):
         self.wallet = wallet
 
         # Mock bucket
-        self.mock_bucket = MagicMock()
-        self.mock_bucket.name = "test-bucket"
-        self.mock_bucket.account_id = "test-account"
-        self.mock_bucket.access_key_id = "test-key"
-        self.mock_bucket.secret_access_key = "test-secret"
+        self.mock_bucket = Bucket(
+            name="test-bucket",
+            account_id="test-account",
+            access_key_id="test-key",
+            secret_access_key="test-secret",
+        )
 
         # Mock highest stake validator
         self.highest_stake_validator_uid = 1
+
+        # Mock methods as AsyncMock instead of regular functions
+        self.start_commitment_fetcher = AsyncMock()
+        self.update_peers_with_buckets = MagicMock()
+        self.get_bucket = MagicMock(return_value=self.mock_bucket)
+        self._get_highest_stake_validator_bucket = AsyncMock(
+            return_value=(self.mock_bucket, 1)
+        )
+        self.get_miner_bucket = MagicMock(return_value=self.mock_bucket)
+        self.get_validator_bucket = MagicMock(return_value=self.mock_bucket)
 
     def start_commitment_fetcher(self):
         """Mock starting the background task to fetch commitments."""
@@ -70,7 +85,13 @@ class MockChainSync(BaseMock):
 
     async def get_commitments(self) -> Dict[int, object]:
         """Mock fetching commitments from the blockchain."""
-        return {uid: self.mock_bucket for uid in [1, 2, 3]}
+        # Use the subtensor to get commitments
+        mock_commitments = {
+            uid: self.mock_bucket
+            for uid in self.metagraph.uids.tolist()
+            if uid in [1, 2, 3]
+        }
+        return mock_commitments
 
     def get_bucket(self, uid: int) -> Optional[object]:
         """Mock getting bucket for a specific UID."""
@@ -112,3 +133,9 @@ class MockChainSync(BaseMock):
     ) -> bool:
         """Mock catch-up mechanism."""
         return True
+
+    async def _fetch_commitments_periodically(self):
+        """Mock background task to periodically fetch commitments."""
+        # This would use the subtensor in the real implementation
+        self.commitments = await self.get_commitments()
+        self.update_peers_with_buckets()

@@ -9,7 +9,6 @@ import pytest
 import torch
 from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock
-from tests.utils.assertions import assert_tensor_equal
 
 pytestmark = pytest.mark.asyncio
 
@@ -21,7 +20,10 @@ class TestCommsBasicOperations:
         from tplr.comms import Comms
 
         hparams = SimpleNamespace(
-            active_check_interval=60, recent_windows=3, blocks_per_window=10, topk_compression=5
+            active_check_interval=60,
+            recent_windows=3,
+            blocks_per_window=10,
+            topk_compression=5,
         )
         with patch("tplr.comms.Comms.get_own_bucket") as mock_get_bucket:
             mock_get_bucket.return_value = SimpleNamespace(
@@ -105,7 +107,7 @@ class TestCommsBasicOperations:
             for filename in os.listdir(local_dir):
                 os.remove(os.path.join(local_dir, filename))
             os.rmdir(local_dir)
-    
+
         # Store checkpoint locally.
         await comms_instance.put(
             state_dict=test_state_dict,
@@ -117,9 +119,10 @@ class TestCommsBasicOperations:
             stale_retention=10,
         )
         await asyncio.sleep(0.05)
-    
+
         # Patch cleanup so it does not remove the file while retrieving.
         with pytest.MonkeyPatch.context() as mp:
+
             async def dummy_cleanup(uid, current_window, stale_retention):
                 return None
 
@@ -127,7 +130,7 @@ class TestCommsBasicOperations:
             checkpoint, global_step = await comms_instance.get(
                 uid=uid, window=window, key=key, local=True
             )
-    
+
         assert checkpoint is not None, "Checkpoint returned is None"
         # Expecting the checkpoint to be stored as a dict with a "state_dict" key.
         assert "state_dict" in checkpoint, "Missing 'state_dict' key in checkpoint"
@@ -159,7 +162,8 @@ class TestCommsStorageOperations:
     @pytest.fixture
     async def comms_instance(self, mock_wallet, mock_metagraph):
         from tplr.comms import Comms
-        import tempfile, shutil
+        import tempfile
+        import shutil
 
         temp_dir = tempfile.mkdtemp()
         save_dir = tempfile.mkdtemp()
@@ -203,7 +207,10 @@ class TestCommsGradientBatching:
         from tplr.comms import Comms
 
         hparams = SimpleNamespace(
-            active_check_interval=60, recent_windows=3, blocks_per_window=10, topk_compression=5
+            active_check_interval=60,
+            recent_windows=3,
+            blocks_per_window=10,
+            topk_compression=5,
         )
         with patch("tplr.comms.Comms.get_own_bucket") as mock_get_bucket:
             mock_get_bucket.return_value = SimpleNamespace(
@@ -246,7 +253,10 @@ class TestCommsGatherOperations:
         from tplr.comms import Comms
 
         hparams = SimpleNamespace(
-            active_check_interval=60, recent_windows=3, blocks_per_window=10, topk_compression=5
+            active_check_interval=60,
+            recent_windows=3,
+            blocks_per_window=10,
+            topk_compression=5,
         )
         with patch("tplr.comms.Comms.get_own_bucket") as mock_get_bucket:
             mock_get_bucket.return_value = SimpleNamespace(
@@ -308,7 +318,10 @@ class TestCommsErrorHandling:
         from tplr.comms import Comms
 
         hparams = SimpleNamespace(
-            active_check_interval=60, recent_windows=3, blocks_per_window=10, topk_compression=5
+            active_check_interval=60,
+            recent_windows=3,
+            blocks_per_window=10,
+            topk_compression=5,
         )
         with patch("tplr.comms.Comms.get_own_bucket") as mock_get_bucket:
             mock_get_bucket.return_value = SimpleNamespace(

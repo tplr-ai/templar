@@ -17,6 +17,9 @@ from .loader import MockLoader
 from .mock_bittensor import mock_bt
 from .subtensor import MockSubtensor
 from .r2_dataset import MockR2DatasetLoader
+from .storage import MockStorageManager
+from .peer_manager import MockPeerManager
+from .chain_sync import MockChainSync
 
 __all__ = [
     "BaseMock",
@@ -34,4 +37,7 @@ __all__ = [
     "MockLlamaForCausalLM",
     "MockModelConfig",
     "MockR2DatasetLoader",
+    "MockStorageManager",
+    "MockPeerManager",
+    "MockChainSync",
 ]

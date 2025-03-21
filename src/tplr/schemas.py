@@ -17,6 +17,7 @@
 
 # Global imports
 from pydantic import BaseModel
+from typing import Optional, Dict, Any, List
 
 
 class Bucket(BaseModel):
@@ -42,3 +43,11 @@ class Bucket(BaseModel):
     class Config:
         str_min_length = 1
         str_strip_whitespace = True
+
+
+class GradientResult(BaseModel):
+    """Result from a gradient gather operation."""
+
+    state_dict: Optional[Dict[str, Any]] = None
+    skipped_uids: List[int] = []
+    error: Optional[str] = None

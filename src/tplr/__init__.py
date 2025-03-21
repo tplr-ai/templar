@@ -22,15 +22,19 @@
 
 __version__ = "0.2.28trt"
 
-# Import package.
-from .chain import *
-from .comms import *
+
+from .logging import logger
+
+# Then import other modules
+from .schemas import *
+from .storage import *
 from .compress import *
+from .peer_manager import *
+from .chain_sync import *
+from .comms import *
 from .dataset import *
 from .evaluation import *
 from .neurons import *
 from .r2_dataset import *
 from .hparams import *
-from .logging import *
-from .schemas import *
 from .wandb import initialize_wandb

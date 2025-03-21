@@ -205,8 +205,6 @@ class Miner:
             tplr.logger.info(f"Filtered gather peers with buckets: {self.peers}")
         else:
             self.peers = self.config.peers
-        if self.uid not in self.peers:
-            self.peers.append(self.uid)
 
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.set_gather_peers()

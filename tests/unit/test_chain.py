@@ -14,9 +14,7 @@ class TestChainBasics:
     async def chain_instance(self, mock_wallet, mock_metagraph, mock_subtensor):
         """Create chain instance with standard mocks"""
         hparams = SimpleNamespace(
-            blocks_per_window=100,
-            active_check_interval=60,
-            recent_windows=5
+            blocks_per_window=100, active_check_interval=60, recent_windows=5
         )
         chain = ChainManager(n_validators=10)
         # Attach required attributes from real ChainManager for testing
@@ -28,7 +26,9 @@ class TestChainBasics:
 
         # Stub methods required by tests
         chain.get_current_block = AsyncMock(return_value=1000)
-        chain.get_window_from_block = lambda block: block // chain.hparams.blocks_per_window
+        chain.get_window_from_block = (
+            lambda block: block // chain.hparams.blocks_per_window
+        )
         return chain
 
     async def test_initialization(self, chain_instance):
@@ -60,9 +60,7 @@ class TestPeerTracking:
     async def chain_instance(self, mock_wallet, mock_metagraph, mock_subtensor):
         """Create chain instance with peer tracking using mocks"""
         hparams = SimpleNamespace(
-            blocks_per_window=100,
-            active_check_interval=60,
-            recent_windows=5
+            blocks_per_window=100, active_check_interval=60, recent_windows=5
         )
         chain = ChainManager(n_validators=10)
         chain.wallet = mock_wallet
@@ -75,7 +73,9 @@ class TestPeerTracking:
         chain.eval_peers = [1, 2, 3]
         chain.active_peers = {2, 3}
         # Stub missing method for tracking peer activity
-        chain.track_peer_activity = AsyncMock(side_effect=lambda uid, window: chain.active_peers.add(uid))
+        chain.track_peer_activity = AsyncMock(
+            side_effect=lambda uid, window: chain.active_peers.add(uid)
+        )
         return chain
 
     async def test_peer_status_tracking(self, chain_instance):
@@ -119,7 +119,7 @@ class TestChainSyncing:
             active_check_interval=60,
             recent_windows=5,
             catch_up_threshold=5,
-            catch_up_min_peers=1
+            catch_up_min_peers=1,
         )
         chain = ChainManager(n_validators=10)
         chain.wallet = mock_wallet
@@ -136,7 +136,11 @@ class TestChainSyncing:
 
         chain.should_sync = AsyncMock(side_effect=check_catch_up)
         # For testing get_sync_peers: simply return active peers meeting minimum min_peers.
-        chain.get_sync_peers = lambda: list(chain.active_peers) if len(chain.active_peers) >= hparams.catch_up_min_peers else []
+        chain.get_sync_peers = (
+            lambda: list(chain.active_peers)
+            if len(chain.active_peers) >= hparams.catch_up_min_peers
+            else []
+        )
         chain.get_current_window = AsyncMock(return_value=10)
         return chain
 
@@ -172,9 +176,7 @@ class TestChainEdgeCases:
     async def chain_instance(self, mock_wallet, mock_metagraph, mock_subtensor):
         """Create chain instance for edge case testing using mocks"""
         hparams = SimpleNamespace(
-            blocks_per_window=100,
-            active_check_interval=60,
-            recent_windows=5
+            blocks_per_window=100, active_check_interval=60, recent_windows=5
         )
         chain = ChainManager(n_validators=10)
         chain.wallet = mock_wallet
@@ -210,12 +212,12 @@ class TestChainEdgeCases:
                 # Remove one peer arbitrarily
                 peer = next(iter(chain_instance.active_peers))
                 chain_instance.active_peers.remove(peer)
-            
+
             # Add new peer
             new_peer = max(chain_instance.eval_peers) + 1
             chain_instance.eval_peers.append(new_peer)
             chain_instance.active_peers.add(new_peer)
-            
+
             chain_instance.update_peers_with_buckets()
             # Verify no overlap between active and inactive peers
-            assert chain_instance.inactive_peers.isdisjoint(chain_instance.active_peers) 
+            assert chain_instance.inactive_peers.isdisjoint(chain_instance.active_peers)

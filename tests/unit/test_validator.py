@@ -8,6 +8,7 @@ from tests.mocks.wallet import MockWallet
 from tests.mocks.subtensor import MockSubtensor
 from tests.mocks.model import MockModel
 
+
 # ----------------------------
 # Test Class: Validator Configuration
 # ----------------------------
@@ -15,7 +16,7 @@ class TestValidatorConfig:
     def test_config_parsing(self, monkeypatch):
         """
         Test that Validator.config() correctly parses command‑line arguments.
-        
+
         Steps:
           - Patch sys.argv to simulate command‑line input.
           - Stub bt.subtensor.add_args, bt.logging.add_args, and bt.wallet.add_args.
@@ -26,27 +27,39 @@ class TestValidatorConfig:
 
         original_argv = sys.argv
         sys.argv = [
-            'validator.py', '--netuid', '42', '--project', 'test_project',
-            '--device', 'cpu', '--debug'
+            "validator.py",
+            "--netuid",
+            "42",
+            "--project",
+            "test_project",
+            "--device",
+            "cpu",
+            "--debug",
         ]
-        with patch("neurons.validator.bt.subtensor.add_args"), \
-             patch("neurons.validator.bt.logging.add_args"), \
-             patch("neurons.validator.bt.wallet.add_args"), \
-             patch("neurons.validator.bt.config", return_value=SimpleNamespace(
-                 netuid=42,
-                 project='test_project',
-                 device='cpu',
-                 debug=True,
-                 trace=False,
-                 store_gathers=False
-             )):
+        with (
+            patch("neurons.validator.bt.subtensor.add_args"),
+            patch("neurons.validator.bt.logging.add_args"),
+            patch("neurons.validator.bt.wallet.add_args"),
+            patch(
+                "neurons.validator.bt.config",
+                return_value=SimpleNamespace(
+                    netuid=42,
+                    project="test_project",
+                    device="cpu",
+                    debug=True,
+                    trace=False,
+                    store_gathers=False,
+                ),
+            ),
+        ):
             cfg = Validator.config()
             assert cfg.netuid == 42
-            assert cfg.project == 'test_project'
-            assert cfg.device == 'cpu'
+            assert cfg.project == "test_project"
+            assert cfg.device == "cpu"
             assert cfg.debug is True
             assert cfg.trace is False
         sys.argv = original_argv
+
 
 # ----------------------------
 # Test Class: Wallet Registration
@@ -54,9 +67,9 @@ class TestValidatorConfig:
 class TestWalletRegistration:
     def test_wallet_registration_success(self):
         """
-        Test that Validator initialization completes normally when the wallet's hotkey 
+        Test that Validator initialization completes normally when the wallet's hotkey
         is present in metagraph.hotkeys.
-        
+
         Steps:
           - Create a wallet instance using the shared MockWallet.
           - Override its hotkey (if needed) to "default".
@@ -72,19 +85,21 @@ class TestWalletRegistration:
         # Use the reusable MockSubtensor.
         mock_subtensor = MockSubtensor()
 
-        with patch("neurons.validator.bt.wallet", return_value=dummy_wallet), \
-             patch("neurons.validator.bt.subtensor", return_value=mock_subtensor):
+        with (
+            patch("neurons.validator.bt.wallet", return_value=dummy_wallet),
+            patch("neurons.validator.bt.subtensor", return_value=mock_subtensor),
+        ):
             # Bypass __init__() registration check using __new__.
             validator = Validator.__new__(Validator)
             validator.config = SimpleNamespace(netuid=1, peers=[])
             validator.hparams = SimpleNamespace(
-                model_config={}, 
-                target_chunk=512, 
+                model_config={},
+                target_chunk=512,
                 learning_rate=0.01,
-                topk_compression=0.1, 
-                weight_decay=0.0, 
+                topk_compression=0.1,
+                weight_decay=0.0,
                 checkpoint_frequency=100,
-                windows_per_weights=10
+                windows_per_weights=10,
             )
             validator.wallet = dummy_wallet
             validator.subtensor = mock_subtensor
@@ -99,7 +114,7 @@ class TestWalletRegistration:
     def test_wallet_registration_failure(self, monkeypatch):
         """
         Test that Validator.__init__ calls sys.exit when wallet's hotkey is not in metagraph.hotkeys.
-        
+
         Steps:
           - Create a wallet using MockWallet and override its hotkey to an unregistered value.
           - Create a dummy metagraph (using SimpleNamespace) that does not include that hotkey.
@@ -114,11 +129,16 @@ class TestWalletRegistration:
         dummy_metagraph = SimpleNamespace(hotkeys=["default"], n=1, netuid=1)
         # Create a dummy subtensor that returns the dummy metagraph.
         dummy_subtensor = SimpleNamespace(metagraph=lambda netuid: dummy_metagraph)
-        monkeypatch.setattr("neurons.validator.sys.exit", lambda: (_ for _ in ()).throw(SystemExit()))
-        with patch("neurons.validator.bt.wallet", return_value=dummy_wallet), \
-             patch("neurons.validator.bt.subtensor", return_value=dummy_subtensor):
+        monkeypatch.setattr(
+            "neurons.validator.sys.exit", lambda: (_ for _ in ()).throw(SystemExit())
+        )
+        with (
+            patch("neurons.validator.bt.wallet", return_value=dummy_wallet),
+            patch("neurons.validator.bt.subtensor", return_value=dummy_subtensor),
+        ):
             with pytest.raises(SystemExit):
                 Validator.__init__(Validator.__new__(Validator))
+
 
 # ----------------------------
 # Test Class: Normalization
@@ -130,6 +150,7 @@ class TestNormalization:
         The sum of the normalized tensor should be nearly 1.
         """
         from neurons.validator import min_power_normalization
+
         logits = torch.tensor([1.0, 2.0, 3.0])
         normalized = min_power_normalization(logits, power=2.0)
         assert torch.isclose(normalized.sum(), torch.tensor(1.0), atol=1e-6)
@@ -139,9 +160,11 @@ class TestNormalization:
         Ensure that a zero tensor remains zero after normalization.
         """
         from neurons.validator import min_power_normalization
+
         logits = torch.zeros(3)
         normalized = min_power_normalization(logits, power=2.0)
         assert torch.allclose(normalized, torch.zeros(3), atol=1e-6)
+
 
 # ----------------------------
 # Test Class: Run Loop
@@ -176,7 +199,9 @@ class TestRunLoop:
         dummy_wallet.hotkey.ss58_address = "default"
         validator.wallet = dummy_wallet
         validator.subtensor = MockSubtensor()
-        validator.subtensor.query_module = MagicMock(return_value=SimpleNamespace(value=1630000000))
+        validator.subtensor.query_module = MagicMock(
+            return_value=SimpleNamespace(value=1630000000)
+        )
         validator.metagraph = validator.subtensor.metagraph(validator.config.netuid)
         validator.uid = (
             validator.metagraph.hotkeys.index("default")
@@ -186,12 +211,19 @@ class TestRunLoop:
         # Use the real model from tests/mocks/model.py without overriding state_dict/named_parameters.
         validator.model = MockModel()
         # Ensure that xshapes and totalks match the model parameters from tests/mocks/model.py.
-        validator.xshapes = {name: param.shape for name, param in validator.model.named_parameters()}
-        validator.totalks = {name: param.numel() for name, param in validator.model.named_parameters()}
+        validator.xshapes = {
+            name: param.shape for name, param in validator.model.named_parameters()
+        }
+        validator.totalks = {
+            name: param.numel() for name, param in validator.model.named_parameters()
+        }
 
         # Dummy optimizer.
         optimizer = MagicMock()
-        optimizer.state_dict.return_value = {"state": {0: {"step": 0}}, "param_groups": []}
+        optimizer.state_dict.return_value = {
+            "state": {0: {"step": 0}},
+            "param_groups": [],
+        }
         validator.optimizer = optimizer
 
         scheduler = MagicMock()
@@ -215,17 +247,21 @@ class TestRunLoop:
             return_value=(
                 True,
                 validator.momentum,
-                getattr(validator, "global_step", validator.hparams.checkpoint_frequency),
+                getattr(
+                    validator, "global_step", validator.hparams.checkpoint_frequency
+                ),
                 validator.optimizer,
                 validator.scheduler,
             )
         )
         # Patch gather so it can be awaited and returns a dummy result.
-        validator.comms.gather = AsyncMock(return_value=SimpleNamespace(
-            state_dict=SimpleNamespace(paramidxs=[], paramvals=[]),
-            skipped_uids=[],
-            success_rate=1.0,
-        ))
+        validator.comms.gather = AsyncMock(
+            return_value=SimpleNamespace(
+                state_dict=SimpleNamespace(paramidxs=[], paramvals=[]),
+                skipped_uids=[],
+                success_rate=1.0,
+            )
+        )
         validator.transformer = MagicMock()
         validator.compressor = MagicMock()
 
@@ -235,11 +271,15 @@ class TestRunLoop:
         validator.sync_window = 8  # 8 < (10 - 1) = 9
 
         validator.start_window = 5
-        validator.global_step = validator.hparams.checkpoint_frequency  # to trigger checkpoint creation
+        validator.global_step = (
+            validator.hparams.checkpoint_frequency
+        )  # to trigger checkpoint creation
         validator.stop_event = threading.Event()
         validator.inactive_scores = {}
-        validator.final_moving_avg_scores = torch.zeros(validator.metagraph.n, dtype=torch.float32)
-        validator.final_score_history = {}  
+        validator.final_moving_avg_scores = torch.zeros(
+            validator.metagraph.n, dtype=torch.float32
+        )
+        validator.final_score_history = {}
         validator.eval_peers = {1: 0, 2: 0}
         validator.eval_candidates_counter = {1: 0, 2: 0}
         validator.eval_metrics_collection = {
@@ -261,21 +301,21 @@ class TestRunLoop:
         validator.wandb = MagicMock()
 
         from unittest.mock import AsyncMock
+
         validator.listen_to_blockchain = AsyncMock(return_value=None)
         return validator
 
     def test_gradient_merge_in_run(self, minimal_validator):
         """
         Simulate the gradient merge step from the run loop.
-    
+
         Creates dummy gathered gradients and verifies that model parameter gradients are updated.
         """
         validator = minimal_validator
         # Create a dummy gathered result with a state_dict containing gradient data.
-        dummy_gather_result = SimpleNamespace(state_dict=SimpleNamespace(
-            paramidxs=[0],
-            paramvals=[torch.tensor([2.0])]
-        ))
+        dummy_gather_result = SimpleNamespace(
+            state_dict=SimpleNamespace(paramidxs=[0], paramvals=[torch.tensor([2.0])])
+        )
         validator.transformer = MagicMock()
         # Identity decode: simply return the input.
         validator.transformer.decode.side_effect = lambda x: x
@@ -302,8 +342,8 @@ class TestRunLoop:
                         p.to(validator.config.device),
                         idxs,
                         vals,
-                        list(p.shape),   # Use the actual shape
-                        p.numel()        # Use p.numel() as totalk
+                        list(p.shape),  # Use the actual shape
+                        p.numel(),  # Use p.numel() as totalk
                     )
                 )
                 validator.momentum[n] = new_grad.clone()
@@ -317,6 +357,7 @@ class TestRunLoop:
             expected = torch.ones(param.shape, device=param.grad.device)
             assert torch.allclose(param.grad, expected, atol=1e-6)
 
+
 # ----------------------------
 # Test Class: Block Listener
 # ----------------------------
@@ -324,26 +365,32 @@ class TestBlockListener:
     def test_block_listener_updates_window(self):
         """
         Validate that block_listener's handler updates current_block and current_window correctly.
-        
+
         Simulates receiving a block header event and checks window update logic.
         """
         from neurons.validator import Validator
+
         validator = Validator.__new__(Validator)
         validator.current_window = 5
         validator.hparams = SimpleNamespace(blocks_per_window=100)
         validator.comms = MagicMock()
         event = {"header": {"number": "750"}}
+
         def dummy_handler(event):
             try:
                 validator.current_block = int(event["header"]["number"])
-                new_window = int(validator.current_block / validator.hparams.blocks_per_window)
+                new_window = int(
+                    validator.current_block / validator.hparams.blocks_per_window
+                )
                 if new_window != validator.current_window:
                     validator.current_window = new_window
                     validator.comms.current_window = validator.current_window
             except Exception:
                 pass
+
         dummy_handler(event)
         assert validator.current_window == 7
+
 
 # ----------------------------
 # Test Class: Basic Evaluation Flow
@@ -353,11 +400,12 @@ class TestValidatorBasicEvaluation:
     def minimal_validator(self):
         """
         Creates a minimal Validator instance with sufficient state for a basic evaluation flow test.
-        
+
         Bypasses __init__() and manually sets config, hparams, wallet, subtensor, metagraph,
         a dummy model, optimizer, scheduler, momentum, and a dummy comms with AsyncMock put.
         """
         from neurons.validator import Validator
+
         validator = Validator.__new__(Validator)
         validator.config = SimpleNamespace(netuid=1, device="cpu", peers=[])
         validator.hparams = SimpleNamespace(
@@ -377,7 +425,11 @@ class TestValidatorBasicEvaluation:
         # Use reusable MockSubtensor.
         validator.subtensor = MockSubtensor()
         validator.metagraph = validator.subtensor.metagraph(validator.config.netuid)
-        validator.uid = validator.metagraph.hotkeys.index("default") if "default" in validator.metagraph.hotkeys else 0
+        validator.uid = (
+            validator.metagraph.hotkeys.index("default")
+            if "default" in validator.metagraph.hotkeys
+            else 0
+        )
         # Use dummy model from MockModel.
         validator.model = MockModel()
         optimizer = MagicMock()
@@ -395,7 +447,7 @@ class TestValidatorBasicEvaluation:
         else:
             dummy_param = torch.tensor([1.0])
             validator.momentum = {"param": torch.zeros_like(dummy_param)}
-            
+
         validator.comms = MagicMock()
         validator.comms.put = AsyncMock()
         validator.current_window = 10
@@ -408,7 +460,7 @@ class TestValidatorBasicEvaluation:
     async def test_basic_evaluation_flow(self, minimal_validator):
         """
         Simulate a basic evaluation flow in one run iteration.
-        
+
         Mimics an evaluation step by sending a dummy evaluation result via comms.put,
         and verifies that comms.put is called with the expected payload.
         """
@@ -423,11 +475,11 @@ class TestValidatorBasicEvaluation:
             uid="test_uid",
             window=validator.current_window,
             key="debug",
-            local=False
+            local=False,
         )
         validator.comms.put.assert_called_once()
         assert debug_data["improvement"] == 2.0
 
+
 if __name__ == "__main__":
     pytest.main()
-

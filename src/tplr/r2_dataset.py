@@ -79,7 +79,7 @@ class R2DatasetLoader(DatasetLoader):
 
     # Static configuration
     PREFETCH_SIZE = 3  # Number of pages to prefetch
-    MAX_CONCURRENT_REQUESTS = 20  
+    MAX_CONCURRENT_REQUESTS = 20
     BATCH_SIZE = 128  # Increased batch size for tokenization
     READ_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB read buffer
 
@@ -425,14 +425,14 @@ class R2DatasetLoader(DatasetLoader):
                     # Instead of using cached file handles, open a new one per read.
                     fs = R2DatasetLoader._get_fs()
                     file_path = chosen_shard["path"]
-                    f = fs.open(file_path, "rb", buffer_size=R2DatasetLoader.READ_BUFFER_SIZE)
+                    f = fs.open(
+                        file_path, "rb", buffer_size=R2DatasetLoader.READ_BUFFER_SIZE
+                    )
                     try:
                         # Create a new ParquetFile object from the newly opened file handle.
                         pf = pq.ParquetFile(f, memory_map=True)
                         table = pf.read_row_group(
-                            group_index,
-                            columns=["text"],
-                            use_threads=True
+                            group_index, columns=["text"], use_threads=True
                         )
                     finally:
                         f.close()
@@ -552,7 +552,15 @@ class R2DatasetLoader(DatasetLoader):
         return R2DatasetLoader._token_cache.get(cache_key)
 
     @classmethod
-    async def get_loader(cls, window: int, hparams, tokenizer, seed: int = None, data_type: str = "training", pack_samples: bool = True):
+    async def get_loader(
+        cls,
+        window: int,
+        hparams,
+        tokenizer,
+        seed: int = None,
+        data_type: str = "training",
+        pack_samples: bool = True,
+    ):
         """
         Loads data for a given window using the R2DatasetLoader.
 
@@ -570,19 +578,20 @@ class R2DatasetLoader(DatasetLoader):
         seed_val = seed if seed is not None else np.random.randint(0, 10000)
         start_time = T()
         pages = await cls.next_pages(
-            offset=window,
-            n_pages=hparams.pages_per_window,
-            seed=seed_val
+            offset=window, n_pages=hparams.pages_per_window, seed=seed_val
         )
         loader = await cls.create(
             batch_size=hparams.batch_size,
             sequence_length=hparams.sequence_length,
             pages_info=pages,
             tokenizer=tokenizer,
-            pack_samples=pack_samples
+            pack_samples=pack_samples,
         )
         elapsed = T() - start_time
-        logger.info(f"Loaded {data_type} data for window {window} with seed: {seed_val}, pages: {[p[1] for p in pages]} " + P(window, elapsed))
+        logger.info(
+            f"Loaded {data_type} data for window {window} with seed: {seed_val}, pages: {[p[1] for p in pages]} "
+            + P(window, elapsed)
+        )
         return loader, pages
 
 

@@ -1,7 +1,9 @@
 """Base mock classes and utilities"""
 
+
 class BaseMock:
     """Base class for all mocks with common utilities"""
+
     @classmethod
     def create(cls, **kwargs):
         """Factory method to create mock instances with custom attributes"""
@@ -12,4 +14,4 @@ class BaseMock:
 
     def __getattr__(self, name):
         """Handle any unexpected attribute access"""
-        return None 
+        return None

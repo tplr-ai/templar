@@ -239,7 +239,7 @@ class Comms:
         time_max: datetime = None,
     ) -> Optional[SimpleNamespace]:
         """
-        Gather data from multiple peers with validation.
+        Gather data from multiple peers.
 
         Args:
             my_uid: Own user ID
@@ -308,60 +308,7 @@ class Comms:
                     skipped_uids.append(uid)
                     continue
 
-                # Validate tensor indices and values
-                valid_response = True
-
-                # Check compressed indices
-                for param_name, tensor in state_dict_resp.items():
-                    if param_name.endswith("idxs"):
-                        base_name = param_name[:-4]
-                        totalk = totalks.get(base_name)
-                        if totalk is None:
-                            tplr.logger.warning(
-                                f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
-                            )
-                            valid_response = False
-                            break
-                        try:
-                            self._check_compressed_indices(
-                                param_name,
-                                tensor.to(device),
-                                totalk,
-                                allowed_topk=self.hparams.topk_compression,
-                            )
-                        except Exception as e:
-                            tplr.logger.warning(
-                                f"Compressed indices check failed for parameter {param_name} from UID {uid}: {e}"
-                            )
-                            valid_response = False
-                            break
-                    # Check tensor values
-                    elif param_name.endswith("vals"):
-                        tensor_to_check = tensor.to(device)
-                        try:
-                            if (
-                                torch.isnan(tensor_to_check).any()
-                                or torch.isinf(tensor_to_check).any()
-                            ):
-                                tplr.logger.warning(
-                                    f"Values contain NaN or Inf for parameter {param_name} from UID {uid}, skipping UID."
-                                )
-                                valid_response = False
-                                break
-                        except Exception as e:
-                            tplr.logger.warning(
-                                f"Values check failed for parameter {param_name} from UID {uid}: {e}"
-                            )
-                            valid_response = False
-                            break
-
-                # Skip this UID if validation failed
-                if not valid_response:
-                    tplr.logger.info(f"Skipping UID {uid} due to validation failures")
-                    skipped_uids.append(uid)
-                    continue
-
-                # This peer's data passed validation
+                # This peer's data passed basic format validation
                 valid_uids.append(uid)
                 valid_state_dicts.append(state_dict_resp)
                 valid_global_steps.append(global_step_resp)
@@ -387,9 +334,12 @@ class Comms:
                             setattr(aggregated_dict, key, [])
                         getattr(aggregated_dict, key).append(tensor)
 
-        # Return the aggregated results
+        # Return the aggregated results with UIDs included
         return SimpleNamespace(
-            state_dict=aggregated_dict, uids=valid_uids, global_steps=valid_global_steps
+            state_dict=aggregated_dict, 
+            uids=valid_uids, 
+            global_steps=valid_global_steps,
+            skipped_uids=skipped_uids
         )
 
     # Helper methods
@@ -446,32 +396,6 @@ class Comms:
             access_key_id=access_key_id,
             secret_access_key=secret_access_key,
         )
-
-    def _check_compressed_indices(self, param_name, indices, totalk, allowed_topk=None):
-        """Validate compressed indices are within bounds"""
-        if indices is None or not isinstance(indices, torch.Tensor):
-            raise ValueError(
-                f"Invalid indices for {param_name}: expected tensor, got {type(indices)}"
-            )
-
-        if indices.numel() == 0:
-            return  # Empty tensor is valid
-
-        # Check that indices are within bounds
-        if torch.any(indices < 0) or torch.any(indices >= totalk):
-            raise ValueError(
-                f"Indices out of bounds for {param_name}: min={indices.min().item()}, "
-                f"max={indices.max().item()}, totalk={totalk}"
-            )
-
-        # Check if topk is reasonable
-        if allowed_topk is not None:
-            max_allowed = int(totalk * (allowed_topk / 100.0))
-            if indices.numel() > max_allowed:
-                raise ValueError(
-                    f"Too many indices for {param_name}: got {indices.numel()}, "
-                    f"max allowed is {max_allowed} ({allowed_topk}% of {totalk})"
-                )
 
     # Chain sync and other methods needed for compatibility
     async def post_start_window(self, start_window):

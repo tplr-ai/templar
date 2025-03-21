@@ -17,6 +17,7 @@
 
 
 from tplr.logging import logger
+import torch
 
 
 def prepare_gradient_dict(miner, pages, step_window):
@@ -75,3 +76,57 @@ def prepare_gradient_dict(miner, pages, step_window):
     logger.info(f"Attached metadata to gradient: {gradient['metadata']}")
 
     return gradient, xshapes, totalks, transmitted
+
+
+def validate_compressed_gradients(state_dict, totalks, allowed_topk=None, device="cpu"):
+    """
+    Validates compressed gradients received from peers.
+    
+    Args:
+        state_dict (dict): Dictionary containing compressed gradient data
+        totalks (dict): Dictionary of parameter total sizes
+        allowed_topk (float, optional): Maximum allowed compression percentage
+        device (str): Device to move tensors to for validation
+        
+    Returns:
+        bool: Whether the compressed gradients are valid
+        str: Error message if invalid, None otherwise
+    """
+    # Validate tensor indices and values
+    for param_name, tensor in state_dict.items():
+        # Check compressed indices
+        if param_name.endswith("idxs"):
+            base_name = param_name[:-4]
+            totalk = totalks.get(base_name)
+            if totalk is None:
+                return False, f"Missing totalk for parameter {base_name}"
+                
+            if tensor is None or not isinstance(tensor, torch.Tensor):
+                return False, f"Invalid indices for {param_name}: expected tensor, got {type(tensor)}"
+                
+            if tensor.numel() == 0:
+                continue  # Empty tensor is valid
+                
+            # Check that indices are within bounds
+            tensor_to_check = tensor.to(device)
+            if torch.any(tensor_to_check < 0) or torch.any(tensor_to_check >= totalk):
+                return False, (f"Indices out of bounds for {param_name}: min={tensor_to_check.min().item()}, "
+                              f"max={tensor_to_check.max().item()}, totalk={totalk}")
+                
+            # Check if topk is reasonable
+            if allowed_topk is not None:
+                max_allowed = int(totalk * (allowed_topk / 100.0))
+                if tensor_to_check.numel() > max_allowed:
+                    return False, (f"Too many indices for {param_name}: got {tensor_to_check.numel()}, "
+                                  f"max allowed is {max_allowed} ({allowed_topk}% of {totalk})")
+                    
+        # Check tensor values
+        elif param_name.endswith("vals"):
+            tensor_to_check = tensor.to(device)
+            try:
+                if torch.isnan(tensor_to_check).any() or torch.isinf(tensor_to_check).any():
+                    return False, f"Values contain NaN or Inf for parameter {param_name}"
+            except Exception as e:
+                return False, f"Values check failed for parameter {param_name}: {e}"
+                
+    return True, None

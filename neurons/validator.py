@@ -475,58 +475,52 @@ class Validator:
 
             gather_start = tplr.T()
             gather_result = await self.comms.gather(
-                my_uid=self.uid,
+                my_uid=str(self.uid),
                 uids=self.peers,
                 window=self.sync_window,
                 key="gradient",
-                timeout=35,
                 device=self.config.device,
-                local=False,
+                timeout=35,
                 totalks=self.totalks,
+                local=False,
                 time_min=time_min,
                 time_max=time_max,
             )
 
             if gather_result is None:
-                tplr.logger.error(
-                    "Failed to gather gradients from peers. Waiting for next window."
-                )
+                tplr.logger.error("Failed to gather gradients from peers. Waiting for next window.")
                 self.global_step += 1
                 continue
 
             tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
 
-            # Slash peers failing to submit gradients (penalize 50%)
-            for uid in gather_result.skipped_uids:
-                tplr.logger.info(
-                    f"No gradient gathered from UID {uid}. Slashing moving average score by 50%."
+            # ---- Validate gathered compressed gradients ----
+            valid_uids = []
+            invalid_uids = []
+            num_peers = len(gather_result.uids)
+            # Iterate over each peer's data.
+            for idx, uid in enumerate(gather_result.uids):
+                # Build per-peer gradient dictionary from aggregated state_dict lists.
+                peer_state = {}
+                for key, tensor_list in gather_result.state_dict.__dict__.items():
+                    if isinstance(tensor_list, list) and len(tensor_list) == num_peers:
+                        peer_state[key] = tensor_list[idx]
+                # Validate using the new logic.
+                is_valid, err_msg = tplr.neurons.validate_compressed_gradients(
+                    peer_state,
+                    self.totalks,
+                    allowed_topk=self.hparams.topk_compression,
+                    device=self.config.device,
                 )
-                if 0 <= uid < self.final_moving_avg_scores.size(0):
-                    old_score = self.final_moving_avg_scores[uid].item()
-
-                    # Only reduce positive scores
-                    if self.final_moving_avg_scores[uid] > 0:
-                        self.final_moving_avg_scores[uid] *= 0.5
-                        self.final_score_history[uid] = [
-                            final_score * 0.5 if final_score > 0 else final_score
-                            for final_score in self.final_score_history[uid]
-                        ]
-
-                        new_score = self.final_moving_avg_scores[uid].item()
-                        tplr.logger.info(
-                            f"Reduced moving average score of UID {uid} from {old_score:.4f} to {new_score:.4f} "
-                            f"due to missing gradient in gather."
-                        )
-                    else:
-                        tplr.logger.info(
-                            f"Skipped reducing moving average score of UID {uid} (current score: {old_score:.4f}) "
-                            f"due to negative or zero value."
-                        )
-                    self.evaluated_uids.add(uid)
+                if is_valid:
+                    valid_uids.append(uid)
                 else:
-                    tplr.logger.info(
-                        f"UID {uid} not found in final_moving_avg_scores; skipping penalty."
-                    )
+                    tplr.logger.warning(f"Gradient from UID {uid} failed validation: {err_msg}")
+                    invalid_uids.append(uid)
+            # Update gathered result to include only valid peers.
+            gather_result.uids = valid_uids
+            gather_result.skipped_uids.extend(invalid_uids)
+            # ----------------------------------------------------------
 
             # Add check for empty peers (evaluating all peer uids)
             if not self.peers:

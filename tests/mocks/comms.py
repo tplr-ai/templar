@@ -122,8 +122,6 @@ class MockComms(BaseMock):
 
     def mock_gather_operation(self, *args, **kwargs):
         """Mock gather operation with time window support"""
-        # Optional time parameters are ignored in the mock.
-        # (Previous code extracted time_min and time_max, but they are not used.)
 
         # Return simulated gradient data
         return [{"gradient": "mock_data"}]

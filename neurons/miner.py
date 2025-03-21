@@ -446,6 +446,30 @@ class Miner:
             # Await the task to get the result
             gather_result = await gather_task
 
+            # --- Validate gathered gradients from peers ---
+            valid_uids = []
+            invalid_uids = []
+            num_peers = len(gather_result.uids)
+            for idx, uid in enumerate(gather_result.uids):
+                peer_state = {}
+                for key, tensor_list in gather_result.state_dict.__dict__.items():
+                    if isinstance(tensor_list, list) and len(tensor_list) == num_peers:
+                        peer_state[key] = tensor_list[idx]
+                is_valid, err_msg = tplr.neurons.validate_compressed_gradients(
+                    peer_state,
+                    self.totalks,
+                    allowed_topk=self.hparams.topk_compression,
+                    device=self.config.device,
+                )
+                if is_valid:
+                    valid_uids.append(uid)
+                else:
+                    tplr.logger.warning(f"Gradient from UID {uid} failed validation: {err_msg}")
+                    invalid_uids.append(uid)
+            gather_result.uids = valid_uids
+            gather_result.skipped_uids.extend(invalid_uids)
+            # -----------------------------------------------------
+
             # 5. Calculate and log metrics
             duration = time.time() - train_start
             self.batch_times.append(duration)

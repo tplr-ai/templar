@@ -205,8 +205,6 @@ class Miner:
             tplr.logger.info(f"Filtered gather peers with buckets: {self.peers}")
         else:
             self.peers = self.config.peers
-        if self.uid not in self.peers:
-            self.peers.append(self.uid)
 
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.set_gather_peers()
@@ -430,7 +428,7 @@ class Miner:
             gather_task = asyncio.create_task(
                 self.comms.gather(
                     my_uid=self.uid,
-                    uids=[uid for uid in self.peers if uid != self.uid],
+                    uids=self.peers,
                     window=step_window,
                     key="gradient",
                     timeout=35,

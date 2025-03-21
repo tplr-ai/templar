@@ -28,6 +28,9 @@ from functools import lru_cache
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
+from tplr.logging import T, P  # Use timing utilities
+
+import tplr
 
 
 class R2DatasetLoader(DatasetLoader):
@@ -76,7 +79,7 @@ class R2DatasetLoader(DatasetLoader):
 
     # Static configuration
     PREFETCH_SIZE = 3  # Number of pages to prefetch
-    MAX_CONCURRENT_REQUESTS = 8  # Increased from 4
+    MAX_CONCURRENT_REQUESTS = 20  
     BATCH_SIZE = 128  # Increased batch size for tokenization
     READ_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB read buffer
 
@@ -437,13 +440,24 @@ class R2DatasetLoader(DatasetLoader):
                 rows_per_group = chosen_shard["num_rows"] // num_row_groups
                 group_index = min(shard_offset // rows_per_group, num_row_groups - 1)
 
-                # Read the row group
-                table = await asyncio.to_thread(
-                    pf_data["parquet"].read_row_group,
-                    group_index,
-                    columns=["text"],
-                    use_threads=True,
-                )
+                def safe_read_row_group():
+                    # Instead of using cached file handles, open a new one per read.
+                    fs = R2DatasetLoader._get_fs()
+                    file_path = chosen_shard["path"]
+                    f = fs.open(file_path, "rb", buffer_size=R2DatasetLoader.READ_BUFFER_SIZE)
+                    try:
+                        # Create a new ParquetFile object from the newly opened file handle.
+                        pf = pq.ParquetFile(f, memory_map=True)
+                        table = pf.read_row_group(
+                            group_index,
+                            columns=["text"],
+                            use_threads=True
+                        )
+                    finally:
+                        f.close()
+                    return table
+
+                table = await asyncio.to_thread(safe_read_row_group)
 
                 # Adjust start_idx based on actual rows in the group
                 start_idx = shard_offset % rows_per_group
@@ -555,3 +569,62 @@ class R2DatasetLoader(DatasetLoader):
     def _get_tokenized_cache(cache_key: str):
         """Cached tokenization results"""
         return R2DatasetLoader._token_cache.get(cache_key)
+
+    @classmethod
+    async def get_loader(cls, window: int, hparams, tokenizer, seed: int = None, data_type: str = "training", pack_samples: bool = True):
+        """
+        Loads data for a given window using the R2DatasetLoader.
+
+        Args:
+            window (int): The window offset (e.g. step_window or sync_window).
+            hparams: Hyperparameters including pages_per_window, batch_size, sequence_length, etc.
+            tokenizer: Tokenizer instance to use.
+            seed (int, optional): Seed for deterministic page selection; if None, a random seed is used.
+            data_type (str, optional): For logging, e.g. "training" or "evaluation".
+            pack_samples (bool, optional): Whether to pack samples without padding.
+
+        Returns:
+            tuple: (loader, pages_info)
+        """
+        seed_val = seed if seed is not None else np.random.randint(0, 10000)
+        start_time = T()
+        pages = await cls.next_pages(
+            offset=window,
+            n_pages=hparams.pages_per_window,
+            seed=seed_val
+        )
+        loader = await cls.create(
+            batch_size=hparams.batch_size,
+            sequence_length=hparams.sequence_length,
+            pages_info=pages,
+            tokenizer=tokenizer,
+            pack_samples=pack_samples
+        )
+        elapsed = T() - start_time
+        logger.info(f"Loaded {data_type} data for window {window} with seed: {seed_val}, pages: {[p[1] for p in pages]} " + P(window, elapsed))
+        return loader, pages
+
+
+async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
+    """
+    Calls an async function with retries.
+    Args:
+        func (Callable): An async function.
+        *args: Positional arguments to pass to func.
+        attempts (int): Number of retries.
+        delay (int): Delay between attempts in seconds.
+        context (str): Context description for logging.
+        **kwargs: Keyword arguments to pass to func.
+    Returns:
+        The result of func(*args, **kwargs) or None if all attempts fail.
+    """
+    for attempt in range(attempts):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            tplr.logger.error(
+                f"Attempt {attempt + 1}/{attempts} failed for {context}: {e}"
+            )
+            await asyncio.sleep(delay)
+    tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
+    return None

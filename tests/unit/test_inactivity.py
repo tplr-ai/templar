@@ -3,16 +3,30 @@
 import pytest
 import torch
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 
-# Use mocks from tests/mocks for a reusable setup.
 @pytest.fixture
 def mock_chain():
-    from tests.mocks.chain import MockChainManager
-    from tests.mocks.metagraph import MockMetagraph
+    """Create a mock of ChainSync for testing"""
+    from tplr.chain_sync import ChainSync
 
-    chain = MockChainManager()
-    chain.metagraph = MockMetagraph()
+    # Create a simple config
+    config = SimpleNamespace()
+
+    # Create a mock metagraph
+    metagraph = SimpleNamespace()
+    metagraph.uids = torch.tensor([1, 2, 3])
+    metagraph.S = torch.tensor([1000.0, 2000.0, 3000.0])
+
+    # Initialize ChainSync with our test config and metagraph
+    chain = ChainSync(config=config, metagraph=metagraph)
+
+    # Pre-configure properties for testing
+    chain.eval_peers = {}
+    chain.active_peers = set()
+    chain.inactive_peers = set()
+
     return chain
 
 
@@ -40,17 +54,27 @@ class TestInactivitySlashing:
     async def test_newly_inactive_peer_tracking(self, mock_chain):
         """
         Test that newly inactive peers are correctly identified.
-        Uses MockChainManager.update_peers_with_buckets to compute inactive_peers.
+        Uses ChainSync.update_peers_with_buckets to compute inactive_peers.
         """
         # Setup
-        mock_chain.eval_peers = [1, 2, 3]
-        mock_chain.active_peers = {2, 3}
+        mock_chain.eval_peers = {1: 1, 2: 1, 3: 1}  # Previously active peers
+        mock_chain.active_peers = {2, 3}  # Currently active peers
 
-        # Execute
-        mock_chain.update_peers_with_buckets()
+        # Mock the hparams with all required attributes
+        mock_chain.hparams = SimpleNamespace(
+            eval_stake_threshold=20000,
+            topk_peers=10,
+            minimum_peers=3,
+            max_topk_peers=10,
+        )
 
-        # Verify
-        assert mock_chain.inactive_peers == {1}
+        # Use monkeypatch to avoid calling to Bittensor in set_gather_peers
+        with patch.object(mock_chain, "set_gather_peers", MagicMock()):
+            # Execute
+            mock_chain.update_peers_with_buckets()
+
+            # Verify
+            assert mock_chain.inactive_peers == {1}
 
     async def test_inactive_peer_scoring(self, mock_validator):
         """

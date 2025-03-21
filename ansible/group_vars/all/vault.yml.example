@@ -1,0 +1,27 @@
+env_vars:
+  WANDB_API_KEY: ".."
+  R2_ACCOUNT_ID: ".."
+  R2_GRADIENTS_ACCOUNT_ID: ".."
+  R2_GRADIENTS_BUCKET_NAME: ".."
+  R2_READ_ACCESS_KEY_ID: ".."
+  R2_READ_SECRET_ACCESS_KEY: ".."
+  R2_GRADIENTS_READ_ACCESS_KEY_ID: ".."
+  R2_GRADIENTS_READ_SECRET_ACCESS_KEY: ".."
+  R2_WRITE_ACCESS_KEY_ID: ".."
+  R2_WRITE_SECRET_ACCESS_KEY: ".."
+  R2_GRADIENTS_WRITE_ACCESS_KEY_ID: ".."
+  R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY: ".."
+  R2_DATASET_WRITE_ACCESS_KEY_ID: ".."
+  R2_DATASET_WRITE_SECRET_ACCESS_KEY: ".."
+
+  WALLET_NAME: "default"
+  NETWORK: "finney"
+  NETUID: "3"
+  GITHUB_USER: "..."
+
+actual_batch_size: 5
+netuid: "3"
+subtensor_network: "finney"
+wallet_name: "default"
+cuda_devices: ["cuda:0"]
+wallet_hotkeys: ["miner_0"]

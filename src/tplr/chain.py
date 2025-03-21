@@ -527,3 +527,4 @@ class ChainManager:
         # Take top n_peers by incentive from only the active peers.
         self.peers = [uid for uid, _ in miner_incentives[:n_peers]]
         logger.info(f"Updated gather peers (active only): {self.peers}")
+

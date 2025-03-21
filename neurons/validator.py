@@ -78,6 +78,11 @@ class Validator:
             action="store_true",
             help="Store gathered gradients in R2",
         )
+        parser.add_argument(
+            "--test",
+            action="store_true",
+            help="Test mode - use all peers without filtering",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -258,6 +263,7 @@ class Validator:
             'own_improvement': [],
             'random_improvement': []
         }
+
 
     async def run(self):
         # Start background block listener
@@ -443,6 +449,7 @@ class Validator:
                     if retries > max_retries:
                         tplr.logger.error(
                             "Exceeded maximum retries for timestamp query. Falling back to current system time."
+
                         )
                         ts_value = (
                             time.time()
@@ -454,6 +461,7 @@ class Validator:
             time_max = time_min + timedelta(
                 seconds=self.hparams.time_window_delta_seconds
             )
+
 
             # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
@@ -468,6 +476,7 @@ class Validator:
             self.eval_peers = self.comms.eval_peers
 
             tplr.logger.info(f"Validator gather peers: {self.peers}")
+
 
             gather_start = tplr.T()
             gather_result = await self.comms.gather(
@@ -491,6 +500,7 @@ class Validator:
                 continue
 
             tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
+
 
             # Slash peers failing to submit gradients (penalize 50%)
             for uid in gather_result.skipped_uids:
@@ -531,6 +541,7 @@ class Validator:
                 )
                 self.global_step += 1
                 continue
+
 
             # 5. Evaluate peers in parallel using modular evaluation logic.
             eval_start = tplr.T()
@@ -598,6 +609,7 @@ class Validator:
                         + self.hparams.binary_score_ma_alpha * result["binary_indicator"]
                     )
                     self.normalised_binary_moving_averages[eval_uid] = self.binary_moving_averages[eval_uid] / 2
+
                     final_score = sign_preserving_multiplication(
                         self.gradient_moving_avg_scores[eval_uid],
                         self.normalised_binary_moving_averages[eval_uid],
@@ -608,9 +620,20 @@ class Validator:
 
                     # Sliding window update for the final moving average score
                     self.final_score_history[eval_uid].append(final_score)
+
                     if len(self.final_score_history[eval_uid]) > self.hparams.moving_average_window:
                         self.final_score_history[eval_uid].pop(0)
                     self.final_moving_avg_scores[eval_uid] = sum(self.final_score_history[eval_uid]) / len(self.final_score_history[eval_uid])
+
+                    if (
+                        len(self.final_score_history[eval_uid])
+                        > self.hparams.moving_average_window
+                    ):
+                        self.final_score_history[eval_uid].pop(0)
+                    self.final_moving_avg_scores[eval_uid] = sum(
+                        self.final_score_history[eval_uid]
+                    ) / len(self.final_score_history[eval_uid])
+
                     tplr.logger.debug(
                         f"Updated Final Moving Average Score for UID {eval_uid}: {self.final_moving_avg_scores[eval_uid]}"
                     )
@@ -653,6 +676,7 @@ class Validator:
             self.wandb.log(evaluation_metrics, step=self.global_step)
             tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
 
+
             # Calculate weights using min power normalization over evaluated peers with positive final scores
             self.weights = torch.zeros_like(self.final_moving_avg_scores)
             evaluated_mask = torch.zeros_like(self.final_moving_avg_scores, dtype=torch.bool)
@@ -663,6 +687,7 @@ class Validator:
                     self.final_moving_avg_scores[positive_mask], 
                     power=self.hparams.power_normalisation
                 )
+
                 weight_sum = self.weights.sum().item()
                 tplr.logger.debug(f"Weight sum: {weight_sum}")
                 if abs(weight_sum - 1.0) > 1e-6:
@@ -673,6 +698,7 @@ class Validator:
             # Log scores and metrics for evaluated UIDs
             # Build a table with headers and one row per evaluated UID
             headers = ["UID", "Last Score", "Binary Indicator", "Binary Moving Avg", "Norm Binary Score", "Final Moving Avg", "Weight"]
+
             table = [headers]
             for uid in sorted(self.evaluated_uids):
                 row = [
@@ -687,6 +713,7 @@ class Validator:
                 table.append(row)
 
             # Format the table using Rich for better visual appearance in PM2 logs.
+
             try:
                 try:
                     width = os.get_terminal_size().columns
@@ -694,6 +721,7 @@ class Validator:
                     width = 0
                 os.environ['COLUMNS'] = str(max(200, width))
                 
+
 
                 rich_table = Table(title="Updated scores for evaluated UIDs")
                 for header in headers:
@@ -717,6 +745,7 @@ class Validator:
                 table_str = "\n".join(lines)
             tplr.logger.info("Updated scores for evaluated UIDs:\n" + table_str)
             
+
             # Log WandB metrics per UID
             for uid in sorted(self.evaluated_uids):
                 self.wandb.log(
@@ -941,6 +970,7 @@ def min_power_normalization(logits, power=2.0, epsilon=1e-8):
         probabilities = torch.zeros_like(powered_logits)
 
     return probabilities
+
 
 
 def sign_preserving_multiplication(a, b):

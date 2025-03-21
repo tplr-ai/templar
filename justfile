@@ -39,5 +39,6 @@ test-parallel:
 test-k pattern:
     uv run pytest -sv -k "{{pattern}}"
 
+
 bistro:
     ps aux | grep Bistro

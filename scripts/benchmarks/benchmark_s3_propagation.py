@@ -1,3 +1,5 @@
+#ruff: noqa
+
 #!/usr/bin/env python3
 """
 Benchmark S3 Propagation Delay Using Comms.s3_put_object

@@ -12,23 +12,36 @@ from tests.mocks import (
     MockCompressor
 )
 from tests.utils.env_setup import setup_test_environment
-from tests.mocks.bittensor import mock_bt
+from tests.mocks.mock_bittensor import mock_bt
 import sys
 from pathlib import Path
 import sysconfig
 import importlib
+import os
+import json
+from types import SimpleNamespace
 
 # Remove the current directory from sys.path to avoid local module shadowing.
 if '' in sys.path:
     sys.path.remove('')
+
+# Remove any local instances of "bittensor" that might be pre-loaded.
+import sys
+if "bittensor" in sys.modules:
+    del sys.modules["bittensor"]
+
+# Invalidate caches to ensure fresh imports.
+import importlib
+importlib.invalidate_caches()
 
 # Force the virtualenv's site-packages to be first.
 venv_site_packages = sysconfig.get_paths()["purelib"]
 if venv_site_packages not in sys.path:
     sys.path.insert(0, venv_site_packages)
 
-# Diagnostic: Locate the bittensor package.
-import bittensor  # This is the installed package in your venv
+# Now import bittensor from the installed package.
+import bittensor
+print("Using bittensor from:", bittensor.__file__)
 
 try:
     spec = importlib.util.find_spec("bittensor")
@@ -74,7 +87,7 @@ def mock_config():
 @pytest.fixture(autouse=True)
 def setup_mocks():
     """Setup global mocks"""
-    with patch.dict('sys.modules', {'bittensor': mock_bt, 'bt': mock_bt}):
+    with patch.dict('sys.modules', {'bt': mock_bt}):
         yield
 
 def pytest_configure(config):
@@ -223,3 +236,11 @@ async def comms_instance():
 def enable_tplr_logger_propagation():
     tplr.logging.logger.setLevel("INFO")
     tplr.logging.logger.propagate = True
+
+@pytest.fixture(scope="session")
+def hparams():
+    # Assume that hparams.json is at the project root (one level up from tests/)
+    hparams_path = os.path.join(os.path.dirname(__file__), '..', 'hparams.json')
+    with open(hparams_path, 'r') as f:
+        data = json.load(f)
+    return SimpleNamespace(**data)

@@ -65,6 +65,10 @@ class MockModel(BaseMock):
     def parameters(self):
         return self.params.values()
     
+    def state_dict(self):
+        # Return a dictionary with clones of the parameters on the CPU
+        return {name: param.detach().cpu().clone() for name, param in self.params.items()}
+    
     def eval(self):
         """
         Simulates switching the model to evaluation mode.
@@ -84,6 +88,14 @@ class MockModel(BaseMock):
         Allows the model to be callable, mimicking torch.nn.Module behavior.
         """
         return self.forward(*args, **kwargs)
+    
+    def zero_grad(self):
+        """
+        Simulates zeroing the gradients of all parameters.
+        """
+        for param in self.parameters():
+            if param.grad is not None:
+                param.grad.zero_()
     
     def clone(self):
         # Instead of using deep copy, create a new instance and copy only essential attributes.

@@ -8,7 +8,8 @@ class MockMetagraph(BaseMock):
         # Include our test wallet's address as first hotkey
         self.hotkeys = [
             '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty',  # Test wallet address
-            *[f"hotkey{i}" for i in range(n_validators-1)]  # Other validators
+            *[f"hotkey{i}" for i in range(n_validators-1)],  # Other validators
+            "default"  # Include the wallet's hotkey
         ]
         self.uids = list(range(n_validators))
         self.n = len(self.uids)

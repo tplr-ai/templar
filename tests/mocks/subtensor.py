@@ -11,11 +11,11 @@ class MockSubtensor:
         # Mock weight setting
         self.set_weights = AsyncMock()
         
-        # Add metagraph instance
-        self.metagraph = MockMetagraph()
+        # Initialize internal metagraph instance
+        self._metagraph = MockMetagraph()
         
         # Mock network info
-        self.network = self.metagraph.name
+        self.network = self._metagraph.name   # Assuming MockMetagraph defines 'name'
         self.chain_endpoint = "mock_endpoint"
         
         # Mock difficulty
@@ -32,4 +32,12 @@ class MockSubtensor:
         
         # Mock neuron info
         self.get_neuron_for_pubkey = MagicMock(return_value={"uid": 1})
-        self.get_neuron_for_uid = MagicMock(return_value={"hotkey": "test_hotkey"}) 
+        self.get_neuron_for_uid = MagicMock(return_value={"hotkey": "test_hotkey"})
+    
+    def connect(self, init=True):
+        # Simulate a successful WebSocket connection.
+        return "dummy_ws"
+         
+    def metagraph(self, netuid):
+        # Return the internal metagraph instance.
+        return self._metagraph 

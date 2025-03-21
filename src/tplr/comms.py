@@ -16,7 +16,6 @@
 # DEALINGS IN THE SOFTWARE.
 # type: ignore
 import os
-import random
 import re
 import math
 import json

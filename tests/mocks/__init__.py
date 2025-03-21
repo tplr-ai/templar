@@ -13,7 +13,7 @@ from .model import (
 )
 from .comms import MockComms
 from .loader import MockLoader
-from .bittensor import mock_bt
+from .mock_bittensor import mock_bt
 from .subtensor import MockSubtensor
 from .r2_dataset import MockR2DatasetLoader
 

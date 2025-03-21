@@ -1,3 +1,4 @@
+#ruff : noqa
 """Unit tests for R2 dataset loader functionality"""
 import pytest
 from ..utils.env_setup import setup_test_environment

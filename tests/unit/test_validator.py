@@ -1,12 +1,39 @@
 import pytest
 import torch
+import threading
+import asyncio
+from unittest.mock import MagicMock, AsyncMock, patch
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock, AsyncMock
+import sys
+from neurons.validator import Validator, min_power_normalization
 
 # Import the reusable mocks.
 from tests.mocks.wallet import MockWallet
 from tests.mocks.subtensor import MockSubtensor
 from tests.mocks.model import MockModel
+
+# Add this at the top to prevent multiple registrations
+import warnings
+
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+    message=".*operator registration has already occurred.*",
+)
+
+# Prevent re-registering torch operators
+_TORCH_INITIALIZED = False
+
+
+@pytest.fixture(scope="module", autouse=True)
+def init_torch_only_once():
+    """Initialize torch operators only once for the entire module"""
+    global _TORCH_INITIALIZED
+    if not _TORCH_INITIALIZED:
+        # Clear any existing registrations if possible
+        if hasattr(torch._C, "_jit_clear_class_registry"):
+            torch._C._jit_clear_class_registry()
+        _TORCH_INITIALIZED = True
 
 
 # ----------------------------
@@ -22,8 +49,6 @@ class TestValidatorConfig:
           - Stub bt.subtensor.add_args, bt.logging.add_args, and bt.wallet.add_args.
           - Stub bt.config() to return a controlled SimpleNamespace.
         """
-        import sys
-        from neurons.validator import Validator
 
         original_argv = sys.argv
         sys.argv = [
@@ -77,7 +102,6 @@ class TestWalletRegistration:
           - Patch bt.subtensor to return a reusable MockSubtensor.
           - Bypass __init__ registration via __new__() and manually set necessary attributes.
         """
-        from neurons.validator import Validator
 
         # Instantiate a reusable wallet and overwrite its hotkey to "default"
         dummy_wallet = MockWallet()
@@ -121,7 +145,6 @@ class TestWalletRegistration:
           - Monkey-patch sys.exit to raise a SystemExit.
           - Verify that SystemExit is raised during Validator.__init__().
         """
-        from neurons.validator import Validator
 
         dummy_wallet = MockWallet()
         dummy_wallet.hotkey.ss58_address = "non_registered"
@@ -149,7 +172,6 @@ class TestNormalization:
         Validate min_power_normalization on a non-zero tensor.
         The sum of the normalized tensor should be nearly 1.
         """
-        from neurons.validator import min_power_normalization
 
         logits = torch.tensor([1.0, 2.0, 3.0])
         normalized = min_power_normalization(logits, power=2.0)
@@ -159,7 +181,6 @@ class TestNormalization:
         """
         Ensure that a zero tensor remains zero after normalization.
         """
-        from neurons.validator import min_power_normalization
 
         logits = torch.zeros(3)
         normalized = min_power_normalization(logits, power=2.0)
@@ -176,15 +197,6 @@ class TestRunLoop:
         Creates a minimal Validator instance with required state.
         See original fixture in conftest.py for hparams.
         """
-        from neurons.validator import Validator
-        from tests.mocks.wallet import MockWallet
-        from tests.mocks.subtensor import MockSubtensor
-        from tests.mocks.model import MockModel
-        import torch
-        import threading
-        import asyncio
-        from unittest.mock import MagicMock, AsyncMock
-        from types import SimpleNamespace
 
         validator = Validator.__new__(Validator)
         # Use hparams from the fixture.
@@ -300,8 +312,6 @@ class TestRunLoop:
         validator.valid_score_indices = []
         validator.wandb = MagicMock()
 
-        from unittest.mock import AsyncMock
-
         validator.listen_to_blockchain = AsyncMock(return_value=None)
         return validator
 
@@ -368,7 +378,6 @@ class TestBlockListener:
 
         Simulates receiving a block header event and checks window update logic.
         """
-        from neurons.validator import Validator
 
         validator = Validator.__new__(Validator)
         validator.current_window = 5
@@ -404,7 +413,6 @@ class TestValidatorBasicEvaluation:
         Bypasses __init__() and manually sets config, hparams, wallet, subtensor, metagraph,
         a dummy model, optimizer, scheduler, momentum, and a dummy comms with AsyncMock put.
         """
-        from neurons.validator import Validator
 
         validator = Validator.__new__(Validator)
         validator.config = SimpleNamespace(netuid=1, device="cpu", peers=[])
@@ -439,7 +447,7 @@ class TestValidatorBasicEvaluation:
         scheduler.state_dict.return_value = {}
         scheduler.get_last_lr.return_value = [0.01]
         validator.scheduler = scheduler
-        # FIX: Create momentum based on model parameters if present. Otherwise, use a dummy parameter.
+        # Create momentum based on model parameters if present. Otherwise, use a dummy parameter.
         params = list(validator.model.named_parameters())
         if params:
             name, param = params[0]

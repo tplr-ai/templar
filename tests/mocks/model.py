@@ -1,7 +1,9 @@
 """Mock model and related components"""
 
-from .base import BaseMock
 import torch
+# torch._C._jit_set_operator_registry_dedup(True)
+
+from .base import BaseMock
 from torch.optim import SGD
 from torch.optim.lr_scheduler import StepLR
 from unittest.mock import MagicMock

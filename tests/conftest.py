@@ -21,6 +21,7 @@ import importlib
 import os
 import json
 from types import SimpleNamespace
+import torch
 
 # Remove the current directory from sys.path to avoid local module shadowing.
 if "" in sys.path:
@@ -166,7 +167,6 @@ def test_data_dir(tmp_path):
 
 
 import pytest
-import torch
 import tplr.comms as comms_module
 import tplr.compress as compress
 from types import SimpleNamespace
@@ -267,3 +267,32 @@ def hparams():
     with open(hparams_path, "r") as f:
         data = json.load(f)
     return SimpleNamespace(**data)
+
+
+@pytest.fixture(autouse=True)
+def cleanup_torch_state():
+    """Reset PyTorch state between tests"""
+    yield
+    # Clear any cached tensors
+    torch.cuda.empty_cache()
+    # Force garbage collection
+    import gc
+
+    gc.collect()
+
+
+# Track if we've already initialized our custom torch operators
+_TORCH_OPERATORS_INITIALIZED = False
+
+
+@pytest.fixture(scope="session", autouse=True)
+def initialize_torch_once():
+    """Ensure torch operators are registered only once across the test suite"""
+    global _TORCH_OPERATORS_INITIALIZED
+    if not _TORCH_OPERATORS_INITIALIZED:
+        # Reset any existing torch JIT optimizations
+        if hasattr(torch._C, "_jit_clear_class_registry"):
+            torch._C._jit_clear_class_registry()
+        if hasattr(torch._C, "_clear_jit_registry"):
+            torch._C._clear_jit_registry()
+        _TORCH_OPERATORS_INITIALIZED = True

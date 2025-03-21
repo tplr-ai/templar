@@ -23,7 +23,7 @@
 __version__ = "0.2.28trt"
 
 
-from .logging import logger
+from .logging import logger, debug
 
 # Then import other modules
 from .schemas import *

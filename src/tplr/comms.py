@@ -119,6 +119,8 @@ class Comms:
         # Initialize loop reference for background tasks
         self.loop = None
 
+        tplr.logger.info("Comms initialized with bucket: %s", self.bucket)
+
     def start_background_tasks(self):
         """Start all background monitoring tasks"""
         self.loop = asyncio.get_running_loop()
@@ -375,27 +377,36 @@ class Comms:
                     )
                     raise
 
-    def _get_own_bucket(self, bucket_type, access_type=None) -> Bucket:
-        """Get our own bucket configuration"""
-        secrets = BUCKET_SECRETS.get(bucket_type, {})
+    def _get_own_bucket(self, bucket_type: str, rw: str) -> Bucket:
+        bucket_conf = tplr.config.BUCKET_SECRETS.get(bucket_type)
+        tplr.logger.debug("Bucket config for %s: %s", bucket_type, bucket_conf)
+        if not bucket_conf:
+            raise ValueError(f"No bucket configuration found for '{bucket_type}'.")
 
-        # Get the appropriate access credentials
-        if access_type and access_type in secrets:
-            access_info = secrets[access_type]
-            access_key_id = access_info.get("access_key_id", "")
-            secret_access_key = access_info.get("secret_access_key", "")
-        else:
-            # Default to read access
-            read_access = secrets.get("read", {})
-            access_key_id = read_access.get("access_key_id", "")
-            secret_access_key = read_access.get("secret_access_key", "")
+        name = bucket_conf.get("name", "").strip()
+        if not name:
+            raise ValueError(f"Bucket name for '{bucket_type}' must not be empty.")
 
-        return Bucket(
-            name=secrets.get("bucket_name", ""),
-            account_id=secrets.get("account_id", ""),
-            access_key_id=access_key_id,
-            secret_access_key=secret_access_key,
+        account_id = bucket_conf.get("account_id", "").strip()
+        if not account_id:
+            raise ValueError(f"Bucket account_id for '{bucket_type}' must not be empty.")
+
+        creds = bucket_conf.get("credentials", {}).get(rw, {})
+        access_key = creds.get("access_key_id", "").strip()
+        secret_key = creds.get("secret_access_key", "").strip()
+        if not access_key or not secret_key:
+            raise ValueError(
+                f"Bucket credentials for '{bucket_type}' in '{rw}' mode must not be empty."
+            )
+
+        bucket = Bucket(
+            name=name,
+            account_id=account_id,
+            access_key_id=access_key,
+            secret_access_key=secret_key,
         )
+        tplr.logger.debug("Created Bucket: %s", bucket)
+        return bucket
 
     # Chain sync and other methods needed for compatibility
     async def post_start_window(self, start_window):

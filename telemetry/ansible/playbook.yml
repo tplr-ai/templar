@@ -26,6 +26,9 @@
 
     - role: nginx
       tags: [nginx, proxy]
+      
+    - role: grafana-checks
+      tags: [checks, verification]
 
   post_tasks:
     - name: Verify Grafana is healthy

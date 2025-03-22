@@ -81,3 +81,8 @@ nginx_proxy_buffers: "32 4k"
 templar_version_api_url: "http://18.217.218.11/api/templar/version"
 grafana_plugins_to_allow:
   - "templar-version-datasource"
+
+# Verification settings
+fail_on_verification_error: false          # Whether to fail the playbook if verification checks fail
+save_verification_results: true            # Whether to save verification results to files
+verification_output_dir: "{{ playbook_dir }}/verification_results"

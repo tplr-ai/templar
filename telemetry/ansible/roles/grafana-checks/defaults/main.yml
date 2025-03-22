@@ -1,0 +1,11 @@
+---
+# Default variables for grafana-checks role
+
+# Whether to fail the playbook if verification checks fail
+fail_on_verification_error: false
+
+# Whether to save verification results to files
+save_verification_results: true
+
+# Directory to save verification results (on the control machine)
+verification_output_dir: "{{ playbook_dir }}/verification_results"

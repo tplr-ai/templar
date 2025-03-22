@@ -296,3 +296,14 @@ def initialize_torch_once():
         if hasattr(torch._C, "_clear_jit_registry"):
             torch._C._clear_jit_registry()
         _TORCH_OPERATORS_INITIALIZED = True
+
+
+@pytest.fixture
+def storage_manager(temp_dirs, mock_wallet):
+    """
+    Create a StorageManager instance for testing.
+    Uses the temporary directory from temp_dirs and the mock_wallet fixture.
+    """
+    from tplr.storage import StorageManager  # Import the real StorageManager
+    temp_dir, save_location = temp_dirs
+    return StorageManager(temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet)

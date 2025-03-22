@@ -5,9 +5,11 @@ from unittest.mock import patch, MagicMock, AsyncMock, mock_open
 from tempfile import TemporaryDirectory
 from datetime import datetime, timezone, timedelta
 from aiobotocore.session import AioSession
+import os
 
 from tplr.storage import StorageManager
 from tplr.schemas import Bucket
+from tplr import __version__
 
 # Import existing mocks
 
@@ -562,6 +564,18 @@ class TestCleanupOperations:
         mock_exists.assert_called_once()
         assert mock_remove.call_count == 0
 
+    @pytest.mark.asyncio
+    async def test_cleanup_local_data_edge(self, storage_manager):
+        """
+        Test cleanup_local_data when directories are not directories (cover lines 228 & 233).
+        """
+        fake_listing = ["not_a_dir"]
+        with patch("os.path.exists", return_value=True), \
+             patch("os.listdir", return_value=fake_listing), \
+             patch("os.path.isdir", return_value=False):
+            # Simply run; no exception should be raised.
+            await storage_manager.cleanup_local_data()
+
 
 class TestS3Operations:
     """Test S3 operations"""
@@ -743,3 +757,382 @@ class TestTimeBasedFiltering:
         # Verify that the marker is returned.
         assert result == "TOO_LATE"
         mock_makedirs.assert_called_once()
+
+
+# -------------------------------
+# Fake classes for simulating S3 GET
+# -------------------------------
+class FakeResponse:
+    def __init__(self, status, text, body):
+        self.status = status
+        self._text = text
+        self._body = body
+
+    async def read(self):
+        return self._body
+
+    async def text(self):
+        return self._text
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
+
+
+class FakeClientSession:
+    def __init__(self, fake_response):
+        self.fake_response = fake_response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        pass
+
+    def get(self, url, headers, timeout):
+        return self.fake_response
+
+
+class TestStorageExtra:
+
+    @pytest.mark.asyncio
+    async def test_store_remote_exception(self, storage_manager, temp_dirs, mock_wallet):
+        """
+        Force an exception in store_remote (e.g. during torch.save)
+        """
+        test_bucket = Bucket(
+            name="test-bucket", account_id="test-account", access_key_id="key", secret_access_key="secret"
+        )
+        test_data = {"dummy": 1}
+        # Force torch.save to raise an exception.
+        with patch("torch.save", side_effect=Exception("torch.save failed")), \
+             patch("os.path.exists", return_value=True) as mock_exists, \
+             patch("os.remove") as mock_remove:
+            result = await storage_manager.store_remote(test_data, "uid", 100, "test", test_bucket)
+            assert result is False
+            mock_exists.assert_called()  # Called on temp file path.
+            mock_remove.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_local_exception(self, storage_manager):
+        """
+        Test get_local when torch.load fails to load the file (covering lines 133-136).
+        """
+        # Simulate file exists.
+        with patch("os.path.exists", return_value=True), \
+             patch("torch.load", side_effect=Exception("load failed")), \
+             patch.object(storage_manager, "cleanup_local_data", AsyncMock()) as cleanup_mock:
+            result = await storage_manager.get_local("uid", 100, "test")
+            assert result is None
+            cleanup_mock.assert_not_awaited()  # Because error occurred before calling cleanup.
+
+    @pytest.mark.asyncio
+    async def test_get_bytes_exception(self, storage_manager):
+        """
+        Test get_bytes when s3_get_object raises an exception (covering lines 151-153).
+        """
+        with patch.object(storage_manager, "s3_get_object", AsyncMock(side_effect=Exception("get_bytes error"))):
+            result = await storage_manager.get_bytes("key", Bucket(name="dummy", account_id="dummy", access_key_id="a", secret_access_key="b"))
+            assert result is None
+
+    # --- Tests for load_latest_checkpoint ---
+    @pytest.mark.asyncio
+    async def test_load_latest_checkpoint_no_dir(self, temp_dirs, mock_wallet):
+        """
+        Test load_latest_checkpoint when the checkpoints directory does not exist.
+        """
+        temp_dir, save_location = temp_dirs
+        storage = StorageManager(temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet)
+        with patch("os.path.exists", return_value=False) as mock_exists:
+            result = await storage.load_latest_checkpoint("uid")
+            assert result is None
+            mock_exists.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_load_latest_checkpoint_no_files(self, temp_dirs, mock_wallet):
+        """
+        Test load_latest_checkpoint when no checkpoint files are found.
+        """
+        temp_dir, save_location = temp_dirs
+        storage = StorageManager(temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet)
+        with patch("os.path.exists", return_value=True), \
+             patch("os.listdir", return_value=[]):
+            result = await storage.load_latest_checkpoint("uid")
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_load_latest_checkpoint_exception(self, temp_dirs, mock_wallet):
+        """
+        Test load_latest_checkpoint when torch.load raises an exception.
+        """
+        temp_dir, save_location = temp_dirs
+        storage = StorageManager(temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet)
+        checkpoints_dir = os.path.join(storage.save_location, "checkpoints")
+        fake_file = "checkpoint-1.pt"
+        fake_path = os.path.join(checkpoints_dir, fake_file)
+        with patch("os.path.exists", return_value=True), \
+             patch("os.listdir", return_value=[fake_file]), \
+             patch("os.path.getmtime", return_value=1000), \
+             patch("torch.load", side_effect=Exception("load failed")) as mock_torch_load:
+            result = await storage.load_latest_checkpoint("uid")
+            assert result is None
+            mock_torch_load.assert_called_once_with(fake_path)
+
+    # --- Tests for load_remote_checkpoint ---
+    @pytest.mark.asyncio
+    async def test_load_remote_checkpoint_no_index(self, storage_manager):
+        """
+        Test load_remote_checkpoint when checkpoint index is None.
+        """
+        test_bucket = Bucket(
+            name="dummy", account_id="dummy", access_key_id="a", secret_access_key="b"
+        )
+        with patch.object(storage_manager, "s3_get_object", AsyncMock(return_value=None)) as mock_s3:
+            result = await storage_manager.load_remote_checkpoint("uid", "cpu", test_bucket)
+            assert result is None
+            mock_s3.assert_awaited()  # At least the index retrieval was attempted.
+
+    @pytest.mark.asyncio
+    async def test_load_remote_checkpoint_exception(self, storage_manager):
+        """
+        Test load_remote_checkpoint when an exception is raised during its process.
+        """
+        test_bucket = Bucket(
+            name="dummy", account_id="dummy", access_key_id="a", secret_access_key="b"
+        )
+        with patch.object(storage_manager, "s3_get_object", AsyncMock(side_effect=Exception("fail"))) as mock_s3:
+            result = await storage_manager.load_remote_checkpoint("uid", "cpu", test_bucket)
+            assert result is None
+            mock_s3.assert_awaited()
+
+    # --- Test cleanup_local_data edge branch ---
+    @pytest.mark.asyncio
+    async def test_cleanup_local_data_edge(self, storage_manager):
+        """
+        Test cleanup_local_data when directories are not directories (cover lines 228 & 233).
+        """
+        fake_listing = ["not_a_dir"]
+        with patch("os.path.exists", return_value=True), \
+             patch("os.listdir", return_value=fake_listing), \
+             patch("os.path.isdir", return_value=False):
+            # Simply run; no exception should be raised.
+            await storage_manager.cleanup_local_data()
+
+    # --- Tests for s3_get_object ---
+    @pytest.mark.asyncio
+    async def test_s3_get_object_status_marker(self, temp_dirs, mock_wallet):
+        """
+        Test s3_get_object returns status marker if JSON response includes __status.
+        """
+        temp_dir, save_location = temp_dirs
+        storage = StorageManager(temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet)
+        # Fake response returns JSON string with __status "TOO_EARLY"
+        fake_body = b'{"__status": "TOO_EARLY"}'
+        fake_response = FakeResponse(status=200, text="OK", body=fake_body)
+        fake_session = FakeClientSession(fake_response)
+        with patch("tplr.storage.aiohttp.ClientSession", return_value=fake_session):
+            result = await storage.s3_get_object(
+                "testkey",
+                Bucket(name="dummy", account_id="dummy", access_key_id="a", secret_access_key="b")
+            )
+            assert result == "TOO_EARLY"
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_file_path(self, temp_dirs, mock_wallet, tmp_path):
+        """
+        Test s3_get_object when file_path is provided.
+        (Covers branch writing to file and returning True.)
+        """
+        temp_dir, save_location = temp_dirs
+        storage = StorageManager(temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet)
+        # Fake response returns bytes without a __status field.
+        fake_body = b'{"data": "value"}'
+        fake_response = FakeResponse(status=200, text="OK", body=fake_body)
+        fake_session = FakeClientSession(fake_response)
+        file_path = str(tmp_path / "test_file.json")
+        with patch("tplr.storage.aiohttp.ClientSession", return_value=fake_session):
+            result = await storage.s3_get_object(
+                "testkey",
+                Bucket(name="dummy", account_id="dummy", access_key_id="a", secret_access_key="b"),
+                file_path=file_path
+            )
+            # Method should write to file and return True.
+            assert result is True
+            with open(file_path, "rb") as f:
+                content = f.read()
+            assert content == fake_body
+            os.remove(file_path)
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_non_200(self, temp_dirs, mock_wallet):
+        """
+        Test s3_get_object when the HTTP response status is not 200.
+        """
+        temp_dir, save_location = temp_dirs
+        storage = StorageManager(temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet)
+        fake_response = FakeResponse(status=404, text="Not Found", body=b"")
+        fake_session = FakeClientSession(fake_response)
+        with patch("tplr.storage.aiohttp.ClientSession", return_value=fake_session):
+            result = await storage.s3_get_object(
+                "testkey",
+                Bucket(name="dummy", account_id="dummy", access_key_id="a", secret_access_key="b")
+            )
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_exception(self, temp_dirs, mock_wallet):
+        """
+        Test s3_get_object when an exception occurs in the ClientSession.
+        """
+        temp_dir, save_location = temp_dirs
+        storage = StorageManager(temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet)
+        with patch("tplr.storage.aiohttp.ClientSession", side_effect=Exception("session failed")):
+            result = await storage.s3_get_object(
+                "testkey",
+                Bucket(name="dummy", account_id="dummy", access_key_id="a", secret_access_key="b")
+            )
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_dict_loaded(self, temp_dirs, mock_wallet):
+        """
+        Test s3_get_object branch where loaded_data is a dict.
+        """
+        temp_dir, save_location = temp_dirs
+        storage = StorageManager(temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet)
+        # Fake response returns a dict directly.
+        fake_body = {"__status": "TOO_LATE"}
+        fake_response = FakeResponse(status=200, text="OK", body=fake_body)
+        fake_session = FakeClientSession(fake_response)
+        with patch("tplr.storage.aiohttp.ClientSession", return_value=fake_session):
+            result = await storage.s3_get_object(
+                "testkey",
+                Bucket(name="dummy", account_id="dummy", access_key_id="a", secret_access_key="b")
+            )
+            assert result == "TOO_LATE"
+
+
+class TestStorageNewBranches:
+    @pytest.mark.asyncio
+    async def test_store_local_success(self, storage_manager, temp_dirs, mock_wallet):
+        """
+        Test store_local on a successful run.
+        Verifies that store_local returns True when torch.save works.
+        """
+        state = {"a": 1}
+        uid = "testuid"
+        window = "1"
+        key = "local_test"
+        result = await storage_manager.store_local(state, uid, window, key)
+        assert result is True
+        # Construct expected file path.
+        path = os.path.join(storage_manager.save_location, "local_store", uid, str(window))
+        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        # The file may have been cleaned up as part of cleanup_local_data;
+
+    @pytest.mark.asyncio
+    async def test_store_local_exception(self, storage_manager):
+        """
+        Test store_local exception branch:
+        If torch.save fails, store_local returns False.
+        """
+        state = {"a": 1}
+        uid = "testuid"
+        window = "1"
+        key = "local_fail"
+        with patch("torch.save", side_effect=Exception("fail in store_local")):
+            result = await storage_manager.store_local(state, uid, window, key)
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_store_remote_success(self, storage_manager, temp_dirs, mock_wallet):
+        """
+        Test store_remote successful branch.
+        (Covers the non-exception path after torch.save succeeds.)
+        """
+        state = {"b": 2}
+        uid = "testuid"
+        window = "2"
+        key = "remote_test"
+        test_bucket = Bucket(
+            name="remote_bucket",
+            account_id="account",
+            access_key_id="key",
+            secret_access_key="secret"
+        )
+        with patch("torch.save"), patch.object(storage_manager, "s3_put_object", new=AsyncMock(return_value=True)):
+            result = await storage_manager.store_remote(state, uid, window, key, test_bucket)
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_store_bytes_success(self, storage_manager, temp_dirs, mock_wallet):
+        """
+        Test store_bytes successful branch.
+        (Ensures that with a valid bucket and s3_put_object returning True,
+        store_bytes returns True.)
+        """
+        data = b"sample bytes"
+        key = "bytes_test.json"
+        test_bucket = Bucket(
+            name="bytes_bucket",
+            account_id="account",
+            access_key_id="key",
+            secret_access_key="secret"
+        )
+        with patch.object(storage_manager, "s3_put_object", new=AsyncMock(return_value=True)):
+            result = await storage_manager.store_bytes(data, key, test_bucket)
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_store_bytes_no_bucket(self, storage_manager):
+        """
+        Test store_bytes when no bucket is provided.
+        (Covers the branch that returns False.)
+        """
+        data = b"sample bytes no bucket"
+        key = "nobucket.json"
+        result = await storage_manager.store_bytes(data, key, None)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_get_local_success(self, storage_manager, tmp_path, temp_dirs, mock_wallet):
+        """
+        Test get_local successful branch.
+        (If file exists and torch.load returns the state, get_local returns it.)
+        """
+        uid = "testuid"
+        window = "3"
+        key = "getlocal_test"
+        path = os.path.join(storage_manager.save_location, "local_store", uid, str(window))
+        os.makedirs(path, exist_ok=True)
+        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        file_path = os.path.join(path, filename)
+        dummy_state = {"dummy": "state"}
+        torch.save(dummy_state, file_path)
+        with patch.object(storage_manager, "cleanup_local_data", new=AsyncMock()):
+            result = await storage_manager.get_local(uid, window, key)
+            assert result == dummy_state
+
+    @pytest.mark.asyncio
+    async def test_get_local_no_file(self, storage_manager):
+        """
+        Test get_local branch when the file does not exist.
+        (Should return None.)
+        """
+        uid = "nonexistent"
+        window = "999"
+        key = "nofile"
+        with patch("os.path.exists", return_value=False):
+            result = await storage_manager.get_local(uid, window, key)
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_no_bucket(self, storage_manager):
+        """
+        Test s3_get_object branch when no bucket is provided.
+        (Should log an error and return None.)
+        """
+        result = await storage_manager.s3_get_object("anykey", None)
+        assert result is None

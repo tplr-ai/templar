@@ -289,84 +289,144 @@
   vars:
     verification_results:
       - name: "Grafana Service"
-        status: "{{ grafana_service.status.ActiveState == 'active' }}"
+        status: "{{ grafana_service_ok }}"
       - name: "Nginx Service"
-        status: "{{ nginx_service.status.ActiveState == 'active' }}"
+        status: "{{ nginx_service_ok }}"
       - name: "Version API Service"
-        status: "{{ version_api_service.status.ActiveState == 'active' if version_api_service.status is defined else false }}"
+        status: "{{ version_api_service_ok }}"
       - name: "Grafana API Health"
-        status: "{{ health_result.status == 200 if health_result.status is defined else false }}"
+        status: "{{ health_result_ok }}"
       - name: "Dashboard File"
-        status: "{{ dashboard_file.stat.exists }}"
+        status: "{{ dashboard_file_ok }}"
       - name: "Plugin Directory"
-        status: "{{ plugin_dir.stat.exists }}"
+        status: "{{ plugin_dir_ok }}"
       - name: "Dashboard Provider Config"
-        status: "{{ dashboard_provider_config.rc == 0 and 'path: /etc/grafana/dashboards' in dashboard_provider_config.stdout }}"
+        status: "{{ dashboard_provider_config_ok }}"
       - name: "Plugins Configuration"
-        status: "{{ 'allow_loading_unsigned_plugins' in plugins_config.stdout and 'templar-version-datasource' in plugins_config.stdout }}"
+        status: "{{ plugins_config_ok }}"
       - name: "Anonymous Access Config"
-        status: "{{ 'enabled = true' in anonymous_config.stdout }}"
+        status: "{{ anonymous_config_ok }}"
       - name: "InfluxDB Datasource"
-        status: "{{ datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length > 0 if datasources.status is defined and datasources.json is defined else false }}"
+        status: "{{ influxdb_datasource_ok }}"
       - name: "Templar Version Datasource"
-        status: "{{ datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length > 0 if datasources.status is defined and datasources.json is defined else false }}"
+        status: "{{ templar_version_datasource_ok }}"
       - name: "Dashboard Availability"
-        status: "{{ dashboards.status == 200 and dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length > 0 if dashboards.status is defined and dashboards.json is defined else false }}"
+        status: "{{ dashboard_availability_ok }}"
       - name: "NGINX Proxy"
-        status: "{{ nginx_proxy.status == 200 if nginx_proxy.status is defined else false }}"
+        status: "{{ nginx_proxy_ok }}"
       - name: "Anonymous Dashboard Access"
-        status: "{{ dashboard_anonymous_access.status in [200, 302] and not '<a href=\"/login\">' in dashboard_anonymous_access.content if dashboard_anonymous_access is defined and dashboard_anonymous_access.status is defined else false }}"
+        status: "{{ dashboard_access_ok }}"
       - name: "Default Dashboard Access"
-        status: "{{ default_anonymous_access.status in [200, 302] and not '<a href=\"/login\">' in default_anonymous_access.content if default_anonymous_access is defined and default_anonymous_access.status is defined else false }}"
+        status: "{{ default_access_ok }}"
       - name: "Version API"
-        status: "{{ version_api_response.status == 200 and version_api_response.json is defined and version_api_response.json.version is defined if version_api_response.status is defined else false }}"
+        status: "{{ version_api_ok }}"
+    all_tests_passed: "{{ all_checks_passed }}"
   when: save_verification_results | bool
+
+- name: Calculate Grafana Service status
+  set_fact:
+    grafana_service_ok: "{{ grafana_service.status.ActiveState == 'active' }}"
+
+- name: Calculate Nginx Service status
+  set_fact:
+    nginx_service_ok: "{{ nginx_service.status.ActiveState == 'active' }}"
+
+- name: Calculate Version API Service status
+  set_fact:
+    version_api_service_ok: "{{ version_api_service.status.ActiveState == 'active' if version_api_service.status is defined else false }}"
+
+- name: Calculate Grafana API Health status
+  set_fact:
+    health_result_ok: "{{ health_result.status == 200 if health_result.status is defined else false }}"
+
+- name: Calculate Dashboard File status
+  set_fact:
+    dashboard_file_ok: "{{ dashboard_file.stat.exists }}"
+
+- name: Calculate Plugin Directory status
+  set_fact:
+    plugin_dir_ok: "{{ plugin_dir.stat.exists }}"
+
+- name: Calculate Dashboard Provider Config status
+  set_fact:
+    dashboard_provider_config_ok: "{{ dashboard_provider_config.rc == 0 and 'path: /etc/grafana/dashboards' in dashboard_provider_config.stdout }}"
+
+- name: Calculate Plugins Configuration status
+  set_fact:
+    plugins_config_ok: "{{ 'allow_loading_unsigned_plugins' in plugins_config.stdout and 'templar-version-datasource' in plugins_config.stdout }}"
+
+- name: Calculate Anonymous Access Config status
+  set_fact:
+    anonymous_config_ok: "{{ 'enabled = true' in anonymous_config.stdout }}"
+
+- name: Calculate InfluxDB Datasource status
+  set_fact:
+    influxdb_datasource_ok: "{{ datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length > 0 if datasources.status is defined and datasources.json is defined else false }}"
+
+- name: Calculate Templar Version Datasource status
+  set_fact:
+    templar_version_datasource_ok: "{{ datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length > 0 if datasources.status is defined and datasources.json is defined else false }}"
+
+- name: Calculate Dashboard Availability status
+  set_fact:
+    dashboard_availability_ok: "{{ dashboards.status == 200 and dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length > 0 if dashboards.status is defined and dashboards.json is defined else false }}"
+
+- name: Calculate NGINX Proxy status
+  set_fact:
+    nginx_proxy_ok: "{{ nginx_proxy.status == 200 if nginx_proxy.status is defined else false }}"
+
+- name: Calculate Anonymous Dashboard Access status
+  set_fact:
+    dashboard_access_ok: "{{ dashboard_anonymous_access.status in [200, 302] and not '<a href=\"/login\">' in dashboard_anonymous_access.content if dashboard_anonymous_access is defined and dashboard_anonymous_access.status is defined else false }}"
+
+- name: Calculate Default Dashboard Access status
+  set_fact:
+    default_access_ok: "{{ default_anonymous_access.status in [200, 302] and not '<a href=\"/login\">' in default_anonymous_access.content if default_anonymous_access is defined and default_anonymous_access.status is defined else false }}"
+
+- name: Calculate Version API status
+  set_fact:
+    version_api_ok: "{{ version_api_response.status == 200 and version_api_response.json is defined and version_api_response.json.version is defined if version_api_response.status is defined else false }}"
+
+- name: Calculate overall verification result
+  set_fact:
+    all_checks_passed: "{{ 
+      grafana_service_ok and 
+      nginx_service_ok and 
+      version_api_service_ok and 
+      health_result_ok and 
+      dashboard_file_ok and 
+      plugin_dir_ok and 
+      dashboard_provider_config_ok and 
+      plugins_config_ok and 
+      anonymous_config_ok and 
+      influxdb_datasource_ok and 
+      templar_version_datasource_ok and 
+      dashboard_availability_ok and 
+      nginx_proxy_ok and 
+      dashboard_access_ok and 
+      default_access_ok and 
+      version_api_ok
+    }}"
 
 - name: Display overall verification result
   debug:
     msg: |
       ==========================================
-      GRAFANA STACK VERIFICATION RESULT: {{ 'SUCCESS ✅' if not verification_has_errors else 'FAILED ❌' }}
+      GRAFANA STACK VERIFICATION RESULT: {{ 'SUCCESS ✅' if all_checks_passed else 'FAILED ❌' }}
       ==========================================
-      {{ verification_summary }}
-  vars:
-    verification_has_errors: >-
-      {{ 
-        (grafana_service.status.ActiveState != 'active') or
-        (nginx_service.status.ActiveState != 'active') or
-        (version_api_service.status is defined and version_api_service.status.ActiveState != 'active') or
-        (health_result.status is not defined or health_result.status != 200) or
-        (not dashboard_file.stat.exists) or
-        (not plugin_dir.stat.exists) or
-        (dashboard_provider_config.rc != 0 or 'path: /etc/grafana/dashboards' not in dashboard_provider_config.stdout) or
-        ('allow_loading_unsigned_plugins' not in plugins_config.stdout or 'templar-version-datasource' not in plugins_config.stdout) or
-        ('enabled = true' not in anonymous_config.stdout) or
-        (datasources.status is not defined or datasources.status != 200 or datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length == 0) or
-        (datasources.status is not defined or datasources.status != 200 or datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length == 0) or
-        (dashboards.status is not defined or dashboards.status != 200 or dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length == 0) or
-        (nginx_proxy.status is not defined or nginx_proxy.status != 200) or
-        (dashboard_anonymous_access is defined and dashboard_anonymous_access.status is defined and (dashboard_anonymous_access.status not in [200, 302] or '<a href="/login">' in dashboard_anonymous_access.content)) or
-        (default_anonymous_access is defined and default_anonymous_access.status is defined and (default_anonymous_access.status not in [200, 302] or '<a href="/login">' in default_anonymous_access.content)) or
-        (version_api_response.status is not defined or version_api_response.status != 200 or version_api_response.json is not defined or version_api_response.json.version is not defined)
-      }}
-    verification_summary: |
-      {% for item in [
-        {'name': 'Grafana Service', 'status': grafana_service.status.ActiveState == 'active'},
-        {'name': 'Nginx Service', 'status': nginx_service.status.ActiveState == 'active'},
-        {'name': 'Version API Service', 'status': version_api_service.status.ActiveState == 'active' if version_api_service.status is defined else false},
-        {'name': 'Grafana API Health', 'status': health_result.status == 200 if health_result.status is defined else false},
-        {'name': 'Dashboard File', 'status': dashboard_file.stat.exists},
-        {'name': 'Plugin Directory', 'status': plugin_dir.stat.exists},
-        {'name': 'Dashboard Provider Config', 'status': dashboard_provider_config.rc == 0 and 'path: /etc/grafana/dashboards' in dashboard_provider_config.stdout},
-        {'name': 'Plugins Configuration', 'status': 'allow_loading_unsigned_plugins' in plugins_config.stdout and 'templar-version-datasource' in plugins_config.stdout},
-        {'name': 'Anonymous Access Config', 'status': 'enabled = true' in anonymous_config.stdout},
-        {'name': 'InfluxDB Datasource', 'status': datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length > 0 if datasources.status is defined and datasources.json is defined else false},
-        {'name': 'Templar Version Datasource', 'status': datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length > 0 if datasources.status is defined and datasources.json is defined else false},
-        {'name': 'Dashboard Availability', 'status': dashboards.status == 200 and dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length > 0 if dashboards.status is defined and dashboards.json is defined else false},
-        {'name': 'NGINX Proxy', 'status': nginx_proxy.status == 200 if nginx_proxy.status is defined else false},
-        {'name': 'Anonymous Dashboard Access', 'status': dashboard_anonymous_access.status in [200, 302] and not '<a href="/login">' in dashboard_anonymous_access.content if dashboard_anonymous_access is defined and dashboard_anonymous_access.status is defined else false},
-        {'name': 'Default Dashboard Access', 'status': default_anonymous_access.status in [200, 302] and not '<a href="/login">' in default_anonymous_access.content if default_anonymous_access is defined and default_anonymous_access.status is defined else false},
-        {'name': 'Version API', 'status': version_api_response.status == 200 and version_api_response.json is defined and version_api_response.json.version is defined if version_api_response.status is defined else false}
-      ] %}
-        {{ "✅" if item.status else "❌" }} {{ item.name }}
-      {% endfor %}
+      {{ '✅' if grafana_service_ok else '❌' }} Grafana Service
+      {{ '✅' if nginx_service_ok else '❌' }} Nginx Service 
+      {{ '✅' if version_api_service_ok else '❌' }} Version API Service
+      {{ '✅' if health_result_ok else '❌' }} Grafana API Health
+      {{ '✅' if dashboard_file_ok else '❌' }} Dashboard File
+      {{ '✅' if plugin_dir_ok else '❌' }} Plugin Directory
+      {{ '✅' if dashboard_provider_config_ok else '❌' }} Dashboard Provider Config
+      {{ '✅' if plugins_config_ok else '❌' }} Plugins Configuration
+      {{ '✅' if anonymous_config_ok else '❌' }} Anonymous Access Config
+      {{ '✅' if influxdb_datasource_ok else '❌' }} InfluxDB Datasource
+      {{ '✅' if templar_version_datasource_ok else '❌' }} Templar Version Datasource
+      {{ '✅' if dashboard_availability_ok else '❌' }} Dashboard Availability
+      {{ '✅' if nginx_proxy_ok else '❌' }} NGINX Proxy
+      {{ '✅' if dashboard_access_ok else '❌' }} Anonymous Dashboard Access
+      {{ '✅' if default_access_ok else '❌' }} Default Dashboard Access
+      {{ '✅' if version_api_ok else '❌' }} Version API

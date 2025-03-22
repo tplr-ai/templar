@@ -9,6 +9,7 @@
     state: directory
     mode: '0755'
   delegate_to: localhost
+  become: false
   run_once: true
   when: save_verification_results | bool
 
@@ -16,6 +17,7 @@
   set_fact:
     verification_timestamp: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
   delegate_to: localhost
+  become: false
   run_once: true
   when: save_verification_results | bool
 
@@ -282,6 +284,7 @@
     src: verification_report.j2
     dest: "{{ verification_output_dir }}/verification_report_{{ verification_timestamp }}.txt"
   delegate_to: localhost
+  become: false
   run_once: true
   vars:
     verification_results:

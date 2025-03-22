@@ -154,22 +154,15 @@ class Validator:
             milestones=[250],
         )
 
-        # Init comms with required chain management args,
-        # including transformer and compressor for gradient decoding.
+        # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
-            key_prefix="model",
             config=self.config,
-            netuid=self.config.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
-            totalks=self.totalks,
         )
-
-        self.bucket = self.comms.get_own_bucket("gradients", "read")
-        self.comms.try_commit(self.wallet, self.bucket)
+        self.bucket = self.comms.bucket  # bucket is auto-assigned in the constructor
 
         # Init state params
         self.stop_event = asyncio.Event()
@@ -321,7 +314,6 @@ class Validator:
             device=self.config.device,
             peers=self.peers,
             uid=self.uid,
-            totalks=self.totalks,
         )
         if success:
             self.momentum = loaded_momentum
@@ -486,7 +478,6 @@ class Validator:
                 key="gradient",
                 device=self.config.device,
                 timeout=35,
-                totalks=self.totalks,
                 local=False,
                 time_min=time_min,
                 time_max=time_max,

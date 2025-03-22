@@ -151,18 +151,11 @@ class Miner:
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
-            key_prefix="model",
             config=self.config,
-            netuid=self.config.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
         )
-
-        self.bucket = self.comms.get_own_bucket("gradients", "read")
-        self.comms.try_commit(self.wallet, self.bucket)
-        # self.comms.fetch_commitments()
 
         # Init state params
         self.stop_event = asyncio.Event()
@@ -234,9 +227,8 @@ class Miner:
             compressor=self.compressor,
             current_window=self.current_window,
             device=self.config.device,
-            peers=[],
+            peers=self.peers,
             uid=self.uid,
-            totalks=self.totalks,
         )
         if success:
             self.momentum = loaded_momentum

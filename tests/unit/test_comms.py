@@ -642,3 +642,162 @@ class TestCommsBucket:
             assert read_bucket.account_id == "test-account"
             assert read_bucket.access_key_id == "read-key"
             assert read_bucket.secret_access_key == "read-secret"
+
+
+class TestCommsGatherExtra:
+    @pytest.mark.asyncio
+    async def test_gather_mixed_responses(self, comms):
+        """
+        Test Comms.gather with mixed responses to cover:
+          - A valid response,
+          - An invalid response format,
+          - A None (empty) state_dict,
+          - And an exception during get.
+
+        For a valid response, the fake_get coroutine returns a tuple
+        whose state dict has both "a_idxs" and "a_vals" keys.
+        """
+
+        async def fake_get(**kwargs):
+            uid = kwargs.get("uid")
+            if uid == 1:
+                # Valid response: state dict includes both required keys.
+                return ({"a_idxs": torch.tensor([1]), "a_vals": torch.tensor([2])}, 10)
+            elif uid == 2:
+                # Invalid format: not a tuple.
+                return "bad_format"
+            elif uid == 3:
+                # Tuple with a None state dict; should be skipped.
+                return (None, 0)
+            elif uid == 4:
+                # Raise an exception.
+                raise Exception("fail")
+
+        # Assign the async fake_get directly.
+        comms.get = fake_get
+
+        # Call gather with numeric UIDs.
+        result = await comms.gather(
+            my_uid=0,
+            uids=[1, 2, 3, 4],
+            window=1,
+            key="test_key",
+            timeout=1,
+            device="cpu",
+            totalks={},
+            local=True,
+            stale_retention=10,
+            time_min=None,
+            time_max=None,
+        )
+        # We expect only the valid response (from UID 1) to be accepted.
+        assert result is not None, "A valid response was expected."
+        # Gather is assumed to return an object with attributes: uids, global_steps,
+        # state_dict, and skipped_uids.
+        assert result.uids == [1]
+        assert result.global_steps == [10]
+        aggregated_dict = result.state_dict
+        # Since state_dict is a SimpleNamespace, use hasattr for key checking.
+        assert hasattr(aggregated_dict, "a_idxs")
+        assert hasattr(aggregated_dict, "a_vals")
+        assert isinstance(aggregated_dict.a_idxs, list)
+        assert isinstance(aggregated_dict.a_vals, list)
+        # And verify that the other UIDs were skipped.
+        assert 2 in result.skipped_uids
+        assert 3 in result.skipped_uids
+        assert 4 in result.skipped_uids
+
+    @pytest.mark.asyncio
+    async def test_gather_all_invalid(self, comms):
+        """
+        Test that if all responses from get fail (i.e. no valid responses),
+        gather returns None.
+        """
+
+        async def always_fail_get(**kwargs):
+            raise Exception("fail")
+
+        comms.get = always_fail_get
+
+        result = await comms.gather(
+            my_uid=0,
+            uids=[10, 20],
+            window=1,
+            key="test_key",
+            timeout=1,
+            device="cpu",
+            totalks={},
+            local=True,
+            stale_retention=10,
+            time_min=None,
+            time_max=None,
+        )
+        # When no valid responses are gathered, gather should return None.
+        assert result is None
+
+
+class TestCommsCheckpointExtra:
+    @pytest.mark.asyncio
+    async def test_load_checkpoint_keyerror(self, comms):
+        """
+        Test load_checkpoint when a KeyError is raised,
+        ensuring the method returns the expected tuple.
+        This covers lines 518–520 (the KeyError branch).
+        """
+        # Create dummy objects for parameters.
+        model = MagicMock(name="model")
+        optimizer = MagicMock(name="optimizer")
+        scheduler = MagicMock(name="scheduler")
+        transformer = MagicMock(name="transformer")
+        compressor = MagicMock(name="compressor")
+        # Patch the storage.load_checkpoint method to raise a KeyError.
+        with patch.object(
+            comms.storage, "load_checkpoint", side_effect=KeyError("missing_key")
+        ):
+            result = await comms.load_checkpoint(
+                model,
+                optimizer,
+                scheduler,
+                transformer,
+                compressor,
+                current_window=1,
+                device="cpu",
+                peers=[],
+                uid="test_uid",
+                totalks={},
+            )
+            # Result should be: (False, {}, 0, optimizer, scheduler)
+            assert result[0] is False
+            assert result[1] == {}
+            assert result[2] == 0
+            assert result[3] is optimizer
+            assert result[4] is scheduler
+
+    @pytest.mark.asyncio
+    async def test_load_checkpoint_exception(self, comms):
+        """
+        Test load_checkpoint when a generic Exception is raised,
+        ensuring the fallback branch returns the expected tuple.
+        This covers lines 534–536.
+        """
+        model = MagicMock(name="model")
+        optimizer = MagicMock(name="optimizer")
+        scheduler = MagicMock(name="scheduler")
+        transformer = MagicMock(name="transformer")
+        compressor = MagicMock(name="compressor")
+        with patch.object(
+            comms.storage, "load_checkpoint", side_effect=Exception("fail")
+        ):
+            result = await comms.load_checkpoint(
+                model,
+                optimizer,
+                scheduler,
+                transformer,
+                compressor,
+                current_window=1,
+                device="cpu",
+                peers=[],
+                uid="test_uid",
+                totalks={},
+            )
+            assert result[0] is False

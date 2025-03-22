@@ -409,12 +409,31 @@ class R2DatasetLoader(DatasetLoader):
                 pf_data = self._parquet_cache.get(chosen_shard["path"])
                 if not pf_data:
                     fs = self._get_fs()
-                    f = fs.open(
-                        chosen_shard["path"], "rb", buffer_size=self.READ_BUFFER_SIZE
-                    )
-                    pf = pq.ParquetFile(f, memory_map=True)
-                    pf_data = {"file": f, "parquet": pf}
-                    self._parquet_cache[chosen_shard["path"]] = pf_data
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            f = fs.open(
+                                chosen_shard["path"],
+                                "rb",
+                                buffer_size=self.READ_BUFFER_SIZE,
+                            )
+                            pf = pq.ParquetFile(
+                                f, memory_map=False
+                            )  # Disable memory mapping
+                            pf_data = {"file": f, "parquet": pf}
+                            self._parquet_cache[chosen_shard["path"]] = pf_data
+                            break
+                        except Exception as e:
+                            if attempt < max_retries - 1:
+                                logger.warning(
+                                    f"Attempt {attempt + 1} failed to open parquet file {chosen_shard['path']} with error: {e}. Retrying..."
+                                )
+                                await asyncio.sleep(2**attempt)  # Exponential backoff
+                            else:
+                                logger.error(
+                                    f"Failed to open parquet file {chosen_shard['path']} after {max_retries} attempts: {e}"
+                                )
+                                raise
 
                 # Fix: Ensure row group index is within bounds
                 num_row_groups = pf_data["parquet"].num_row_groups

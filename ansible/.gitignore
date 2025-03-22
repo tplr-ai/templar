@@ -1,0 +1,17 @@
+inventory
+host_vars/*/vault.yml
+group_vars/all/vault.yml
+*.retry
+*.log
+*.tmp
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.vagrant/
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db

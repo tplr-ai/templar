@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tplr"
 version = "0.1.0"
-description = "Add your description here"
+description = "Incentivised Internet-Wide Training"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -25,8 +25,7 @@ dependencies = [
     "s3fs",
     "pyarrow",
     "scipy",
-    "rich"
-
+    "rich>=13.0.0"
 ]
 
 [project.optional-dependencies]
@@ -62,4 +61,23 @@ filterwarnings = [
     # Keep other warnings
     "default::RuntimeWarning",
     "default::UserWarning",
+]
+
+[tool.uv]
+prerelease = "allow"
+
+[tool.ruff]
+# Exclude directories that often trigger permission issues
+exclude = [
+    ".git",
+    "venv",
+    ".venv",
+    "node_modules",
+    "build",
+    "dist",
+    "__pycache__",
+    "downloads",
+    "eggs",
+    ".eggs",
+    "influxdb_data"
 ]

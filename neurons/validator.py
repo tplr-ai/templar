@@ -78,6 +78,11 @@ class Validator:
             action="store_true",
             help="Store gathered gradients in R2",
         )
+        parser.add_argument(
+            "--test",
+            action="store_true",
+            help="Test mode - use all peers without filtering",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -261,6 +266,7 @@ class Validator:
             "own_improvement": [],
             "random_improvement": [],
         }
+
 
     async def run(self):
         # Start background block listener
@@ -447,6 +453,7 @@ class Validator:
                     if retries > max_retries:
                         tplr.logger.error(
                             "Exceeded maximum retries for timestamp query. Falling back to current system time."
+
                         )
                         ts_value = (
                             time.time()
@@ -458,6 +465,7 @@ class Validator:
             time_max = time_min + timedelta(
                 seconds=self.hparams.time_window_delta_seconds
             )
+
 
             # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
@@ -472,6 +480,7 @@ class Validator:
             self.eval_peers = self.comms.eval_peers
 
             tplr.logger.info(f"Validator gather peers: {self.peers}")
+
 
             gather_start = tplr.T()
             gather_result = await self.comms.gather(
@@ -495,6 +504,7 @@ class Validator:
                 continue
 
             tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
+
 
             # ---- Validate gathered compressed gradients ----
             valid_uids = []
@@ -524,7 +534,7 @@ class Validator:
             # Update gathered result to include only valid peers.
             gather_result.uids = valid_uids
             gather_result.skipped_uids.extend(invalid_uids)
-            # ----------------------------------------------------------
+            # ---------------------------------------------------------- 
 
             # Add check for empty peers (evaluating all peer uids)
             if not self.peers:
@@ -533,6 +543,7 @@ class Validator:
                 )
                 self.global_step += 1
                 continue
+
 
             # 5. Evaluate peers in parallel using modular evaluation logic.
             eval_start = tplr.T()
@@ -630,9 +641,17 @@ class Validator:
                         > self.hparams.moving_average_window
                     ):
                         self.final_score_history[eval_uid].pop(0)
+                    self.final_moving_avg_scores[eval_uid] = sum(self.final_score_history[eval_uid]) / len(self.final_score_history[eval_uid])
+
+                    if (
+                        len(self.final_score_history[eval_uid])
+                        > self.hparams.moving_average_window
+                    ):
+                        self.final_score_history[eval_uid].pop(0)
                     self.final_moving_avg_scores[eval_uid] = sum(
                         self.final_score_history[eval_uid]
                     ) / len(self.final_score_history[eval_uid])
+
                     tplr.logger.debug(
                         f"Updated Final Moving Average Score for UID {eval_uid}: {self.final_moving_avg_scores[eval_uid]}"
                     )
@@ -702,6 +721,7 @@ class Validator:
             self.wandb.log(evaluation_metrics, step=self.global_step)
             tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
 
+
             # Calculate weights using min power normalization over evaluated peers with positive final scores
             self.weights = torch.zeros_like(self.final_moving_avg_scores)
             evaluated_mask = torch.zeros_like(
@@ -714,6 +734,7 @@ class Validator:
                     self.final_moving_avg_scores[positive_mask],
                     power=self.hparams.power_normalisation,
                 )
+
                 weight_sum = self.weights.sum().item()
                 tplr.logger.debug(f"Weight sum: {weight_sum}")
                 if abs(weight_sum - 1.0) > 1e-6:
@@ -748,6 +769,7 @@ class Validator:
                 table.append(row)
 
             # Format the table using Rich for better visual appearance in PM2 logs.
+
             try:
                 try:
                     width = os.get_terminal_size().columns
@@ -1010,6 +1032,7 @@ def min_power_normalization(logits, power=2.0, epsilon=1e-8):
         probabilities = torch.zeros_like(powered_logits)
 
     return probabilities
+
 
 
 def sign_preserving_multiplication(a, b):

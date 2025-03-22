@@ -1,0 +1,159 @@
+---
+- name: Check if systemd is enabled
+  stat:
+    path: /run/systemd/system
+  register: systemd_dir
+
+- name: Ensure systemd is enabled
+  assert:
+    that:
+      - systemd_dir.stat.exists
+    msg: "Systemd is not enabled on this host. This playbook requires systemd."
+  when: use_systemd
+
+- name: Ensure workspace directory exists
+  file:
+    path: "{{ workspace_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Clone the templar repository into the workspace
+  git:
+    repo: "https://github.com/tplr-ai/templar.git"
+    dest: "{{ templar_dir }}"
+    update: yes
+    force: yes
+  become: false
+
+- name: Install essential apt packages
+  apt:
+    name: "{{ apt_packages + additional_apt_packages }}"
+    state: present
+    update_cache: yes
+
+- name: Install essential pip packages globally
+  pip:
+    name: "{{ item }}"
+    executable: pip3
+    state: present
+  loop: "{{ essential_pip_packages }}"
+  become: false
+
+- name: Install additional pip packages globally (if any)
+  pip:
+    name: "{{ item }}"
+    executable: pip3
+    state: present
+  loop: "{{ additional_pip_packages }}"
+  when: additional_pip_packages | length > 0
+  become: false
+
+- name: Install uv globally via pip
+  pip:
+    name: uv
+    executable: pip3
+    state: present
+
+- name: Create a virtual environment using uv (if not already present)
+  command: uv venv .venv
+  args:
+    chdir: "{{ templar_dir }}"
+    creates: "{{ templar_dir }}/.venv"
+  become: false
+
+- name: Install uv pip packages within the virtual environment
+  shell: >
+    uv pip install {{ item.name }}
+    {% if item.index_url is defined and item.index_url | length > 0 %} --index-url {{ item.index_url }}{% endif %}
+  args:
+    chdir: "{{ templar_dir }}"
+  loop: "{{ additional_uv_pip_packages }}"
+  become: false
+
+- name: Sync dependencies using uv
+  command: uv sync --prerelease=allow
+  args:
+    chdir: "{{ templar_dir }}"
+  become: false
+
+- name: Install torch with CUDA support via uv pip
+  command: "{{ templar_dir }}/.venv/bin/python -m pip install torch --index-url https://download.pytorch.org/whl/cu118"
+  args:
+    chdir: "{{ templar_dir }}"
+  become: false
+
+- name: Synchronize local ~/.bittensor configuration to remote ~/.bittensor
+  delegate_to: localhost
+  become: false
+  synchronize:
+    src: "{{ lookup('env','HOME') }}/.bittensor/"
+    dest: "~/.bittensor/"
+    recursive: yes
+    compress: yes
+    rsync_opts:
+      - "--progress"
+
+- name: Template .env file in the templar project directory
+  template:
+    src: ".env.j2"
+    dest: "{{ templar_dir }}/.env"
+    mode: '0644'
+  become: false
+
+- name: Template run.sh into the templar project directory
+  template:
+    src: "run.sh.j2"
+    dest: "{{ templar_dir }}/run.sh"
+    mode: '0755'
+  become: false
+
+- name: Ensure the user sources the .env file in their profile (.bashrc)
+  lineinfile:
+    dest: "{{ ansible_env.HOME }}/.bashrc"
+    line: "source {{ templar_dir }}/.env"
+    create: yes
+    state: present
+  become: false
+
+- name: Manage miner process via systemd if available
+  block:
+    - name: Template systemd service file for miner
+      template:
+        src: miner.service.j2
+        dest: /etc/systemd/system/miner.service
+      become: true
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+      become: true
+
+    - name: Enable and restart miner service
+      systemd:
+        name: miner.service
+        enabled: yes
+        state: restarted
+      become: true
+  when: use_systemd
+
+- name: Manage miner process via nohup when systemd is not available
+  block:
+    - name: Kill any running miner process
+      shell: |
+        pkill -f 'bash run.sh' || true
+        pkill -f 'python neurons/miner.py' || true
+      ignore_errors: true
+      become: false
+
+    - name: Pause for 2 seconds to allow processes to terminate
+      pause:
+        seconds: 2
+
+    - name: Start the miner with nohup (fire-and-forget)
+      shell: "nohup bash run.sh > miner_loop.log 2>&1 &"
+      args:
+        chdir: "{{ templar_dir }}"
+      async: 0
+      poll: 0
+      become: false
+  when: not use_systemd

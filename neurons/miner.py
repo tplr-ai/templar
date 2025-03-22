@@ -464,7 +464,9 @@ class Miner:
                 if is_valid:
                     valid_uids.append(uid)
                 else:
-                    tplr.logger.warning(f"Gradient from UID {uid} failed validation: {err_msg}")
+                    tplr.logger.warning(
+                        f"Gradient from UID {uid} failed validation: {err_msg}"
+                    )
                     invalid_uids.append(uid)
             gather_result.uids = valid_uids
             gather_result.skipped_uids.extend(invalid_uids)

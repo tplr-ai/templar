@@ -488,7 +488,9 @@ class Validator:
             )
 
             if gather_result is None:
-                tplr.logger.error("Failed to gather gradients from peers. Waiting for next window.")
+                tplr.logger.error(
+                    "Failed to gather gradients from peers. Waiting for next window."
+                )
                 self.global_step += 1
                 continue
 
@@ -515,7 +517,9 @@ class Validator:
                 if is_valid:
                     valid_uids.append(uid)
                 else:
-                    tplr.logger.warning(f"Gradient from UID {uid} failed validation: {err_msg}")
+                    tplr.logger.warning(
+                        f"Gradient from UID {uid} failed validation: {err_msg}"
+                    )
                     invalid_uids.append(uid)
             # Update gathered result to include only valid peers.
             gather_result.uids = valid_uids

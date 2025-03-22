@@ -336,10 +336,10 @@ class Comms:
 
         # Return the aggregated results with UIDs included
         return SimpleNamespace(
-            state_dict=aggregated_dict, 
-            uids=valid_uids, 
+            state_dict=aggregated_dict,
+            uids=valid_uids,
             global_steps=valid_global_steps,
-            skipped_uids=skipped_uids
+            skipped_uids=skipped_uids,
         )
 
     # Helper methods

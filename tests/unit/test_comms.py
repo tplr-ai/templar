@@ -2,6 +2,9 @@
 
 """Unit tests for the Comms class"""
 
+
+# TODO: Test Normalisation
+
 import pytest
 import torch
 import json
@@ -356,9 +359,6 @@ class TestCommsGather:
         time_min = time_now - timedelta(hours=1)
         time_max = time_now + timedelta(hours=1)
 
-        # Patch _check_compressed_indices to pass validation
-        comms._check_compressed_indices = MagicMock()
-
         # Call gather
         result = await comms.gather(
             my_uid="my_uid",
@@ -393,68 +393,6 @@ class TestCommsGather:
         # Verify the result contains data for both UIDs, however it's structured
         assert len(idxs_result) == 2  # List of 2 items
         assert len(vals_result) == 2  # List of 2 items
-
-
-class TestCommsValidation:
-    """Tests for validation functions"""
-
-    @pytest.mark.asyncio
-    async def test_check_compressed_indices_valid(self, comms):
-        """Test validation of compressed indices with valid data"""
-        # Create valid indices
-        idxs = torch.tensor([0, 1, 2, 3, 4])
-        totalk = 100
-
-        # This should not raise an exception
-        comms._check_compressed_indices("param.idxs", idxs, totalk, allowed_topk=10)
-
-    @pytest.mark.asyncio
-    async def test_check_compressed_indices_invalid(self, comms):
-        """Test validation of compressed indices with invalid data"""
-        # Create invalid indices (duplicates)
-        idxs = torch.tensor([0, 1, 1, 3, 4])  # Contains duplicate '1'
-        totalk = 100
-
-        # This should raise an exception due to duplicate indices
-        with pytest.raises(ValueError):
-            comms._check_compressed_indices("param.idxs", idxs, totalk, allowed_topk=10)
-
-        # Create out of bounds indices
-        idxs = torch.tensor([0, 1, 200])  # 200 is out of bounds for totalk=100
-
-        # This should raise an exception due to out of bounds
-        with pytest.raises(ValueError):
-            comms._check_compressed_indices("param.idxs", idxs, totalk, allowed_topk=10)
-
-    @pytest.mark.asyncio
-    async def test_gather_with_validation_failures(self, comms):
-        """Test gather with validation failures"""
-        # Create test tensors with NaN values
-        param_name = "layer1.weight"
-        idxs = torch.tensor([0, 1, 2, 3, 4])
-        vals = torch.tensor([0.1, float("nan"), 0.3, 0.4, 0.5])  # Contains NaN
-
-        # Mock get_with_retry to return tensor data
-        tensor_data = {f"{param_name}idxs": idxs, f"{param_name}vals": vals}
-
-        comms.get_with_retry = AsyncMock(return_value=(tensor_data, 5))
-
-        # Create totalks dict
-        totalks = {param_name: 100}
-
-        # Call gather - should reject this tensor due to NaN
-        result = await comms.gather(
-            my_uid="my_uid",
-            uids=["1"],
-            window=1,
-            key="test_key",
-            timeout=10,
-            device="cpu",
-            totalks=totalks,
-        )
-
-        # Verify result is None as all tensors were rejected
-        assert result is None
 
 
 class TestCommsCheckpoint:

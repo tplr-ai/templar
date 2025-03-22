@@ -3,7 +3,7 @@ import torch
 import json
 from unittest.mock import patch, MagicMock, AsyncMock, mock_open
 from tempfile import TemporaryDirectory
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from aiobotocore.session import AioSession
 
 from tplr.storage import StorageManager
@@ -726,7 +726,7 @@ class TestTimeBasedFiltering:
         """Test time filtering - file too late"""
         # Create time bounds
         now = datetime.now(timezone.utc)
-        time_max = now.replace(hour=now.hour - 1)  # 1 hour in the past
+        time_max = now - timedelta(hours=1)  # 1 hour in the past
 
         # Setup mock response with a TOO_LATE marker
         mock_response = MagicMock()

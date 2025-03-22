@@ -37,29 +37,29 @@ server {
     # Reverse proxy configuration for Grafana
     location / {
         # Redirect to kiosk mode for clean UI without navigation bars
-        rewrite ^/$ /d/8f2e6e4d-6b4f-4e50-9db4-9e82c93fcdac/templar-metrics-dashboard?kiosk=tv redirect;
-        
+        rewrite ^/$ /d/begg4wazvzbi8f/templar-metrics?kiosk=tv&orgId=1 redirect;
+
         proxy_pass http://127.0.0.1:{{ grafana_http_port }};
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        
+
         # WebSocket support
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        
+
         # Buffer settings
         proxy_buffering on;
         proxy_buffers 8 4k;
-        
+
         # Timeouts
         proxy_connect_timeout {{ nginx_proxy_connect_timeout | default(60) }}s;
         proxy_send_timeout {{ nginx_proxy_send_timeout | default(60) }}s;
         proxy_read_timeout {{ nginx_proxy_read_timeout | default(60) }}s;
     }
-    
+
     # Allow direct dashboard access without kiosk mode for admins
     location /d/ {
         proxy_pass http://127.0.0.1:{{ grafana_http_port }};
@@ -67,33 +67,33 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        
+
         # WebSocket support
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        
+
         # Buffer settings
         proxy_buffering on;
         proxy_buffers 8 4k;
-        
+
         # Timeouts
         proxy_connect_timeout {{ nginx_proxy_connect_timeout | default(60) }}s;
         proxy_send_timeout {{ nginx_proxy_send_timeout | default(60) }}s;
         proxy_read_timeout {{ nginx_proxy_read_timeout | default(60) }}s;
     }
-    
+
     # Version API endpoints
     location /api/templar/version {
         proxy_pass http://127.0.0.1:8585/version;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        
+
         # Enable CORS
         add_header 'Access-Control-Allow-Origin' '*' always;
         add_header 'Access-Control-Allow-Methods' 'GET, OPTIONS' always;
         add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
-        
+
         # Cache version info for 1 hour
         proxy_cache_valid 200 1h;
         proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
@@ -104,12 +104,12 @@ server {
         proxy_pass http://127.0.0.1:8585/version/plain;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        
+
         # Enable CORS
         add_header 'Access-Control-Allow-Origin' '*' always;
         add_header 'Access-Control-Allow-Methods' 'GET, OPTIONS' always;
         add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range' always;
-        
+
         # Cache version info for 1 hour
         proxy_cache_valid 200 1h;
         proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;

@@ -385,7 +385,7 @@
 
 - name: Calculate Version API status
   set_fact:
-    version_api_ok: "{{ version_api_response.status == 200 and version_api_response.json is defined and version_api_response.json.version is defined if version_api_response.status is defined else false }}"
+    version_api_ok: "{{ (version_api_response.status == 200) and (version_api_response.json is defined) if version_api_response is defined and version_api_response.status is defined else false }}"
 
 - name: Calculate overall verification result
   set_fact:

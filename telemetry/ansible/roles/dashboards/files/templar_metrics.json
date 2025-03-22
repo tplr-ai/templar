@@ -74,15 +74,28 @@
         "y": 0
       },
       "id": 1,
+      "datasource": {
+        "type": "templar-version-datasource",
+        "uid": "ceglodpleraiod"
+      },
       "options": {
         "code": {
           "language": "plaintext",
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "# Templar Version: v0.0.0\n\n<p style=\\\"text-align: center; font-size: 1em; color: #aaa;\\\">Last updated: 2025-03-20 17:30:00<br>Version data is periodically updated via the version API</p>\n",
+        "content": "# Templar Version: ${version}\n\n<p style=\\\"text-align: center; font-size: 1em; color: #aaa;\\\">Version data is automatically fetched from the version API</p>\n",
         "mode": "markdown"
       },
+      "targets": [
+        {
+          "datasource": {
+            "type": "templar-version-datasource",
+            "uid": "ceglodpleraiod"
+          },
+          "refId": "A"
+        }
+      ],
       "pluginVersion": "10.4.0",
       "transparent": true,
       "type": "text"
@@ -2197,7 +2210,7 @@
   },
   "timezone": "",
   "title": "Templar Metrics",
-  "uid": "templar-metrics",
+  "uid": "templar_metrics",
   "version": 8,
   "weekStart": ""
 }

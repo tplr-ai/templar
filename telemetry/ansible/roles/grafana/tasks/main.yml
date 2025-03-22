@@ -58,6 +58,13 @@
     group: "{{ grafana_system_group }}"
     mode: 0640
   notify: restart grafana
+  
+- name: Add home dashboard environment variable to Grafana server
+  lineinfile:
+    path: /etc/default/grafana-server
+    line: "GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH={{ grafana_dashboards_local_path }}/{{ grafana_home_dashboard }}.json"
+    state: present
+  notify: restart grafana
 
 - name: Create Grafana environment file
   template:
@@ -66,6 +73,23 @@
     owner: root
     group: root
     mode: 0644
+  notify: restart grafana
+
+- name: Ensure authentication and security settings are configured in grafana.ini
+  blockinfile:
+    path: /etc/grafana/grafana.ini
+    block: |
+      [auth]
+      disable_login_form = {{ grafana_disable_login_form }}
+
+      [auth.anonymous]
+      enabled = {{ grafana_auth_anonymous_enabled }}
+      org_name = {{ grafana_auth_anonymous_org_name }}
+      org_role = {{ grafana_auth_anonymous_org_role }}
+
+      [security]
+      allow_embedding = true
+    marker: "# {mark} ANSIBLE MANAGED BLOCK FOR AUTH AND SECURITY SETTINGS"
   notify: restart grafana
 
 - name: Configure InfluxDB data source

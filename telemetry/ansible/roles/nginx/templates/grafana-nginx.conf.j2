@@ -37,7 +37,7 @@ server {
     # Reverse proxy configuration for Grafana
     location / {
         # Redirect to kiosk mode for clean UI without navigation bars
-        rewrite ^/$ /d/begg4wazvzbi8f/templar-metrics?kiosk=tv&orgId=1 redirect;
+        rewrite ^/$ /d/aegn1pd8n3wu8c/templar-metrics?kiosk=tv&orgId=1 redirect;
 
         proxy_pass http://127.0.0.1:{{ grafana_http_port }};
         proxy_set_header Host $host;

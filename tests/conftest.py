@@ -305,5 +305,8 @@ def storage_manager(temp_dirs, mock_wallet):
     Uses the temporary directory from temp_dirs and the mock_wallet fixture.
     """
     from tplr.storage import StorageManager  # Import the real StorageManager
+
     temp_dir, save_location = temp_dirs
-    return StorageManager(temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet)
+    return StorageManager(
+        temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet
+    )

@@ -111,15 +111,27 @@ def dummy_comms():
     wallet = MockWallet()
     metagraph = MockMetagraph()
     # Patch _get_own_bucket so that bucket is consistent for testing.
-    with patch.object(Comms, "_get_own_bucket", return_value=Bucket(
-         name="dummy_bucket",
-         account_id="dummy_account",
-         access_key_id="dummy_key",
-         secret_access_key="dummy_secret",
-    )):
-        comms = Comms(wallet=wallet, config=config, metagraph=metagraph, hparams=hparams, uid=123)
+    with patch.object(
+        Comms,
+        "_get_own_bucket",
+        return_value=Bucket(
+            name="dummy_bucket",
+            account_id="dummy_account",
+            access_key_id="dummy_key",
+            secret_access_key="dummy_secret",
+        ),
+    ):
+        comms = Comms(
+            wallet=wallet, config=config, metagraph=metagraph, hparams=hparams, uid=123
+        )
     # Replace components with existing mocks.
-    comms.chain = MockChainSync(config=config, netuid=config.netuid, metagraph=metagraph, hparams=hparams, wallet=wallet)
+    comms.chain = MockChainSync(
+        config=config,
+        netuid=config.netuid,
+        metagraph=metagraph,
+        hparams=hparams,
+        wallet=wallet,
+    )
     comms.storage = MockStorageManager()
     comms.peer_manager = MockPeerManager()
     return comms
@@ -878,7 +890,9 @@ class TestCommsWindowOperations:
         builds the expected key, and calls storage.store_bytes.
         """
         comms = dummy_comms
-        with patch.object(comms.storage, "store_bytes", new_callable=AsyncMock) as mock_store:
+        with patch.object(
+            comms.storage, "store_bytes", new_callable=AsyncMock
+        ) as mock_store:
             # Set the mock to return True.
             mock_store.return_value = True
             start_window = 15
@@ -901,7 +915,12 @@ class TestCommsWindowOperations:
         """
         comms = dummy_comms
         expected_window = 20
-        with patch.object(comms.storage, "get_bytes", new_callable=AsyncMock, return_value={"start_window": expected_window}):
+        with patch.object(
+            comms.storage,
+            "get_bytes",
+            new_callable=AsyncMock,
+            return_value={"start_window": expected_window},
+        ):
             with patch("asyncio.sleep", new=self.fast_sleep):
                 result = await comms.get_start_window()
                 assert result == expected_window
@@ -914,7 +933,9 @@ class TestCommsWindowOperations:
         comms = dummy_comms
         expected_window = 25
         json_bytes = json.dumps({"start_window": expected_window}).encode("utf-8")
-        with patch.object(comms.storage, "get_bytes", new_callable=AsyncMock, return_value=json_bytes):
+        with patch.object(
+            comms.storage, "get_bytes", new_callable=AsyncMock, return_value=json_bytes
+        ):
             with patch("asyncio.sleep", new=self.fast_sleep):
                 result = await comms.get_start_window()
                 assert result == expected_window
@@ -934,12 +955,26 @@ class TestCommsWindowOperations:
             if call_count < 3:
                 return (None, None)
             else:
-                return (Bucket(name="dummy_bucket", account_id="dummy_account", access_key_id="a", secret_access_key="b"), 99)
+                return (
+                    Bucket(
+                        name="dummy_bucket",
+                        account_id="dummy_account",
+                        access_key_id="a",
+                        secret_access_key="b",
+                    ),
+                    99,
+                )
 
-        with patch.object(comms.chain, "_get_highest_stake_validator_bucket", new=AsyncMock(side_effect=fake_get_bucket)):
+        with patch.object(
+            comms.chain,
+            "_get_highest_stake_validator_bucket",
+            new=AsyncMock(side_effect=fake_get_bucket),
+        ):
             expected_window = 30
             json_bytes = json.dumps({"start_window": expected_window}).encode("utf-8")
-            with patch.object(comms.storage, "get_bytes", new=AsyncMock(return_value=json_bytes)):
+            with patch.object(
+                comms.storage, "get_bytes", new=AsyncMock(return_value=json_bytes)
+            ):
                 with patch("asyncio.sleep", new=self.fast_sleep):
                     result = await comms.get_start_window()
                     assert result == expected_window
@@ -953,8 +988,19 @@ class TestCommsWindowOperations:
         """
         comms = dummy_comms
         with patch.object(
-            comms.chain, "_get_highest_stake_validator_bucket",
-            new=AsyncMock(return_value=(Bucket(name="dummy_bucket", account_id="dummy_account", access_key_id="a", secret_access_key="b"), 99))
+            comms.chain,
+            "_get_highest_stake_validator_bucket",
+            new=AsyncMock(
+                return_value=(
+                    Bucket(
+                        name="dummy_bucket",
+                        account_id="dummy_account",
+                        access_key_id="a",
+                        secret_access_key="b",
+                    ),
+                    99,
+                )
+            ),
         ):
             call_count = 0
 
@@ -967,7 +1013,9 @@ class TestCommsWindowOperations:
                     expected_window = 35
                     return json.dumps({"start_window": expected_window}).encode("utf-8")
 
-            with patch.object(comms.storage, "get_bytes", new=AsyncMock(side_effect=fake_get_bytes)):
+            with patch.object(
+                comms.storage, "get_bytes", new=AsyncMock(side_effect=fake_get_bytes)
+            ):
                 with patch("asyncio.sleep", new=self.fast_sleep):
                     result = await comms.get_start_window()
                     assert result == 35

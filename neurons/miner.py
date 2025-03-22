@@ -24,7 +24,6 @@ import random
 import asyncio
 import argparse
 import threading
-from datetime import datetime, timedelta, timezone
 
 # Third party
 import torch
@@ -152,18 +151,11 @@ class Miner:
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
-            key_prefix="model",
             config=self.config,
-            netuid=self.config.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
         )
-
-        self.bucket = self.comms.get_own_bucket("gradients", "read")
-        self.comms.try_commit(self.wallet, self.bucket)
-        # self.comms.fetch_commitments()
 
         # Init state params
         self.stop_event = asyncio.Event()
@@ -235,9 +227,8 @@ class Miner:
             compressor=self.compressor,
             current_window=self.current_window,
             device=self.config.device,
-            peers=[],
+            peers=self.peers,
             uid=self.uid,
-            totalks=self.totalks,
         )
         if success:
             self.momentum = loaded_momentum
@@ -446,6 +437,32 @@ class Miner:
 
             # Await the task to get the result
             gather_result = await gather_task
+
+            # --- Validate gathered gradients from peers ---
+            valid_uids = []
+            invalid_uids = []
+            num_peers = len(gather_result.uids)
+            for idx, uid in enumerate(gather_result.uids):
+                peer_state = {}
+                for key, tensor_list in gather_result.state_dict.__dict__.items():
+                    if isinstance(tensor_list, list) and len(tensor_list) == num_peers:
+                        peer_state[key] = tensor_list[idx]
+                is_valid, err_msg = tplr.neurons.validate_compressed_gradients(
+                    peer_state,
+                    self.totalks,
+                    allowed_topk=self.hparams.topk_compression,
+                    device=self.config.device,
+                )
+                if is_valid:
+                    valid_uids.append(uid)
+                else:
+                    tplr.logger.warning(
+                        f"Gradient from UID {uid} failed validation: {err_msg}"
+                    )
+                    invalid_uids.append(uid)
+            gather_result.uids = valid_uids
+            gather_result.skipped_uids.extend(invalid_uids)
+            # -----------------------------------------------------
 
             # 5. Calculate and log metrics
             duration = time.time() - train_start

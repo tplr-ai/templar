@@ -19,14 +19,14 @@ dev:
     uv pip install --pre -e ".[dev]"
 
 test: dev
-    uv run pytest -sv --prerelease=allow
+    uv run pytest -sv
 
 # Run specific test file
 test-file file:
     uv run pytest -sv {{file}}
 
 # Run tests with coverage
-test-cov:
+cov:
     uv run pytest -sv --cov=src --cov-report=term-missing
 
 # Run tests in parallel

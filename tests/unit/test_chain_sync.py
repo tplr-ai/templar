@@ -2,6 +2,10 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from types import SimpleNamespace
 import torch
+import asyncio
+from tests.mocks.subtensor import MockSubtensor
+from tests.mocks.wallet import MockWallet
+from tests.mocks.metagraph import MockMetagraph
 
 from tplr.chain_sync import ChainSync
 from tplr.schemas import Bucket
@@ -404,3 +408,529 @@ class TestErrorHandling:
         bucket, uid = await chain_sync_instance._get_highest_stake_validator_bucket()
         assert bucket is None
         assert uid is None
+
+
+async def test_periodic_commitment_fetcher():
+    """
+    Test that the periodic commitment fetcher in ChainSync calls
+    get_commitments repeatedly.
+    """
+    hparams = SimpleNamespace(
+        blocks_per_window=100,
+        topk_peers=10,
+        minimum_peers=1,
+        max_topk_peers=5,
+        eval_stake_threshold=20000,
+    )
+
+    commitment_calls = 0
+
+    async def fake_get_commitments(*args, **kwargs):
+        nonlocal commitment_calls
+        commitment_calls += 1
+        # Return a dummy commitment for each call.
+        return {
+            commitment_calls: Bucket(
+                name=f"bucket{commitment_calls}",
+                account_id=f"acc{commitment_calls}",
+                access_key_id="dummy_key",
+                secret_access_key="dummy_secret",
+            )
+        }
+
+    # Patch ChainSync.get_commitments and bt.subtensor.
+    with patch(
+        "tplr.chain_sync.ChainSync.get_commitments",
+        new=AsyncMock(side_effect=fake_get_commitments),
+    ):
+        with patch("tplr.chain_sync.bt.subtensor", return_value=MockSubtensor()):
+            # Create a metagraph instance from our mocks and attach a dummy sync.
+            metagraph = MockMetagraph()
+            metagraph.sync = lambda subtensor: None
+
+            chain_sync = ChainSync(
+                config=MagicMock(),
+                netuid=1,
+                metagraph=metagraph,
+                hparams=hparams,
+                fetch_interval=0.1,
+                wallet=MockWallet(),
+            )
+
+            fetch_task = asyncio.create_task(
+                chain_sync._fetch_commitments_periodically()
+            )
+            await asyncio.sleep(0.35)  # allow for a few iterations
+            fetch_task.cancel()
+            try:
+                await fetch_task
+            except asyncio.CancelledError:
+                pass
+
+    # Expect at least 3 calls (0.35/0.1 ≈ 3-4 iterations)
+    assert commitment_calls >= 3
+
+
+async def test_update_peers_with_buckets():
+    """
+    Test that ChainSync correctly updates its peers list based on the intersection
+    of active peers and available commitment buckets.
+    """
+    hparams = SimpleNamespace(
+        blocks_per_window=100, topk_peers=10, minimum_peers=1, max_topk_peers=5
+    )
+    chain_sync = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=MagicMock(),
+        hparams=hparams,
+        wallet=MagicMock(),
+    )
+
+    # Set some dummy commitments and active peers.
+    chain_sync.commitments = {
+        1: Bucket(
+            name="bucket1",
+            account_id="acc1",
+            access_key_id="k1",
+            secret_access_key="s1",
+        ),
+        2: Bucket(
+            name="bucket2",
+            account_id="acc2",
+            access_key_id="k2",
+            secret_access_key="s2",
+        ),
+    }
+    # Active peers include one extra peer (3) that lacks a commitment.
+    chain_sync.active_peers = {1, 2, 3}
+    # Update peers by taking an intersection.
+    chain_sync.peers = list(
+        chain_sync.active_peers.intersection(chain_sync.commitments.keys())
+    )
+
+    # Only UIDs 1 and 2 should be in peers.
+    assert set(chain_sync.peers) == {1, 2}
+
+
+async def test_window_update_on_block():
+    """
+    Test that updating the current block value leads to recalculating the current window.
+    """
+    hparams = SimpleNamespace(
+        blocks_per_window=10, topk_peers=10, minimum_peers=1, max_topk_peers=5
+    )
+    chain_sync = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=MagicMock(),
+        hparams=hparams,
+        wallet=MagicMock(),
+    )
+    # Initialize current block and window.
+    chain_sync.current_block = 5
+    chain_sync.current_window = 0
+
+    # Simulate a block update:
+    def fake_block_update(new_block: int):
+        chain_sync.current_block = new_block
+        new_window = int(new_block / hparams.blocks_per_window)
+        if new_window != chain_sync.current_window:
+            chain_sync.current_window = new_window
+
+    fake_block_update(25)  # 25 // 10 = 2
+    assert chain_sync.current_window == 2
+
+
+async def test_get_bucket_not_found():
+    """
+    Test that get_bucket returns None for an unknown UID.
+    """
+    hparams = SimpleNamespace(
+        blocks_per_window=100, topk_peers=10, minimum_peers=1, max_topk_peers=5
+    )
+    chain_sync = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=MagicMock(),
+        hparams=hparams,
+        wallet=MagicMock(),
+    )
+    # Set commitments with UID 1 only.
+    chain_sync.commitments = {
+        1: Bucket(
+            name="bucket1",
+            account_id="acc1",
+            access_key_id="key1",
+            secret_access_key="secret1",
+        )
+    }
+    bucket = chain_sync.get_bucket(999)
+    assert bucket is None
+
+
+# ------------------------------------------------------------
+# Test get_commitments() with various commitment cases.
+# ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_commitments_various_cases():
+    """
+    Tests get_commitments() with:
+      - Valid commitment (length 128) for uid=1.
+      - Empty commitment for uid=2.
+      - Invalid length commitment for uid=3.
+      - Exception raised for uid=4.
+    Only uid=1 should yield a Bucket.
+    """
+    # Create a dummy metagraph with uids.
+    metagraph = MagicMock()
+    metagraph.uids = torch.tensor([1, 2, 3, 4])
+
+    # Instantiate ChainSync.
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=metagraph,
+        hparams=SimpleNamespace(),
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+
+    # Create a fake subtensor with custom get_commitment.
+    class FakeSubtensor:
+        def get_commitment(self, netuid, uid):
+            if uid == 1:
+                return "a" * 128  # valid
+            elif uid == 2:
+                return ""  # empty
+            elif uid == 3:
+                return "b" * 50  # invalid length
+            elif uid == 4:
+                raise Exception("dummy error")
+
+    fake_subtensor = FakeSubtensor()
+
+    with patch("tplr.chain_sync.bt.subtensor", return_value=fake_subtensor):
+        commitments = await cs.get_commitments()
+
+    # Only uid 1 should be added.
+    assert 1 in commitments
+    assert commitments[1].name == "a" * 32
+    assert 2 not in commitments
+    assert 3 not in commitments
+    assert 4 not in commitments
+
+
+# ------------------------------------------------------------
+# Test update_peers_with_buckets() and set_gather_peers()
+# ------------------------------------------------------------
+
+
+def test_update_peers_with_empty_active_peers():
+    """
+    If active_peers is empty, update_peers_with_buckets() should warn
+    and leave peers empty while marking previously active peers as inactive.
+    """
+    metagraph = MagicMock()
+    metagraph.uids = torch.tensor([1, 2, 3])
+    metagraph.S = torch.tensor([100, 200, 300])
+    metagraph.I = torch.tensor([10, 20, 30])
+
+    hparams = SimpleNamespace(
+        eval_stake_threshold=20000, topk_peers=10, minimum_peers=3, max_topk_peers=10
+    )
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=metagraph,
+        hparams=hparams,
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+
+    # Prepopulate eval_peers so we can see the difference.
+    cs.eval_peers = {1: 5, 2: 3}
+    cs.active_peers = set()  # empty active peers
+
+    cs.update_peers_with_buckets()
+    assert cs.peers == []  # No peers gathered.
+    # All previously active should now be inactive.
+    assert cs.inactive_peers == {1, 2}
+
+
+def test_update_peers_with_nonempty_active_peers():
+    """
+    With non-empty active_peers, update_peers_with_buckets() should filter
+    eval_peers based on stake threshold and set gather peers ordering by incentive.
+    """
+    metagraph = MagicMock()
+    metagraph.uids = torch.tensor([1, 2, 3])
+    # Stakes: uid1=15000, uid2=25000, uid3=18000.
+    metagraph.S = torch.tensor([15000, 25000, 18000])
+    # Incentives: uid1=100, uid2=200, uid3=50.
+    metagraph.I = torch.tensor([100, 200, 50])
+
+    hparams = SimpleNamespace(
+        eval_stake_threshold=20000, topk_peers=10, minimum_peers=3, max_topk_peers=10
+    )
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=metagraph,
+        hparams=hparams,
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+
+    cs.active_peers = {1, 2, 3}
+    cs.eval_peers = {}  # start with empty eval_peers.
+
+    cs.update_peers_with_buckets()
+    # Only uid=1 and uid=3 have stakes <=20000.
+    assert cs.eval_peers == {1: 1, 3: 1}
+    # set_gather_peers works on active_peers regardless.
+    # Incentives sorted descending: [(2,200), (1,100), (3,50)].
+    # With minimum_peers=3, peers list should be all: [2, 1, 3].
+    assert cs.peers == [2, 1, 3]
+
+
+def test_set_gather_peers_empty():
+    """
+    If there are no active peers, set_gather_peers() should set peers to empty.
+    """
+    metagraph = MagicMock()
+    metagraph.uids = torch.tensor([1, 2])
+    metagraph.I = torch.tensor([50, 60])
+    hparams = SimpleNamespace(topk_peers=10, minimum_peers=3, max_topk_peers=10)
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=metagraph,
+        hparams=hparams,
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+
+    cs.active_peers = set()
+    cs.set_gather_peers()
+    assert cs.peers == []
+
+
+# ------------------------------------------------------------
+# Test _get_highest_stake_validator_bucket()
+# ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_highest_stake_validator_bucket_valid():
+    """
+    When a valid validator exists (T > 0), _get_highest_stake_validator_bucket()
+    should return the bucket for the highest staked validator.
+    """
+    metagraph = MagicMock()
+    metagraph.uids = torch.tensor([1, 2, 3])
+    # Stakes: 100, 200, 50.
+    metagraph.S = torch.tensor([100, 200, 50])
+    # Only uid 2 is a validator.
+    metagraph.T = torch.tensor([0, 1, 0])
+
+    hparams = SimpleNamespace()
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=metagraph,
+        hparams=hparams,
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+
+    valid_commitment = "c" * 128
+    cs.commitments = {
+        2: Bucket(
+            name=valid_commitment[:32],
+            account_id=valid_commitment[:32],
+            access_key_id=valid_commitment[32:64],
+            secret_access_key=valid_commitment[64:],
+        )
+    }
+
+    bucket, uid = await cs._get_highest_stake_validator_bucket()
+    assert uid == 2
+    assert bucket is not None
+
+
+@pytest.mark.asyncio
+async def test_get_highest_stake_validator_bucket_no_validators():
+    """
+    If no validators are found (all T values are 0), the method should return (None, None).
+    """
+    metagraph = MagicMock()
+    metagraph.uids = torch.tensor([1, 2, 3])
+    metagraph.S = torch.tensor([100, 200, 50])
+    metagraph.T = torch.tensor([0, 0, 0])
+
+    hparams = SimpleNamespace()
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=metagraph,
+        hparams=hparams,
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+
+    bucket, uid = await cs._get_highest_stake_validator_bucket()
+    assert bucket is None
+    assert uid is None
+
+
+@pytest.mark.asyncio
+async def test_get_highest_stake_validator_bucket_no_metagraph():
+    """
+    If metagraph is None, _get_highest_stake_validator_bucket() should return (None, None).
+    """
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=None,
+        hparams=SimpleNamespace(),
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+    bucket, uid = await cs._get_highest_stake_validator_bucket()
+    assert bucket is None
+    assert uid is None
+
+
+@pytest.mark.asyncio
+async def test_get_highest_stake_validator_bucket_exception():
+    """
+    Simulate an exception (e.g., in metagraph.uids.tolist()) so that the method
+    returns (None, None).
+    """
+    metagraph = MagicMock()
+    # Make uids.tolist() raise an exception.
+    metagraph.uids = property(
+        lambda self: (_ for _ in ()).throw(Exception("dummy exception"))
+    )
+
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=metagraph,
+        hparams=SimpleNamespace(),
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+
+    bucket, uid = await cs._get_highest_stake_validator_bucket()
+    assert bucket is None
+    assert uid is None
+
+
+@pytest.mark.asyncio
+async def test_get_commitments_outer_exception():
+    """
+    Simulate an outer exception by patching bt.subtensor so that it raises.
+    This covers the outer try/except in get_commitments().
+    """
+    metagraph = MagicMock()
+    metagraph.uids = torch.tensor([1])
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=metagraph,
+        hparams=SimpleNamespace(),
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+    with patch(
+        "tplr.chain_sync.bt.subtensor", side_effect=Exception("outer exception")
+    ):
+        commitments = await cs.get_commitments()
+        # Expect the method to return an empty dict.
+        assert commitments == {}
+
+
+@pytest.mark.asyncio
+async def test_get_commitments_logger_invalid_length(caplog):
+    """
+    Test that a commitment with an invalid length triggers the
+    logger.error and skips adding the bucket.
+    Covers lines 128-130 where the invalid length branch is taken.
+    """
+    metagraph = MagicMock()
+    metagraph.uids = torch.tensor([1])
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=metagraph,
+        hparams=SimpleNamespace(),
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+
+    class FakeSubtensor:
+        def get_commitment(self, netuid, uid):
+            # Return a string whose length is not 128.
+            return "short_commitment"  # length = 16
+
+    with patch("tplr.chain_sync.bt.subtensor", return_value=FakeSubtensor()):
+        await cs.get_commitments()
+
+    # Check that logger.error recorded a message about invalid commitment length.
+    error_msgs = [
+        record.message for record in caplog.records if record.levelname == "ERROR"
+    ]
+    found = any("Invalid commitment length" in msg for msg in error_msgs)
+    assert found
+
+
+@pytest.mark.asyncio
+async def test_get_commitments_empty_commitment():
+    """
+    Test that if get_commitment returns an empty string,
+    the method skips it without error.
+    This covers the branch for `if not commitment or len(commitment) == 0`.
+    """
+    metagraph = MagicMock()
+    metagraph.uids = torch.tensor([1])
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=metagraph,
+        hparams=SimpleNamespace(),
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+
+    class FakeSubtensor:
+        def get_commitment(self, netuid, uid):
+            return ""  # empty commitment
+
+    with patch("tplr.chain_sync.bt.subtensor", return_value=FakeSubtensor()):
+        commitments = await cs.get_commitments()
+        # No valid commitment, so expect an empty dict.
+        assert commitments == {}
+
+
+@pytest.mark.asyncio
+async def test_get_commitments_no_metagraph():
+    """
+    Test that if metagraph is None, get_commitments() triggers an exception
+    and returns an empty dict.
+    Patching bt.subtensor to prevent any network call.
+    """
+    cs = ChainSync(
+        config=MagicMock(),
+        netuid=1,
+        metagraph=None,
+        hparams=SimpleNamespace(),
+        wallet=MagicMock(),
+        fetch_interval=1,
+    )
+    with patch("tplr.chain_sync.bt.subtensor", return_value=MagicMock()):
+        commitments = await cs.get_commitments()
+    assert commitments == {}

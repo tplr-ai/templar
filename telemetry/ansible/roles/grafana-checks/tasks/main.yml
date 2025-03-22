@@ -122,7 +122,7 @@
     msg: "{{ 'Dashboard provider configuration is valid ✅' if dashboard_provider_config.rc == 0 and 'path: /etc/grafana/dashboards' in dashboard_provider_config.stdout else 'WARNING: Dashboard provider configuration issue ❌' }}"
   failed_when: 
     - fail_on_verification_error | bool
-    - dashboard_provider_config.rc != 0 or 'path: /etc/grafana/dashboards' not in dashboard_provider_config.stdout
+    - (dashboard_provider_config.rc != 0 or (dashboard_provider_config.stdout is defined and 'path: /etc/grafana/dashboards' not in dashboard_provider_config.stdout))
 
 - name: Verify plugins configuration in grafana.ini
   shell: "grep -A3 '\\[plugins\\]' /etc/grafana/grafana.ini || echo 'plugins section not found'"
@@ -135,7 +135,7 @@
     msg: "{{ 'Plugins configuration is valid ✅' if 'allow_loading_unsigned_plugins' in plugins_config.stdout and 'templar-version-datasource' in plugins_config.stdout else 'WARNING: Plugins configuration issue ❌' }}"
   failed_when: 
     - fail_on_verification_error | bool
-    - 'allow_loading_unsigned_plugins' not in plugins_config.stdout or 'templar-version-datasource' not in plugins_config.stdout
+    - (plugins_config.stdout is defined and ('allow_loading_unsigned_plugins' not in plugins_config.stdout or 'templar-version-datasource' not in plugins_config.stdout))
 
 - name: Verify anonymous access configuration in grafana.ini
   shell: "grep -A5 '\\[auth.anonymous\\]' /etc/grafana/grafana.ini || echo 'anonymous access section not found'"
@@ -148,7 +148,7 @@
     msg: "{{ 'Anonymous access configuration is valid ✅' if 'enabled = true' in anonymous_config.stdout else 'WARNING: Anonymous access configuration issue ❌' }}"
   failed_when: 
     - fail_on_verification_error | bool
-    - 'enabled = true' not in anonymous_config.stdout
+    - (anonymous_config.stdout is defined and 'enabled = true' not in anonymous_config.stdout)
 
 - name: Verify Grafana datasources via API
   uri:
@@ -167,7 +167,7 @@
     msg: "{{ 'InfluxDB datasource is configured ✅' if datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length > 0 else 'WARNING: InfluxDB datasource not found ❌' }}"
   failed_when: 
     - fail_on_verification_error | bool
-    - datasources.status != 200 or (datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length == 0)
+    - (datasources is defined and datasources.status is defined and (datasources.status != 200 or (datasources.json is defined and (datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length == 0))))
   when: datasources.status is defined and datasources.json is defined
 
 - name: Check Templar Version datasource
@@ -175,7 +175,7 @@
     msg: "{{ 'Templar Version datasource is configured ✅' if datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length > 0 else 'WARNING: Templar Version datasource not found ❌' }}"
   failed_when: 
     - fail_on_verification_error | bool
-    - datasources.status != 200 or (datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length == 0)
+    - (datasources is defined and datasources.status is defined and (datasources.status != 200 or (datasources.json is defined and (datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length == 0))))
   when: datasources.status is defined and datasources.json is defined
 
 - name: Verify dashboard access via Grafana API
@@ -195,7 +195,7 @@
     msg: "{{ 'Templar dashboard is available ✅' if dashboards.status == 200 and dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length > 0 else 'WARNING: Templar dashboard not found ❌' }}"
   failed_when: 
     - fail_on_verification_error | bool
-    - dashboards.status != 200 or (dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length == 0)
+    - (dashboards is defined and dashboards.status is defined and (dashboards.status != 200 or (dashboards.json is defined and (dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length == 0))))
   when: dashboards.status is defined and dashboards.json is defined
 
 - name: Verify NGINX proxy to Grafana

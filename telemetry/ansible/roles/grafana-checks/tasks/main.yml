@@ -29,7 +29,7 @@
 - name: Verify Grafana service status
   debug:
     msg: "{{ 'Grafana service is active and running ✅' if grafana_service.status.ActiveState == 'active' else 'WARNING: Grafana service is not active ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - grafana_service.status.ActiveState != 'active'
 
@@ -41,7 +41,7 @@
 - name: Verify Nginx service status
   debug:
     msg: "{{ 'Nginx service is active and running ✅' if nginx_service.status.ActiveState == 'active' else 'WARNING: Nginx service is not active ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - nginx_service.status.ActiveState != 'active'
 
@@ -54,7 +54,7 @@
 - name: Verify version API service status
   debug:
     msg: "{{ 'Version API service is active and running ✅' if version_api_service.status.ActiveState == 'active' else 'WARNING: Version API service is not active ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - version_api_service.status.ActiveState != 'active'
   when: version_api_service.status is defined
@@ -71,7 +71,7 @@
 - name: Report Grafana API health status
   debug:
     msg: "{{ 'Grafana API is healthy ✅' if health_result.status is defined and health_result.status == 200 else 'WARNING: Grafana API health check failed ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - health_result.status is not defined or health_result.status != 200
 
@@ -83,7 +83,7 @@
 - name: Report dashboard file status
   debug:
     msg: "{{ 'Dashboard file exists ✅' if dashboard_file.stat.exists else 'WARNING: Dashboard file not found ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - not dashboard_file.stat.exists
 
@@ -95,7 +95,7 @@
 - name: Report plugin directory status
   debug:
     msg: "{{ 'Plugin directory exists ✅' if plugin_dir.stat.exists else 'WARNING: Plugin directory not found ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - not plugin_dir.stat.exists
 
@@ -108,7 +108,7 @@
 - name: Verify plugin content
   debug:
     msg: "Plugin directory has content ✅"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - plugin_files.rc != 0 or plugin_files.stdout == ""
   when: plugin_dir.stat.exists
@@ -122,9 +122,9 @@
 - name: Check dashboard provider content
   debug:
     msg: "{{ 'Dashboard provider configuration is valid ✅' if dashboard_provider_config.rc == 0 and 'path: /etc/grafana/dashboards' in dashboard_provider_config.stdout else 'WARNING: Dashboard provider configuration issue ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
-    - (dashboard_provider_config.rc != 0 or (dashboard_provider_config.stdout is defined and 'path: /etc/grafana/dashboards' not in dashboard_provider_config.stdout))
+    - "{{ dashboard_provider_config.rc != 0 or (dashboard_provider_config.stdout is defined and 'path: /etc/grafana/dashboards' not in dashboard_provider_config.stdout) }}"
 
 - name: Verify plugins configuration in grafana.ini
   shell: "grep -A3 '\\[plugins\\]' /etc/grafana/grafana.ini || echo 'plugins section not found'"
@@ -135,7 +135,7 @@
 - name: Check plugins configuration content
   debug:
     msg: "{{ 'Plugins configuration is valid ✅' if 'allow_loading_unsigned_plugins' in plugins_config.stdout and 'templar-version-datasource' in plugins_config.stdout else 'WARNING: Plugins configuration issue ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - (plugins_config.stdout is defined and ('allow_loading_unsigned_plugins' not in plugins_config.stdout or 'templar-version-datasource' not in plugins_config.stdout))
 
@@ -148,7 +148,7 @@
 - name: Check anonymous access configuration content
   debug:
     msg: "{{ 'Anonymous access configuration is valid ✅' if 'enabled = true' in anonymous_config.stdout else 'WARNING: Anonymous access configuration issue ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - (anonymous_config.stdout is defined and 'enabled = true' not in anonymous_config.stdout)
 
@@ -167,7 +167,7 @@
 - name: Check InfluxDB datasource
   debug:
     msg: "{{ 'InfluxDB datasource is configured ✅' if datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length > 0 else 'WARNING: InfluxDB datasource not found ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - (datasources is defined and datasources.status is defined and (datasources.status != 200 or (datasources.json is defined and (datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length == 0))))
   when: datasources.status is defined and datasources.json is defined
@@ -175,7 +175,7 @@
 - name: Check Templar Version datasource
   debug:
     msg: "{{ 'Templar Version datasource is configured ✅' if datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length > 0 else 'WARNING: Templar Version datasource not found ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - (datasources is defined and datasources.status is defined and (datasources.status != 200 or (datasources.json is defined and (datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length == 0))))
   when: datasources.status is defined and datasources.json is defined
@@ -195,7 +195,7 @@
 - name: Check dashboard existence
   debug:
     msg: "{{ 'Templar dashboard is available ✅' if dashboards.status == 200 and dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length > 0 else 'WARNING: Templar dashboard not found ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - (dashboards is defined and dashboards.status is defined and (dashboards.status != 200 or (dashboards.json is defined and (dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length == 0))))
   when: dashboards.status is defined and dashboards.json is defined
@@ -212,7 +212,7 @@
 - name: Check NGINX proxy status
   debug:
     msg: "{{ 'NGINX proxy to Grafana is working ✅' if nginx_proxy.status == 200 else 'WARNING: NGINX proxy to Grafana is not working ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - nginx_proxy.status != 200
 
@@ -250,7 +250,7 @@
 - name: Report dashboard access status
   debug:
     msg: "{{ dashboard_access_status | default('Could not verify dashboard access') }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - dashboard_access_status is defined and 'WARNING' in dashboard_access_status
   when: dashboard_access_status is defined
@@ -258,7 +258,7 @@
 - name: Report default dashboard access status
   debug:
     msg: "{{ default_access_status | default('Could not verify default dashboard access') }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - default_access_status is defined and 'WARNING' in default_access_status
   when: default_access_status is defined
@@ -275,7 +275,7 @@
 - name: Report version API status
   debug:
     msg: "{{ 'Version API is working ✅' if version_api_response.status == 200 and version_api_response.json is defined and version_api_response.json.version is defined else 'WARNING: Version API is not working ❌' }}"
-  failed_when: 
+  failed_when:
     - fail_on_verification_error | bool
     - version_api_response.status != 200 or version_api_response.json is not defined or version_api_response.json.version is not defined
 
@@ -389,24 +389,25 @@
 
 - name: Calculate overall verification result
   set_fact:
-    all_checks_passed: "{{ 
-      grafana_service_ok and 
-      nginx_service_ok and 
-      version_api_service_ok and 
-      health_result_ok and 
-      dashboard_file_ok and 
-      plugin_dir_ok and 
-      dashboard_provider_config_ok and 
-      plugins_config_ok and 
-      anonymous_config_ok and 
-      influxdb_datasource_ok and 
-      templar_version_datasource_ok and 
-      dashboard_availability_ok and 
-      nginx_proxy_ok and 
-      dashboard_access_ok and 
-      default_access_ok and 
-      version_api_ok
-    }}"
+    all_checks_passed: >-
+      {{
+        grafana_service_ok and
+        nginx_service_ok and
+        version_api_service_ok and
+        health_result_ok and
+        dashboard_file_ok and
+        plugin_dir_ok and
+        dashboard_provider_config_ok and
+        plugins_config_ok and
+        anonymous_config_ok and
+        influxdb_datasource_ok and
+        templar_version_datasource_ok and
+        dashboard_availability_ok and
+        nginx_proxy_ok and
+        dashboard_access_ok and
+        default_access_ok and
+        version_api_ok
+      }}
 
 - name: Display overall verification result
   debug:
@@ -415,7 +416,7 @@
       GRAFANA STACK VERIFICATION RESULT: {{ 'SUCCESS ✅' if all_checks_passed else 'FAILED ❌' }}
       ==========================================
       {{ '✅' if grafana_service_ok else '❌' }} Grafana Service
-      {{ '✅' if nginx_service_ok else '❌' }} Nginx Service 
+      {{ '✅' if nginx_service_ok else '❌' }} Nginx Service
       {{ '✅' if version_api_service_ok else '❌' }} Version API Service
       {{ '✅' if health_result_ok else '❌' }} Grafana API Health
       {{ '✅' if dashboard_file_ok else '❌' }} Dashboard File

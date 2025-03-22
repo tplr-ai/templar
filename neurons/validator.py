@@ -1618,6 +1618,64 @@ class Validator:
             # 18. Increment global step
             self.global_step += 1
 
+    def select_initial_peers(self) -> bool:
+        try:
+            tplr.logger.info("Starting selection of initial gather peers")
+            # 1. Add top incentive peers
+            uid_to_non_zero_incentive = {
+                uid: incentive
+                for uid, incentive in zip(self.metagraph.uids, self.metagraph.I)
+                if incentive > 0 and uid in self.comms.active_peers
+            }
+            top_incentive_peers = sorted(
+                uid_to_non_zero_incentive,
+                key=uid_to_non_zero_incentive.get,
+                reverse=True,
+            )[: self.hparams.max_topk_peers]
+
+            # Convert to list to ensure it's not a dict_keys object
+            top_incentive_peers = np.array(top_incentive_peers, dtype=np.int64)
+
+            assert len(top_incentive_peers) <= self.hparams.max_topk_peers
+            if len(top_incentive_peers) >= self.hparams.minimum_peers:
+                tplr.logger.info(
+                    f"Selected {len(top_incentive_peers)} initial peers purely based "
+                    f"on incentive: {top_incentive_peers}"
+                )
+                return top_incentive_peers
+
+            # 2. If needed, fill up with active peers
+            remaining_active_peers = np.array(
+                list(set(self.comms.active_peers) - set(top_incentive_peers))
+            )
+            top_incentive_and_active_peers = np.concatenate(
+                [top_incentive_peers, remaining_active_peers]
+            )[: self.hparams.max_topk_peers]
+
+            assert len(top_incentive_and_active_peers) <= self.hparams.max_topk_peers
+            if len(top_incentive_and_active_peers) >= self.hparams.minimum_peers:
+                tplr.logger.info(
+                    f"Selected {len(top_incentive_and_active_peers)} initial peers. "
+                    f"{len(top_incentive_peers)} with incentive: {top_incentive_peers} "
+                    f"and {len(remaining_active_peers)} without: "
+                    f"{remaining_active_peers}"
+                )
+                return top_incentive_and_active_peers
+
+            # 3. Give up
+            tplr.logger.info(
+                f"Failed to find at least {self.hparams.minimum_peers} initial gather "
+                f"peers. Found only {len(top_incentive_and_active_peers)} active "
+                f"peers, of which {len(top_incentive_peers)} had incentive and "
+                f"{len(top_incentive_and_active_peers) - len(top_incentive_peers)} "
+                f"were incentiveless active peers."
+            )
+            return None
+
+        except Exception as e:
+            tplr.logger.error(f"Failed to create new peer list: {e}")
+            return None
+
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
         import websockets.exceptions  # Ensure we catch websockets errors

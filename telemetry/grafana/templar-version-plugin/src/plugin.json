@@ -1,0 +1,25 @@
+{
+  "type": "datasource",
+  "name": "Templar Version",
+  "id": "templar-version-datasource",
+  "metrics": true,
+  "info": {
+    "description": "Datasource plugin for displaying Templar version information",
+    "author": {
+      "name": "Templar Team"
+    },
+    "keywords": ["templar", "version"],
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "links": [],
+    "screenshots": [],
+    "version": "1.0.0",
+    "updated": "2025-03-22"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=9.0.0",
+    "plugins": []
+  }
+}

@@ -1,0 +1,12 @@
+apiVersion: 1
+
+datasources:
+  - name: Templar Version
+    type: templar-version-datasource
+    uid: templar-version
+    access: proxy
+    isDefault: false
+    jsonData:
+      url: '{{ templar_version_api_url }}'
+    version: 1
+    editable: true

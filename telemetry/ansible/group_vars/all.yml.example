@@ -76,3 +76,8 @@ nginx_proxy_send_timeout: 60
 nginx_proxy_read_timeout: 60
 nginx_client_max_body_size: "1m"
 nginx_proxy_buffers: "32 4k"
+
+# Grafana plugins settings
+templar_version_api_url: "http://18.217.218.11/api/templar/version"
+grafana_plugins_to_allow:
+  - "templar-version-datasource"

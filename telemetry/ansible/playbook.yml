@@ -6,7 +6,7 @@
   vars_files:
     - group_vars/all.yml
     - group_vars/vault.yml
-  
+
   tasks:
     - name: Update apt cache
       apt:
@@ -17,13 +17,16 @@
   roles:
     - role: grafana
       tags: [grafana]
-    
+
+    - role: grafana-plugins
+      tags: [grafana, plugins]
+
     - role: dashboards
       tags: [dashboards]
-    
+
     - role: nginx
       tags: [nginx, proxy]
-      
+
   post_tasks:
     - name: Verify Grafana is healthy
       uri:
@@ -36,11 +39,11 @@
       until: health_result is defined and health_result.status is defined and health_result.status == 200
       when: not ansible_check_mode
       failed_when: false
-      
+
     - name: Report Grafana health status
       debug:
         msg: "{{ 'Grafana is healthy and running properly!' if not ansible_check_mode and health_result is defined and health_result.status is defined and health_result.status == 200 else 'WARNING: Grafana health check skipped in check mode or failed.' }}"
-      
+
     - name: Verify anonymous access works
       uri:
         url: "http://localhost:{{ grafana_http_port }}/api/org"
@@ -49,16 +52,16 @@
       register: anon_access
       failed_when: false
       when: not ansible_check_mode and health_result is defined and health_result.status is defined and health_result.status == 200
-      
+
     - name: Report anonymous access status
       debug:
         msg: >-
-          {{ 'Anonymous access is properly configured!' 
-             if not ansible_check_mode and health_result is defined and health_result.status is defined and health_result.status == 200 
-                and anon_access is defined and anon_access.status is defined and anon_access.status == 200 
-                and anon_access.json is defined and anon_access.json.name is defined and anon_access.json.name == grafana_auth_anonymous_org_name 
+          {{ 'Anonymous access is properly configured!'
+             if not ansible_check_mode and health_result is defined and health_result.status is defined and health_result.status == 200
+                and anon_access is defined and anon_access.status is defined and anon_access.status == 200
+                and anon_access.json is defined and anon_access.json.name is defined and anon_access.json.name == grafana_auth_anonymous_org_name
              else 'WARNING: Anonymous access check skipped in check mode or failed.' }}
-      
+
     - name: Verify NGINX is correctly proxying Grafana
       uri:
         url: http://localhost:80/api/health
@@ -67,14 +70,14 @@
       register: nginx_proxy
       failed_when: false
       when: not ansible_check_mode and health_result is defined and health_result.status is defined and health_result.status == 200
-      
+
     - name: Report NGINX proxy status
       debug:
         msg: >-
-          {{ 'NGINX proxy is working correctly!' 
-             if not ansible_check_mode and nginx_proxy is defined and nginx_proxy.status is defined and nginx_proxy.status == 200 
+          {{ 'NGINX proxy is working correctly!'
+             if not ansible_check_mode and nginx_proxy is defined and nginx_proxy.status is defined and nginx_proxy.status == 200
              else 'WARNING: NGINX proxy check skipped in check mode or failed.' }}
-      
+
     - name: Verify InfluxDB datasource is available
       uri:
         url: "http://localhost:{{ grafana_http_port }}/api/datasources"
@@ -83,15 +86,15 @@
       register: datasources
       failed_when: false
       when: not ansible_check_mode and health_result is defined and health_result.status is defined and health_result.status == 200
-      
+
     - name: Report InfluxDB datasource status
       debug:
         msg: >-
-          {{ 'InfluxDB datasource is properly configured!' 
-             if not ansible_check_mode and datasources is defined and datasources.status is defined and datasources.status == 200 
-                and datasources.json is defined and 'InfluxDB' in (datasources.json | map(attribute='name') | list) 
+          {{ 'InfluxDB datasource is properly configured!'
+             if not ansible_check_mode and datasources is defined and datasources.status is defined and datasources.status == 200
+                and datasources.json is defined and 'InfluxDB' in (datasources.json | map(attribute='name') | list)
              else 'WARNING: InfluxDB datasource check skipped in check mode or failed.' }}
-      
+
     - name: Output success message
       debug:
         msg: |

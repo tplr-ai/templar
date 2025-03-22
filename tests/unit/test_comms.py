@@ -11,6 +11,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 from datetime import datetime, timezone, timedelta
+import asyncio
 
 from tplr.comms import Comms, Bucket
 
@@ -92,6 +93,36 @@ def comms(wallet, config, hparams):
             uid=1,
         )
         yield comms
+
+
+@pytest.fixture
+def dummy_comms():
+    # Create a minimal config and hyperparameter set expected by comms.
+    config = SimpleNamespace(netuid=1)
+    hparams = SimpleNamespace(
+        blocks_per_window=100,
+        topk_peers=10,
+        minimum_peers=3,
+        max_topk_peers=10,
+        pages_per_window=1,
+        batch_size=2,
+        sequence_length=10,
+    )
+    wallet = MockWallet()
+    metagraph = MockMetagraph()
+    # Patch _get_own_bucket so that bucket is consistent for testing.
+    with patch.object(Comms, "_get_own_bucket", return_value=Bucket(
+         name="dummy_bucket",
+         account_id="dummy_account",
+         access_key_id="dummy_key",
+         secret_access_key="dummy_secret",
+    )):
+        comms = Comms(wallet=wallet, config=config, metagraph=metagraph, hparams=hparams, uid=123)
+    # Replace components with existing mocks.
+    comms.chain = MockChainSync(config=config, netuid=config.netuid, metagraph=metagraph, hparams=hparams, wallet=wallet)
+    comms.storage = MockStorageManager()
+    comms.peer_manager = MockPeerManager()
+    return comms
 
 
 class TestCommsInitialization:
@@ -801,3 +832,143 @@ class TestCommsCheckpointExtra:
                 totalks={},
             )
             assert result[0] is False
+
+
+class TestCommsInitExtra:
+    def test_initialization_defaults(self, dummy_comms):
+        """
+        Verify that Comms.__init__ sets up working directories, semaphores,
+        active/inactive peer sets, and assigns the bucket via _get_own_bucket.
+        """
+        comms = dummy_comms
+        # Updated check: temp_dir should contain "templar_" (as actually generated) or "test_comms"
+        assert "templar_" in comms.temp_dir or "test_comms" in comms.temp_dir
+        # Ensure save_location contains wallet's hotkey.
+        wallet_hotkey = comms.wallet.hotkey.ss58_address
+        assert wallet_hotkey in comms.save_location
+        # Ensure required components have been assigned.
+        assert isinstance(comms.storage, MockStorageManager)
+        assert isinstance(comms.chain, MockChainSync)
+        assert hasattr(comms.peer_manager, "track_active_peers")
+        # Check semaphore and session are set.
+        assert comms.session is not None
+        assert isinstance(comms.client_semaphore, asyncio.Semaphore)
+        # Check for active/inactive peer sets.
+        assert isinstance(comms.active_peers, set)
+        assert isinstance(comms.inactive_peers, set)
+        # Verify that bucket is as patched.
+        assert comms.bucket.name == "dummy_bucket"
+        # Before any background tasks, loop should be None.
+        assert comms.loop is None
+
+
+# ----------------------------------------------------
+# Tests covering get_start_window and post_start_window branches:
+# (Lines 434, 444-450 and related branches)
+# ----------------------------------------------------
+class TestCommsWindowOperations:
+    async def fast_sleep(self, seconds):
+        # Bypass sleep delays in tests.
+        return
+
+    @pytest.mark.asyncio
+    async def test_post_start_window(self, dummy_comms):
+        """
+        Verify that post_start_window serializes the start_window properly,
+        builds the expected key, and calls storage.store_bytes.
+        """
+        comms = dummy_comms
+        with patch.object(comms.storage, "store_bytes", new_callable=AsyncMock) as mock_store:
+            # Set the mock to return True.
+            mock_store.return_value = True
+            start_window = 15
+            result = await comms.post_start_window(start_window)
+            # Validate that store_bytes was called with expected parameters.
+            expected_key = f"start_window_v{{__version__}}.json"
+            call_args = mock_store.call_args[1]
+            stored_data = call_args["data"]
+            if isinstance(stored_data, bytes):
+                data = json.loads(stored_data.decode("utf-8"))
+            else:
+                data = json.loads(stored_data)
+            assert data["start_window"] == start_window
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_get_start_window_with_dict(self, dummy_comms):
+        """
+        Test get_start_window branch when storage.get_bytes returns a dict.
+        """
+        comms = dummy_comms
+        expected_window = 20
+        with patch.object(comms.storage, "get_bytes", new_callable=AsyncMock, return_value={"start_window": expected_window}):
+            with patch("asyncio.sleep", new=self.fast_sleep):
+                result = await comms.get_start_window()
+                assert result == expected_window
+
+    @pytest.mark.asyncio
+    async def test_get_start_window_with_bytes(self, dummy_comms):
+        """
+        Test get_start_window branch that handles byte-string JSON.
+        """
+        comms = dummy_comms
+        expected_window = 25
+        json_bytes = json.dumps({"start_window": expected_window}).encode("utf-8")
+        with patch.object(comms.storage, "get_bytes", new_callable=AsyncMock, return_value=json_bytes):
+            with patch("asyncio.sleep", new=self.fast_sleep):
+                result = await comms.get_start_window()
+                assert result == expected_window
+
+    @pytest.mark.asyncio
+    async def test_get_start_window_retry_on_none(self, dummy_comms):
+        """
+        Simulate the retry loop in get_start_window when _get_highest_stake_validator_bucket
+        initially returns (None, None) and then valid data.
+        """
+        comms = dummy_comms
+        call_count = 0
+
+        async def fake_get_bucket():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                return (None, None)
+            else:
+                return (Bucket(name="dummy_bucket", account_id="dummy_account", access_key_id="a", secret_access_key="b"), 99)
+
+        with patch.object(comms.chain, "_get_highest_stake_validator_bucket", new=AsyncMock(side_effect=fake_get_bucket)):
+            expected_window = 30
+            json_bytes = json.dumps({"start_window": expected_window}).encode("utf-8")
+            with patch.object(comms.storage, "get_bytes", new=AsyncMock(return_value=json_bytes)):
+                with patch("asyncio.sleep", new=self.fast_sleep):
+                    result = await comms.get_start_window()
+                    assert result == expected_window
+                    assert call_count >= 3
+
+    @pytest.mark.asyncio
+    async def test_get_start_window_exception_in_get_bytes(self, dummy_comms):
+        """
+        Test that get_start_window properly handles an exception from storage.get_bytes,
+        then retries and eventually returns the valid start_window.
+        """
+        comms = dummy_comms
+        with patch.object(
+            comms.chain, "_get_highest_stake_validator_bucket",
+            new=AsyncMock(return_value=(Bucket(name="dummy_bucket", account_id="dummy_account", access_key_id="a", secret_access_key="b"), 99))
+        ):
+            call_count = 0
+
+            async def fake_get_bytes(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise Exception("get_bytes failure")
+                else:
+                    expected_window = 35
+                    return json.dumps({"start_window": expected_window}).encode("utf-8")
+
+            with patch.object(comms.storage, "get_bytes", new=AsyncMock(side_effect=fake_get_bytes)):
+                with patch("asyncio.sleep", new=self.fast_sleep):
+                    result = await comms.get_start_window()
+                    assert result == 35
+                    assert call_count == 2

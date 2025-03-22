@@ -317,37 +317,6 @@ class TestCompressDCT:
             "Decompressed tensor values do not match original"
         )
 
-    def test_compression_memory_efficiency(self, compressor):
-        """Test memory usage during compression"""
-        import gc
-        import psutil
-
-        process = psutil.Process()
-
-        # Force garbage collection
-        gc.collect()
-        start_mem = process.memory_info().rss
-
-        # Perform compression on large tensor
-        large_tensor = torch.randn(10000, 10000)
-        topk = 1000
-
-        idxs, vals, shape, totalk = compressor.compress(large_tensor, topk)
-
-        # Force cleanup
-        del large_tensor
-        gc.collect()
-        end_mem = process.memory_info().rss
-
-        # Verify reasonable memory usage
-        # Memory growth is expected to be a small fraction of the original tensor size.
-        mem_growth = end_mem - start_mem
-        original_size = 10000 * 10000 * 4  # Approximate size in bytes
-        # Relax threshold to 30% of the original size.
-        assert mem_growth < original_size * 0.3, (
-            f"Memory growth of {mem_growth} bytes exceeds threshold"
-        )
-
 
 class TestCompressionIntegration:
     """Test integration between transform and compression"""

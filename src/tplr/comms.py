@@ -254,7 +254,7 @@ class Comms:
     async def gather(
         self,
         my_uid: str,
-        uids: List[int],
+        uids: List[str],
         window: int,
         key: str,
         timeout: int,
@@ -695,3 +695,51 @@ class Comms:
         )
 
         return True
+
+    async def load_aggregation(self, window: int):
+        """
+        Load aggregated gradients for a specified window from the aggregation server.
+
+        Args:
+            window: Window number to load
+
+        Returns:
+            Processed aggregation data or None if failed
+        """
+        try:
+            bucket_config = config.BUCKET_SECRETS["aggregator"]
+            credentials = bucket_config["credentials"]["read"]
+
+            # Create a Bucket object using specified credentials
+            bucket = Bucket(
+                name=bucket_config["name"],
+                account_id=bucket_config["account_id"],
+                access_key_id=credentials["access_key_id"],
+                secret_access_key=credentials["secret_access_key"],
+            )
+
+            filename = f"aggregation-{window}-v{tplr.__version__}.pt"
+
+            tplr.logger.info(f"Attempting to download aggregation file: {filename}")
+
+            # Use shared async S3 logic instead of boto3 manually
+            result = await self.storage.s3_get_object(
+                key=filename,
+                bucket=bucket,
+                timeout=20,
+            )
+
+            if result is None:
+                tplr.logger.warning(f"No aggregation file found for window {window}")
+                return None
+
+            tplr.logger.info(
+                f"Successfully loaded aggregation data for window {window}"
+            )
+            return result
+
+        except Exception as e:
+            tplr.logger.error(
+                f"Error loading aggregation file for window {window}: {e}"
+            )
+            return None

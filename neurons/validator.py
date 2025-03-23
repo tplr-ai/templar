@@ -307,24 +307,19 @@ class Validator:
         (
             success,
             loaded_momentum,
-            loaded_global_step,
+            loaded_checkpoint_current_window,
             loaded_optimizer,
             loaded_scheduler,
         ) = await self.comms.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
-            transformer=self.transformer,
-            compressor=self.compressor,
             current_window=self.current_window,
             device=self.config.device,
-            peers=self.peers,
-            uid=self.uid,
-            totalks=self.totalks,
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_global_step
+            self.global_step = loaded_checkpoint_current_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(

@@ -1370,22 +1370,16 @@ class Comms(ChainManager):
         model,
         optimizer,
         scheduler,
-        transformer,
-        compressor,
         current_window: int,
         device: str,
-        peers: list,
-        uid: str,
-        totalks: dict,
     ) -> tuple[
         bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
     ]:
         """
-        Loads the latest checkpoint and catches up across missed windows.
-        In this version, we parallelize gathers but still apply updates strictly in ascending window order.
-
+        Loads the latest checkpoint. No catchup or step simulation happens here.
         Returns:
-            tuple: (success: bool, momentum: dict, global_step: int, optimizer: Optimizer, scheduler: LRScheduler)
+            tuple: (success: bool, momentum: dict, checkpoint_current_window: int,
+                    optimizer: Optimizer, scheduler: LRScheduler)
         """
         result = await self.get_latest_checkpoint()
         if not result:
@@ -1394,7 +1388,7 @@ class Comms(ChainManager):
 
         checkpoint_data, checkpoint_window = result
         try:
-            # 1) Load checkpoint data
+            # 1) Load model and optimizer state
             model.load_state_dict(
                 {
                     k: v.to(device)
@@ -1420,27 +1414,13 @@ class Comms(ChainManager):
                 )
                 return False, {}, 0, optimizer, scheduler
 
-            # Instead of computing global_step from the entire training period,
-            # compute window_difference as the number of missed windows.
-            window_difference = current_window - checkpoint_current_window
-            global_step = current_window - checkpoint_start_window
-
             tplr.logger.info(
-                f"Checkpoint windows (start={checkpoint_start_window}, checkpoint_current={checkpoint_current_window}), "
-                f"local_current={current_window}, window_diff={window_difference}, global_step={global_step}"
+                f"Checkpoint loaded. start_window={checkpoint_start_window}, "
+                f"checkpoint_current_window={checkpoint_current_window}, "
+                f"local_current_window={current_window}"
             )
 
-            # 2) Sync scheduler with the missing window count (only catch-up missed windows)
-            steps_needed = window_difference
-            if steps_needed > 0:
-                tplr.logger.info(
-                    f"Syncing optimizer/scheduler by stepping {steps_needed} times…"
-                )
-                for _ in range(steps_needed):
-                    optimizer.step()
-                    scheduler.step()
-
-            return True, momentum, global_step, optimizer, scheduler
+            return True, momentum, checkpoint_current_window, optimizer, scheduler
 
         except KeyError as e:
             tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
@@ -1448,7 +1428,6 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.error(f"Failed to load checkpoint: {e}")
             return False, {}, 0, optimizer, scheduler
-        # TODO: Add more robust error handling for large window_difference or gather failures.
 
     # Start Window Operations
 

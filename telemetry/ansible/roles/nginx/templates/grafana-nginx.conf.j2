@@ -11,19 +11,28 @@ server {
     location / {
         return 301 https://$host$request_uri;
     }
-
-    # Let's Encrypt validation
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
 }
 {% endif %}
 
 server {
 {% if nginx_ssl_enabled %}
     listen 443 ssl http2;
+    
+    # SSL certificate configuration
     ssl_certificate /etc/nginx/ssl/nginx_cert.pem;
     ssl_certificate_key /etc/nginx/ssl/nginx_key.pem;
+    
+    # SSL protocol and ciphers
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384';
+    ssl_prefer_server_ciphers on;
+    
+    # HSTS (HTTP Strict Transport Security)
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    
+    # SSL session parameters
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
 {% else %}
     listen 80;
 {% endif %}
@@ -33,6 +42,12 @@ server {
     # Logging configuration
     access_log /var/log/nginx/grafana.access.log;
     error_log /var/log/nginx/grafana.error.log;
+
+    # Security headers
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 
     # Reverse proxy configuration for Grafana
     location / {

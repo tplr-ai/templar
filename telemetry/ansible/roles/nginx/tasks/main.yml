@@ -57,6 +57,26 @@
   notify: restart nginx
   when: default_site.stat.exists
 
+# Remove any remnants of Let's Encrypt and Certbot
+- name: Remove Let's Encrypt and Certbot packages
+  apt:
+    name:
+      - certbot
+      - python3-certbot-nginx
+    state: absent
+    purge: yes
+  when: ansible_os_family == "Debian"
+
+- name: Remove Let's Encrypt directories
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/letsencrypt
+    - /var/lib/letsencrypt
+  when: ansible_os_family == "Debian"
+
+# Create directory for SSL certificates
 - name: Create SSL directory if not exists
   file:
     path: /etc/nginx/ssl
@@ -66,17 +86,104 @@
     mode: 0700
   when: nginx_ssl_enabled
 
-- name: Install SSL certificates (if available)
+# Check if certificates already exist
+- name: Check if SSL certificate and key files already exist
+  stat:
+    path: "{{ item }}"
+  register: ssl_cert_exists
+  loop:
+    - "/etc/nginx/ssl/nginx_cert.pem"
+    - "/etc/nginx/ssl/nginx_key.pem"
+  when: nginx_ssl_enabled
+
+# Use custom certificates if provided
+- name: Check if custom SSL certificates are provided
+  local_action:
+    module: stat
+    path: "{{ item }}"
+  register: custom_ssl_cert_exists
+  loop:
+    - "{{ playbook_dir }}/roles/nginx/files/nginx_cert.pem"
+    - "{{ playbook_dir }}/roles/nginx/files/nginx_key.pem"
+  changed_when: false
+  become: false
+  when: nginx_ssl_enabled and nginx_use_custom_ssl_cert | default(false)
+
+- name: Install custom SSL certificates (if available)
   copy:
     src: "{{ item }}"
-    dest: "/etc/nginx/ssl/{{ item }}"
+    dest: "/etc/nginx/ssl/{{ item | basename }}"
     owner: root
     group: root
     mode: 0600
   loop:
-    - nginx_cert.pem
-    - nginx_key.pem
-  when: nginx_ssl_enabled
+    - "nginx_cert.pem"
+    - "nginx_key.pem"
+  when: >
+    nginx_ssl_enabled and
+    nginx_use_custom_ssl_cert | default(false) and
+    custom_ssl_cert_exists.results[0].stat.exists and
+    custom_ssl_cert_exists.results[1].stat.exists
+  notify: restart nginx
+
+# Generate self-signed certificates if needed
+- name: Generate self-signed SSL certificates
+  block:
+    - name: Generate self-signed certificates with OpenSSL
+      shell: |
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 -sha256 \
+          -keyout /etc/nginx/ssl/nginx_key.pem \
+          -out /etc/nginx/ssl/nginx_cert.pem \
+          -subj "/C={{ nginx_cert_country | default('US') }}/ST={{ nginx_cert_state | default('State') }}/L={{ nginx_cert_locality | default('City') }}/O={{ nginx_cert_organization | default('Templar') }}/CN={{ grafana_domain }}"
+      args:
+        creates: /etc/nginx/ssl/nginx_cert.pem
+      notify: restart nginx
+
+    - name: Set proper permissions on SSL files
+      file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: 0600
+      loop:
+        - /etc/nginx/ssl/nginx_cert.pem
+        - /etc/nginx/ssl/nginx_key.pem
+  when: >
+    nginx_ssl_enabled and
+    (not nginx_use_custom_ssl_cert | default(false)) and
+    (ssl_cert_exists.results[0].stat is not defined or not ssl_cert_exists.results[0].stat.exists or
+     ssl_cert_exists.results[1].stat is not defined or not ssl_cert_exists.results[1].stat.exists)
+
+# Copy self-signed certificates back to local control node for version control
+- name: Fetch generated SSL certificates back to control node
+  fetch:
+    src: "{{ item }}"
+    dest: "{{ playbook_dir }}/roles/nginx/files/{{ item | basename }}"
+    flat: yes
+  loop:
+    - /etc/nginx/ssl/nginx_cert.pem
+    - /etc/nginx/ssl/nginx_key.pem
+  when: nginx_ssl_enabled and not (nginx_use_custom_ssl_cert | default(false))
+  changed_when: false
+  ignore_errors: true
+
+# Certificate rotation via cron job
+- name: Create certificate rotation script
+  template:
+    src: rotate_ssl_cert.sh.j2
+    dest: /usr/local/bin/rotate_ssl_cert.sh
+    owner: root
+    group: root
+    mode: 0700
+  when: nginx_ssl_enabled and nginx_auto_rotate_cert | default(true)
+
+- name: Create cron job for yearly certificate rotation
+  cron:
+    name: "Rotate self-signed SSL certificates annually"
+    special_time: yearly
+    job: "/usr/local/bin/rotate_ssl_cert.sh"
+    user: root
+  when: nginx_ssl_enabled and nginx_auto_rotate_cert | default(true)
 
 - name: Ensure UFW is installed
   apt:

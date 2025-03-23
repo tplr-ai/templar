@@ -77,6 +77,14 @@ nginx_proxy_read_timeout: 60
 nginx_client_max_body_size: "1m"
 nginx_proxy_buffers: "32 4k"
 
+# SSL Certificate settings
+nginx_use_custom_ssl_cert: false    # Set to true to use custom certificates
+nginx_auto_rotate_cert: true        # Set to true to enable automatic certificate rotation
+nginx_cert_country: "US"            # Country code for self-signed certificate
+nginx_cert_state: "State"           # State for self-signed certificate 
+nginx_cert_locality: "City"         # Locality for self-signed certificate
+nginx_cert_organization: "Templar"  # Organization name for self-signed certificate
+
 # Grafana plugins settings
 templar_version_api_url: "http://18.217.218.11/api/templar/version"
 grafana_plugins_to_allow:

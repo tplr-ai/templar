@@ -5,10 +5,49 @@ This role configures NGINX as a reverse proxy for Grafana and other services in 
 ## Features
 
 1. **Reverse Proxy for Grafana**: Routes web traffic to the Grafana instance
-2. **SSL Support**: Optional HTTPS configuration with SSL certificates
+2. **SSL Support**: HTTPS configuration with self-signed or custom SSL certificates
 3. **Kiosk Mode**: Automatic redirection to dashboard kiosk mode for clean UI
 4. **Firewall Configuration**: Sets up UFW rules for secure access
 5. **Version API**: Provides endpoints to retrieve the current Templar version
+6. **Certificate Management**: Automatic generation and rotation of self-signed certificates
+
+## SSL Configuration
+
+### Self-Signed Certificates
+
+By default, the role generates self-signed SSL certificates with the following properties:
+- 2048-bit RSA keys with SHA-256 hashing
+- 365-day validity period
+- Stored in `/etc/nginx/ssl/` on the server
+- Backed up to `roles/nginx/files/` locally
+
+### Custom Certificates
+
+To use custom certificates instead of self-signed ones:
+
+1. Place your certificate files in the following locations:
+   - `roles/nginx/files/nginx_cert.pem` (certificate)
+   - `roles/nginx/files/nginx_key.pem` (private key)
+
+2. Set `nginx_use_custom_ssl_cert: true` in your variables
+
+### Certificate Rotation
+
+A cron job is automatically configured to rotate certificates annually. The rotation process:
+
+1. Backs up existing certificates
+2. Generates new certificates with the same settings
+3. Reloads Nginx to apply changes
+
+You can disable this by setting `nginx_auto_rotate_cert: false`.
+
+## Security Features
+
+- HTTPS redirection from HTTP
+- HTTP Strict Transport Security (HSTS)
+- Secure TLS protocols (TLSv1.2, TLSv1.3)
+- Strong cipher suite configuration
+- Security headers for XSS protection and clickjacking prevention
 
 ## Version API
 

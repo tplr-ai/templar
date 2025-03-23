@@ -32,7 +32,13 @@ ENV WALLET_HOTKEY=""
 ENV CUDA_DEVICE="cuda:0"
 ENV NETWORK="test"
 ENV DEBUG="false"
-ENV NODE_TYPE="" 
+ENV NODE_TYPE=""
+ENV ENABLE_LOKI="false"
+ENV INFLUXDB_HOST=""
+ENV INFLUXDB_PORT="8086"
+ENV INFLUXDB_DATABASE="tplr"
+ENV INFLUXDB_ORG="tplr"
+ENV INFLUXDB_TOKEN=""
 
 # Make entrypoint script executable
 RUN chmod +x /app/scripts/entrypoint.sh

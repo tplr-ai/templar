@@ -107,7 +107,13 @@ ansible/
 |----------|-------------|---------|
 | `grafana_auth_anonymous_enabled` | Enable anonymous access | true |
 | `grafana_auth_anonymous_org_role` | Role for anonymous users | Viewer |
-| `nginx_ssl_enabled` | Enable SSL | false |
+| `nginx_ssl_enabled` | Enable SSL | true |
+| `nginx_use_custom_ssl_cert` | Use custom SSL certificates | false |
+| `nginx_auto_rotate_cert` | Enable certificate rotation | true |
+| `nginx_cert_country` | Certificate country code | US |
+| `nginx_cert_state` | Certificate state/province | State |
+| `nginx_cert_locality` | Certificate locality/city | City |
+| `nginx_cert_organization` | Certificate organization | Templar |
 
 ## Managing Dashboards
 
@@ -164,6 +170,21 @@ If you encounter errors with Grafana:
    
    # Test direct Grafana access
    curl -v http://localhost:3000/api/health
+   ```
+   
+   For SSL-related issues:
+   ```bash
+   # Check certificate validity
+   openssl x509 -in /etc/nginx/ssl/nginx_cert.pem -text -noout
+   
+   # Test SSL connection
+   openssl s_client -connect localhost:443
+   
+   # Check certificate permissions
+   ls -la /etc/nginx/ssl/
+   
+   # Verify SSL configuration in Nginx
+   grep -r "ssl" /etc/nginx/sites-enabled/
    ```
 
 4. **Basic Recovery Steps**:

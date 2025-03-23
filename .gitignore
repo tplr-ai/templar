@@ -76,4 +76,9 @@ model_state.pt
 influxdb_data/
 data/
 chain-specs/
-.env.backup
+.env.backuptelemetry/ansible/roles/nginx/files/nginx_cert.pem
+telemetry/ansible/roles/nginx/files/nginx_key.pem
+
+# SSL Certificates
+*.pem
+

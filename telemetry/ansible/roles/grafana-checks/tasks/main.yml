@@ -193,29 +193,48 @@
     - (dashboards is defined and dashboards.status is defined and (dashboards.status != 200 or (dashboards.json is defined and (dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length == 0))))
   when: dashboards.status is defined and dashboards.json is defined
 
-- name: Verify NGINX proxy to Grafana
+- name: Verify NGINX proxy to Grafana (HTTP)
   uri:
     url: "http://localhost:80/api/health"
     method: GET
-    status_code: 200
+    status_code: [200, 301, 302]
     return_content: yes
-  register: nginx_proxy
+    follow_redirects: no
+  register: nginx_proxy_http
   failed_when: false
 
-- name: Check NGINX proxy status
+- name: Verify NGINX proxy to Grafana (HTTPS)
+  uri:
+    url: "https://localhost/api/health"
+    method: GET
+    status_code: 200
+    return_content: yes
+    validate_certs: no
+  register: nginx_proxy_https
+  failed_when: false
+
+- name: Check NGINX HTTP proxy status
   debug:
-    msg: "{{ 'NGINX proxy to Grafana is working ✅' if nginx_proxy.status == 200 else 'WARNING: NGINX proxy to Grafana is not working ❌' }}"
+    msg: "{{ 'NGINX HTTP to HTTPS redirect is working ✅' if nginx_proxy_http.status in [301, 302] else 'WARNING: NGINX HTTP to HTTPS redirect is not working ❌' }}"
   failed_when:
     - fail_on_verification_error | bool
-    - nginx_proxy.status != 200
+    - nginx_proxy_http.status not in [200, 301, 302]
 
-- name: Check anonymous access to dashboard via NGINX
+- name: Check NGINX HTTPS proxy status
+  debug:
+    msg: "{{ 'NGINX HTTPS proxy to Grafana is working ✅' if nginx_proxy_https.status == 200 else 'WARNING: NGINX HTTPS proxy to Grafana is not working ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - nginx_proxy_https.status != 200
+
+- name: Check anonymous access to dashboard via NGINX (HTTPS)
   uri:
-    url: "http://localhost:80/d/{{ dashboards.json[0].uid | default('templar_metrics') }}/templar-metrics"
+    url: "https://localhost/d/{{ dashboards.json[0].uid | default('templar_metrics') }}/templar-metrics?kiosk=tv&orgId=1"
     method: GET
     status_code: [200, 302]
     return_content: yes
     follow_redirects: all
+    validate_certs: no
   register: dashboard_anonymous_access
   failed_when: false
   when: dashboards.status is defined and dashboards.json is defined and dashboards.json | length > 0
@@ -225,13 +244,14 @@
     dashboard_access_status: "{{ 'Anonymous dashboard access is working ✅' if dashboard_anonymous_access.status in [200, 302] and not '<a href=\"/login\">' in dashboard_anonymous_access.content else 'WARNING: Anonymous dashboard access is not working ❌' }}"
   when: dashboard_anonymous_access is defined and dashboard_anonymous_access.status is defined
 
-- name: Check anonymous access to default dashboard
+- name: Check anonymous access to default dashboard (HTTPS)
   uri:
-    url: "http://localhost:80/"
+    url: "https://localhost/"
     method: GET
     status_code: [200, 302]
     return_content: yes
     follow_redirects: all
+    validate_certs: no
   register: default_anonymous_access
   failed_when: false
 
@@ -256,12 +276,13 @@
     - default_access_status is defined and 'WARNING' in default_access_status
   when: default_access_status is defined
 
-- name: Check version API response
+- name: Check version API response (HTTPS)
   uri:
-    url: "http://localhost/api/templar/version"
+    url: "https://localhost/api/templar/version"
     method: GET
     status_code: 200
     return_content: yes
+    validate_certs: no
   register: version_api_response
   failed_when: false
 
@@ -358,9 +379,31 @@
   set_fact:
     dashboard_availability_ok: "{{ dashboards.status == 200 and dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length > 0 if dashboards.status is defined and dashboards.json is defined else false }}"
 
+- name: Check SSL certificate exists and is valid
+  stat:
+    path: /etc/nginx/ssl/nginx_cert.pem
+  register: nginx_ssl_cert
+
+- name: Verify SSL certificate validity
+  shell: "openssl x509 -in /etc/nginx/ssl/nginx_cert.pem -noout -checkend 86400"
+  register: cert_valid
+  failed_when: false
+  when: nginx_ssl_cert.stat.exists
+
+- name: Display SSL certificate status
+  debug:
+    msg: "{{ 'SSL certificate is valid ✅' if nginx_ssl_cert.stat.exists and cert_valid.rc == 0 else 'WARNING: SSL certificate is missing or invalid ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - not nginx_ssl_cert.stat.exists or cert_valid.rc != 0
+  when: nginx_ssl_cert.stat.exists
+
 - name: Calculate NGINX Proxy status
   set_fact:
-    nginx_proxy_ok: "{{ nginx_proxy.status == 200 if nginx_proxy.status is defined else false }}"
+    nginx_proxy_ok: "{{ 
+      (nginx_proxy_http.status in [301, 302] if nginx_proxy_http.status is defined else false) and 
+      (nginx_proxy_https.status == 200 if nginx_proxy_https.status is defined else false) 
+    }}"
 
 - name: Calculate Anonymous Dashboard Access status
   set_fact:
@@ -373,6 +416,10 @@
 - name: Calculate Version API status
   set_fact:
     version_api_ok: "{{ (version_api_response.status == 200) and (version_api_response.json is defined) if version_api_response is defined and version_api_response.status is defined else false }}"
+
+- name: Calculate SSL Certificate status
+  set_fact:
+    ssl_cert_ok: "{{ nginx_ssl_cert.stat.exists and cert_valid.rc == 0 if nginx_ssl_cert.stat.exists and cert_valid is defined else false }}"
 
 - name: Calculate overall verification result
   set_fact:
@@ -392,7 +439,8 @@
         nginx_proxy_ok and
         dashboard_access_ok and
         default_access_ok and
-        version_api_ok
+        version_api_ok and
+        ssl_cert_ok
       }}
 
 - name: Display overall verification result
@@ -412,7 +460,8 @@
       {{ '✅' if influxdb_datasource_ok else '❌' }} InfluxDB Datasource
       {{ '✅' if json_api_datasource_ok else '❌' }} JSON API Datasource
       {{ '✅' if dashboard_availability_ok else '❌' }} Dashboard Availability
-      {{ '✅' if nginx_proxy_ok else '❌' }} NGINX Proxy
+      {{ '✅' if nginx_proxy_ok else '❌' }} NGINX Proxy (HTTP/HTTPS)
+      {{ '✅' if ssl_cert_ok else '❌' }} SSL Certificate
       {{ '✅' if dashboard_access_ok else '❌' }} Anonymous Dashboard Access
       {{ '✅' if default_access_ok else '❌' }} Default Dashboard Access
       {{ '✅' if version_api_ok else '❌' }} Version API

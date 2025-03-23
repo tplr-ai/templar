@@ -313,7 +313,7 @@ class Validator:
         (
             success,
             loaded_momentum,
-            loaded_global_step,
+            loaded_checkpoint_window,
             loaded_optimizer,
             loaded_scheduler,
         ) = await self.comms.load_checkpoint(
@@ -322,9 +322,16 @@ class Validator:
             scheduler=self.scheduler,
             device=self.config.device,
         )
-        if success:
+        if (
+            success
+            and loaded_momentum is not None
+            and loaded_momentum is not None
+            and loaded_optimizer is not None
+            and loaded_scheduler is not None
+            and loaded_checkpoint_window is not None
+        ):
             self.momentum = loaded_momentum
-            self.global_step = loaded_global_step
+            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(

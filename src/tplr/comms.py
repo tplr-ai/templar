@@ -516,8 +516,17 @@ class Comms:
         device: str,
     ):
         """Load the latest available checkpoint with matching version and from highest staked validator"""
-        bucket = self.chain.get_own_bucket("gradients", "read")
-        if bucket is None:
+        # Get the highest staked validator UID.
+        (
+            highest_validator_bucket,
+            highest_validator_uid,
+        ) = await self.chain._get_highest_stake_validator_bucket(
+            refresh_commitments=True
+        )
+        if highest_validator_uid is None:
+            tplr.logger.warning("Highest staked validator UID not found.")
+            return False, None, None, None, None
+        if highest_validator_bucket is None:
             tplr.logger.warning("No bucket available for loading checkpoint")
             return False, None, None, None, None
 
@@ -535,15 +544,15 @@ class Comms:
 
             s3_client = boto3.client(
                 "s3",
-                endpoint_url=f"https://{bucket.account_id}.r2.cloudflarestorage.com",
-                aws_access_key_id=bucket.access_key_id,
-                aws_secret_access_key=bucket.secret_access_key,
+                endpoint_url=f"https://{highest_validator_bucket.account_id}.r2.cloudflarestorage.com",
+                aws_access_key_id=highest_validator_bucket.access_key_id,
+                aws_secret_access_key=highest_validator_bucket.secret_access_key,
                 config=s3_config,
             )
 
             # List objects with checkpoint prefix
             response = s3_client.list_objects_v2(
-                Bucket=bucket.name, Prefix="checkpoint-"
+                Bucket=highest_validator_bucket.name, Prefix="checkpoint-"
             )
 
             current_version = __version__
@@ -575,17 +584,6 @@ class Comms:
                         tplr.logger.debug(
                             f"Skipping checkpoint with non-matching version: {key} (version {checkpoint_version})"
                         )
-                        continue
-
-                    # Get the highest staked validator UID.
-                    (
-                        _,
-                        highest_validator_uid,
-                    ) = await self.chain._get_highest_stake_validator_bucket(
-                        refresh_commitments=True
-                    )
-                    if highest_validator_uid is None:
-                        tplr.logger.warning("Highest staked validator UID not found.")
                         continue
 
                     # Filter checkpoints by highest staked validator UID
@@ -620,7 +618,10 @@ class Comms:
                 f"Downloading checkpoint {latest_checkpoint} to {temp_path}"
             )
             result = await self.storage.s3_get_object(
-                key=latest_checkpoint, bucket=bucket, file_path=temp_path, timeout=60
+                key=latest_checkpoint,
+                bucket=highest_validator_bucket,
+                file_path=temp_path,
+                timeout=60,
             )
 
             if not result:
@@ -643,13 +644,15 @@ class Comms:
                 optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
                 scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
                 momentum = checkpoint["momentum"]
-                global_step = checkpoint["global_step"]
+                current_checkpoint_window = checkpoint["current_window"]
 
-                tplr.logger.info(f"Loaded checkpoint with global_step={global_step}")
+                tplr.logger.info(
+                    f"Loaded checkpoint from window={current_checkpoint_window}"
+                )
 
                 os.remove(temp_path)
 
-                return True, momentum, global_step, optimizer, scheduler
+                return True, momentum, current_checkpoint_window, optimizer, scheduler
 
             except Exception as e:
                 tplr.logger.error(f"Error loading checkpoint data: {e}")

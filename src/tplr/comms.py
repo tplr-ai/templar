@@ -743,3 +743,53 @@ class Comms:
                 f"Error loading aggregation file for window {window}: {e}"
             )
             return None
+
+    async def get_debug_dict(self, window: int):
+        """
+        Get debug dictionary from validator bucket for a specific window.
+
+        Args:
+            window: Specific window to retrieve debug data for
+
+        Returns:
+            Debug dictionary or None if not found
+        """
+        try:
+            (
+                validator_bucket,
+                validator_uid,
+            ) = await self.chain._get_highest_stake_validator_bucket()
+            if not validator_bucket or validator_uid is None:
+                tplr.logger.warning(
+                    "Unable to get validator bucket - cannot proceed with catchup"
+                )
+                return
+
+            key = f"debug-{window}-{validator_uid}-v{tplr.__version__}"
+            tplr.logger.info(
+                f"Attempting to retrieve debug dictionary for window {window} from validator {validator_uid}"
+            )
+
+            result = await self.storage.s3_get_object(
+                key=key,
+                bucket=validator_bucket,
+                timeout=20,
+            )
+
+            if result is None:
+                tplr.logger.warning(f"No debug dictionary found for window {window}")
+                return None
+
+            tplr.logger.info(
+                f"Successfully retrieved debug dictionary for window {window}"
+            )
+            return result
+
+        except Exception as e:
+            tplr.logger.error(
+                f"Error getting debug dictionary for window {window}: {e}"
+            )
+            import traceback
+
+            tplr.logger.error(traceback.format_exc())
+            return None

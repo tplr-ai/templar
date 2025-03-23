@@ -41,6 +41,126 @@ class TestPeerSelection:
         # Verify peer list hasn't changed
         assert np.array_equal(mock_validator.comms.peers, initial_peers)
 
+    class TestSelectNextPeers:
+        """Tests for select_next_peers method."""
+
+        def _setup_validator_state(
+            self,
+            mock_validator: Validator,
+            num_non_zero_weights: int,
+            peers_to_replace: int = 2,
+            num_initial_peers: int = hparams.minimum_peers,
+        ):
+            """Helper to setup common validator test state.
+
+            Args:
+                mock_validator: The mock validator instance
+                weight_indices: Tuple of (start, end) indices for non-zero weights, or single index
+                peers_to_replace: Number of peers to replace
+            """
+            mock_validator.comms.peers = np.arange(num_initial_peers)
+            mock_validator.hparams.peers_to_replace = peers_to_replace
+
+            mock_validator.weights = torch.zeros(250)
+            mock_validator.weights[:num_non_zero_weights] = torch.rand(
+                num_non_zero_weights
+            )
+            mock_validator.weights[:num_non_zero_weights] /= mock_validator.weights[
+                :num_non_zero_weights
+            ].sum()
+
+        @pytest.mark.parametrize(
+            "num_non_zero_weights",
+            [
+                4 + hparams.max_topk_peers,  # Default case
+                10 + hparams.max_topk_peers,  # More candidates
+                250,  # Many candidates
+            ],
+        )
+        @pytest.mark.parametrize(
+            "peers_to_replace",
+            [
+                1,  # Minimum replacement
+                2,  # Default case
+                4,  # Maximum replacement
+            ],
+        )
+        def test_successful_peer_update(
+            self, mock_validator, num_non_zero_weights, peers_to_replace
+        ):
+            """Test successful peer update with sufficient candidates."""
+            # Setup initial peers and weights
+            self._setup_validator_state(
+                mock_validator,
+                num_non_zero_weights=num_non_zero_weights,
+                peers_to_replace=peers_to_replace,
+            )
+            initial_peers = mock_validator.comms.peers
+
+            # Call select_next_peers
+            selected_peers = mock_validator.select_next_peers()
+
+            TestPeerSelection.assert_basic_requirements(
+                mock_validator=mock_validator,
+                selected_peers=selected_peers,
+                initial_peers=initial_peers,
+            )
+
+            # Verify some peers were replaced
+            assert set(selected_peers) != {0, 1, 2, 3, 4}
+
+            # Verify new peers came from candidates with non-zero weights
+            new_peers = set(selected_peers) - {0, 1, 2, 3, 4}
+            assert all(mock_validator.weights[peer] > 0 for peer in new_peers)
+
+        def test_maintains_peer_list_size(self, mock_validator):
+            """Test peer list size remains constant after update."""
+            # Setup
+            self._setup_validator_state(
+                mock_validator,
+                num_non_zero_weights=250,
+                num_initial_peers=hparams.max_topk_peers,
+            )
+            initial_peers = mock_validator.comms.peers
+
+            # Call select_next_peers
+            selected_peers = mock_validator.select_next_peers()
+
+            TestPeerSelection.assert_basic_requirements(
+                mock_validator=mock_validator,
+                selected_peers=selected_peers,
+                initial_peers=initial_peers,
+            )
+
+            # Verify size hasn't changed
+            assert len(selected_peers) == len(initial_peers)
+
+        @pytest.mark.parametrize("seed", [42, 123, 456])
+        def test_random_selection(self, mock_validator, seed):
+            """Test that peer selection has random behavior."""
+            # Setup
+            self._setup_validator_state(mock_validator, num_non_zero_weights=10)
+
+            # Do multiple updates and collect results
+            results = []
+            for idx in range(3):
+                np.random.seed(idx)
+
+                initial_peers = mock_validator.comms.peers
+
+                # Call select_next_peers
+                selected_peers = mock_validator.select_next_peers()
+
+                TestPeerSelection.assert_basic_requirements(
+                    mock_validator=mock_validator,
+                    selected_peers=selected_peers,
+                    initial_peers=initial_peers,
+                )
+                results.append(selected_peers)
+
+            # Verify we got different peer lists
+            assert not all(np.array_equal(r, results[0]) for r in results[1:])
+
     class TestSelectInitialPeers:
         """Tests for select_initial_peers method."""
 

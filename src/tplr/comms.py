@@ -909,7 +909,7 @@ class Comms(ChainManager):
 
     async def gather(
         self,
-        my_uid: str | None,
+        my_uid: int | None,
         uids: List[int],
         window: int,
         key: str,

@@ -36,6 +36,7 @@ The following endpoints are available:
 ### Dashboard Integration
 
 The Templar version appears at the top of the dashboard in a text panel that uses JavaScript to:
+
 1. Fetch the version from the API endpoint
 2. Update the HTML display with the current version
 3. Refresh periodically to ensure the version is current

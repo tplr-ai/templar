@@ -4,7 +4,7 @@ This Ansible role installs and configures custom Grafana plugins for the Templar
 
 ## Plugins Installed
 
-- **templar-version-datasource**: A custom plugin that fetches and displays Templar version information from the API endpoint.
+- **marcusolsson-json-datasource**: A plugin that fetches and displays Templar version information from the API endpoint.
 
 ## Requirements
 
@@ -16,7 +16,7 @@ This Ansible role installs and configures custom Grafana plugins for the Templar
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `templar_version_api_url` | URL for the Templar version API | `http://18.217.218.11/api/templar/version` |
-| `grafana_plugins_to_allow` | List of unsigned plugins to allow | `["templar-version-datasource"]` |
+| `grafana_plugins_to_allow` | List of unsigned plugins to allow | `["marcusolsson-json-datasource"]` |
 
 ## How It Works
 

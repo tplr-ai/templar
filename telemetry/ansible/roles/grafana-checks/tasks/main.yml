@@ -87,31 +87,31 @@
     - fail_on_verification_error | bool
     - not dashboard_file.stat.exists
 
-- name: Verify plugins directory structure
+- name: Verify JSON API plugin directory structure
   stat:
-    path: "/var/lib/grafana/plugins/templar-version-datasource"
-  register: plugin_dir
+    path: "/var/lib/grafana/plugins/marcusolsson-json-datasource"
+  register: json_plugin_dir
 
-- name: Report plugin directory status
+- name: Report JSON API plugin directory status
   debug:
-    msg: "{{ 'Plugin directory exists ✅' if plugin_dir.stat.exists else 'WARNING: Plugin directory not found ❌' }}"
+    msg: "{{ 'JSON API plugin directory exists ✅' if json_plugin_dir.stat.exists else 'WARNING: JSON API plugin directory not found ❌' }}"
   failed_when:
     - fail_on_verification_error | bool
-    - not plugin_dir.stat.exists
+    - not json_plugin_dir.stat.exists
 
-- name: Check plugin files
-  command: "ls -la /var/lib/grafana/plugins/templar-version-datasource"
-  register: plugin_files
+- name: Check JSON API plugin files
+  command: "ls -la /var/lib/grafana/plugins/marcusolsson-json-datasource"
+  register: json_plugin_files
   changed_when: false
   failed_when: false
 
-- name: Verify plugin content
+- name: Verify JSON API plugin content
   debug:
-    msg: "Plugin directory has content ✅"
+    msg: "JSON API plugin directory has content ✅"
   failed_when:
     - fail_on_verification_error | bool
-    - plugin_files.rc != 0 or plugin_files.stdout == ""
-  when: plugin_dir.stat.exists
+    - json_plugin_files.rc != 0 or json_plugin_files.stdout == ""
+  when: json_plugin_dir.stat.exists
 
 - name: Verify dashboard provider configuration
   command: "cat /etc/grafana/provisioning/dashboards/default.yml"
@@ -131,13 +131,6 @@
   register: plugins_config
   changed_when: false
   failed_when: false
-
-- name: Check plugins configuration content
-  debug:
-    msg: "{{ 'Plugins configuration is valid ✅' if 'allow_loading_unsigned_plugins' in plugins_config.stdout and 'templar-version-datasource' in plugins_config.stdout else 'WARNING: Plugins configuration issue ❌' }}"
-  failed_when:
-    - fail_on_verification_error | bool
-    - (plugins_config.stdout is defined and ('allow_loading_unsigned_plugins' not in plugins_config.stdout or 'templar-version-datasource' not in plugins_config.stdout))
 
 - name: Verify anonymous access configuration in grafana.ini
   shell: "grep -A5 '\\[auth.anonymous\\]' /etc/grafana/grafana.ini || echo 'anonymous access section not found'"
@@ -172,12 +165,12 @@
     - (datasources is defined and datasources.status is defined and (datasources.status != 200 or (datasources.json is defined and (datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length == 0))))
   when: datasources.status is defined and datasources.json is defined
 
-- name: Check Templar Version datasource
+- name: Check JSON API datasource
   debug:
-    msg: "{{ 'Templar Version datasource is configured ✅' if datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length > 0 else 'WARNING: Templar Version datasource not found ❌' }}"
+    msg: "{{ 'JSON API datasource is configured ✅' if datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'marcusolsson-json-datasource') | list | length > 0 else 'WARNING: JSON API datasource not found ❌' }}"
   failed_when:
     - fail_on_verification_error | bool
-    - (datasources is defined and datasources.status is defined and (datasources.status != 200 or (datasources.json is defined and (datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length == 0))))
+    - (datasources is defined and datasources.status is defined and (datasources.status != 200 or (datasources.json is defined and (datasources.json | selectattr('type', 'equalto', 'marcusolsson-json-datasource') | list | length == 0))))
   when: datasources.status is defined and datasources.json is defined
 
 - name: Verify dashboard access via Grafana API
@@ -298,18 +291,16 @@
         status: "{{ health_result_ok }}"
       - name: "Dashboard File"
         status: "{{ dashboard_file_ok }}"
-      - name: "Plugin Directory"
-        status: "{{ plugin_dir_ok }}"
+      - name: "JSON API Plugin Directory"
+        status: "{{ json_plugin_dir_ok }}"
       - name: "Dashboard Provider Config"
         status: "{{ dashboard_provider_config_ok }}"
-      - name: "Plugins Configuration"
-        status: "{{ plugins_config_ok }}"
       - name: "Anonymous Access Config"
         status: "{{ anonymous_config_ok }}"
       - name: "InfluxDB Datasource"
         status: "{{ influxdb_datasource_ok }}"
-      - name: "Templar Version Datasource"
-        status: "{{ templar_version_datasource_ok }}"
+      - name: "JSON API Datasource"
+        status: "{{ json_api_datasource_ok }}"
       - name: "Dashboard Availability"
         status: "{{ dashboard_availability_ok }}"
       - name: "NGINX Proxy"
@@ -343,17 +334,13 @@
   set_fact:
     dashboard_file_ok: "{{ dashboard_file.stat.exists }}"
 
-- name: Calculate Plugin Directory status
+- name: Calculate JSON API Plugin Directory status
   set_fact:
-    plugin_dir_ok: "{{ plugin_dir.stat.exists }}"
+    json_plugin_dir_ok: "{{ json_plugin_dir.stat.exists }}"
 
 - name: Calculate Dashboard Provider Config status
   set_fact:
     dashboard_provider_config_ok: "{{ dashboard_provider_config.rc == 0 and 'path: /etc/grafana/dashboards' in dashboard_provider_config.stdout }}"
-
-- name: Calculate Plugins Configuration status
-  set_fact:
-    plugins_config_ok: "{{ 'allow_loading_unsigned_plugins' in plugins_config.stdout and 'templar-version-datasource' in plugins_config.stdout }}"
 
 - name: Calculate Anonymous Access Config status
   set_fact:
@@ -363,9 +350,9 @@
   set_fact:
     influxdb_datasource_ok: "{{ datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length > 0 if datasources.status is defined and datasources.json is defined else false }}"
 
-- name: Calculate Templar Version Datasource status
+- name: Calculate JSON API Datasource status
   set_fact:
-    templar_version_datasource_ok: "{{ datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'templar-version-datasource') | list | length > 0 if datasources.status is defined and datasources.json is defined else false }}"
+    json_api_datasource_ok: "{{ datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'marcusolsson-json-datasource') | list | length > 0 if datasources.status is defined and datasources.json is defined else false }}"
 
 - name: Calculate Dashboard Availability status
   set_fact:
@@ -396,12 +383,11 @@
         version_api_service_ok and
         health_result_ok and
         dashboard_file_ok and
-        plugin_dir_ok and
+        json_plugin_dir_ok and
         dashboard_provider_config_ok and
-        plugins_config_ok and
         anonymous_config_ok and
         influxdb_datasource_ok and
-        templar_version_datasource_ok and
+        json_api_datasource_ok and
         dashboard_availability_ok and
         nginx_proxy_ok and
         dashboard_access_ok and
@@ -420,12 +406,11 @@
       {{ '✅' if version_api_service_ok else '❌' }} Version API Service
       {{ '✅' if health_result_ok else '❌' }} Grafana API Health
       {{ '✅' if dashboard_file_ok else '❌' }} Dashboard File
-      {{ '✅' if plugin_dir_ok else '❌' }} Plugin Directory
+      {{ '✅' if json_plugin_dir_ok else '❌' }} JSON API Plugin Directory
       {{ '✅' if dashboard_provider_config_ok else '❌' }} Dashboard Provider Config
-      {{ '✅' if plugins_config_ok else '❌' }} Plugins Configuration
       {{ '✅' if anonymous_config_ok else '❌' }} Anonymous Access Config
       {{ '✅' if influxdb_datasource_ok else '❌' }} InfluxDB Datasource
-      {{ '✅' if templar_version_datasource_ok else '❌' }} Templar Version Datasource
+      {{ '✅' if json_api_datasource_ok else '❌' }} JSON API Datasource
       {{ '✅' if dashboard_availability_ok else '❌' }} Dashboard Availability
       {{ '✅' if nginx_proxy_ok else '❌' }} NGINX Proxy
       {{ '✅' if dashboard_access_ok else '❌' }} Anonymous Dashboard Access

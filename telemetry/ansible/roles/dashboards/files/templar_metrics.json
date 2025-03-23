@@ -24,7 +24,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 8,
+  "id": 3,
   "links": [
     {
       "asDropdown": false,
@@ -74,29 +74,17 @@
         "y": 0
       },
       "id": 1,
-      "datasource": {
-        "type": "templar-version-datasource",
-        "uid": "ceglodpleraiod"
-      },
       "options": {
         "code": {
           "language": "plaintext",
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "# Templar Version: ${version}\n\n<p style=\\\"text-align: center; font-size: 1em; color: #aaa;\\\">Version data is automatically fetched from the version API</p>\n",
+        "content": "# Templar Version: ${templar_version}\n\n<p style=\\\"text-align: center; font-size: 1em; color: #aaa;\\\">Version data is automatically fetched from the version API</p>\n",
         "mode": "markdown"
       },
-      "targets": [
-        {
-          "datasource": {
-            "type": "templar-version-datasource",
-            "uid": "ceglodpleraiod"
-          },
-          "refId": "A"
-        }
-      ],
       "pluginVersion": "10.4.0",
+      "targets": [ ],
       "transparent": true,
       "type": "text"
     },
@@ -2190,6 +2178,40 @@
         "skipUrlSync": false,
         "sort": 0,
         "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "0.2.49",
+          "value": "0.2.49"
+        },
+        "datasource": {
+          "type": "marcusolsson-json-datasource",
+          "uid": "templar-version-json"
+        },
+        "definition": "$.version",
+        "hide": 1,
+        "includeAll": false,
+        "label": "templar project version",
+        "multi": false,
+        "name": "templar_version",
+        "options": [],
+        "query": {
+          "cacheDurationSeconds": 30,
+          "fields": [
+            {
+              "jsonPath": "$.version"
+            }
+          ],
+          "method": "GET",
+          "queryParams": "",
+          "urlPath": ""
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "type": "query"
       }
     ]
   },
@@ -2211,6 +2233,6 @@
   "timezone": "",
   "title": "Templar Metrics",
   "uid": "templar_metrics",
-  "version": 8,
+  "version": 13,
   "weekStart": ""
 }

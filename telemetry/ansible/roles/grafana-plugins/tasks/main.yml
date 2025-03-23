@@ -9,31 +9,12 @@
     group: "{{ grafana_system_group }}"
     mode: 0755
 
-- name: Create templar-version-plugin directory
-  file:
-    path: "{{ grafana_plugins_dir }}/templar-version-datasource"
-    state: directory
-    owner: "{{ grafana_system_user }}"
-    group: "{{ grafana_system_group }}"
-    mode: 0755
-
-- name: Copy templar-version-plugin files to server
-  copy:
-    src: "{{ playbook_dir }}/../grafana/templar-version-plugin/dist/"
-    dest: "{{ grafana_plugins_dir }}/templar-version-datasource/"
-    owner: "{{ grafana_system_user }}"
-    group: "{{ grafana_system_group }}"
-    mode: 0755
+- name: Install JSON API datasource plugin
+  command: "grafana-cli plugins install marcusolsson-json-datasource"
+  register: json_plugin_install
+  changed_when: "'installed' in json_plugin_install.stdout"
+  failed_when: json_plugin_install.rc != 0 and 'already installed' not in json_plugin_install.stderr
   become: true
-
-- name: Fix ownership of plugin files
-  file:
-    path: "{{ grafana_plugins_dir }}/templar-version-datasource"
-    state: directory
-    owner: "{{ grafana_system_user }}"
-    group: "{{ grafana_system_group }}"
-    recurse: yes
-    mode: 0755
 
 - name: Ensure plugins section exists in grafana.ini
   lineinfile:
@@ -68,55 +49,31 @@
   delay: 1
   when: plugins_config is changed
 
-- name: Create datasource for Templar Version API
-  uri:
-    url: "http://localhost:{{ grafana_http_port }}/api/datasources"
-    method: POST
-    body_format: json
-    body:
-      name: "Templar Version"
-      type: "templar-version-datasource"
-      uid: "templar-version"
-      access: "proxy"
-      isDefault: false
-      jsonData:
-        url: "{{ templar_version_api_url }}"
-    headers:
-      Content-Type: "application/json"
-      Authorization: "Basic {{ (grafana_security_admin_user + ':' + grafana_security_admin_password) | b64encode }}"
-    status_code: [200, 201, 409]  # 409 means datasource with same name already exists
-  register: datasource_result
-  failed_when: datasource_result.status not in [200, 201, 409]
-
-- name: Display datasource configuration result
-  debug:
-    msg: "Templar Version datasource {{ 'already exists' if datasource_result.status == 409 else 'created successfully' }}"
-
-- name: Create datasource provisioning file for Templar Version
+- name: Create provisioning file for JSON API datasource
   template:
-    src: templar-version-datasource.yml.j2
-    dest: "{{ grafana_provisioning_dir }}/datasources/templar-version-datasource.yml"
+    src: json-api-datasource.yml.j2
+    dest: "{{ grafana_provisioning_dir }}/datasources/json-api-datasource.yml"
     owner: "{{ grafana_system_user }}"
     group: "{{ grafana_system_group }}"
     mode: 0640
   notify: restart grafana
 
-- name: Verify plugin is loaded correctly
+- name: Verify JSON API plugin is loaded correctly
   uri:
-    url: "http://localhost:{{ grafana_http_port }}/api/plugins/templar-version-datasource"
+    url: "http://localhost:{{ grafana_http_port }}/api/plugins/marcusolsson-json-datasource"
     method: GET
     headers:
       Authorization: "Basic {{ (grafana_security_admin_user + ':' + grafana_security_admin_password) | b64encode }}"
     status_code: 200
-  register: plugin_status
+  register: json_plugin_status
   failed_when: false
 
-- name: Display plugin loading status
+- name: Display JSON API plugin loading status
   debug:
-    msg: "Templar Version plugin successfully loaded and available"
-  when: plugin_status.status is defined and plugin_status.status == 200
+    msg: "JSON API plugin successfully loaded and available"
+  when: json_plugin_status is defined and json_plugin_status.status is defined and json_plugin_status.status == 200
 
-- name: Display plugin error status
+- name: Display JSON API plugin error status
   debug:
-    msg: "WARNING: Templar Version plugin may not be properly loaded. Please check Grafana logs."
-  when: plugin_status.status is not defined or plugin_status.status != 200
+    msg: "WARNING: JSON API plugin may not be properly loaded. Please check Grafana logs."
+  when: json_plugin_status is not defined or json_plugin_status.status is not defined or json_plugin_status.status != 200

@@ -24,12 +24,15 @@ import random
 import asyncio
 import argparse
 import threading
+from typing import cast
 
 # Third party
+from bittensor.core.subtensor import ScaleObj
 import torch
 import numpy as np
 import bittensor as bt
 from torch.optim import SGD
+from torch import autocast
 from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
@@ -98,7 +101,7 @@ class Miner:
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
-        self.metagraph = self.subtensor.metagraph(self.config.netuid)
+        self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             tplr.logger.error(
                 f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
@@ -108,7 +111,7 @@ class Miner:
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)
+        self.model.to(self.config.device)  # type: ignore
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
@@ -164,7 +167,7 @@ class Miner:
         )
         self.chain_sync = tplr.ChainSync(
             config=self.config,
-            netuid=self.config.netuid,
+            netuid=cast(int, self.config.netuid),
             metagraph=self.metagraph,
             hparams=self.hparams,
             wallet=self.wallet,
@@ -176,7 +179,6 @@ class Miner:
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         self.start_window = self.current_window  # Record the start window
         self.global_step = 0
-        self.comms.current_window = self.current_window
         self.step_counter = 0
 
         # Add step tracking
@@ -228,7 +230,13 @@ class Miner:
             scheduler=self.scheduler,
             device=self.config.device,
         )
-        if success:
+        if (
+            success
+            and loaded_momentum is not None
+            and loaded_momentum is not None
+            and loaded_optimizer is not None
+            and loaded_scheduler is not None
+        ):
             self.momentum = loaded_momentum
             self.global_step = loaded_global_step
             self.optimizer = loaded_optimizer
@@ -243,7 +251,7 @@ class Miner:
             self.momentum = {
                 n: torch.zeros_like(p) for n, p in self.model.named_parameters()
             }
-            self.model.to(self.config.device)
+            self.model.to(self.config.device)  # type: ignore
 
         while True:
             # 1. Initialize window and update peers
@@ -300,9 +308,7 @@ class Miner:
                     labels == self.tokenizer.pad_token_id, -100, labels
                 )
 
-                with torch.amp.autocast(
-                    device_type=self.model.device.type, dtype=torch.bfloat16
-                ):
+                with autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
                     outputs = self.model(input_ids=input_ids, labels=labels)
 
                 total_loss += outputs.loss.item()
@@ -327,9 +333,7 @@ class Miner:
             )
 
             compress_start = tplr.T()
-            gradient, xshapes, totalks, _ = tplr.prepare_gradient_dict(
-                self, pages, step_window
-            )
+            gradient, _, _, _ = tplr.prepare_gradient_dict(self, pages, step_window)
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - compress_start)} Compressed local gradients"
             )
@@ -375,7 +379,11 @@ class Miner:
                     response = self.subtensor.query_module(
                         "Timestamp", "Now", block=sync_block
                     )
-                    ts_value = response.value / 1000  # convert milliseconds to seconds
+                    if response is None or not isinstance(response, ScaleObj):
+                        raise ValueError(f"Could not query timestamp for {sync_block}")
+                    ts_value = (
+                        cast(int, response.value) / 1000
+                    )  # convert milliseconds to seconds
                     break
                 except Exception as e:
                     tplr.logger.error(
@@ -656,12 +664,11 @@ class Miner:
 
                 # asyncio checkpoint saving task
                 asyncio.create_task(
-                    self.comms.save_checkpoint(
+                    self.comms.save_remote_checkpoint(
                         model=self.model,
                         optimizer=self.optimizer,
                         scheduler=self.scheduler,
                         momentum=self.momentum,
-                        global_step=self.global_step,
                         current_window=self.current_window,
                         start_window=self.start_window,
                     )
@@ -675,7 +682,7 @@ class Miner:
                 await asyncio.sleep(0.1)
 
     # Listens for new blocks and sets self.current_block and self.current_window
-    def block_listener(self, loop):
+    def block_listener(self, _):
         import websockets.exceptions  # Ensure we catch websockets errors
 
         def handler(event):
@@ -684,7 +691,6 @@ class Miner:
                 new_window = int(self.current_block / self.hparams.blocks_per_window)
                 if new_window != self.current_window:
                     self.current_window = new_window
-                    self.comms.current_window = self.current_window
                     tplr.logger.info(
                         f"New block received. Current window updated to: {self.current_window}"
                     )

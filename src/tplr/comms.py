@@ -254,7 +254,7 @@ class Comms:
     async def gather(
         self,
         my_uid: str,
-        uids: List[str],
+        uids: List[int],
         window: int,
         key: str,
         timeout: int,
@@ -660,3 +660,38 @@ class Comms:
         except Exception as e:
             tplr.logger.error(f"Error in checkpoint loading process: {e}")
             return False, None, None, None, None
+
+    async def save_remote_checkpoint(
+        self,
+        model,
+        optimizer,
+        scheduler,
+        momentum,
+        current_window: int,
+        start_window: int,
+    ):
+        """Save checkpoint to R2 and local storage"""
+        checkpoint_data = {
+            "model_state_dict": {
+                k: v.cpu().clone() for k, v in model.state_dict().items()
+            },
+            "optimizer_state_dict": {
+                k: v.cpu().clone() if torch.is_tensor(v) else v
+                for k, v in optimizer.state_dict().items()
+            },
+            "scheduler_state_dict": scheduler.state_dict(),
+            "momentum": {k: v.cpu().clone() for k, v in momentum.items()},
+            "start_window": start_window,
+            "current_window": current_window,
+        }
+
+        # upload to R2
+        await self.storage.store_remote(
+            state_dict=checkpoint_data,
+            uid=self.uid,
+            window=current_window,
+            key="checkpoint",
+            bucket=self.bucket,
+        )
+
+        return True

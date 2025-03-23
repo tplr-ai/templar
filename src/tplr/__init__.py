@@ -24,7 +24,7 @@
 __version__ = "0.2.49"
 
 
-from .logging import logger, debug
+from .logging import logger, debug, trace
 
 # Then import other modules
 from .schemas import *

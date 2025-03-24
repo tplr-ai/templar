@@ -110,7 +110,7 @@ def trace() -> None:
         if self.isEnabledFor(TRACE_LEVEL_NUM):
             self._log(TRACE_LEVEL_NUM, message, args, **kws)
 
-    logging.Logger.trace = trace_method
+    setattr(logging.Logger, "trace", trace_method)  # type: ignore[attr-defined]
     logger.setLevel(TRACE_LEVEL_NUM)
 
 

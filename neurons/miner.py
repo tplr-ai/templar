@@ -226,7 +226,7 @@ class Miner:
         (
             success,
             loaded_momentum,
-            loaded_checkpoint_current_window,
+            loaded_checkpoint_window,
             loaded_optimizer,
             loaded_scheduler,
         ) = await self.comms.load_checkpoint(
@@ -238,7 +238,7 @@ class Miner:
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_checkpoint_current_window - self.start_window
+            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -247,12 +247,12 @@ class Miner:
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
             # Only catch up if we're behind
-            if loaded_checkpoint_current_window < self.current_window:
+            if loaded_checkpoint_window < self.current_window:
                 tplr.logger.info(
-                    f"Checkpoint is behind current window ({loaded_checkpoint_current_window} < {self.current_window}), starting catchup..."
+                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
                 )
-                await self.catchup_with_aggregation_server(
-                    loaded_checkpoint_current_window
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, loaded_checkpoint_window
                 )
             else:
                 tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
@@ -676,225 +676,6 @@ class Miner:
             tplr.logger.info("Wait for next window...")
             while self.current_window == step_window:
                 await asyncio.sleep(0.1)
-
-    async def catchup_with_aggregation_server(self, checkpoint_current_window):
-        """
-        Catch up the model by applying aggregated gradients from the aggregation server
-        and verifying against the validator's debug dict.
-        """
-        tplr.logger.info("Starting catchup with aggregation server...")
-
-        # Start from the checkpoint window and continue until we reach the current window
-        checkpoint_window = checkpoint_current_window + 1
-        target_window = self.current_window
-
-        tplr.logger.info(
-            f"Catching up from window {checkpoint_window} to current window {target_window}"
-        )
-
-        weight_decay = self.hparams.weight_decay
-
-        # Apply aggregation for each step, checking for current window changes
-        current_step = checkpoint_window
-        while current_step <= target_window:
-            # Check if current_window has changed during processing
-            if self.current_window > target_window:
-                target_window = self.current_window
-                tplr.logger.info(
-                    f"Current window advanced during catchup, new target: {target_window}"
-                )
-
-            tplr.logger.info(
-                f"\nProcessing catchup for window {current_step} (Target: {target_window})"
-            )
-
-            # Load aggregation for current window - pass version explicitly
-            agg_data = await self.comms.load_aggregation(window=current_step)
-            if not agg_data:
-                tplr.logger.warning(
-                    f"No aggregation data found for window {current_step}, skipping"
-                )
-                current_step += 1
-                continue
-
-            processed_agg_data = self.process_loaded_data(agg_data)
-
-            # Get learning rate for this step
-            lr = self.get_lr_at_step(current_step - self.start_window)
-            tplr.logger.info(f"Using learning rate: {lr:.6f} for catchup step")
-
-            # Get debug dictionary for verification
-            debug_dict = await self.comms.get_debug_dict(current_step - 1)
-
-            # Apply aggregation to model
-            tplr.logger.info(
-                f"Applying aggregation to model for window {current_step}..."
-            )
-            with torch.no_grad():
-                for name, param in self.model.named_parameters():
-                    if name in agg_data["tensors"]:
-                        # Move aggregation tensor to device
-                        agg_tensor = processed_agg_data["tensors"][name].to(
-                            cast(str, self.cfg.device)
-                        )
-
-                        # Apply weight decay to parameter
-                        param.data.mul_(1.0 - lr * weight_decay)
-
-                        # Apply gradient update with learning rate
-                        param.data.add_(agg_tensor, alpha=-lr)
-
-            tplr.logger.info(
-                f"Successfully applied aggregation for window {current_step}"
-            )
-
-            # Calculate L2 norm of difference between model and debug values after this step
-            if debug_dict and "state_dict" in debug_dict:
-                debug_state_dict = debug_dict["state_dict"]
-                total_squared_diff = 0.0
-                param_count = 0
-                abs_diff = 0
-
-                for name, param in self.model.named_parameters():
-                    # Check if there's a corresponding debug entry
-                    debug_key = name + "_debug"
-                    if debug_key in debug_state_dict:
-                        # Calculate L2 norm for this parameter
-                        param_data = param.data.cpu().flatten()[
-                            :2
-                        ]  # Take only first two values
-                        debug_data = torch.tensor(
-                            cast(float, debug_state_dict[debug_key])
-                        ).cpu()
-                        squared_diff = torch.sum((param_data - debug_data) ** 2).item()
-                        total_squared_diff += squared_diff
-                        abs_diff += (
-                            torch.abs(torch.tensor(param_data - debug_data))
-                            .mean()
-                            .item()
-                        )
-                        param_count += param_data.numel()
-
-                # Final L2 norm across all parameters
-                final_l2_norm = torch.sqrt(torch.tensor(total_squared_diff)).item()
-                tplr.logger.info(
-                    f"Window {current_step} - L2 norm difference between model and debug values: {final_l2_norm}"
-                )
-                tplr.logger.info(
-                    f"Window {current_step} - Average L2 norm per parameter: {final_l2_norm / param_count if param_count > 0 else 0}"
-                )
-                tplr.logger.info(
-                    f"Window {current_step} - Average absolute difference per parameter: {abs_diff / param_count / lr if param_count > 0 else 0}"
-                )
-            else:
-                tplr.logger.info(
-                    f"No valid debug dictionary available for window {current_step - 1} - cannot compute L2 norm"
-                )
-
-            # Update global step and move to next window
-            self.global_step = current_step - self.start_window
-            current_step += 1
-
-            # Step optimizer and scheduler to match the current window
-            self.optimizer.step()
-            self.scheduler.step()
-
-        # Update global step after catchup
-        self.global_step = target_window - self.start_window
-        tplr.logger.info(f"Catchup complete. Global step updated to {self.global_step}")
-
-    def process_loaded_data(self, compressed_data):
-        """
-        Unpack the compressed tensor data from the aggregation server.
-
-        Args:
-            compressed_data: The compressed tensor data
-
-        Returns:
-            Dictionary with unpacked tensors
-        """
-        result = {
-            "timestamp": compressed_data.get("timestamp", None),
-            "window": compressed_data.get("window", None),
-            "version": compressed_data.get("version", None),
-            "tensors": {},
-        }
-
-        for name, param in self.model.named_parameters():
-            if name in compressed_data:
-                original_shape = param.shape
-                # Use unpack_binary_tensor from the sample, but in our context
-                unpacked = self.unpack_binary_tensor(
-                    compressed_data[name], original_shape
-                )
-                result["tensors"][name] = unpacked
-                tplr.logger.debug(f"Unpacked tensor {name} with shape {original_shape}")
-
-        tplr.logger.info(f"Successfully unpacked {len(result['tensors'])} tensors")
-        return result
-
-    def unpack_binary_tensor(self, packed_tensor, original_shape):
-        """
-        Unpack a 1-bit representation tensor back to ±1 values.
-
-        Args:
-            packed_tensor: The packed binary tensor
-            original_shape: The original shape of the tensor
-
-        Returns:
-            Unpacked tensor with original shape
-        """
-        total_elements = int(torch.prod(torch.tensor(original_shape)).item())
-
-        # Create a flat tensor to hold the unpacked values
-        unpacked = torch.zeros(total_elements, dtype=torch.float32)
-
-        for i in range(8):
-            mask = 1 << i
-            bits = (packed_tensor & mask) >> i
-            # Convert 0/1 to -1/+1
-            unpacked[i::8] = (bits.float() * 2) - 1
-
-        return unpacked.reshape(original_shape)
-
-    def get_lr_at_step(self, global_step):
-        """
-        Get the learning rate at a specific global step.
-
-        Args:
-            global_step: The global step to calculate LR for
-
-        Returns:
-            Learning rate value
-        """
-        # Create temporary objects to avoid modifying originals
-        temp_optimizer = SGD([torch.tensor([1.0])], lr=self.hparams.learning_rate)
-
-        # Recreate the schedulers to match our existing scheduler configuration
-        temp_warmup_scheduler = LinearLR(
-            temp_optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=250,
-        )
-        temp_cosine_scheduler = CosineAnnealingWarmRestarts(
-            temp_optimizer,
-            T_0=10000,
-            T_mult=2,
-            eta_min=self.hparams.learning_rate * 0.1,
-        )
-        temp_scheduler = SequentialLR(
-            temp_optimizer,
-            schedulers=[temp_warmup_scheduler, temp_cosine_scheduler],
-            milestones=[250],
-        )
-
-        # Step to the target global step
-        for _ in range(global_step):
-            temp_scheduler.step()
-
-        # Return the current learning rate
-        return temp_optimizer.param_groups[0]["lr"]
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, _):

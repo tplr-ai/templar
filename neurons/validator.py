@@ -307,7 +307,7 @@ class Validator:
         (
             success,
             loaded_momentum,
-            loaded_checkpoint_current_window,
+            loaded_checkpoint_window,
             loaded_optimizer,
             loaded_scheduler,
         ) = await self.comms.load_checkpoint(
@@ -319,7 +319,7 @@ class Validator:
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_checkpoint_current_window - self.start_window
+            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -327,6 +327,17 @@ class Validator:
                 f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
+            # Only catch up if we're behind
+            if loaded_checkpoint_window < self.current_window:
+                tplr.logger.info(
+                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
+                )
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, loaded_checkpoint_window
+                )
+            else:
+                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
+
         else:
             tplr.logger.info("Starting from scratch")
             self.momentum = {

@@ -252,7 +252,9 @@ class Miner:
                 tplr.logger.info(
                     f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
                 )
-                await tplr.neurons.catchup_with_aggregation_server(self, loaded_checkpoint_window)
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, loaded_checkpoint_window
+                )
             else:
                 tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
         else:

@@ -254,7 +254,7 @@ class Comms:
     async def gather(
         self,
         my_uid: str,
-        uids: List[str],
+        uids: List[int],
         window: int,
         key: str,
         timeout: int,

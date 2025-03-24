@@ -14,23 +14,20 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
-# type: ignore
 import os
 import json
 import torch
 import asyncio
 from datetime import datetime, timezone
-import bittensor as bt
 
-from typing import List, Dict, Optional, TypeVar, Any
+from typing import List, Dict, Optional
 from aiobotocore.session import get_session
 
 from . import __version__
-from .config import BUCKET_SECRETS
 from .schemas import Bucket
 
 import tplr as tplr
-# from .hparams import HParams
+from . import config
 
 from types import SimpleNamespace
 from typing import Tuple
@@ -44,9 +41,6 @@ from tplr.chain_sync import ChainSync
 CF_REGION_NAME: str = "enam"
 LOCAL_TMP_DIR = "/tmp/local_store"
 
-T = TypeVar("T", bound=Any)
-FixtureFunction = TypeVar("FixtureFunction", bound=Any)
-
 
 class Comms:
     """
@@ -56,7 +50,7 @@ class Comms:
 
     def __init__(
         self,
-        wallet: "bt.wallet",
+        wallet,
         config=None,
         metagraph=None,
         hparams=None,
@@ -137,22 +131,22 @@ class Comms:
         key: str,
         global_step: int = 0,
         local: bool = True,
+        stale_retention: int = 10,
     ) -> bool:
         """
-        Store data either locally or in remote storage.
+        Store data either locally or in remote storage, and cleanup old data beyond stale_retention.
 
         Args:
-            state_dict: Data to store
-            uid: User ID for storage location
-            window: Window number for storage location
-            key: Key for stored data
-            global_step: Current global step (for checkpoints)
-            local: Whether to store locally
-
-        Returns:
-            Success status
+            state_dict: Data to store.
+            uid: User ID for storage location.
+            window: Window number for storage location.
+            key: Key for stored data.
+            global_step: Current global step (for checkpoints).
+            local: Whether to store locally.
+            stale_retention: Number of recent files to retain.
         """
-        # Add metadata to state_dict
+        from datetime import datetime
+
         full_state_dict = {
             "state_dict": state_dict,
             "global_step": global_step,
@@ -160,19 +154,27 @@ class Comms:
         }
 
         if local:
-            # Store locally
-            return await self.storage.store_local(
+            success = await self.storage.store_local(
                 state_dict=full_state_dict, uid=uid, window=window, key=key
             )
+            if success:
+                await self.storage.cleanup_local_gradients(
+                    uid, key, retention=stale_retention
+                )
+            return success
         else:
-            # Store in remote bucket
-            return await self.storage.store_remote(
+            success = await self.storage.store_remote(
                 state_dict=full_state_dict,
                 uid=uid,
                 window=window,
                 key=key,
                 bucket=self.bucket,
             )
+            if success:
+                await self.storage.cleanup_remote_gradients(
+                    uid, key, retention=stale_retention, bucket=self.bucket
+                )
+            return success
 
     async def get(
         self,
@@ -182,6 +184,9 @@ class Comms:
         local: bool = True,
         device: str = "cpu",
         timeout: int = 30,
+        stale_retention: int = 10,
+        time_min=None,
+        time_max=None,
     ) -> Tuple[Dict, int]:
         """
         Retrieve data either locally or from remote storage.
@@ -193,38 +198,58 @@ class Comms:
             local: Whether to retrieve locally
             device: Device to load tensors on
             timeout: Timeout for remote requests
+            stale_retention: Number of recent files to retain (passed to storage)
+            time_min: Minimum timestamp for filtering gradients
+            time_max: Maximum timestamp for filtering gradients
 
         Returns:
             Tuple of (state_dict, global_step)
         """
         if local:
-            # Get from local storage
-            data = await self.storage.get_local(uid=uid, window=window, key=key)
+            # Get from local storage with stale retention and time boundaries.
+            data = await self.storage.get_local(
+                uid=uid,
+                window=window,
+                key=key,
+                stale_retention=stale_retention,
+                time_min=time_min,
+                time_max=time_max,
+            )
         else:
-            # Get from remote bucket for the specified UID
+            # Get from remote bucket for the specified UID with proper parameters.
             peer_bucket = self.chain.get_bucket(int(uid))
             if peer_bucket:
                 data = await self.storage.get_remote(
-                    uid=uid, window=window, key=key, bucket=peer_bucket, timeout=timeout
+                    uid=uid,
+                    window=window,
+                    key=key,
+                    bucket=peer_bucket,
+                    timeout=timeout,
+                    stale_retention=stale_retention,
+                    time_min=time_min,
+                    time_max=time_max,
                 )
             else:
                 tplr.logger.warning(f"No bucket found for UID {uid}")
-                return None, 0
+                return {}, 0
 
         if data:
-            # Extract and return state_dict and global_step
-            state_dict = data.get("state_dict", {})
-            global_step = data.get("global_step", 0)
+            # Extract and return state_dict and global_step.
+            if isinstance(data, dict):
+                state_dict = data.get("state_dict", {})
+                global_step = data.get("global_step", 0)
+            else:
+                state_dict = {}
+                global_step = 0
 
-            # Move tensors to the specified device
+            # Move tensors to the specified device.
             state_dict = {
                 k: v.to(device) if isinstance(v, torch.Tensor) else v
                 for k, v in state_dict.items()
             }
-
             return state_dict, global_step
 
-        return None, 0
+        return {}, 0
 
     async def gather(
         self,
@@ -234,119 +259,134 @@ class Comms:
         key: str,
         timeout: int,
         device: str,
-        totalks: dict,
         local: bool = True,
         stale_retention: int = 10,
         time_min: datetime = None,
         time_max: datetime = None,
     ) -> Optional[SimpleNamespace]:
-        """
-        Gather data from multiple peers.
+        import time
 
-        Args:
-            my_uid: Own user ID
-            uids: List of peer UIDs to gather from
-            window: Window number to gather
-            key: Data key to gather
-            timeout: Request timeout
-            device: Device to load tensors on
-            totalks: Dictionary of parameter total sizes
-            local: Whether to gather locally
-            stale_retention: Number of windows to retain stale data
-            time_min: Minimum timestamp for data
-            time_max: Maximum timestamp for data
+        start_time = time.time()
+        metrics = {"upload_bytes": 0, "download_bytes": 0}
 
-        Returns:
-            SimpleNamespace with aggregated data
-        """
-        skipped_uids = []
+        tplr.logger.debug(
+            f"Starting gather for window {window} with time window: {time_min} to {time_max}"
+        )
+        tplr.logger.debug(
+            f"Starting gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
+        )
+        tplr.logger.debug(f"Target UIDs for gathering: {uids}")
+
+        uid_state_dicts = {}  # Map each valid UID to its processed state_dict
         valid_uids = []
-        valid_state_dicts = []
-        valid_global_steps = []
+        skipped_uids = []
+        global_steps = {}  # Map UID to its global step
 
-        # Extract optional time parameters from kwargs without removing them
-        time_min = time_min or None
-        time_max = time_max or None
-        if time_min or time_max:
-            tplr.logger.debug(f"Gathering with time window: {time_min} to {time_max}")
-
-        # Create tasks for all peers to fetch in parallel
-        tasks = []
-        for uid in uids:
-            if uid == my_uid:
-                continue
-
-            # Create task to get data from this peer
-            task = self.get_with_retry(
-                uid=uid,
-                window=window,
-                key=key,
-                local=local,
-                device=device,
-                timeout=timeout,
-                time_min=time_min,
-                time_max=time_max,
-            )
-            tasks.append((uid, task))
-
-        # Process all responses
-        for uid, task in tasks:
+        async with self.client_semaphore:
+            batch_tasks = [
+                self.get_with_retry(
+                    uid=uid,
+                    window=window,
+                    key=key,
+                    local=local,
+                    device=device,
+                    timeout=timeout,
+                    stale_retention=stale_retention,
+                    time_min=time_min,
+                    time_max=time_max,
+                )
+                for uid in uids
+            ]
             try:
-                response = await task
+                batch_responses = await asyncio.gather(
+                    *batch_tasks, return_exceptions=True
+                )
+                for uid, response in zip(uids, batch_responses):
+                    if isinstance(response, Exception):
+                        tplr.logger.debug(f"Error from UID {uid}: {str(response)}")
+                        skipped_uids.append(uid)
+                        continue
+                    if response is None:
+                        tplr.logger.info(
+                            f"Skipped UID {uid} - gradient might not exist or was uploaded too late"
+                        )
+                        skipped_uids.append(uid)
+                        continue
 
-                # Validate response format
-                try:
-                    state_dict_resp, global_step_resp = response
-                    tplr.logger.debug(
-                        f"Received state dict and global step {global_step_resp} from UID {uid}"
-                    )
-                except (TypeError, ValueError) as e:
-                    tplr.logger.debug(f"Invalid response format from UID {uid}: {e}")
-                    skipped_uids.append(uid)
-                    continue
+                    try:
+                        state_dict_resp, global_step_resp = response
+                        tplr.logger.debug(
+                            f"Received state dict and global step {global_step_resp} from UID {uid}"
+                        )
+                    except (TypeError, ValueError) as e:
+                        tplr.logger.debug(
+                            f"Invalid response format from UID {uid}: {e}"
+                        )
+                        skipped_uids.append(uid)
+                        continue
 
-                if state_dict_resp is None:
-                    tplr.logger.debug(f"Empty state dict from UID {uid}")
-                    skipped_uids.append(uid)
-                    continue
+                    if state_dict_resp is None:
+                        tplr.logger.debug(f"Empty state dict from UID {uid}")
+                        skipped_uids.append(uid)
+                        continue
 
-                # This peer's data passed basic format validation
-                valid_uids.append(uid)
-                valid_state_dicts.append(state_dict_resp)
-                valid_global_steps.append(global_step_resp)
+                    # Process tensors and normalize those with "vals" keys.
+                    processed_state = {}
+                    for param_name, tensor in state_dict_resp.items():
+                        if isinstance(tensor, torch.Tensor):
+                            tensor = tensor.to(device)
+                            if param_name.endswith("vals"):
+                                norm = torch.norm(tensor)
+                                normalized = tensor / (norm + 1e-8)
+                                processed_state[param_name] = normalized
+                            else:
+                                processed_state[param_name] = tensor
+                            metrics["download_bytes"] += (
+                                tensor.element_size() * tensor.nelement()
+                            )
+                        else:
+                            processed_state[param_name] = tensor
 
+                    uid_state_dicts[uid] = processed_state
+                    valid_uids.append(uid)
+                    global_steps[uid] = global_step_resp
             except Exception as e:
-                tplr.logger.warning(f"Error processing response from UID {uid}: {e}")
-                skipped_uids.append(uid)
+                tplr.logger.error(f"Error processing uid batch: {str(e)}")
 
-        # If no valid responses, return None
         if not valid_uids:
-            tplr.logger.warning(
-                f"No valid responses gathered from peers. Skipped UIDs: {skipped_uids}"
-            )
+            tplr.logger.info("No valid gradients received from any UID")
             return None
 
-        # Aggregate all valid state dicts
-        aggregated_dict = SimpleNamespace()
-        for param_suffix in ["idxs", "vals"]:
-            for uid_idx, state_dict in enumerate(valid_state_dicts):
-                for key, tensor in state_dict.items():
-                    if key.endswith(param_suffix):
-                        if not hasattr(aggregated_dict, key):
-                            setattr(aggregated_dict, key, [])
-                        getattr(aggregated_dict, key).append(tensor)
+        total_time = time.time() - start_time
+        tplr.logger.info(
+            f"Gather completed in {total_time:.2f}s. Success rate: {len(valid_uids)}/{len(uids)}, "
+            f"Upload: {metrics['upload_bytes']} bytes, Download: {metrics['download_bytes']} bytes"
+        )
 
-        # Return the aggregated results with UIDs included
-        return SimpleNamespace(
-            state_dict=aggregated_dict,
+        result = SimpleNamespace(
+            time=total_time,
+            upload_bytes=metrics["upload_bytes"],
+            download_bytes=metrics["download_bytes"],
+            success_rate=len(valid_uids) / len(uids),
+            state_dicts=uid_state_dicts,
             uids=valid_uids,
-            global_steps=valid_global_steps,
+            global_steps=global_steps,
             skipped_uids=skipped_uids,
         )
+        return result
 
     # Helper methods
     async def get_with_retry(
-        self, uid, window, key, local, device, timeout, time_min, time_max
+        self,
+        uid,
+        window,
+        key,
+        local,
+        device,
+        timeout,
+        stale_retention,
+        time_min,
+        time_max,
     ):
         """Get data with retries on failure"""
         max_attempts = 3
@@ -361,6 +401,7 @@ class Comms:
                     local=local,
                     device=device,
                     timeout=timeout,
+                    stale_retention=stale_retention,
                     time_min=time_min,
                     time_max=time_max,
                 )
@@ -375,10 +416,12 @@ class Comms:
                     tplr.logger.warning(
                         f"Get failed for UID {uid} after {max_attempts} attempts: {e}"
                     )
-                    raise
+                    raise Exception(
+                        f"Get failed for UID {uid} after {max_attempts} attempts: {e}"
+                    )
 
     def _get_own_bucket(self, bucket_type: str, rw: str) -> Bucket:
-        bucket_conf = tplr.config.BUCKET_SECRETS.get(bucket_type)
+        bucket_conf = config.BUCKET_SECRETS.get(bucket_type)
         tplr.logger.debug("Bucket config for %s: %s", bucket_type, bucket_conf)
         if not bucket_conf:
             raise ValueError(f"No bucket configuration found for '{bucket_type}'.")
@@ -389,7 +432,9 @@ class Comms:
 
         account_id = bucket_conf.get("account_id", "").strip()
         if not account_id:
-            raise ValueError(f"Bucket account_id for '{bucket_type}' must not be empty.")
+            raise ValueError(
+                f"Bucket account_id for '{bucket_type}' must not be empty."
+            )
 
         creds = bucket_conf.get("credentials", {}).get(rw, {})
         access_key = creds.get("access_key_id", "").strip()
@@ -441,12 +486,15 @@ class Comms:
 
                 if start_window_data:
                     # Parse JSON data
-                    if isinstance(start_window_data, dict):
-                        start_window_json = start_window_data
-                    else:
+                    if isinstance(start_window_data, (bytes, bytearray)):
                         start_window_json = json.loads(
                             start_window_data.decode("utf-8")
                         )
+                    elif isinstance(start_window_data, dict):
+                        start_window_json = start_window_data
+                    else:
+                        # Handle unexpected type
+                        start_window_json = {"start_window": 0}
 
                     start_window = start_window_json["start_window"]
                     tplr.logger.info(f"Fetched start_window: {start_window}")
@@ -465,67 +513,150 @@ class Comms:
         model,
         optimizer,
         scheduler,
-        transformer,
-        compressor,
-        current_window: int,
         device: str,
-        peers: list,
-        uid: str,
-        totalks: dict,
     ):
-        """Load the latest checkpoint and handle catch-up if needed"""
+        """Load the latest available checkpoint with matching version and from highest staked validator"""
+        bucket = self.chain.get_own_bucket("gradients", "read")
+        if bucket is None:
+            tplr.logger.warning("No bucket available for loading checkpoint")
+            return False, None, None, None, None
+
+        latest_window = None
+        latest_checkpoint = None
+
         try:
-            # First try to load from local storage
-            checkpoint = await self.storage.load_latest_checkpoint(uid)
+            import boto3
+            from botocore.client import Config
+            import re
 
-            if checkpoint is None:
-                # Try to load from remote storage
-                checkpoint = await self.storage.load_remote_checkpoint(
-                    uid=uid, device=device, bucket=self.bucket
-                )
-
-            if checkpoint is None:
-                tplr.logger.info("No checkpoint found. Starting fresh.")
-                return False, {}, 0, optimizer, scheduler
-
-            # Extract checkpoint data
-            model_state_dict = checkpoint.get("model_state_dict", {})
-            optimizer_state_dict = checkpoint.get("optimizer_state_dict", {})
-            scheduler_state_dict = checkpoint.get("scheduler_state_dict", {})
-            momentum = checkpoint.get("momentum", {})
-            ckpt_start_window = checkpoint.get("start_window", 0)
-            ckpt_window = checkpoint.get("current_window", 0)
-            global_step = ckpt_window - ckpt_start_window
-
-            # Load model state
-            model.load_state_dict(model_state_dict)
-
-            # Load optimizer state
-            optimizer.load_state_dict(optimizer_state_dict)
-
-            # Load scheduler state
-            scheduler.load_state_dict(scheduler_state_dict)
-
-            # Determine if catch-up is needed
-            window_difference = current_window - ckpt_window
-            tplr.logger.info(
-                f"Checkpoint window: {ckpt_window}, Current window: {current_window}"
+            s3_config = Config(
+                region_name="auto", signature_version="s3v4", max_pool_connections=256
             )
 
-            # Synchronize with missed windows if needed
-            if window_difference > 0:
+            s3_client = boto3.client(
+                "s3",
+                endpoint_url=f"https://{bucket.account_id}.r2.cloudflarestorage.com",
+                aws_access_key_id=bucket.access_key_id,
+                aws_secret_access_key=bucket.secret_access_key,
+                config=s3_config,
+            )
+
+            # List objects with checkpoint prefix
+            response = s3_client.list_objects_v2(
+                Bucket=bucket.name, Prefix="checkpoint-"
+            )
+
+            current_version = __version__
+            tplr.logger.info(
+                f"Looking for checkpoints with current version {current_version}"
+            )
+
+            # Regex to parse: checkpoint-{window}-{uid}-v{version}.pt
+            pattern = re.compile(r"^checkpoint-(\d+)-(\d+)-v(.+)\.pt$")
+
+            if "Contents" in response:
+                for obj in response["Contents"]:
+                    key = obj["Key"]
+                    m = pattern.match(key)
+                    if not m:
+                        tplr.logger.debug(f"Skipping invalid checkpoint format: {key}")
+                        continue
+
+                    try:
+                        checkpoint_window = int(m.group(1))
+                        checkpoint_uid = int(m.group(2))
+                        checkpoint_version = m.group(3)
+                    except Exception as e:
+                        tplr.logger.debug(f"Error parsing checkpoint key {key}: {e}")
+                        continue
+
+                    # Version must match current version.
+                    if checkpoint_version != current_version:
+                        tplr.logger.debug(
+                            f"Skipping checkpoint with non-matching version: {key} (version {checkpoint_version})"
+                        )
+                        continue
+
+                    # Get the highest staked validator UID.
+                    (
+                        _,
+                        highest_validator_uid,
+                    ) = await self.chain._get_highest_stake_validator_bucket(
+                        refresh_commitments=True
+                    )
+                    if highest_validator_uid is None:
+                        tplr.logger.warning("Highest staked validator UID not found.")
+                        continue
+
+                    # Filter checkpoints by highest staked validator UID
+                    if checkpoint_uid != highest_validator_uid:
+                        tplr.logger.debug(
+                            f"Skipping checkpoint not from highest staked validator (expected uid {highest_validator_uid}): {key}"
+                        )
+                        continue
+
+                    if latest_window is None or checkpoint_window > latest_window:
+                        latest_window = checkpoint_window
+                        latest_checkpoint = key
+
+            if latest_checkpoint:
                 tplr.logger.info(
-                    f"Syncing optimizer/scheduler by stepping {window_difference} times…"
+                    f"Found checkpoint: {latest_checkpoint} (window {latest_window})"
                 )
-                for _ in range(window_difference):
-                    optimizer.step()
-                    scheduler.step()
+            else:
+                tplr.logger.info(
+                    f"No checkpoints found matching version {current_version} from the highest staked validator. Starting from scratch."
+                )
+                return False, None, None, None, None
 
-            return True, momentum, global_step, optimizer, scheduler
-
-        except KeyError as e:
-            tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
-            return False, {}, 0, optimizer, scheduler
         except Exception as e:
-            tplr.logger.error(f"Failed to load checkpoint: {e}")
-            return False, {}, 0, optimizer, scheduler
+            tplr.logger.warning(f"Error listing checkpoint files: {e}")
+            return False, None, None, None, None
+
+        try:
+            # Download the checkpoint
+            temp_path = os.path.join(self.storage.temp_dir, latest_checkpoint)
+            tplr.logger.info(
+                f"Downloading checkpoint {latest_checkpoint} to {temp_path}"
+            )
+            result = await self.storage.s3_get_object(
+                key=latest_checkpoint, bucket=bucket, file_path=temp_path, timeout=60
+            )
+
+            if not result:
+                tplr.logger.warning(
+                    f"Failed to download checkpoint {latest_checkpoint}"
+                )
+                return False, None, None, None, None
+
+            tplr.logger.info(f"Loading checkpoint from {temp_path}")
+            try:
+                checkpoint = await asyncio.to_thread(
+                    torch.load, temp_path, map_location=device
+                )
+
+                if "model_state_dict" not in checkpoint:
+                    tplr.logger.error("Checkpoint missing model_state_dict key")
+                    return False, None, None, None, None
+
+                model.load_state_dict(checkpoint["model_state_dict"])
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                momentum = checkpoint["momentum"]
+                global_step = checkpoint["global_step"]
+
+                tplr.logger.info(f"Loaded checkpoint with global_step={global_step}")
+
+                os.remove(temp_path)
+
+                return True, momentum, global_step, optimizer, scheduler
+
+            except Exception as e:
+                tplr.logger.error(f"Error loading checkpoint data: {e}")
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                return False, None, None, None, None
+
+        except Exception as e:
+            tplr.logger.error(f"Error in checkpoint loading process: {e}")
+            return False, None, None, None, None

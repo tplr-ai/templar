@@ -155,14 +155,25 @@ class Validator:
         )
 
         # Init comms
-        self.comms = tplr.comms.Comms(
+        self.comms = tplr.Comms(
             wallet=self.wallet,
             config=self.config,
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
         )
-        self.bucket = self.comms.bucket  # bucket is auto-assigned in the constructor
+        self.bucket = self.comms.bucket  # Bucket info comes from blockchain commitments
+
+        self.peer_manager = tplr.PeerManager(
+            chain=self.comms, hparams=self.hparams, metagraph=self.metagraph
+        )
+        self.chain_sync = tplr.ChainSync(
+            config=self.config,
+            netuid=self.config.netuid,
+            metagraph=self.metagraph,
+            hparams=self.hparams,
+            wallet=self.wallet,
+        )
 
         # Init state params
         self.stop_event = asyncio.Event()
@@ -266,18 +277,19 @@ class Validator:
         self.listener = threading.Thread(
             target=self.block_listener, args=(self.loop,), daemon=True
         ).start()
-        # Load Peers
-        if not self.config.peers:
-            self.peers = self.comms.peers
-            tplr.logger.info(f"Filtered gather peers with buckets: {self.peers}")
-        else:
-            self.peers = self.config.peers
-        if self.uid not in self.peers:
-            self.peers.append(self.uid)
+        # Start chain sync tasks
+        # self.chain_sync.start_commitment_fetcher()
+        self.comms.start_background_tasks()
 
-        self.comms.commitments = await self.comms.get_commitments()
-        self.comms.update_peers_with_buckets()
-        tplr.logger.info("Loaded commitments")
+        # Start active peer tracking as a background task
+        asyncio.create_task(self.peer_manager.track_active_peers())
+
+        # Check and commit your bucket
+        await self.chain_sync.check_and_commit_bucket()
+
+        # Load Peers
+        self.peers = self.chain_sync.peers
+        tplr.logger.info(f"Filtered gather peers with buckets: {self.peers}")
 
         # Only post start window if you are the highest stake validator
         if self.uid == self.metagraph.S.argmax().item():
@@ -308,12 +320,7 @@ class Validator:
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
-            transformer=self.transformer,
-            compressor=self.compressor,
-            current_window=self.current_window,
             device=self.config.device,
-            peers=self.peers,
-            uid=self.uid,
         )
         if success:
             self.momentum = loaded_momentum
@@ -332,8 +339,6 @@ class Validator:
             }
             self.model.to(self.config.device)
 
-        self.comms.start_commitment_fetcher()
-        self.comms.start_background_tasks()
         time_min = None
         while True:
             # Wait for validator offset before continuing
@@ -354,9 +359,9 @@ class Validator:
             tplr.logger.info(
                 f"Processing window: {self.sync_window} current: {self.current_window}"
             )
-            self.comms.update_peers_with_buckets()
-            self.peers = self.comms.peers
-            self.eval_peers = self.comms.eval_peers
+            # self.comms.update_peers_with_buckets()
+            self.peers = self.chain_sync.peers
+            self.eval_peers = self.chain_sync.eval_peers
             tplr.logger.info(
                 f"{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - gather: {len(self.peers)}, eval: {len(self.eval_peers)}"
             )
@@ -464,9 +469,9 @@ class Validator:
             # Refresh peers explicitly before starting gather to avoid missing updated active peers.
             tplr.logger.info("Refreshing peers before gather task in validator...")
 
-            self.comms.update_peers_with_buckets()
-            self.peers = self.comms.peers
-            self.eval_peers = self.comms.eval_peers
+            self.chain_sync.update_peers_with_buckets()
+            self.peers = self.chain_sync.peers
+            self.eval_peers = self.chain_sync.eval_peers
 
             tplr.logger.info(f"Validator gather peers: {self.peers}")
 

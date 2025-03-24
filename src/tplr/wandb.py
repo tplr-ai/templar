@@ -10,9 +10,10 @@
 # THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE,
+
 import os
 import wandb
-from wandb.sdk.wandb_run import Run
+from wandb.sdk.wandb_run import Run  # type: ignore
 from . import __version__
 from .logging import logger
 
@@ -56,7 +57,6 @@ def initialize_wandb(
         tags=[f"v{__version__}"],
         settings=wandb.Settings(
             init_timeout=300,
-            _disable_stats=True,
         ),
     )
 

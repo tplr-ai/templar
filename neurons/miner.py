@@ -157,12 +157,25 @@ class Miner:
             uid=self.uid,
         )
 
+        self.bucket = self.comms.bucket
+
+        self.peer_manager = tplr.PeerManager(
+            chain=self.comms, hparams=self.hparams, metagraph=self.metagraph
+        )
+        self.chain_sync = tplr.ChainSync(
+            config=self.config,
+            netuid=self.config.netuid,
+            metagraph=self.metagraph,
+            hparams=self.hparams,
+            wallet=self.wallet,
+        )
+
         # Init state params
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         self.start_window = self.current_window  # Record the start window
-        self.global_step = 0  # Initialize global_step to zero
+        self.global_step = 0
         self.comms.current_window = self.current_window
         self.step_counter = 0
 
@@ -192,18 +205,8 @@ class Miner:
             daemon=True,
         )
         self.listener.start()  #
-        # Load Peers
-        if not self.config.peers:
-            self.peers = self.comms.peers
-            tplr.logger.info(f"Filtered gather peers with buckets: {self.peers}")
-        else:
-            self.peers = self.config.peers
-        if self.uid not in self.peers:
-            self.peers.append(self.uid)
 
-        self.comms.commitments = await self.comms.get_commitments()
-        self.comms.set_gather_peers()
-        tplr.logger.info("Loaded commitments")
+        # await self.chain_sync.get_commitments()
 
         # Fetch start_window from highest stake validator
         self.start_window = await self.comms.get_start_window()
@@ -223,12 +226,7 @@ class Miner:
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
-            transformer=self.transformer,
-            compressor=self.compressor,
-            current_window=self.current_window,
             device=self.config.device,
-            peers=self.peers,
-            uid=self.uid,
         )
         if success:
             self.momentum = loaded_momentum
@@ -247,9 +245,6 @@ class Miner:
             }
             self.model.to(self.config.device)
 
-        self.comms.start_commitment_fetcher()
-        self.comms.start_background_tasks()
-
         while True:
             # 1. Initialize window and update peers
             window_start = tplr.T()
@@ -264,8 +259,8 @@ class Miner:
             )
 
             peer_start = tplr.T()
-            self.comms.set_gather_peers()
-            self.peers = self.comms.peers
+            self.peers = self.chain_sync.set_gather_peers()
+            # self.peers = self.chain_sync.peers
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}"
             )
@@ -406,47 +401,40 @@ class Miner:
             # Refresh the peers list immediately before gathering
             tplr.logger.info("Refreshing peers before gather task...")
 
-            if self.config.test:
-                # In test mode, use all UIDs from metagraph except self
-                tplr.logger.info("Test mode active: Using all peers from metagraph.")
-                all_uids = list(range(len(self.metagraph.S)))
-                self.peers = [uid for uid in all_uids if uid != self.uid]
-            else:
-                # Normal operation - update and filter peers
-                self.comms.set_gather_peers()
-                self.peers = self.comms.peers
+            tplr.logger.info(
+                f"Final peers for gather: {self.peer_manager.active_peers}"
+            )
 
-            tplr.logger.info(f"Final peers for gather: {self.peers}")
-
-            # Create a task for gathering gradients asynchronously
+            tplr.logger.info(f"Gathering gradients from peers: {self.peers}")
             gather_task = asyncio.create_task(
                 self.comms.gather(
                     my_uid=self.uid,
-                    uids=[uid for uid in self.peers if uid != self.uid],
+                    uids=self.peers,
                     window=step_window,
                     key="gradient",
                     timeout=35,
                     device="cpu",
                     local=False,
                     stale_retention=100,
-                    totalks=self.totalks,
                     time_min=time_min,
                     time_max=time_max,
                 )
             )
-
-            # Await the task to get the result
             gather_result = await gather_task
+
+            if gather_result is None:
+                tplr.logger.error(
+                    "Failed to gather gradients from peers. Waiting for next window."
+                )
+                while self.current_window == step_window:
+                    await asyncio.sleep(0.1)
+                continue
 
             # --- Validate gathered gradients from peers ---
             valid_uids = []
             invalid_uids = []
-            num_peers = len(gather_result.uids)
-            for idx, uid in enumerate(gather_result.uids):
-                peer_state = {}
-                for key, tensor_list in gather_result.state_dict.__dict__.items():
-                    if isinstance(tensor_list, list) and len(tensor_list) == num_peers:
-                        peer_state[key] = tensor_list[idx]
+            for uid in gather_result.uids:
+                peer_state = gather_result.state_dicts.get(uid, {})
                 is_valid, err_msg = tplr.neurons.validate_compressed_gradients(
                     peer_state,
                     self.totalks,
@@ -462,7 +450,7 @@ class Miner:
                     invalid_uids.append(uid)
             gather_result.uids = valid_uids
             gather_result.skipped_uids.extend(invalid_uids)
-            # -----------------------------------------------------
+            # TODO: Add error handling here if gather_result.state_dicts is empty or missing keys.
 
             # 5. Calculate and log metrics
             duration = time.time() - train_start
@@ -518,39 +506,44 @@ class Miner:
 
             tplr.logger.info("Put task completed!")
 
-            tplr.logger.info("Waiting on gather task...")
-            gather_result = await gather_task
-            tplr.logger.info("Gather task completed!")
+            # tplr.logger.info("Waiting on gather task...")
+            # gather_result = await gather_task
+            # tplr.logger.info("Gather task completed!")
 
-            if gather_result is None:
-                tplr.logger.error(
-                    "Failed to gather gradients from peers. Waiting for next window."
-                )
-                while self.current_window == step_window:
-                    await asyncio.sleep(0.1)
-                continue
+            # if gather_result is None:
+            #     tplr.logger.error(
+            #         "Failed to gather gradients from peers. Waiting for next window."
+            #     )
+            #     while self.current_window == step_window:
+            #         await asyncio.sleep(0.1)
+            #     continue
 
             # 8. Apply gathered gradients
             update_start = tplr.T()
             for n, p in self.model.named_parameters():
                 idxs_key = n + "idxs"
                 vals_key = n + "vals"
-                idxs = getattr(gather_result.state_dict, idxs_key, None)
-                vals = getattr(gather_result.state_dict, vals_key, None)
-                if idxs is not None and vals is not None:
-                    # Ensure idx and val are lists of tensors
-                    if not isinstance(idxs, (list, tuple)):
-                        idxs = [idxs]
-                    if not isinstance(vals, (list, tuple)):
-                        vals = [vals]
-
+                all_idxs = []
+                all_vals = []
+                # Aggregate gradients from all valid peers
+                for uid, state in gather_result.state_dicts.items():
+                    if idxs_key in state and vals_key in state:
+                        idx = state[idxs_key]
+                        val = state[vals_key]
+                        if not isinstance(idx, (list, tuple)):
+                            idx = [idx]
+                        if not isinstance(val, (list, tuple)):
+                            val = [val]
+                        all_idxs.extend(idx)
+                        all_vals.extend(val)
+                if all_idxs and all_vals:
                     new_grad = self.transformer.decode(
                         self.compressor.batch_decompress(
                             p.to(self.config.device),
-                            idxs,
-                            vals,
-                            xshapes[n],
-                            totalks[n],
+                            all_idxs,
+                            all_vals,
+                            self.xshapes[n],
+                            self.totalks[n],
                         )
                     )
                     p.data.sub_(new_grad.sign(), alpha=self.scheduler.get_last_lr()[0])
@@ -644,7 +637,9 @@ class Miner:
                     "miner/mean_momentum_norm": sum(momentum_norms)
                     / len(momentum_norms),
                     # Added gather success rate in %
-                    "miner/gather/success_rate": gather_result.success_rate * 100,
+                    "miner/gather/success_rate": gather_result.success_rate * 100
+                    if gather_result
+                    else 0,
                 },
                 step=self.global_step,
             )

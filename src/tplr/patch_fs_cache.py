@@ -2,8 +2,8 @@
 
 print("tplr.patch_fs_cache loaded!")
 
-import fsspec
 import s3fs
+from fsspec.spec import AbstractFileSystem
 
 
 class DummyCache:
@@ -24,7 +24,7 @@ def _get_cache(self):
 
 
 # Patch the AbstractFileSystem cache property.
-fsspec.AbstractFileSystem.cache = property(_get_cache)
+setattr(AbstractFileSystem, "cache", {})  # type: ignore[attr-defined]
 
 # Additionally, patch s3fs.S3FileSystem to ensure _cache is set properly.
 _original_init = s3fs.S3FileSystem.__init__

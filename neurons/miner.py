@@ -546,7 +546,6 @@ class Miner:
 
             # 10. Optimization step
             tplr.logger.info("Finish and step.")
-            self.optimizer.step()
             self.scheduler.step()
 
             # Log total window time and add timing metrics to existing wandb logging

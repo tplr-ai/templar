@@ -75,3 +75,4 @@ def prepare_gradient_dict(miner, pages, step_window):
     logger.info(f"Attached metadata to gradient: {gradient['metadata']}")
 
     return gradient, xshapes, totalks, transmitted
+

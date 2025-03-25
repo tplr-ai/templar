@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import bittensor as bt
 
 from tqdm import tqdm as std_tqdm
-from typing import List, Dict, Optional, TypeVar, Any
+from typing import List, Dict, Literal, Optional, TypeVar, Any
 from aiobotocore.session import get_session
 
 from . import __version__
@@ -709,9 +709,9 @@ class Comms(ChainManager):
     async def put(
         self,
         state_dict: dict,
-        uid: str,
+        uid: str | None,
         window: int,
-        key: str,
+        key: Literal["checkpoint", "debug", "gradient", "aggregator"],
         global_step: int = 0,
         local: bool = True,
         stale_retention: int = 10,
@@ -731,7 +731,10 @@ class Comms(ChainManager):
         Returns:
             float: The elapsed time (in seconds) for the PUT operation.
         """
-        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        if key == "aggregator":
+            filename = f"{key}-{window}-v{__version__}.pt"
+        else:
+            filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         tplr.logger.debug(f"PUT {filename} -->")
 
         put_start = tplr.T()
@@ -906,8 +909,8 @@ class Comms(ChainManager):
 
     async def gather(
         self,
-        my_uid: str,
-        uids: List[str],
+        my_uid: str | None,
+        uids: List[int],
         window: int,
         key: str,
         timeout: int,

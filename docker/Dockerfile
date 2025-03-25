@@ -24,7 +24,7 @@ COPY pyproject.toml .
 COPY . .
 
 # Install dependencies using uv
-RUN uv sync --extra all
+RUN uv sync
 
 # Environment variables that can be passed
 ENV WALLET_NAME=""

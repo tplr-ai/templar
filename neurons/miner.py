@@ -514,39 +514,45 @@ class Miner:
 
             # 8. Apply gathered gradients
             update_start = tplr.T()
-            for n, p in self.model.named_parameters():
-                idxs_key = n + "idxs"
-                vals_key = n + "vals"
-                idxs = getattr(gather_result.state_dict, idxs_key, None)
-                vals = getattr(gather_result.state_dict, vals_key, None)
-                if idxs is not None and vals is not None:
-                    # Ensure idx and val are lists of tensors
-                    if not isinstance(idxs, (list, tuple)):
-                        idxs = [idxs]
-                    if not isinstance(vals, (list, tuple)):
-                        vals = [vals]
 
-                    new_grad = self.transformer.decode(
-                        self.compressor.batch_decompress(
-                            p.to(self.config.device),
-                            idxs,
-                            vals,
-                            xshapes[n],
-                            totalks[n],
+            if gather_result is not None and gather_result.state_dict is not None:
+                for n, p in self.model.named_parameters():
+                    idxs_key = n + "idxs"
+                    vals_key = n + "vals"
+                    idxs = getattr(gather_result.state_dict, idxs_key, None)
+                    vals = getattr(gather_result.state_dict, vals_key, None)
+                    if idxs is not None and vals is not None:
+                        if not isinstance(idxs, (list, tuple)):
+                            idxs = [idxs]
+                        if not isinstance(vals, (list, tuple)):
+                            vals = [vals]
+                        new_grad = self.transformer.decode(
+                            self.compressor.batch_decompress(
+                                p.to(self.config.device),
+                                idxs,
+                                vals,
+                                self.xshapes[n],
+                                self.totalks[n],
+                            )
                         )
-                    )
-                    p.data.sub_(new_grad.sign(), alpha=self.scheduler.get_last_lr()[0])
-                else:
-                    tplr.logger.info(
-                        f"Gradient data missing for parameter {n}, skipping."
-                    )
+
+                        if p.grad is None:
+                            p.grad = new_grad
+                        else:
+                            p.grad.copy_(new_grad)
+                        p.grad.sign_()
+                    else:
+                        tplr.logger.info(
+                            f"Gradient data missing for parameter {n}, skipping."
+                        )
             tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - update_start)} Updated model"
+                f"{tplr.P(self.start_window, tplr.T() - update_start)} Updated model"
             )
 
-            # 10. Optimization step
-            tplr.logger.info("Finish and step.")
+            self.optimizer.step()
             self.scheduler.step()
+            torch.cuda.empty_cache()
+
 
             # Log total window time and add timing metrics to existing wandb logging
             tplr.logger.info(

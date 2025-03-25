@@ -430,7 +430,7 @@ class Miner:
             gather_task = asyncio.create_task(
                 self.comms.gather(
                     my_uid=self.uid,
-                    uids=[uid for uid in self.peers if uid != self.uid],
+                    uids=self.peers,
                     window=step_window,
                     key="gradient",
                     timeout=35,
@@ -514,6 +514,8 @@ class Miner:
 
             # 8. Apply gathered gradients
             update_start = tplr.T()
+            self.model.train()
+            self.optimizer.zero_grad()
 
             if gather_result is not None and gather_result.state_dict is not None:
                 for n, p in self.model.named_parameters():
@@ -531,8 +533,8 @@ class Miner:
                                 p.to(self.config.device),
                                 idxs,
                                 vals,
-                                self.xshapes[n],
-                                self.totalks[n],
+                                xshapes[n],
+                                totalks[n],
                             )
                         )
 

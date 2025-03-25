@@ -9,7 +9,7 @@ description = "Incentivised Internet-Wide Training"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "bittensor==9.0.3",
+    "bittensor==9.1.0",
     "bt-decode",
     "torch",
     "boto3",
@@ -40,7 +40,8 @@ dev = [
     "matplotlib",
     "seaborn",
     "ruff",
-    "pytest-xdist"
+    "pytest-xdist",
+    "bittensor-cli"
 
 ]
 

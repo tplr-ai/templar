@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import bittensor as bt
 
 from tqdm import tqdm as std_tqdm
-from typing import List, Dict, Literal, Optional, TypeVar, Any
+from typing import List, Dict, Literal, Optional
 from aiobotocore.session import get_session
 
 from . import __version__
@@ -51,9 +51,6 @@ from .compress import TransformDCT, CompressDCT
 # Constants
 CF_REGION_NAME: str = "enam"
 LOCAL_TMP_DIR = "/tmp/local_store"
-
-T = TypeVar("T", bound=Any)
-FixtureFunction = TypeVar("FixtureFunction", bound=Any)
 
 
 class Comms(ChainManager):

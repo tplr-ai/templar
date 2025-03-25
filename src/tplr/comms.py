@@ -20,7 +20,7 @@ import torch
 import asyncio
 from datetime import datetime, timezone
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Literal, Optional
 from aiobotocore.session import get_session
 
 from . import __version__
@@ -125,10 +125,10 @@ class Comms:
 
     async def put(
         self,
-        state_dict: Dict,
-        uid: str,
+        state_dict: dict,
+        uid: int | None,
         window: int,
-        key: str,
+        key: Literal["checkpoint", "debug", "gradient", "aggregator"],
         global_step: int = 0,
         local: bool = True,
         stale_retention: int = 10,
@@ -145,7 +145,12 @@ class Comms:
             local: Whether to store locally.
             stale_retention: Number of recent files to retain.
         """
-        from datetime import datetime
+
+        if key == "aggregator":
+            filename = f"{key}-{window}-v{__version__}.pt"
+        else:
+            filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        tplr.logger.debug(f"PUT {filename} -->")
 
         full_state_dict = {
             "state_dict": state_dict,
@@ -253,7 +258,7 @@ class Comms:
 
     async def gather(
         self,
-        my_uid: str,
+        my_uid: str | None,
         uids: List[int],
         window: int,
         key: str,

@@ -1,0 +1,133 @@
+---
+- name: Create NVIDIA Docker keyring directory
+  ansible.builtin.file:
+    path: /usr/share/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Debug Ubuntu version
+  ansible.builtin.debug:
+    msg: "Ubuntu version: {{ ansible_distribution_version }}"
+  when: ansible_distribution == 'Ubuntu'
+  tags: nvidia_container
+
+# For Ubuntu 24.04 we need to use a special approach as there's no direct repository yet
+- name: Add NVIDIA Container Toolkit Repository for Ubuntu
+  tags: nvidia_container
+  block:
+    - name: Ensure curl is installed
+      ansible.builtin.apt:
+        name: curl
+        state: present
+      register: install_curl
+      retries: 3
+      delay: 5
+      until: install_curl is succeeded
+
+    - name: Get system architecture
+      ansible.builtin.command: dpkg --print-architecture
+      register: dpkg_arch
+      changed_when: false
+
+    - name: Download NVIDIA Container Toolkit GPG key (for Ubuntu 24.04)
+      ansible.builtin.shell: |
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+      register: add_nvidia_key
+      retries: 3
+      delay: 10
+      until: add_nvidia_key is succeeded
+
+    # Try different repository approaches since NVIDIA doesn't have official Ubuntu 24.04 repos yet
+    - name: Add NVIDIA Container Toolkit repository (attempt 1)
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/experimental/ubuntu22.04/{{ dpkg_arch.stdout }} /"
+        state: present
+        filename: nvidia-container-toolkit
+      register: add_repo_attempt1
+      failed_when: false
+
+    - name: Add NVIDIA Container Toolkit repository (attempt 2 - stable)
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/stable/ubuntu22.04/{{ dpkg_arch.stdout }} /"
+        state: present
+        filename: nvidia-container-toolkit
+      register: add_repo_attempt2
+      failed_when: false
+      when: add_repo_attempt1 is failed
+
+    # Last resort - install directly from package
+    - name: Manually download and install NVIDIA Container Runtime (fallback)
+      block:
+        - name: Download NVIDIA Container Runtime package
+          ansible.builtin.get_url:
+            url: https://nvidia.github.io/libnvidia-container/ubuntu22.04/{{ dpkg_arch.stdout }}/nvidia-container-toolkit_1.14.6-1_{{ dpkg_arch.stdout }}.deb
+            dest: /tmp/nvidia-container-toolkit.deb
+            mode: '0644'
+          register: download_package
+          retries: 3
+          delay: 10
+          until: download_package is succeeded
+
+        - name: Install NVIDIA Container Toolkit from package
+          ansible.builtin.apt:
+            deb: /tmp/nvidia-container-toolkit.deb
+            state: present
+          register: install_toolkit_package
+          
+        - name: Set fact to skip future installation
+          ansible.builtin.set_fact:
+            nvidia_toolkit_already_installed: true
+      when: (add_repo_attempt1 is failed) and (add_repo_attempt2 is defined and add_repo_attempt2 is failed)
+  when: ansible_distribution == 'Ubuntu' and ansible_distribution_version == '24.04'
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: yes
+  register: apt_update
+  retries: 3
+  delay: 10
+  until: apt_update is succeeded
+  tags: nvidia_container
+
+- name: Install NVIDIA Container Toolkit
+  ansible.builtin.apt:
+    name: nvidia-container-toolkit
+    state: present
+  register: toolkit_install
+  retries: 3
+  delay: 10
+  until: toolkit_install is succeeded
+  when: nvidia_toolkit_already_installed is not defined or not nvidia_toolkit_already_installed
+  tags: nvidia_container
+
+- name: Configure Docker runtime
+  ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker
+  register: docker_runtime_config
+  changed_when: docker_runtime_config.rc == 0
+
+- name: Set no-cgroups to false in config.toml
+  ansible.builtin.lineinfile:
+    path: /etc/nvidia-container-runtime/config.toml
+    regexp: '^no-cgroups = .*'
+    line: 'no-cgroups = false'
+  register: config_toml_changed
+
+- name: Configure container runtime for rootless mode
+  ansible.builtin.command: "nvidia-ctk runtime configure --runtime=docker --config={{ ansible_env.HOME }}/.config/docker/daemon.json"
+  register: rootless_config
+  changed_when: rootless_config.rc == 0
+
+- name: Configure no-cgroups setting
+  ansible.builtin.command: nvidia-ctk config --set nvidia-container-cli.no-cgroups --in-place
+  register: no_cgroups_config
+  changed_when: no_cgroups_config.rc == 0
+
+- name: Configure Docker daemon.json
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+  notify: restart docker
+  register: docker_daemon_config

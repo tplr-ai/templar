@@ -1,0 +1,18 @@
+---
+- name: remove ppa
+  apt_repository:
+    repo: ppa:graphics-drivers/ppa
+    state: absent
+
+- name: install driver packages
+  apt:
+    name: "{{ nvidia_driver_package_version | ternary(item+'='+nvidia_driver_package_version, item) }}"
+    state: "{{ nvidia_driver_package_state }}"
+    autoremove: "{{ nvidia_driver_package_state == 'absent' }}"
+    purge: "{{ nvidia_driver_package_state == 'absent' }}"
+  loop: "{{ nvidia_driver_ubuntu_packages }}"
+  register: install_driver
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
+  retries: "{{ nvidia_driver_install_retries }}"
+  delay: "{{ nvidia_driver_install_retry_delay }}"
+  until: install_driver is succeeded

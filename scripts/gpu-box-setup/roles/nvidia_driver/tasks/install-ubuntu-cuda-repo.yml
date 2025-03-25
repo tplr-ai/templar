@@ -1,0 +1,79 @@
+---
+- name: remove ppa
+  apt_repository:
+    repo: ppa:graphics-drivers/ppa
+    state: absent
+
+- name: remove old signing key
+  apt_key:
+    id: "{{ old_nvidia_driver_ubuntu_cuda_repo_gpgkey_id }}"
+    state: absent
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
+  when: nvidia_driver_add_repos | bool
+
+- name: Debug CUDA repository information
+  debug:
+    msg:
+      - "Ubuntu repo dir: {{ _ubuntu_repo_dir }}"
+      - "Keyring URL: {{ nvidia_driver_ubuntu_cuda_keyring_url }}"
+  when: nvidia_driver_add_repos | bool
+
+# Since we're using Ubuntu 24.04, we need to use a different approach for the NVIDIA repositories
+- name: Add NVIDIA CUDA repository key (alternative method)
+  shell: |
+    curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/3bf863cc.pub | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-cuda-keyring.gpg
+  args:
+    creates: /usr/share/keyrings/nvidia-cuda-keyring.gpg
+  register: add_key
+  retries: 3
+  delay: 10
+  until: add_key is succeeded
+  when: nvidia_driver_add_repos | bool
+
+- name: Add NVIDIA CUDA repository
+  apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/nvidia-cuda-keyring.gpg] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/ /"
+    state: present
+    filename: nvidia-cuda
+  register: add_repo
+  retries: 3
+  delay: 10
+  until: add_repo is succeeded
+  when: nvidia_driver_add_repos | bool
+
+# CUDA keyring installation is now handled by the repository setup
+
+- name: force an apt update
+  apt:
+    update_cache: true
+  register: apt_update
+  retries: 3
+  delay: 10
+  until: apt_update is succeeded
+  changed_when: false
+
+- name: ensure kmod is installed
+  apt:
+    name: "kmod"
+    state: "present"
+  register: kmod_install
+  retries: 3
+  delay: 5
+  until: kmod_install is succeeded
+
+- name: blacklist nouveau
+  kernel_blacklist:
+    name: nouveau
+    state: present
+
+- name: install driver packages
+  apt:
+    name: "{{ nvidia_driver_package_version | ternary(nvidia_driver_ubuntu_cuda_package+'='+nvidia_driver_package_version, nvidia_driver_ubuntu_cuda_package) }}"
+    state: "{{ nvidia_driver_package_state }}"
+    autoremove: "{{ nvidia_driver_package_state == 'absent' }}"
+    purge: "{{ nvidia_driver_package_state == 'absent' }}"
+  register: install_driver
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
+  retries: "{{ nvidia_driver_install_retries }}"
+  delay: "{{ nvidia_driver_install_retry_delay }}"
+  until: install_driver is succeeded

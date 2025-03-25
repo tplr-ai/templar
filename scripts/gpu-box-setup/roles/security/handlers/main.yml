@@ -1,0 +1,11 @@
+---
+- name: restart sshd
+  service:
+    name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
+    state: restarted
+
+- name: reload firewall
+  service:
+    name: "{{ 'ufw' if ansible_os_family == 'Debian' else 'firewalld' }}"
+    state: reloaded
+  when: ansible_service_mgr == 'systemd'

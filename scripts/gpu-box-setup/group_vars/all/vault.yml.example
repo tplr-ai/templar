@@ -1,0 +1,10 @@
+---
+# Credentials
+vault_sudo_password: "..."
+ansible_become_pass: "{{ vault_sudo_password }}"
+ansible_password: "{{ vault_sudo_password }}"
+
+# SSH Configuration
+ansible_ssh_retries: 3
+ssh_public_keys:
+  - "ssh-rsa ..."

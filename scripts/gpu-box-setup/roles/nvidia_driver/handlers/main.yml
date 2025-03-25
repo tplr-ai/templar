@@ -1,0 +1,11 @@
+---
+- name: restart nvidia-persistenced
+  systemd:
+    name: nvidia-persistenced
+    state: restarted
+    daemon_reload: yes
+
+- name: reload udev rules
+  shell: udevadm control --reload-rules && udevadm trigger
+  args:
+    executable: /bin/bash

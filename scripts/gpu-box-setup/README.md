@@ -12,6 +12,7 @@ This Ansible playbook automates the setup of a GPU server for AI workloads, incl
 - Sets up Python environment for AI development
 - Optimizes memory and swap settings
 - Verifies GPU functionality
+- Runs comprehensive GPU benchmarks
 
 ## Prerequisites
 
@@ -70,12 +71,33 @@ The playbook is highly configurable through role variables. Key settings include
 - `nvidia_driver_persistence_mode_on`: Enable driver persistence (default: yes)
 - `nvidia_driver_ubuntu_install_from_cuda_repo`: Install driver from CUDA repo (default: yes)
 
+### NVIDIA Benchmark Role
+- `run_benchmark`: Whether to run benchmarks after setup (default: true)
+- `benchmark_duration`: Duration for thermal test in seconds (default: 30)
+- `benchmark_iterations`: Number of iterations for benchmark tests (default: 20)
+
 ## Verification
 
 After the playbook completes, the following verification steps are performed:
 - Tests NVIDIA driver installation with `nvidia-smi`
 - Verifies Docker can access NVIDIA runtime
 - Runs a simple CUDA test container
+
+## Benchmarking
+
+The playbook can run comprehensive GPU benchmarks to evaluate system performance:
+
+- Memory usage testing with different model sizes
+- Precision format benchmarks (FP32, FP16, BF16 if supported)
+- Throughput testing with ResNet50
+- Thermal monitoring under load
+- Memory bandwidth measurement
+- Convolution performance
+- Transformer layer performance
+- Multi-GPU scaling (when multiple GPUs are available)
+- Mixed precision training speedup
+
+Results are saved as JSON in the home directory and a summary is displayed after completion.
 
 ## Troubleshooting
 

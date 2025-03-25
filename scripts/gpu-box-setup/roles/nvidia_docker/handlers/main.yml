@@ -5,3 +5,6 @@
     daemon_reload: yes
     state: restarted
   ignore_errors: "{{ ansible_check_mode }}"
+  retries: 3
+  delay: 10
+  until: docker_status is succeeded

@@ -1,0 +1,143 @@
+---
+- name: Create benchmark directory
+  file:
+    path: "{{ ansible_env.HOME }}/gpu_benchmark"
+    state: directory
+    mode: '0755'
+
+- name: Copy the benchmark script
+  copy:
+    src: gpu_benchmark.py
+    dest: "{{ ansible_env.HOME }}/gpu_benchmark/gpu_benchmark.py"
+    mode: '0755'
+  register: benchmark_script
+
+- name: Check if Python virtual environment exists
+  stat:
+    path: "{{ python_venv_path }}/bin/pip"
+  register: venv_pip
+
+- name: Ensure Python venv package is installed (Ubuntu/Debian)
+  apt:
+    name:
+      - python3-pip
+      - python3-venv
+      - python3-full
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Ensure Python venv package is installed (RedHat/CentOS)
+  yum:
+    name:
+      - python3-pip
+      - python3-virtualenv
+    state: present
+  when: ansible_os_family == "RedHat"
+
+- name: Create benchmark virtual environment
+  command: python3 -m venv {{ ansible_env.HOME }}/benchmark-env
+  args:
+    creates: "{{ ansible_env.HOME }}/benchmark-env/bin/activate"
+
+- name: Install benchmark dependencies in benchmark virtual environment
+  pip:
+    name:
+      - torch
+      - torchvision
+      - numpy
+    virtualenv: "{{ ansible_env.HOME }}/benchmark-env"
+  register: pip_install_result
+  ignore_errors: true
+
+- name: Install benchmark dependencies using existing virtual environment
+  pip:
+    name:
+      - torch
+      - torchvision
+      - numpy
+    virtualenv: "{{ python_venv_path }}"
+  when: venv_pip.stat.exists and install_ai_dependencies | bool and pip_install_result is failed
+
+- name: Check if PyTorch is installed in benchmark virtual environment
+  shell: |
+    source {{ ansible_env.HOME }}/benchmark-env/bin/activate
+    python -c "import torch; print('torch_installed')"
+  register: torch_benchmark_check
+  failed_when: false
+  changed_when: false
+
+- name: Check if PyTorch is installed in main virtual environment
+  shell: |
+    source {{ python_venv_path }}/bin/activate
+    python -c "import torch; print('torch_installed')"
+  register: torch_venv_check
+  failed_when: false
+  changed_when: false
+  when: venv_pip.stat.exists
+
+- name: Run GPU benchmark with benchmark virtual environment
+  shell: |
+    source {{ ansible_env.HOME }}/benchmark-env/bin/activate
+    cd {{ ansible_env.HOME }}/gpu_benchmark
+    python gpu_benchmark.py
+  register: benchmark_output
+  when:
+    - benchmark_script.changed
+    - torch_benchmark_check.stdout is defined
+    - "'torch_installed' in torch_benchmark_check.stdout"
+  ignore_errors: true
+  changed_when: false
+
+- name: Run GPU benchmark with main virtual environment
+  shell: |
+    source {{ python_venv_path }}/bin/activate
+    cd {{ ansible_env.HOME }}/gpu_benchmark
+    python gpu_benchmark.py
+  register: benchmark_output_venv
+  when:
+    - benchmark_script.changed
+    - benchmark_output is failed or benchmark_output.stdout is not defined
+    - venv_pip.stat.exists
+    - torch_venv_check.stdout is defined
+    - "'torch_installed' in torch_venv_check.stdout"
+  ignore_errors: true
+  changed_when: false
+
+- name: Set benchmark stdout variable
+  set_fact:
+    benchmark_stdout: "{{ benchmark_output.stdout | default('') if benchmark_output is defined and benchmark_output.stdout is defined else (benchmark_output_venv.stdout | default('') if benchmark_output_venv is defined and benchmark_output_venv.stdout is defined else '') }}"
+
+- name: Check if PyTorch is available
+  set_fact:
+    pytorch_available: "{{ (torch_benchmark_check.stdout is defined and 'torch_installed' in torch_benchmark_check.stdout) or (torch_venv_check.stdout is defined and 'torch_installed' in torch_venv_check.stdout) }}"
+
+- name: Display benchmark results summary
+  debug:
+    msg: |
+      GPU Benchmark Results:
+      - GPU Model: {{ benchmark_stdout | regex_search('Running benchmarks on GPU: (.+)', '\\1') | default('N/A') }}
+      - Framework Versions:
+        - PyTorch: {{ benchmark_stdout | regex_search('torch_version.: (.+?),', '\\1') | default('N/A') }}
+        - CUDA: {{ benchmark_stdout | regex_search('cuda_version.: (.+?),', '\\1') | default('N/A') }}
+      - Performance Metrics:
+        - Mixed Precision Speedup: {{ benchmark_stdout | regex_search('Speedup: (.+?)x', '\\1') | default('N/A') }}
+
+      Full benchmark results are available at: {{ ansible_env.HOME }}/gpu_benchmark/gpu_benchmark_results.json
+  when: benchmark_stdout is defined and benchmark_stdout != ''
+
+- name: Display PyTorch installation message when benchmark fails
+  debug:
+    msg: |
+      GPU Benchmark could not run because PyTorch is not available.
+
+      To manually install PyTorch and run the benchmark:
+
+      1. SSH into the server
+      2. Create a Python virtual environment:
+         python3 -m venv ~/benchmark-env
+      3. Activate the environment and install PyTorch:
+         source ~/benchmark-env/bin/activate
+         pip install torch torchvision numpy
+      4. Run the benchmark:
+         cd ~/gpu_benchmark && python gpu_benchmark.py
+  when: not pytorch_available

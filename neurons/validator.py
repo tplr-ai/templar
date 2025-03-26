@@ -118,6 +118,7 @@ class Validator:
         # Set InfluxDB environment variable based on CLI arg
         if config.enable_influxdb:
             os.environ["ENABLE_INFLUXDB"] = "true"
+            tplr.logger.info("InfluxDB metrics logging enabled for validator")
             
         return config
 
@@ -258,6 +259,7 @@ class Validator:
             group="validator",
             job_type="validation",
         )
+        tplr.logger.info(f"MetricsLogger initialized for validator. ENABLE_INFLUXDB={os.environ.get('ENABLE_INFLUXDB', 'not set')}")
 
         # Initialize peers
         self.peers = []

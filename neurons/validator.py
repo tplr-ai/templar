@@ -1589,8 +1589,10 @@ class Validator:
             gather_success_rate = float(gather_result.success_rate * 100) if gather_result else 0.0
             total_skipped = len(gather_result.skipped_uids) if gather_result else 0
             
+            tplr.logger.info(f"Attempting to log validator metrics to InfluxDB. ENABLE_INFLUXDB={os.environ.get('ENABLE_INFLUXDB', 'not set')}")
+            
             self.metrics_logger.log(
-                measurement="validator_window",
+                measurement="validator_window_v2",
                 tags={
                     "window": int(self.sync_window),
                     "global_step": int(self.global_step),
@@ -1616,6 +1618,7 @@ class Validator:
                     "total_skipped": int(total_skipped),
                 },
             )
+            tplr.logger.info("Finished metrics logging call for validator")
 
             # 18. Increment global step
             self.global_step += 1

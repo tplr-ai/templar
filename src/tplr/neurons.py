@@ -229,18 +229,19 @@ def process_loaded_data(model: torch.nn.Module, compressed_data: dict):
     Returns:
         Dictionary with unpacked tensors
     """
+    state_dict = compressed_data.get("state_dict")
     result = {
-        "timestamp": compressed_data.get("timestamp", None),
-        "window": compressed_data.get("window", None),
-        "version": compressed_data.get("version", None),
+        "timestamp": state_dict.get("timestamp", None),
+        "window": state_dict.get("window", None),
+        "version": state_dict.get("version", None),
         "tensors": {},
     }
 
     for name, param in model.named_parameters():
-        if name in compressed_data:
+        if name in state_dict:
             original_shape = param.shape
             # Use unpack_binary_tensor from the sample, but in our context
-            unpacked = unpack_binary_tensor(compressed_data[name], original_shape)
+            unpacked = unpack_binary_tensor(state_dict[name], original_shape)
             result["tensors"][name] = unpacked
             logger.debug(f"Unpacked tensor {name} with shape {original_shape}")
 

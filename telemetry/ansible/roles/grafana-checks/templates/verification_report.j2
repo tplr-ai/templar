@@ -1,0 +1,27 @@
+=======================================================================
+GRAFANA STACK VERIFICATION REPORT
+=======================================================================
+Date: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+Host: {{ inventory_hostname }} ({{ ansible_host }})
+=======================================================================
+
+SUMMARY
+-----------------------------------------------------------------------
+Overall Status: {{ "SUCCESS" if all_tests_passed else "FAILED" }}
+
+DETAILS
+-----------------------------------------------------------------------
+{% for item in verification_results %}
+{{ "✅" if item.status else "❌" }} {{ item.name }}
+{% endfor %}
+
+SYSTEM INFORMATION
+-----------------------------------------------------------------------
+Ansible Distribution: {{ ansible_distribution }} {{ ansible_distribution_version }}
+Ansible Architecture: {{ ansible_architecture }}
+Python Version: {{ ansible_python_version }}
+Grafana Version: {{ grafana_version | default('Unknown') }}
+
+-----------------------------------------------------------------------
+Report generated automatically by Grafana-Checks role
+-----------------------------------------------------------------------

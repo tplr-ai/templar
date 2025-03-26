@@ -1,0 +1,14 @@
+---
+# Example Ansible Vault file - Replace these values with your secrets
+# Use 'ansible-vault encrypt vault.yml' to encrypt this file
+
+# Grafana credentials
+grafana_security_admin_password: "CHANGE_ME"
+grafana_security_secret_key: "CHANGE_ME"
+
+# InfluxDB authentication token
+grafana_influxdb_token: "CHANGE_ME_WITH_YOUR_INFLUXDB_TOKEN"
+
+# Other secrets
+# api_token: "CHANGE_ME"
+# ssl_private_key_passphrase: "CHANGE_ME"

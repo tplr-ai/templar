@@ -1,0 +1,6 @@
+---
+# Handlers for grafana-checks role
+
+- name: display verification summary
+  debug:
+    msg: "Verification complete. Check the summary report for details."

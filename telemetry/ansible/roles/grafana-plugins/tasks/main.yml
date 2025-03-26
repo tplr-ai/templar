@@ -1,0 +1,79 @@
+---
+# Main tasks for Grafana plugins installation
+
+- name: Ensure Grafana plugins directory exists
+  file:
+    path: "{{ grafana_plugins_dir }}"
+    state: directory
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0755
+
+- name: Install JSON API datasource plugin
+  command: "grafana-cli plugins install marcusolsson-json-datasource"
+  register: json_plugin_install
+  changed_when: "'installed' in json_plugin_install.stdout"
+  failed_when: json_plugin_install.rc != 0 and 'already installed' not in json_plugin_install.stderr
+  become: true
+
+- name: Ensure plugins section exists in grafana.ini
+  lineinfile:
+    path: /etc/grafana/grafana.ini
+    line: "[plugins]"
+    state: present
+  register: plugins_section
+
+- name: Update Grafana configuration to allow unsigned plugins
+  lineinfile:
+    path: /etc/grafana/grafana.ini
+    regexp: "^;?allow_loading_unsigned_plugins *=.*"
+    line: "allow_loading_unsigned_plugins = {{ grafana_plugins_to_allow | join(',') }}"
+    insertafter: "^\\[plugins\\]"
+    state: present
+  register: plugins_config
+
+- name: Restart Grafana service
+  service:
+    name: grafana-server
+    state: restarted
+  when: plugins_config is changed
+
+- name: Wait for Grafana to be available
+  uri:
+    url: "http://localhost:{{ grafana_http_port }}/api/health"
+    method: GET
+    status_code: 200
+  register: result
+  until: result is success
+  retries: 60
+  delay: 1
+  when: plugins_config is changed
+
+- name: Create provisioning file for JSON API datasource
+  template:
+    src: json-api-datasource.yml.j2
+    dest: "{{ grafana_provisioning_dir }}/datasources/json-api-datasource.yml"
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0640
+  notify: restart grafana
+
+- name: Verify JSON API plugin is loaded correctly
+  uri:
+    url: "http://localhost:{{ grafana_http_port }}/api/plugins/marcusolsson-json-datasource"
+    method: GET
+    headers:
+      Authorization: "Basic {{ (grafana_security_admin_user + ':' + grafana_security_admin_password) | b64encode }}"
+    status_code: 200
+  register: json_plugin_status
+  failed_when: false
+
+- name: Display JSON API plugin loading status
+  debug:
+    msg: "JSON API plugin successfully loaded and available"
+  when: json_plugin_status is defined and json_plugin_status.status is defined and json_plugin_status.status == 200
+
+- name: Display JSON API plugin error status
+  debug:
+    msg: "WARNING: JSON API plugin may not be properly loaded. Please check Grafana logs."
+  when: json_plugin_status is not defined or json_plugin_status.status is not defined or json_plugin_status.status != 200

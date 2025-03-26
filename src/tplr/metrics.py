@@ -118,7 +118,11 @@ class MetricsLogger:
         self.lock = Lock()
 
     def process_value(self, v):
-        if isinstance(v, (int, float)):
+        if isinstance(v, int):
+            # Keep integers as integers (especially for counts, IDs, etc.)
+            return int(v)
+        elif isinstance(v, float):
+            # Convert floats consistently
             return float(v)
         elif isinstance(v, list):
             # If the list appears to be a list of peer UIDs, log the raw list as a string.
@@ -133,7 +137,13 @@ class MetricsLogger:
                 "max": float(max(v)),
                 "median": float(statistics.median(v)),
             }
-        return v
+        elif isinstance(v, str):
+            return str(v)
+        elif v is None:
+            return 0.0  # Default value for None
+        else:
+            # Convert anything else to string to avoid type conflicts
+            return str(v)
 
     def log(
         self,
@@ -155,6 +165,11 @@ class MetricsLogger:
             with_system_metrics: Whether to include system metrics
             with_gpu_metrics: Whether to include GPU metrics
         """
+        # Skip logging if InfluxDB is not enabled via environment variable
+        if os.environ.get("ENABLE_INFLUXDB", "").lower() != "true":
+            logger.debug("InfluxDB logging is disabled. Set ENABLE_INFLUXDB=true to enable.")
+            return
+            
         try:
             timestamp = timestamp or int(time.time_ns())
 
@@ -176,6 +191,7 @@ class MetricsLogger:
 
             with self.lock:
                 self.write_api.write(bucket=self.database, org=self.org, record=point)
+                logger.debug(f"Successfully logged metrics to InfluxDB: {measurement}")
 
         except Exception as e:
             logger.error(f"Error logging metrics: {e}")

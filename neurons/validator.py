@@ -61,13 +61,19 @@ torch.backends.cudnn.allow_tf32 = True
 
 
 @contextmanager
-def timer(name: str, wandb_obj=None, step=None):
+def timer(name: str, wandb_obj=None, step=None, metrics_logger=None):
     start = perf_counter()
     yield
     duration = perf_counter() - start
     tplr.logger.debug(f"{name} took {duration:.2f}s")
     if wandb_obj and step is not None:
         wandb_obj.log({f"validator/{name}": duration}, step=step)
+    if metrics_logger and step is not None:
+        metrics_logger.log(
+            measurement="timing", 
+            tags={"window": step}, 
+            fields={name: duration}
+        )
 
 
 class Validator:
@@ -95,6 +101,11 @@ class Validator:
             action="store_true",
             help="Test mode - use all peers without filtering",
         )
+        parser.add_argument(
+            "--enable-influxdb",
+            action="store_true",
+            help="Enable InfluxDB metrics logging (disabled by default)"
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -103,6 +114,11 @@ class Validator:
             tplr.debug()
         if config.trace:
             tplr.trace()
+            
+        # Set InfluxDB environment variable based on CLI arg
+        if config.enable_influxdb:
+            os.environ["ENABLE_INFLUXDB"] = "true"
+            
         return config
 
     def __init__(self):
@@ -229,6 +245,16 @@ class Validator:
             run_prefix="V",
             uid=self.uid,
             config=self.config,
+            group="validator",
+            job_type="validation",
+        )
+        
+        # Initialize metrics logger for InfluxDB
+        self.metrics_logger = tplr.metrics.MetricsLogger(
+            prefix="V",
+            uid=self.uid,
+            config=self.config,
+            role="validator",
             group="validator",
             job_type="validation",
         )
@@ -422,13 +448,27 @@ class Validator:
                         f"{old_score:.4f} -> {new_score:.4f}"
                     )
 
-                # Log slash metrics
+                # Log slash metrics to WandB
                 self.wandb.log(
                     {
                         f"validator/inactivity/{uid}/score_before": old_score,
                         f"validator/inactivity/{uid}/score_after": new_score,
                     },
                     step=self.global_step,
+                )
+                
+                # Log slash metrics to InfluxDB with primitive types
+                self.metrics_logger.log(
+                    measurement="validator_inactivity",
+                    tags={
+                        "uid": str(uid), 
+                        "window": int(current_window),
+                        "global_step": int(self.global_step)
+                    },
+                    fields={
+                        "score_before": float(old_score),
+                        "score_after": float(new_score),
+                    },
                 )
 
             # Calculate time window for this sync window
@@ -826,6 +866,22 @@ class Validator:
                                 f"validator/slash/{eval_uid}/reason": str(e),
                             },
                             step=self.global_step,
+                        )
+                        
+                        # Log to InfluxDB metrics with primitive types
+                        self.metrics_logger.log(
+                            measurement="validator_slash",
+                            tags={
+                                "eval_uid": str(eval_uid),
+                                "window": int(self.sync_window),
+                                "global_step": int(self.global_step),
+                                "reason_code": "invalid_gradient",
+                            },
+                            fields={
+                                "score_before": float(old_score),
+                                "score_after": float(self.final_moving_avg_scores[eval_uid].item()),
+                                "reason": str(e)[:255],  # Truncate long error messages
+                            },
                         )
 
                         # Skip the rest of processing for this peer
@@ -1332,26 +1388,42 @@ class Validator:
 
             # Log WandB metrics per UID
             for uid in sorted(self.evaluated_uids):
+                # Extract primitive values from tensors for WandB
+                gradient_score = float(self.gradient_scores[uid].item())
+                binary_indicator = float(self.binary_indicator_scores[uid].item())
+                binary_moving_avg = float(self.binary_moving_averages[uid].item())
+                normalised_binary = float(self.normalised_binary_moving_averages[uid].item())
+                final_moving_avg = float(self.final_moving_avg_scores[uid].item())
+                weight = float(self.weights[uid].item())
+                
                 self.wandb.log(
                     {
-                        f"validator/gradient_scores/{uid}": self.gradient_scores[
-                            uid
-                        ].item(),
-                        f"validator/binary_indicators/{uid}": self.binary_indicator_scores[
-                            uid
-                        ].item(),
-                        f"validator/binary_moving_averages/{uid}": self.binary_moving_averages[
-                            uid
-                        ].item(),
-                        f"validator/normalised_binary_scores/{uid}": self.normalised_binary_moving_averages[
-                            uid
-                        ].item(),
-                        f"validator/final_moving_avg_scores/{uid}": self.final_moving_avg_scores[
-                            uid
-                        ].item(),
-                        f"validator/weights/{uid}": self.weights[uid].item(),
+                        f"validator/gradient_scores/{uid}": gradient_score,
+                        f"validator/binary_indicators/{uid}": binary_indicator,
+                        f"validator/binary_moving_averages/{uid}": binary_moving_avg,
+                        f"validator/normalised_binary_scores/{uid}": normalised_binary,
+                        f"validator/final_moving_avg_scores/{uid}": final_moving_avg,
+                        f"validator/weights/{uid}": weight,
                     },
                     step=self.global_step,
+                )
+                
+                # Log to InfluxDB metrics per UID with primitive types
+                self.metrics_logger.log(
+                    measurement="validator_scores",
+                    tags={
+                        "eval_uid": str(uid),
+                        "window": int(self.sync_window),
+                        "global_step": int(self.global_step),
+                    },
+                    fields={
+                        "gradient_score": gradient_score,
+                        "binary_indicator": binary_indicator,
+                        "binary_moving_avg": binary_moving_avg,
+                        "normalised_binary": normalised_binary,
+                        "final_moving_avg_score": final_moving_avg,
+                        "weight": weight,
+                    },
                 )
 
             # 17. Set weights periodically
@@ -1510,6 +1582,38 @@ class Validator:
                 "validator/timing/model_update": tplr.T() - update_start,
             }
             self.wandb.log(evaluation_metrics, step=self.global_step)
+            
+            # Log metrics to InfluxDB in parallel using primitive types
+            gather_success_rate = float(gather_result.success_rate * 100) if gather_result else 0.0
+            total_skipped = len(gather_result.skipped_uids) if gather_result else 0
+            
+            self.metrics_logger.log(
+                measurement="validator_window",
+                tags={
+                    "window": int(self.sync_window),
+                    "global_step": int(self.global_step),
+                },
+                fields={
+                    "loss_own_before": float(self.loss_before_per_batch_own),
+                    "loss_own_after": float(self.loss_after_per_batch_own),
+                    "loss_random_before": float(self.loss_before_per_batch_random),
+                    "loss_random_after": float(self.loss_after_per_batch_random),
+                    "loss_own_improvement": float(self.relative_improvement_own),
+                    "loss_random_improvement": float(self.relative_improvement_random),
+                    "current_block": int(self.current_block),
+                    "evaluated_uids_count": int(len(self.evaluated_uids)),
+                    "learning_rate": float(self.scheduler.get_last_lr()[0]),
+                    "active_miners_count": int(len(self.valid_score_indices)),
+                    "gather_success_rate": gather_success_rate,
+                    "window_total_time": float(tplr.T() - window_start),
+                    "peer_update_time": float(tplr.T() - peer_start),
+                    "gather_time": float(tplr.T() - gather_start),
+                    "evaluation_time": float(tplr.T() - eval_start),
+                    "model_update_time": float(tplr.T() - update_start),
+                    "total_peers": int(len(self.peers)),
+                    "total_skipped": int(total_skipped),
+                },
+            )
 
             # 18. Increment global step
             self.global_step += 1

@@ -351,6 +351,7 @@ class Validator:
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
         time_min = None
+        self.last_peer_update_window = None
         while True:
             # 1. Wait for the validator window offset
             while self.sync_window >= (
@@ -372,7 +373,42 @@ class Validator:
                 f"Processing window: {self.sync_window} current: {self.current_window}"
             )
 
-            peer_start = tplr.T()
+            # Create and post peers
+            initial_selection = False
+            if (
+                self.last_peer_update_window is None
+                or self.sync_window - self.last_peer_update_window
+                >= self.hparams.peer_replacement_frequency
+            ):
+                reason = (
+                    f"{self.last_peer_update_window=}"
+                    if self.last_peer_update_window is None
+                    else f"{self.sync_window=}>="
+                    f"{self.last_peer_update_window}+"
+                    f"{self.hparams.peer_replacement_frequency}="
+                    "self.last_peer_update_window+"
+                    "self.hparams.peer_replacement_frequency"
+                )
+
+                tplr.logger.info(
+                    f"Time to create and post a new peer list because {reason}"
+                )
+                if self.last_peer_update_window is None:
+                    selected_peers = self.select_initial_peers()
+                    initial_selection = True
+                else:
+                    selected_peers = self.select_next_peers()
+                if selected_peers is not None:
+                    self.last_peer_update_window = self.sync_window
+                    await self.comms.post_peer_list(
+                        peers=selected_peers,
+                        first_effective_window=self.current_window
+                        + self.hparams.peer_list_window_margin,
+                        sync_window=self.sync_window,
+                        weights=self.weights,
+                        initial_selection=initial_selection,
+                    )
+
             self.comms.update_peers_with_buckets()
             self.peers = self.comms.peers
             self.eval_peers = self.comms.eval_peers

@@ -51,6 +51,7 @@ from .compress import TransformDCT, CompressDCT
 # Constants
 CF_REGION_NAME: str = "enam"
 LOCAL_TMP_DIR = "/tmp/local_store"
+PEERS_FILE_PREFIX = "peers_"
 
 # Types
 PeerArray = np.ndarray[Any, np.dtype[np.int64]]
@@ -1435,8 +1436,50 @@ class Comms(ChainManager):
             tplr.logger.error(f"Failed to load checkpoint: {e}")
             return False, {}, 0, optimizer, scheduler
 
-    # Start Window Operations
+    async def post_peer_list(
+        self,
+        peers: PeerArray,
+        first_effective_window: int,
+        sync_window: int,
+        weights: torch.Tensor,
+        initial_selection: bool,
+    ):
+        """Upload peer list and debug data as JSON to the node's R2 bucket.
 
+        The first_effective_window is a future window (>current_window) from
+        which this list peer list will be used.
+
+        The following debugging fields are included in the JSON:
+        - sync_window: when the peer list was updated in "validator time"
+        - weights: weights for all UIDs, which were used to update the peer
+          list (except for during the initial peer selection)
+        - initial selection: whether this peer list is the first one in the
+          current run
+        """
+        key = f"{PEERS_FILE_PREFIX}{first_effective_window}_v{__version__}.json"
+        peers_and_weights = {
+            "peers": peers.tolist(),
+            "weights": weights.tolist(),
+            "initial_selection": initial_selection,
+            "sync_window": sync_window,
+            "first_effective_window": first_effective_window,
+        }
+
+        # Create temporary JSON file
+        temp_file = os.path.join(self.temp_dir, f"temp_{key}")
+        try:
+            async with aiofiles.open(temp_file, "w") as f:
+                await f.write(json.dumps(peers_and_weights))
+
+            await self.s3_put_object(key=key, file_path=temp_file)
+            tplr.logger.info(f"PUT {key} <--")
+        except Exception as e:
+            tplr.logger.info(f"Failed to upload peer list: {e}")
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+    # Start Window Operations
     async def post_start_window(self, start_window: int):
         """Upload the start window as a JSON object to the node's R2 bucket."""
         key = f"start_window_v{__version__}.json"

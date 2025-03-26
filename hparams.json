@@ -33,6 +33,7 @@
     "max_topk_peers": 15,
     "minimum_peers": 5,
     "peers_to_replace": 1,
+    "peer_replacement_frequency": 5,
     "active_check_interval": 60,
     "recent_windows": 5,
     "power_normalisation": 2.0,

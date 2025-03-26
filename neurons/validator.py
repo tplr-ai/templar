@@ -29,6 +29,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
+from types import SimpleNamespace
 from typing import cast
 
 import bittensor as bt
@@ -611,18 +612,38 @@ class Validator:
 
             tplr.logger.info(f"Validator gather peers: {self.comms.peers}")
 
-            gather_result = await self.comms.gather(
-                my_uid=self.uid,
-                uids=self.comms.peers,
-                window=self.sync_window,
-                key="gradient",
-                timeout=35,
-                device=self.config.device,
-                local=False,
-                totalks=self.totalks,
-                time_min=time_min,
-                time_max=time_max,
-            )
+            skipped_uids: list[int] = []
+            success_rate = 0.0
+            gather_result = None
+            aggregation_result = await self.comms.load_aggregation(self.sync_window)
+            if aggregation_result is None:
+                gather_result = await self.comms.gather(
+                    my_uid=self.uid,
+                    uids=self.comms.peers,
+                    window=self.sync_window,
+                    key="gradient",
+                    timeout=35,
+                    device=self.config.device,
+                    local=False,
+                    totalks=self.totalks,
+                    time_min=time_min,
+                    time_max=time_max,
+                )
+
+                if gather_result is None:
+                    tplr.logger.error(
+                        "Failed to gather gradients from peers. Waiting for next window."
+                    )
+                    self.global_step += 1
+                    continue
+                skipped_uids = gather_result.skipped_uids
+                success_rate = gather_result.success_rate
+            else:
+                state_dict = cast(dict, aggregation_result.get("state_dict"))
+                skipped_uids = cast(list[int], state_dict.get("skipped_uids", []))
+                success_rate = aggregation_result.get("success_rate", 0.0)
+
+            tplr.logger.info(f"Skipped UIDs: {skipped_uids}")
 
             gather_sync_scores = await asyncio.gather(
                 *(self.evaluate_miner_sync(uid) for uid in self.comms.peers)
@@ -647,17 +668,8 @@ class Validator:
                             for final_score in self.final_score_history[uid]
                         ]
 
-            if gather_result is None:
-                tplr.logger.error(
-                    "Failed to gather gradients from peers. Waiting for next window."
-                )
-                self.global_step += 1
-                continue
-
-            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
-
             # Slash peers failing to submit gradients
-            for uid in gather_result.skipped_uids:
+            for uid in skipped_uids:
                 tplr.logger.info(
                     f"No gradient gathered from UID {uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}."
                 )
@@ -1585,44 +1597,18 @@ class Validator:
             for n, p in self.model.named_parameters():
                 p.data.mul_(1.0 - lr * self.hparams.weight_decay)
 
-            if gather_result is not None and gather_result.state_dict is not None:
-                for n, p in self.model.named_parameters():
-                    idxs_key = n + "idxs"
-                    vals_key = n + "vals"
-                    idxs = getattr(gather_result.state_dict, idxs_key, None)
-                    vals = getattr(gather_result.state_dict, vals_key, None)
-                    if idxs is not None and vals is not None:
-                        if not isinstance(idxs, (list, tuple)):
-                            idxs = [idxs]
-                        if not isinstance(vals, (list, tuple)):
-                            vals = [vals]
-                        new_grad = self.transformer.decode(
-                            self.compressor.batch_decompress(
-                                p.to(self.config.device),
-                                idxs,
-                                vals,
-                                self.xshapes[n],
-                                self.totalks[n],
-                            )
-                        )
-                        # Store pre-sign gradient in momentum
-                        self.momentum[n] = new_grad.clone()
-                        if p.grad is None:
-                            p.grad = new_grad
-                        else:
-                            p.grad.copy_(new_grad)
-                        p.grad.sign_()
-                    else:
-                        tplr.logger.info(
-                            f"Gradient data missing for parameter {n}, skipping."
-                        )
+            if aggregation_result is not None:
+                self.apply_aggregated_gradients(aggregation_result=aggregation_result)
+            elif gather_result is not None and gather_result.state_dict is not None:
+                self.apply_gathered_gradients(gather_result=gather_result)
+            else:
+                tplr.logger.warning("No gradients to apply.")
+                self.scheduler.step()
+                torch.cuda.empty_cache()
+
             tplr.logger.info(
                 f"{tplr.P(self.sync_window, tplr.T() - update_start)} Updated model"
             )
-
-            self.optimizer.step()
-            self.scheduler.step()
-            torch.cuda.empty_cache()
 
             # Add debug data including successfully gathered peers
             debug_dict = {}
@@ -1637,11 +1623,11 @@ class Validator:
                     )
 
             # Add successful peers information
-            if gather_result is not None:
+            if len(skipped_uids) > 0:
                 debug_dict["successful_peers"] = sorted(
-                    list(set(self.comms.peers) - set(gather_result.skipped_uids))
+                    list(set(self.comms.peers) - set(skipped_uids))
                 )
-                debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
+                debug_dict["skipped_peers"] = sorted(list(skipped_uids))
 
             # 15. Store debug values and model metadata
             asyncio.create_task(
@@ -1673,9 +1659,7 @@ class Validator:
                 "validator/network/evaluated_uids": len(self.evaluated_uids),
                 "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
                 "validator/network/active_miners": len(self.valid_score_indices),
-                "validator/gather/success_rate": gather_result.success_rate * 100
-                if gather_result
-                else 0,  # Success percentage
+                "validator/gather/success_rate": success_rate * 100,
                 "validator/timing/window_total": tplr.T() - window_start,
                 "validator/timing/peer_update": tplr.T() - peer_start,
                 "validator/timing/gather": tplr.T() - gather_start,
@@ -1685,10 +1669,8 @@ class Validator:
             self.wandb.log(evaluation_metrics, step=self.global_step)
 
             # Log metrics to InfluxDB in parallel using primitive types
-            gather_success_rate = (
-                float(gather_result.success_rate * 100) if gather_result else 0.0
-            )
-            total_skipped = len(gather_result.skipped_uids) if gather_result else 0
+            gather_success_rate = float(success_rate * 100)
+            total_skipped = len(skipped_uids)
 
             self.metrics_logger.log(
                 measurement="validator_window_v2",
@@ -1736,7 +1718,9 @@ class Validator:
                         for k, v in self.optimizer.state_dict().items()
                     },
                     "scheduler_state_dict": self.scheduler.state_dict(),
-                    "momentum": {k: v.cpu().clone() for k, v in self.momentum.items()},
+                    "momentum": {
+                        n: torch.zeros_like(p) for n, p in self.model.named_parameters()
+                    },
                     "start_window": self.start_window,
                     "current_window": self.current_window,
                     "sync_window": self.sync_window,
@@ -1982,6 +1966,113 @@ class Validator:
         result = {**comparison_metrics, "sync_score": sync_score}
 
         return result
+
+    def apply_aggregated_gradients(self, aggregation_result: dict):
+        """
+        Apply aggregated gradients from the aggregation server.
+        Args:
+            aggregation_result: Pre-loaded aggregation data from the aggregation server.
+        Returns:
+            bool: True if aggregation was successfully applied, False otherwise
+        """
+        try:
+            update_start = time.time()
+
+            state_dict = aggregation_result.get("state_dict")
+            if state_dict is None:
+                tplr.logger.warning("No state_dict found in aggregation result")
+                return False
+
+            tensors_applied = 0
+
+            for name, param in self.model.named_parameters():
+                if name in state_dict:
+                    packed_tensor = state_dict[name]
+                    if packed_tensor is None:
+                        continue
+
+                    # Unpack binary tensor
+                    unpacked_tensor = tplr.neurons.unpack_binary_tensor(
+                        packed_tensor, param.shape
+                    )
+
+                    # Move to appropriate device
+                    unpacked_tensor = unpacked_tensor.to(self.config.device)
+
+                    # Set as gradient for optimizer
+                    if param.grad is None:
+                        param.grad = unpacked_tensor
+                    else:
+                        param.grad.copy_(unpacked_tensor)
+
+                    tensors_applied += 1
+
+            if tensors_applied > 0:
+                tplr.logger.info(
+                    f"Set gradients for {tensors_applied} tensors in {time.time() - update_start:.2f}s"
+                )
+
+                # Update parameters with optimizer
+                self.optimizer.step()
+                self.scheduler.step()
+                torch.cuda.empty_cache()
+
+                tplr.logger.info("Successfully applied aggregation")
+                return True
+            else:
+                tplr.logger.warning("No tensors were applied during aggregation")
+                return False
+
+        except Exception as e:
+            tplr.logger.error(f"Error applying aggregated gradients: {e}")
+            return False
+
+    def apply_gathered_gradients(self, gather_result: SimpleNamespace):
+        """
+        Apply gathered gradients from peers to the model.
+
+        This method:
+        1. Extracts the compressed gradients from the gather result
+        2. Decompresses them using the DCT transformer and compressor
+        3. Stores the gradients in momentum for checkpointing
+        4. Applies sign operation for SignSGD optimization
+        5. Updates the model using the optimizer and scheduler
+
+        Args:
+            gather_result: The result object from a gather operation containing
+                          compressed gradients from peers
+        """
+        for n, p in self.model.named_parameters():
+            idxs_key = n + "idxs"
+            vals_key = n + "vals"
+            idxs = getattr(gather_result.state_dict, idxs_key, None)
+            vals = getattr(gather_result.state_dict, vals_key, None)
+            if idxs is not None and vals is not None:
+                if not isinstance(idxs, (list, tuple)):
+                    idxs = [idxs]
+                if not isinstance(vals, (list, tuple)):
+                    vals = [vals]
+                new_grad = self.transformer.decode(
+                    self.compressor.batch_decompress(
+                        p.to(self.config.device),
+                        idxs,
+                        vals,
+                        self.xshapes[n],
+                        self.totalks[n],
+                    )
+                )
+                # Store pre-sign gradient in momentum
+                self.momentum[n] = new_grad.clone()
+                if p.grad is None:
+                    p.grad = new_grad
+                else:
+                    p.grad.copy_(new_grad)
+                p.grad.sign_()
+            else:
+                tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
+        self.optimizer.step()
+        self.scheduler.step()
+        torch.cuda.empty_cache()
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

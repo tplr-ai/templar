@@ -2,7 +2,6 @@ services:
   node:
     image: ghcr.io/tplr-ai/templar:latest
     container_name: templar-${NODE_TYPE:-miner}-${WALLET_HOTKEY}
-    container_name: templar-${NODE_TYPE:-miner}-${WALLET_HOTKEY}
     restart: unless-stopped
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets

@@ -17,6 +17,7 @@ This document provides a comprehensive guide on how to set up and run a miner us
     - [Environment Variables](#environment-variables)
     - [Hardware Requirements](#hardware-requirements)
     - [Network Options](#network-options)
+    - [InfluxDB Configuration](#influxdb-configuration)
   - [Monitoring](#monitoring)
     - [Logs](#logs)
     - [Performance](#performance)
@@ -111,6 +112,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    ```dotenv:docker/.env
    # Add your Weights & Biases API key
    WANDB_API_KEY=<your_wandb_api_key>
+   INFLUXDB_TOKEN=your_influxdb_token
 
 
    # Cloudflare R2 Credentials - Add your R2 credentials below
@@ -260,6 +262,7 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    Export necessary environment variables or create a `.env` file in the project root.
    ```bash
    export WANDB_API_KEY=your_wandb_api_key
+   export INFLUXDB_TOKEN=your_influxdb_token
    export NODE_TYPE=your_node_type
    export WALLET_NAME=your_wallet_name
    export WALLET_HOTKEY=your_wallet_hotkey
@@ -320,7 +323,9 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
 When using Docker Compose, set the following variables in the `docker/.env` file:
 
 ```dotenv:docker/.env
+# Add your Weights & Biases API key
 WANDB_API_KEY=your_wandb_api_key
+INFLUXDB_TOKEN=your_influxdb_token
 
 # Cloudflare R2 Credentials
 R2_ACCOUNT_ID=your_r2_account_id
@@ -366,6 +371,28 @@ DEBUG=false
 - **Local**:
   - Network: `local`
   - Netuid: `1`
+
+### InfluxDB Configuration
+
+Optional InfluxDB configuration variables include:
+
+- `INFLUXDB_TOKEN`: Authentication token
+- `INFLUXDB_HOST`: Custom host address
+- `INFLUXDB_PORT`: Connection port (default 8086)
+- `INFLUXDB_DATABASE`: Database name
+- `INFLUXDB_ORG`: Organization identifier
+
+Example configuration:
+
+```
+INFLUXDB_HOST=custom-influxdb-host.example.com
+INFLUXDB_PORT=8086
+INFLUXDB_DATABASE=custom-database
+INFLUXDB_ORG=custom-org
+INFLUXDB_TOKEN=your-influxdb-token
+```
+
+These settings are optional and will fall back to default values if not provided.
 
 ---
 

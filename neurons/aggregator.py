@@ -150,7 +150,6 @@ class AggregationServer:
 
         return current_window, time_min, time_max
 
-
     async def process_window(self):
         """Process a single window: gather gradients, aggregate, and store."""
         tplr.logger.info(
@@ -295,6 +294,8 @@ class AggregationServer:
             processed_state_dict["timestamp"] = datetime.now(timezone.utc).isoformat()
             processed_state_dict["window"] = self.sync_window - 1
             processed_state_dict["version"] = self.version
+            processed_state_dict["skipped_uids"] = gather_result.skipped_uids
+            processed_state_dict["success_rate"] = gather_result.success_rate
 
             try:
                 await self.comms.put(
@@ -441,4 +442,3 @@ class AggregationServer:
 # Start the aggregation server
 if __name__ == "__main__":
     asyncio.run(AggregationServer().run())
-

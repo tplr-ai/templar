@@ -238,9 +238,6 @@ class Validator:
             group="validator",
             job_type="validation",
         )
-
-        # Initialize peers
-        self.peers = []
         # Weighted selection counters for fair picking of eval peers
         self.eval_peers = defaultdict(lambda: 1)
 
@@ -251,6 +248,10 @@ class Validator:
 
         # Initialize final score history (for sliding-window averaging)
         self.final_score_history = defaultdict(list)
+
+        # Initialize peer related attributes
+        self.next_peers: tplr.comms.PeerArray | None = None
+        self.peers_update_window = -1
 
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
@@ -275,14 +276,10 @@ class Validator:
         self.listener = threading.Thread(
             target=self.block_listener, args=(self.loop,), daemon=True
         ).start()
-        # Load Peers
-        if not self.config.peers:
-            self.peers = self.comms.peers
-            tplr.logger.info(f"Filtered gather peers with buckets: {self.peers}")
-        else:
-            self.peers = self.config.peers
-        if self.uid not in self.peers:
-            self.peers.append(self.uid)
+
+        # Use config peers if provided
+        if self.config.peers:
+            self.comms.peers = self.config.peers
 
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
@@ -352,6 +349,7 @@ class Validator:
         self.comms.start_background_tasks()
         time_min = None
         self.last_peer_update_window = None
+        self.last_peer_post_window = None
         while True:
             # 1. Wait for the validator window offset
             while self.sync_window >= (
@@ -410,16 +408,20 @@ class Validator:
                     )
 
             self.comms.update_peers_with_buckets()
-            self.peers = self.comms.peers
-            self.eval_peers = self.comms.eval_peers
-            tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}, eval:{len(self.eval_peers)}"
+            peer_start = tplr.T()
+            await tplr.neurons.update_peers(
+                instance=self, window=self.sync_window, peer_start=peer_start
             )
 
-            tplr.logger.info(f"Current gather peers: {self.peers}")
+            self.eval_peers = self.comms.eval_peers
+            tplr.logger.info(
+                f"{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - eval:{len(self.eval_peers)}"
+            )
+
+            tplr.logger.info(f"Current gather peers: {self.comms.peers}")
             tplr.logger.info(f"Current evaluation peers: {self.eval_peers}")
 
-            tplr.logger.info(f"Current gather peers: {self.peers}")
+            tplr.logger.info(f"Current gather peers: {self.comms.peers}")
             tplr.logger.info(
                 f"Current evaluation peers: {list(self.eval_peers.keys())}"
             )
@@ -528,31 +530,30 @@ class Validator:
 
             # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
-            tplr.logger.info(f"We are using peers {self.peers}")
+            tplr.logger.info(f"We are using peers {self.comms.peers}")
 
             gather_start = tplr.T()
             # Refresh peers explicitly before starting gather to avoid missing updated active peers.
-            tplr.logger.info("Refreshing peers before gather task in validator...")
+            tplr.logger.info("Refreshing eval peers before gather task in validator...")
 
             if self.config.test:
                 # In test mode, use all UIDs from metagraph except self
                 tplr.logger.info("Test mode active: Using all peers from metagraph.")
                 all_uids = list(range(len(self.metagraph.S)))
-                self.peers = [uid for uid in all_uids if uid != self.uid]
+                self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
                 # For evaluation, also use all peers but track separately with equal initial weight
-                self.eval_peers = {uid: 1 for uid in self.peers}
+                self.eval_peers = {uid: 1 for uid in self.comms.peers}
             else:
                 # Normal operation - update and filter peers
                 self.comms.update_peers_with_buckets()
-                self.peers = self.comms.peers
                 self.eval_peers = self.comms.eval_peers
 
-            tplr.logger.info(f"Validator gather peers: {self.peers}")
+            tplr.logger.info(f"Validator gather peers: {self.comms.peers}")
 
             gather_result = await self.comms.gather(
                 my_uid=self.uid,
-                uids=self.peers,
+                uids=self.comms.peers,
                 window=self.sync_window,
                 key="gradient",
                 timeout=35,
@@ -609,7 +610,7 @@ class Validator:
                     )
 
             # Add check for empty peers (evaluating all peer uids)
-            if not self.peers:
+            if self.comms.peers.size == 0:
                 tplr.logger.warning(
                     f"No peers available for evaluation in window {self.sync_window}. Waiting for next window."
                 )
@@ -1536,7 +1537,7 @@ class Validator:
             # Add successful peers information
             if gather_result is not None:
                 debug_dict["successful_peers"] = sorted(
-                    list(set(self.peers) - set(gather_result.skipped_uids))
+                    list(set(self.comms.peers) - set(gather_result.skipped_uids))
                 )
                 debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
 
@@ -1610,7 +1611,7 @@ class Validator:
                     "gather_time": float(tplr.T() - gather_start),
                     "evaluation_time": float(tplr.T() - eval_start),
                     "model_update_time": float(tplr.T() - update_start),
-                    "total_peers": int(len(self.peers)),
+                    "total_peers": int(len(self.comms.peers)),
                     "total_skipped": int(total_skipped),
                 },
             )
@@ -1652,7 +1653,7 @@ class Validator:
             # 18. Increment global step
             self.global_step += 1
 
-    def select_initial_peers(self) -> bool:
+    def select_initial_peers(self) -> tplr.comms.PeerArray | None:
         try:
             tplr.logger.info("Starting selection of initial gather peers")
             # 1. Add top incentive peers

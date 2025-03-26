@@ -1852,7 +1852,7 @@ class Comms(ChainManager):
                 secret_access_key=credentials["secret_access_key"],
             )
 
-            filename = f"aggregation-{window}-v{tplr.__version__}.pt"
+            filename = f"aggregator-{window}-v{tplr.__version__}.pt"
 
             tplr.logger.info(f"Attempting to download aggregation file: {filename}")
 

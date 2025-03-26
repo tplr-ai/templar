@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import bittensor as bt
 
 from tqdm import tqdm as std_tqdm
-from typing import List, Dict, Optional, TypeVar, Any
+from typing import List, Dict, Literal, Optional, TypeVar, Any
 from aiobotocore.session import get_session
 
 from . import __version__
@@ -709,9 +709,9 @@ class Comms(ChainManager):
     async def put(
         self,
         state_dict: dict,
-        uid: str,
+        uid: str | None,
         window: int,
-        key: str,
+        key: Literal["checkpoint", "debug", "gradient", "aggregator"],
         global_step: int = 0,
         local: bool = True,
         stale_retention: int = 10,
@@ -731,7 +731,10 @@ class Comms(ChainManager):
         Returns:
             float: The elapsed time (in seconds) for the PUT operation.
         """
-        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        if key == "aggregator":
+            filename = f"{key}-{window}-v{__version__}.pt"
+        else:
+            filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         tplr.logger.debug(f"PUT {filename} -->")
 
         put_start = tplr.T()
@@ -906,8 +909,8 @@ class Comms(ChainManager):
 
     async def gather(
         self,
-        my_uid: str,
-        uids: List[str],
+        my_uid: str | None,
+        uids: List[int],
         window: int,
         key: str,
         timeout: int,
@@ -1850,6 +1853,54 @@ class Comms(ChainManager):
                 raise ValueError(
                     f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
                 )
+
+    async def load_aggregation(self, window: int):
+        """
+        Load aggregated gradients for a specified window from the aggregation server.
+
+        Args:
+            window: Window number to load
+
+        Returns:
+            Processed aggregation data or None if failed
+        """
+        try:
+            bucket_config = BUCKET_SECRETS["aggregator"]
+            credentials = bucket_config["credentials"]["read"]
+
+            # Create a Bucket object using specified credentials
+            bucket = Bucket(
+                name=bucket_config["name"],
+                account_id=bucket_config["account_id"],
+                access_key_id=credentials["access_key_id"],
+                secret_access_key=credentials["secret_access_key"],
+            )
+
+            filename = f"aggregation-{window}-v{tplr.__version__}.pt"
+
+            tplr.logger.info(f"Attempting to download aggregation file: {filename}")
+
+            # Use shared async S3 logic instead of boto3 manually
+            result = await self.s3_get_object(
+                key=filename,
+                bucket=bucket,
+                timeout=20,
+            )
+
+            if result is None:
+                tplr.logger.warning(f"No aggregation file found for window {window}")
+                return None
+
+            tplr.logger.info(
+                f"Successfully loaded aggregation data for window {window}"
+            )
+            return result
+
+        except Exception as e:
+            tplr.logger.error(
+                f"Error loading aggregation file for window {window}: {e}"
+            )
+            return None
 
     def weighted_random_sample_no_replacement(
         self, candidates: list[str], weights: list[int], k: int

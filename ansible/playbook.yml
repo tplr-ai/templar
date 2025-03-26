@@ -1,7 +1,9 @@
 ---
 - name: Provision Templar instances per GPU
   hosts: all
-  become: yes
+  become: true
+  vars_files:
+    - group_vars/all/vault.yml
   vars:
     workspace_dir: "{{ ansible_env.HOME }}/workspace"
   pre_tasks:

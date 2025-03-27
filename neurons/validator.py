@@ -345,6 +345,7 @@ class Validator:
         self.comms.start_background_tasks()
         time_min = None
         while True:
+            # 1. Wait for the validator window offset
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
             ):
@@ -383,7 +384,7 @@ class Validator:
             newly_inactive = self.comms.inactive_peers
             current_window = self.sync_window
 
-            # Process newly inactive peers
+            # 3. Process inactive peers and apply penalties
             for uid in newly_inactive:
                 if uid not in self.inactive_scores:
                     self.inactive_scores[uid] = (
@@ -434,7 +435,7 @@ class Validator:
                     step=self.global_step,
                 )
 
-            # Calculate time window for this sync window
+            # 4. Calculate time window for this sync window
             sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
             retries = 0
             delay = 1
@@ -556,6 +557,7 @@ class Validator:
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
 
+            # 6. Select peers to evaluate
             candidate_uids = list(self.eval_peers.keys())
             candidate_weights = [self.eval_peers[uid] for uid in candidate_uids]
             k = min(self.hparams.uids_per_window, len(candidate_uids))
@@ -664,7 +666,8 @@ class Validator:
 
                     state_dict, _ = eval_result
                     model_own_data_eval = copy.deepcopy(self.model)
-                    # 8. Compute initial loss
+
+                    # 9. Compute loss before applying gradient
                     self.optimizer.zero_grad()
                     model_own_data_eval.zero_grad()
                     loss_before_own = 0.0
@@ -1350,7 +1353,7 @@ class Validator:
                     step=self.global_step,
                 )
 
-            # 17. Set weights periodically
+            # 13. Set weights on chain
             if self.sync_window % self.hparams.windows_per_weights == 0:
                 # Only set weights for evaluated peers with non-negative (positive) weight values.
                 positive_weighted_uids = sorted(
@@ -1366,40 +1369,7 @@ class Validator:
                         wait_for_finalization=False,
                     )
 
-            # 15. Create checkpoints periodically
-            if (
-                self.global_step % self.hparams.checkpoint_frequency == 0
-                and self.global_step != 0
-            ):
-                tplr.logger.info(
-                    f"Creating checkpoint at global_step {self.global_step}"
-                )
-                checkpoint_data = {
-                    "model_state_dict": {
-                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                    },
-                    "optimizer_state_dict": {
-                        k: v.cpu().clone() if torch.is_tensor(v) else v
-                        for k, v in self.optimizer.state_dict().items()
-                    },
-                    "scheduler_state_dict": self.scheduler.state_dict(),
-                    "momentum": {k: v.cpu().clone() for k, v in self.momentum.items()},
-                    "start_window": self.start_window,
-                    "current_window": self.current_window,
-                    "sync_window": self.sync_window,
-                }
-                asyncio.create_task(
-                    self.comms.put(
-                        state_dict=checkpoint_data,
-                        uid=str(self.uid),
-                        window=self.sync_window,
-                        key="checkpoint",
-                        global_step=self.global_step,
-                        local=False,
-                    )
-                )
-
-            # 16. Now, merge the gathered gradients into the model AFTER finishing evaluation
+            # 14. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
             self.optimizer.zero_grad()
@@ -1467,7 +1437,7 @@ class Validator:
                 )
                 debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
 
-            # Store the debug dictionary
+            # 15. Store debug values and model metadata
             asyncio.create_task(
                 self.comms.put(
                     state_dict=debug_dict,
@@ -1483,7 +1453,7 @@ class Validator:
                 f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
             )
 
-            # 13. Log evaluation metrics once all evaluations are done
+            # 16. Log evaluation metrics once all evaluations are done
             evaluation_metrics = {
                 "validator/loss/own/before": self.loss_before_per_batch_own,
                 "validator/loss/own/after": self.loss_after_per_batch_own,
@@ -1507,6 +1477,39 @@ class Validator:
                 "validator/timing/model_update": tplr.T() - update_start,
             }
             self.wandb.log(evaluation_metrics, step=self.global_step)
+
+            # 17. Create checkpoints periodically
+            if (
+                self.global_step % self.hparams.checkpoint_frequency == 0
+                and self.global_step != 0
+            ):
+                tplr.logger.info(
+                    f"Creating checkpoint at global_step {self.global_step}"
+                )
+                checkpoint_data = {
+                    "model_state_dict": {
+                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
+                    },
+                    "optimizer_state_dict": {
+                        k: v.cpu().clone() if torch.is_tensor(v) else v
+                        for k, v in self.optimizer.state_dict().items()
+                    },
+                    "scheduler_state_dict": self.scheduler.state_dict(),
+                    "momentum": {k: v.cpu().clone() for k, v in self.momentum.items()},
+                    "start_window": self.start_window,
+                    "current_window": self.current_window,
+                    "sync_window": self.sync_window,
+                }
+                asyncio.create_task(
+                    self.comms.put(
+                        state_dict=checkpoint_data,
+                        uid=str(self.uid),
+                        window=self.sync_window,
+                        key="checkpoint",
+                        global_step=self.global_step,
+                        local=False,
+                    )
+                )
 
             # 18. Increment global step
             self.global_step += 1

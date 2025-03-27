@@ -137,6 +137,12 @@ async def catchup_with_aggregation_server(
             continue
 
         processed_agg_data = process_loaded_data(instance.model, agg_data)
+        if processed_agg_data is None:
+            logger.warning(
+                f"No aggregation data found for window {current_step}, skipping"
+            )
+            current_step += 1
+            continue
 
         # Get learning rate for this step
         lr = get_lr_at_step(
@@ -219,7 +225,7 @@ async def catchup_with_aggregation_server(
     logger.info(f"Catchup complete. Global step updated to {instance.global_step}")
 
 
-def process_loaded_data(model: torch.nn.Module, compressed_data: dict):
+def process_loaded_data(model: torch.nn.Module, compressed_data: dict) -> dict | None:
     """
     Unpack the compressed tensor data from the aggregation server.
 
@@ -230,6 +236,9 @@ def process_loaded_data(model: torch.nn.Module, compressed_data: dict):
         Dictionary with unpacked tensors
     """
     state_dict = compressed_data.get("state_dict")
+    if state_dict is None:
+        return None
+
     result = {
         "timestamp": state_dict.get("timestamp", None),
         "window": state_dict.get("window", None),

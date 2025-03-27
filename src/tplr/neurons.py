@@ -129,96 +129,100 @@ async def catchup_with_aggregation_server(
 
         # Load aggregation for current window - pass version explicitly
         agg_data = await instance.comms.load_aggregation(window=current_step)
-        if not agg_data:
-            logger.warning(
-                f"No aggregation data found for window {current_step}, skipping"
+
+        # Process the aggregation data if available
+        processed_agg_data = None
+        if agg_data:
+            processed_agg_data = process_loaded_data(instance.model, agg_data)
+
+        # Apply the aggregation if we have valid data
+        if processed_agg_data is not None:
+            # Get learning rate for this step
+            lr = get_lr_at_step(
+                instance.hparams.learning_rate, current_step - instance.start_window
             )
-            current_step += 1
-            continue
+            logger.info(f"Using learning rate: {lr:.6f} for catchup step")
 
-        processed_agg_data = process_loaded_data(instance.model, agg_data)
-        if processed_agg_data is None:
-            logger.warning(
-                f"No aggregation data found for window {current_step}, skipping"
-            )
-            current_step += 1
-            continue
+            # Get debug dictionary for verification
+            debug_dict = await instance.comms.get_debug_dict(current_step - 1)
 
-        # Get learning rate for this step
-        lr = get_lr_at_step(
-            instance.hparams.learning_rate, current_step - instance.start_window
-        )
-        logger.info(f"Using learning rate: {lr:.6f} for catchup step")
+            # Apply aggregation to model
+            logger.info(f"Applying aggregation to model for window {current_step}...")
+            with torch.no_grad():
+                for name, param in instance.model.named_parameters():
+                    if name in processed_agg_data["tensors"]:
+                        # Move aggregation tensor to device
+                        agg_tensor = processed_agg_data["tensors"][name].to(
+                            instance.config.device  # type: ignore
+                        )
 
-        # Get debug dictionary for verification
-        debug_dict = await instance.comms.get_debug_dict(current_step - 1)
+                        # Apply weight decay to parameter
+                        param.data.mul_(1.0 - lr * weight_decay)
 
-        # Apply aggregation to model
-        logger.info(f"Applying aggregation to model for window {current_step}...")
-        with torch.no_grad():
-            for name, param in instance.model.named_parameters():
-                if name in processed_agg_data["tensors"]:
-                    # Move aggregation tensor to device
-                    agg_tensor = processed_agg_data["tensors"][name].to(
-                        instance.config.device  # type: ignore
-                    )
+                        # Apply gradient update with learning rate
+                        param.data.add_(agg_tensor, alpha=-lr)
 
-                    # Apply weight decay to parameter
-                    param.data.mul_(1.0 - lr * weight_decay)
+            logger.info(f"Successfully applied aggregation for window {current_step}")
 
-                    # Apply gradient update with learning rate
-                    param.data.add_(agg_tensor, alpha=-lr)
+            # Calculate L2 norm of difference between model and debug values after this step
+            if isinstance(debug_dict, dict) and "state_dict" in debug_dict:
+                debug_state_dict = debug_dict["state_dict"]
+                total_squared_diff = 0.0
+                param_count = 0
+                abs_diff = 0
 
-        logger.info(f"Successfully applied aggregation for window {current_step}")
+                for name, param in instance.model.named_parameters():
+                    # Check if there's a corresponding debug entry
+                    debug_key = name + "_debug"
+                    if debug_key in debug_state_dict:
+                        # Calculate L2 norm for this parameter
+                        param_data = param.data.cpu().flatten()[
+                            :2
+                        ]  # Take only first two values
+                        debug_data = torch.tensor(
+                            cast(float, debug_state_dict[debug_key])
+                        ).cpu()
+                        squared_diff = torch.sum((param_data - debug_data) ** 2).item()
+                        total_squared_diff += squared_diff
+                        abs_diff += (
+                            torch.abs(torch.tensor(param_data - debug_data))
+                            .mean()
+                            .item()
+                        )
+                        param_count += param_data.numel()
 
-        # Calculate L2 norm of difference between model and debug values after this step
-        if isinstance(debug_dict, dict) and "state_dict" in debug_dict:
-            debug_state_dict = debug_dict["state_dict"]
-            total_squared_diff = 0.0
-            param_count = 0
-            abs_diff = 0
-
-            for name, param in instance.model.named_parameters():
-                # Check if there's a corresponding debug entry
-                debug_key = name + "_debug"
-                if debug_key in debug_state_dict:
-                    # Calculate L2 norm for this parameter
-                    param_data = param.data.cpu().flatten()[
-                        :2
-                    ]  # Take only first two values
-                    debug_data = torch.tensor(
-                        cast(float, debug_state_dict[debug_key])
-                    ).cpu()
-                    squared_diff = torch.sum((param_data - debug_data) ** 2).item()
-                    total_squared_diff += squared_diff
-                    abs_diff += (
-                        torch.abs(torch.tensor(param_data - debug_data)).mean().item()
-                    )
-                    param_count += param_data.numel()
-
-            # Final L2 norm across all parameters
-            final_l2_norm = torch.sqrt(torch.tensor(total_squared_diff)).item()
-            logger.info(
-                f"Window {current_step} - L2 norm difference between model and debug values: {final_l2_norm}"
-            )
-            logger.info(
-                f"Window {current_step} - Average L2 norm per parameter: {final_l2_norm / param_count if param_count > 0 else 0}"
-            )
-            logger.info(
-                f"Window {current_step} - Average absolute difference per parameter: {abs_diff / param_count / lr if param_count > 0 else 0}"
-            )
+                # Final L2 norm across all parameters
+                final_l2_norm = torch.sqrt(torch.tensor(total_squared_diff)).item()
+                logger.info(
+                    f"Window {current_step} - L2 norm difference between model and debug values: {final_l2_norm}"
+                )
+                logger.info(
+                    f"Window {current_step} - Average L2 norm per parameter: {final_l2_norm / param_count if param_count > 0 else 0}"
+                )
+                logger.info(
+                    f"Window {current_step} - Average absolute difference per parameter: {abs_diff / param_count / lr if param_count > 0 else 0}"
+                )
+            else:
+                logger.info(
+                    f"No valid debug dictionary available for window {current_step - 1} - cannot compute L2 norm"
+                )
         else:
-            logger.info(
-                f"No valid debug dictionary available for window {current_step - 1} - cannot compute L2 norm"
-            )
+            if not agg_data:
+                logger.warning(f"No aggregation data found for window {current_step}")
+            else:
+                logger.warning(
+                    f"Failed to process aggregation data for window {current_step}"
+                )
+
+        # Call optimizer.step() to update internal state (it won't modify parameters)
+        instance.optimizer.step()
+
+        # Always advance the scheduler regardless of whether we applied aggregation
+        instance.scheduler.step()
 
         # Update global step and move to next window
         instance.global_step = current_step - instance.start_window
         current_step += 1
-
-        # Step optimizer and scheduler to match the current window
-        instance.optimizer.step()
-        instance.scheduler.step()
 
     # Update global step after catchup
     instance.global_step = target_window - instance.start_window

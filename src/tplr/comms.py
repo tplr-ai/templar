@@ -1899,7 +1899,7 @@ class Comms(ChainManager):
                 )
                 return
 
-            key = f"debug-{window}-{validator_uid}-v{tplr.__version__}"
+            key = f"debug-{window}-{validator_uid}-v{tplr.__version__}.pt"
             tplr.logger.info(
                 f"Attempting to retrieve debug dictionary for window {window} from validator {validator_uid}"
             )

@@ -275,7 +275,6 @@ class Miner:
             self.model.to(self.config.device)  # type: ignore
 
         self.comms.start_commitment_fetcher()
-        self.comms.start_background_tasks()
 
         while True:
             # 1. Initialize window and update peers

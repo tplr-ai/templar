@@ -236,9 +236,7 @@ class Validator:
         # Initialize peers
         self.peers = []
         # Weighted selection counters for fair picking of eval peers
-        self.eval_peers = defaultdict(int)
-        # Track candidate weights separately
-        self.eval_candidates_counter = defaultdict(int)
+        self.eval_peers = defaultdict(lambda: 1)
 
         # Track inactive peer scores
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
@@ -257,9 +255,8 @@ class Validator:
             self.binary_moving_averages[uid] = 0.0
             self.binary_indicator_scores[uid] = 0.0
             self.normalised_binary_moving_averages[uid] = 0.0
-            self.eval_candidates_counter[uid] = 0
             if uid in self.eval_peers:
-                self.eval_peers[uid] = 0
+                del self.eval_peers[uid]
             del self.inactive_scores[uid]
             tplr.logger.info(f"UID {uid} fully reset after extended inactivity")
             return True
@@ -356,13 +353,13 @@ class Validator:
                 )
                 await asyncio.sleep(12)
 
+            # 2. Increment sync window and update peer lists
+            window_start = tplr.T()
+            self.sync_window += 1
             tplr.logger.info(
                 f"Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}"
             )
 
-            # 2. Increment sync window and update peer lists
-            window_start = tplr.T()
-            self.sync_window += 1
             tplr.logger.info(
                 f"Processing window: {self.sync_window} current: {self.current_window}"
             )
@@ -486,9 +483,6 @@ class Validator:
 
                 # For evaluation, also use all peers but track separately with equal initial weight
                 self.eval_peers = {uid: 1 for uid in self.peers}
-                for uid in self.peers:
-                    if uid not in self.eval_candidates_counter:
-                        self.eval_candidates_counter[uid] = 1
             else:
                 # Normal operation - update and filter peers
                 self.comms.update_peers_with_buckets()
@@ -564,7 +558,7 @@ class Validator:
 
             candidate_uids = list(self.eval_peers.keys())
             candidate_weights = [
-                self.eval_candidates_counter[uid] for uid in candidate_uids
+                self.eval_peers[uid] for uid in candidate_uids
             ]
             k = min(self.hparams.uids_per_window, len(candidate_uids))
             evaluation_uids = self.comms.weighted_random_sample_no_replacement(
@@ -573,14 +567,12 @@ class Validator:
 
             # Reset counters for chosen peers
             for uid in evaluation_uids:
-                self.eval_peers[uid] = 0
-                self.eval_candidates_counter[uid] = 0
+                self.eval_peers[uid] = 1
 
             # Increment counters for not chosen peers
             for uid in candidate_uids:
                 if uid not in evaluation_uids:
                     self.eval_peers[uid] += 1
-                    self.eval_candidates_counter[uid] += 1
             self.comms.eval_peers = self.eval_peers
 
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")

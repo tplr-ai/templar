@@ -144,7 +144,7 @@ async def catchup_with_aggregation_server(
             logger.info(f"Using learning rate: {lr:.6f} for catchup step")
 
             # Get debug dictionary for verification
-            debug_dict = await instance.comms.get_debug_dict(current_step - 1)
+            debug_dict = await instance.comms.get_debug_dict(current_step)
 
             # Apply aggregation to model
             logger.info(f"Applying aggregation to model for window {current_step}...")

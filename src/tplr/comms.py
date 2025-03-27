@@ -1405,6 +1405,7 @@ class Comms(ChainManager):
 
             checkpoint_start_window = checkpoint_data.get("start_window")
             checkpoint_current_window = checkpoint_data.get("current_window")
+            checkpoint_sync_window = checkpoint_data.get("sync_window")
             if checkpoint_start_window is None or checkpoint_current_window is None:
                 tplr.logger.warning(
                     "Checkpoint missing start_window or current_window info"
@@ -1414,10 +1415,11 @@ class Comms(ChainManager):
             tplr.logger.info(
                 f"Checkpoint loaded. start_window={checkpoint_start_window}, "
                 f"checkpoint_current_window={checkpoint_current_window}, "
+                f"checkpoint_sync_window={checkpoint_sync_window}, "
                 f"local_current_window={current_window}"
             )
 
-            return True, momentum, checkpoint_current_window, optimizer, scheduler
+            return True, momentum, checkpoint_sync_window, optimizer, scheduler
 
         except KeyError as e:
             tplr.logger.error(f"Invalid checkpoint format: missing key {e}")

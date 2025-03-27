@@ -557,9 +557,7 @@ class Validator:
             eval_start = tplr.T()
 
             candidate_uids = list(self.eval_peers.keys())
-            candidate_weights = [
-                self.eval_peers[uid] for uid in candidate_uids
-            ]
+            candidate_weights = [self.eval_peers[uid] for uid in candidate_uids]
             k = min(self.hparams.uids_per_window, len(candidate_uids))
             evaluation_uids = self.comms.weighted_random_sample_no_replacement(
                 candidate_uids, candidate_weights, k
@@ -1388,12 +1386,13 @@ class Validator:
                     "momentum": {k: v.cpu().clone() for k, v in self.momentum.items()},
                     "start_window": self.start_window,
                     "current_window": self.current_window,
+                    "sync_window": self.sync_window,
                 }
                 asyncio.create_task(
                     self.comms.put(
                         state_dict=checkpoint_data,
                         uid=str(self.uid),
-                        window=self.current_window,
+                        window=self.sync_window,
                         key="checkpoint",
                         global_step=self.global_step,
                         local=False,
@@ -1473,7 +1472,7 @@ class Validator:
                 self.comms.put(
                     state_dict=debug_dict,
                     uid=str(self.uid),
-                    window=self.current_window,
+                    window=self.sync_window,
                     key="debug",
                     local=False,
                 )

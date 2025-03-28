@@ -108,7 +108,11 @@ class Comms(ChainManager):
         # Start background tasks
         self.loop.create_task(self.track_active_peers())
 
-    def get_own_bucket(self, bucket_type, access_type=None) -> Bucket:
+    def get_own_bucket(
+        self,
+        bucket_type: Literal["gradients", "dataset", "aggregator"],
+        access_type=None,
+    ) -> Bucket:
         """Gets bucket configuration from environment variables via config.BUCKET_SECRETS.
 
         Args:
@@ -116,16 +120,16 @@ class Comms(ChainManager):
             access_type: For gradients bucket, either "read" or "write" to determine access level
         """
         try:
-            if bucket_type not in ["gradients", "dataset"]:
+            if bucket_type not in ["gradients", "dataset", "aggregator"]:
                 raise ValueError("bucket_type must be either 'gradients' or 'dataset'")
 
-            if bucket_type == "gradients":
+            if bucket_type in ["gradients", "aggregator"]:
                 if access_type not in ["read", "write"]:
                     raise ValueError(
-                        "For gradients bucket, access_type must be either 'read' or 'write'"
+                        f"For {bucket_type} bucket, access_type must be either 'read' or 'write'"
                     )
 
-                bucket_config = BUCKET_SECRETS["gradients"]
+                bucket_config = BUCKET_SECRETS[bucket_type]
                 credentials = bucket_config["credentials"][access_type]  # type: ignore
             else:  # dataset bucket
                 bucket_config = BUCKET_SECRETS["dataset"]
@@ -352,7 +356,7 @@ class Comms(ChainManager):
 
             async with self.session.create_client(
                 "s3",
-                endpoint_url=self.get_base_url(bucket.name),
+                endpoint_url=self.get_base_url(bucket.account_id),
                 region_name=CF_REGION_NAME,
                 config=client_config,
                 aws_access_key_id=bucket.access_key_id,

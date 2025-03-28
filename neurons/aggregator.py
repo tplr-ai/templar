@@ -110,6 +110,7 @@ class AggregationServer:
             hparams=self.hparams,
             uid=self.uid,
         )
+        self.comms.bucket = self.comms.get_own_bucket("aggregator", "write")
 
         # Initialize state
         self.current_block = self.subtensor.block

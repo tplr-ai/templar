@@ -33,15 +33,12 @@ from io import StringIO
 from time import perf_counter
 import bittensor as bt
 import numpy as np
-from types import SimpleNamespace
 from rich.console import Console
 from rich.table import Table
 
 
 # Third party
 import torch
-from rich.console import Console
-from rich.table import Table
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
@@ -454,7 +451,6 @@ class Validator:
                     },
                     step=self.global_step,
                 )
-
 
                 # Log slash metrics to InfluxDB with primitive types
                 self.metrics_logger.log(
@@ -1559,7 +1555,6 @@ class Validator:
             }
             self.wandb.log(evaluation_metrics, step=self.global_step)
 
-
             # Log metrics to InfluxDB in parallel using primitive types
             gather_success_rate = (
                 float(gather_result.success_rate * 100) if gather_result else 0.0
@@ -1598,62 +1593,6 @@ class Validator:
             # 18. Increment global step
             self.global_step += 1
 
-    def apply_aggregated_gradients(self, aggregation_result: dict):
-        """
-        Apply aggregated gradients from the aggregation server.
-
-        Args:
-            aggregation_result: Pre-loaded aggregation data from the aggregation server.
-
-        Returns:
-            bool: True if aggregation was successfully applied, False otherwise
-        """
-        for name, param in self.model.named_parameters():
-            if name in aggregation_result:
-                # Get the packed binary tensor
-                packed_tensor = aggregation_result[name]
-                if packed_tensor is None:
-                    continue
-
-                # Process aggregation using tplr.neurons utilities
-                unpacked_tensor = tplr.neurons.unpack_binary_tensor(
-                    packed_tensor, param.shape
-
-            # 17. Create checkpoints periodically
-            if (
-                self.global_step % self.hparams.checkpoint_frequency == 0
-                and self.global_step != 0
-            ):
-                tplr.logger.info(
-                    f"Creating checkpoint at global_step {self.global_step}"
-                )
-                checkpoint_data = {
-                    "model_state_dict": {
-                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                    },
-                    "optimizer_state_dict": {
-                        k: v.cpu().clone() if torch.is_tensor(v) else v
-                        for k, v in self.optimizer.state_dict().items()
-                    },
-                    "scheduler_state_dict": self.scheduler.state_dict(),
-                    "momentum": {k: v.cpu().clone() for k, v in self.momentum.items()},
-                    "start_window": self.start_window,
-                    "current_window": self.current_window,
-                    "sync_window": self.sync_window,
-                }
-                asyncio.create_task(
-                    self.comms.put(
-                        state_dict=checkpoint_data,
-                        uid=str(self.uid),
-                        window=self.sync_window,
-                        key="checkpoint",
-                        global_step=self.global_step,
-                        local=False,
-                    )
-                )
-
-            # 18. Increment global step
-            self.global_step += 1
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

@@ -4,25 +4,27 @@
 import os
 import argparse
 import tplr
-import json
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 def test_validator_metrics():
     """Test validator metrics logging with proper field types"""
     parser = argparse.ArgumentParser(description="Test validator metrics logging")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
-    
+
     if args.debug:
         tplr.debug()
 
     # Set environment variable
     os.environ["ENABLE_INFLUXDB"] = "true"
-    print(f"ENABLE_INFLUXDB environment variable set to: {os.environ.get('ENABLE_INFLUXDB')}")
-    
+    print(
+        f"ENABLE_INFLUXDB environment variable set to: {os.environ.get('ENABLE_INFLUXDB')}"
+    )
+
     # Initialize metrics logger
     metrics_logger = tplr.metrics.MetricsLogger(
         prefix="V",
@@ -31,9 +33,9 @@ def test_validator_metrics():
         group="validator",
         job_type="validation_test",
     )
-    
-    print(f"Initialized MetricsLogger for validator")
-    
+
+    print("Initialized MetricsLogger for validator")
+
     # Log a test metric with proper types
     metrics_logger.log(
         measurement="validator_window_v2",
@@ -63,9 +65,10 @@ def test_validator_metrics():
             "total_skipped": int(2),
         },
     )
-    
+
     print("Logged test validator metrics with proper types to InfluxDB.")
     print("If no errors occurred, the integration is working correctly.")
+
 
 if __name__ == "__main__":
     test_validator_metrics()

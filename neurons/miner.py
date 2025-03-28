@@ -322,7 +322,7 @@ class Miner:
             for i, batch in enumerate(loader):
                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
                 tokens_this_batch = input_ids.numel()  # Tokens in current batch
-                window_tokens += tokens_this_batch       # Accumulate tokens
+                window_tokens += tokens_this_batch  # Accumulate tokens
                 labels = input_ids.clone()
                 labels = torch.where(
                     labels == self.tokenizer.pad_token_id, -100, labels

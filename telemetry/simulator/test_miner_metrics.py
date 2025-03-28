@@ -10,19 +10,22 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 def test_miner_metrics():
     """Test miner metrics logging with proper field types"""
     parser = argparse.ArgumentParser(description="Test miner metrics logging")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
-    
+
     if args.debug:
         tplr.debug()
 
     # Set environment variable
     os.environ["ENABLE_INFLUXDB"] = "true"
-    print(f"ENABLE_INFLUXDB environment variable set to: {os.environ.get('ENABLE_INFLUXDB')}")
-    
+    print(
+        f"ENABLE_INFLUXDB environment variable set to: {os.environ.get('ENABLE_INFLUXDB')}"
+    )
+
     # Initialize metrics logger
     metrics_logger = tplr.metrics.MetricsLogger(
         prefix="M",
@@ -31,9 +34,9 @@ def test_miner_metrics():
         group="miner",
         job_type="mining_test",
     )
-    
-    print(f"Initialized MetricsLogger for miner")
-    
+
+    print("Initialized MetricsLogger for miner")
+
     # Log a test metric with proper types
     metrics_logger.log(
         measurement="training_step_v2",
@@ -69,9 +72,10 @@ def test_miner_metrics():
             "model_update_time": 3.0,
         },
     )
-    
+
     print("Logged test metrics with proper types to InfluxDB.")
     print("If no errors occurred, the integration is working correctly.")
+
 
 if __name__ == "__main__":
     test_miner_metrics()

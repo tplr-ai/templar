@@ -165,11 +165,7 @@ class MetricsLogger:
             with_system_metrics: Whether to include system metrics
             with_gpu_metrics: Whether to include GPU metrics
         """
-        # Skip logging if InfluxDB is not enabled via environment variable
-        if os.environ.get("ENABLE_INFLUXDB", "").lower() != "true":
-            logger.debug("InfluxDB logging is disabled. Set ENABLE_INFLUXDB=true to enable.")
-            return
-            
+
         try:
             timestamp = timestamp or int(time.time_ns())
 

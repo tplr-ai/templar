@@ -17,16 +17,17 @@
 # type: ignore
 
 # Global imports
-import time
-import torch
 import asyncio
-import numpy as np
-import bittensor as bt
-from bittensor import Wallet
-from typing import Dict, Optional
-from pydantic import ValidationError
-from bittensor.core.chain_data import decode_account_id
+import time
 from collections import defaultdict
+from typing import Dict, Optional
+
+import bittensor as bt
+import numpy as np
+import torch
+from bittensor import Wallet
+from bittensor.core.chain_data import decode_account_id
+from pydantic import ValidationError
 
 # Local imports
 from .logging import logger
@@ -493,37 +494,39 @@ class ChainManager:
     def set_gather_peers(self) -> None:
         """Determines and sets the list of peers for gradient gathering based
         on incentive scores from active peers only.
-        
+
         Uses the metagraph incentive scores to select peers from the set of active peers,
         taking either:
           - Top k% of active peers (specified by hparams.topk_peers)
           - Minimum number of peers (specified by hparams.minimum_peers)
           whichever is larger.
-    
+
         The selected peers are stored in self.peers.
         """
         # Get active peers from self.active_peers if set after update.
         # Fallback to an empty list if not set.
         active_peers = set(int(uid) for uid in getattr(self, "active_peers", []))
         if not active_peers:
-            logger.warning("No active peers available for gathering; skipping set_gather_peers.")
+            logger.warning(
+                "No active peers available for gathering; skipping set_gather_peers."
+            )
             self.peers = []
             return
 
         uid_to_incentive = dict(
             zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist())
         )
-    
+
         # Use only active peers for incentive calculation.
         miner_incentives = [(uid, uid_to_incentive.get(uid, 0)) for uid in active_peers]
         miner_incentives.sort(key=lambda x: x[1], reverse=True)
-    
+
         # Determine the number of top-k peers based on percentage from the active set.
         n_topk_peers = int(len(miner_incentives) * (self.hparams.topk_peers / 100))
         n_topk_peers = min(max(n_topk_peers, 1), self.hparams.max_topk_peers)
-    
+
         n_peers = max(self.hparams.minimum_peers, n_topk_peers)
-    
+
         # Take top n_peers by incentive from only the active peers.
         self.peers = [uid for uid, _ in miner_incentives[:n_peers]]
         logger.info(f"Updated gather peers (active only): {self.peers}")

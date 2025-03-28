@@ -20,7 +20,6 @@
 import argparse
 import asyncio
 import json
-import os
 import random
 import sys
 import threading
@@ -80,11 +79,6 @@ class Miner:
             action="store_true",
             help="Test mode - use all peers without filtering",
         )
-        parser.add_argument(
-            "--enable-influxdb",
-            action="store_true",
-            help="Enable InfluxDB metrics logging (disabled by default)",
-        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -93,11 +87,6 @@ class Miner:
             tplr.debug()
         if config.trace:
             tplr.trace()
-
-        # Set InfluxDB environment variable based on CLI arg
-        if config.enable_influxdb:
-            os.environ["ENABLE_INFLUXDB"] = "true"
-            tplr.logger.info("InfluxDB metrics logging enabled for miner")
 
         return config
 
@@ -211,7 +200,6 @@ class Miner:
             group="miner",
             job_type="mining",
         )
-        tplr.logger.info(f"MetricsLogger initialized for miner. ENABLE_INFLUXDB={os.environ.get('ENABLE_INFLUXDB', 'not set')}")
 
     # Main training loop.
     async def run(self):
@@ -678,9 +666,6 @@ class Miner:
                 step=self.global_step,
             )
 
-            # Log to InfluxDB in parallel
-            tplr.logger.info(f"Attempting to log metrics to InfluxDB. ENABLE_INFLUXDB={os.environ.get('ENABLE_INFLUXDB', 'not set')}")
-            
             self.metrics_logger.log(
                 measurement="training_step_v2",
                 tags={
@@ -697,7 +682,9 @@ class Miner:
                     "batch_duration": duration,
                     "total_tokens": int(self.total_tokens_processed),
                     "active_peers": int(len(self.peers)),
-                    "effective_batch_size": int(len(self.peers) * self.hparams.batch_size),
+                    "effective_batch_size": int(
+                        len(self.peers) * self.hparams.batch_size
+                    ),
                     "learning_rate": self.scheduler.get_last_lr()[0],
                     "mean_grad_norm": mean_grad_norm,
                     "gather_success_rate": gather_success_rate,

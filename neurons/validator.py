@@ -18,33 +18,34 @@
 # type: ignore
 
 # Standard library
-import sys
-import copy
-import time
-import random
-import asyncio
-from datetime import datetime, timedelta, timezone
 import argparse
-import threading
-from contextlib import contextmanager
-from collections import defaultdict
-from time import perf_counter
+import asyncio
+import copy
 import os
+import random
+import sys
+import threading
+import time
+from collections import defaultdict
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from io import StringIO
-from rich.console import Console
-from rich.table import Table
+from time import perf_counter
+
+import bittensor as bt
+import numpy as np
 
 # Third party
 import torch
-import numpy as np
-import bittensor as bt
+from rich.console import Console
+from rich.table import Table
 from torch.optim import SGD
-from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
     LinearLR,
     SequentialLR,
 )
+from transformers import LlamaForCausalLM
 
 # Local
 import tplr
@@ -70,9 +71,7 @@ def timer(name: str, wandb_obj=None, step=None, metrics_logger=None):
         wandb_obj.log({f"validator/{name}": duration}, step=step)
     if metrics_logger and step is not None:
         metrics_logger.log(
-            measurement="timing", 
-            tags={"window": step}, 
-            fields={name: duration}
+            measurement="timing", tags={"window": step}, fields={name: duration}
         )
 
 
@@ -101,11 +100,6 @@ class Validator:
             action="store_true",
             help="Test mode - use all peers without filtering",
         )
-        parser.add_argument(
-            "--enable-influxdb",
-            action="store_true",
-            help="Enable InfluxDB metrics logging (disabled by default)"
-        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -114,12 +108,7 @@ class Validator:
             tplr.debug()
         if config.trace:
             tplr.trace()
-            
-        # Set InfluxDB environment variable based on CLI arg
-        if config.enable_influxdb:
-            os.environ["ENABLE_INFLUXDB"] = "true"
-            tplr.logger.info("InfluxDB metrics logging enabled for validator")
-            
+
         return config
 
     def __init__(self):
@@ -249,7 +238,7 @@ class Validator:
             group="validator",
             job_type="validation",
         )
-        
+
         # Initialize metrics logger for InfluxDB
         self.metrics_logger = tplr.metrics.MetricsLogger(
             prefix="V",
@@ -259,7 +248,6 @@ class Validator:
             group="validator",
             job_type="validation",
         )
-        tplr.logger.info(f"MetricsLogger initialized for validator. ENABLE_INFLUXDB={os.environ.get('ENABLE_INFLUXDB', 'not set')}")
 
         # Initialize peers
         self.peers = []
@@ -458,14 +446,14 @@ class Validator:
                     },
                     step=self.global_step,
                 )
-                
+
                 # Log slash metrics to InfluxDB with primitive types
                 self.metrics_logger.log(
                     measurement="validator_inactivity",
                     tags={
-                        "uid": str(uid), 
+                        "uid": str(uid),
                         "window": int(current_window),
-                        "global_step": int(self.global_step)
+                        "global_step": int(self.global_step),
                     },
                     fields={
                         "score_before": float(old_score),
@@ -869,7 +857,7 @@ class Validator:
                             },
                             step=self.global_step,
                         )
-                        
+
                         # Log to InfluxDB metrics with primitive types
                         self.metrics_logger.log(
                             measurement="validator_slash",
@@ -881,7 +869,9 @@ class Validator:
                             },
                             fields={
                                 "score_before": float(old_score),
-                                "score_after": float(self.final_moving_avg_scores[eval_uid].item()),
+                                "score_after": float(
+                                    self.final_moving_avg_scores[eval_uid].item()
+                                ),
                                 "reason": str(e)[:255],  # Truncate long error messages
                             },
                         )
@@ -1394,10 +1384,12 @@ class Validator:
                 gradient_score = float(self.gradient_scores[uid].item())
                 binary_indicator = float(self.binary_indicator_scores[uid].item())
                 binary_moving_avg = float(self.binary_moving_averages[uid].item())
-                normalised_binary = float(self.normalised_binary_moving_averages[uid].item())
+                normalised_binary = float(
+                    self.normalised_binary_moving_averages[uid].item()
+                )
                 final_moving_avg = float(self.final_moving_avg_scores[uid].item())
                 weight = float(self.weights[uid].item())
-                
+
                 self.wandb.log(
                     {
                         f"validator/gradient_scores/{uid}": gradient_score,
@@ -1409,7 +1401,7 @@ class Validator:
                     },
                     step=self.global_step,
                 )
-                
+
                 # Log to InfluxDB metrics per UID with primitive types
                 self.metrics_logger.log(
                     measurement="validator_scores",
@@ -1584,13 +1576,13 @@ class Validator:
                 "validator/timing/model_update": tplr.T() - update_start,
             }
             self.wandb.log(evaluation_metrics, step=self.global_step)
-            
+
             # Log metrics to InfluxDB in parallel using primitive types
-            gather_success_rate = float(gather_result.success_rate * 100) if gather_result else 0.0
+            gather_success_rate = (
+                float(gather_result.success_rate * 100) if gather_result else 0.0
+            )
             total_skipped = len(gather_result.skipped_uids) if gather_result else 0
-            
-            tplr.logger.info(f"Attempting to log validator metrics to InfluxDB. ENABLE_INFLUXDB={os.environ.get('ENABLE_INFLUXDB', 'not set')}")
-            
+
             self.metrics_logger.log(
                 measurement="validator_window_v2",
                 tags={

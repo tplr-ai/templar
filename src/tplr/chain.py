@@ -77,7 +77,7 @@ class ChainManager:
 
         # Initialize bucket storage
         self.commitments = {}
-        self.peers = []
+        self.peers = np.array([], dtype=np.int64)
         self.eval_peers = defaultdict(int)
         self.fetch_interval = fetch_interval
         self._fetch_task = None

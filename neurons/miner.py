@@ -317,9 +317,12 @@ class Miner:
             self.model.zero_grad()
             total_loss = 0.0
             n_batches = 0
+            window_tokens = 0  # Initialize token count for this window
 
             for i, batch in enumerate(loader):
                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
+                tokens_this_batch = input_ids.numel()  # Tokens in current batch
+                window_tokens += tokens_this_batch       # Accumulate tokens
                 labels = input_ids.clone()
                 labels = torch.where(
                     labels == self.tokenizer.pad_token_id, -100, labels
@@ -461,7 +464,8 @@ class Miner:
             # 5. Calculate and log metrics
             duration = time.time() - train_start
             self.batch_times.append(duration)
-            self.total_tokens_processed += n_batches
+            self.total_tokens_processed += window_tokens
+            tokens_per_sec = window_tokens / duration
 
             grad_norms = [
                 p.grad.norm().item()
@@ -474,10 +478,10 @@ class Miner:
                 {
                     # Training metrics
                     "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
-                    "miner/tokens_per_sec": n_batches / duration,
+                    "miner/tokens_per_sec": tokens_per_sec,
                     "miner/batch_duration": duration,
                     "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": n_batches,
+                    "miner/batch_tokens": window_tokens,
                     "miner/global_step": self.global_step,
                     # Resource metrics
                     "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
@@ -609,7 +613,6 @@ class Miner:
 
             # Calculate common metrics values
             loss_value = total_loss / n_batches if n_batches > 0 else 0
-            tokens_per_sec = n_batches / duration
             mean_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0
             grad_norm_std = torch.tensor(grad_norms).std().item() if grad_norms else 0
             mean_weight_norm = (
@@ -645,7 +648,7 @@ class Miner:
                     "miner/loss": loss_value,
                     "miner/tokens_per_sec": tokens_per_sec,
                     "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": n_batches,
+                    "miner/batch_tokens": window_tokens,
                     "miner/global_step": self.global_step,
                     "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
                     / 1024**2,
@@ -675,7 +678,7 @@ class Miner:
                 fields={
                     "loss": loss_value,
                     "tokens_per_sec": tokens_per_sec,
-                    "batch_tokens": int(n_batches),
+                    "batch_tokens": int(window_tokens),
                     "grad_norm_std": grad_norm_std,
                     "mean_weight_norm": mean_weight_norm,
                     "mean_momentum_norm": mean_momentum_norm,

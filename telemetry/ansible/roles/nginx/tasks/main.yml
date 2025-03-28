@@ -1,0 +1,364 @@
+---
+# Tasks for NGINX setup
+
+- name: Install NGINX
+  apt:
+    name: nginx
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Create NGINX configuration directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: 0755
+  loop:
+    - /etc/nginx/conf.d
+    - /etc/nginx/sites-available
+    - /etc/nginx/sites-enabled
+
+- name: Configure NGINX global settings
+  template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    owner: root
+    group: root
+    mode: 0644
+  notify: restart nginx
+
+- name: Configure NGINX for Grafana
+  template:
+    src: grafana-nginx.conf.j2
+    dest: /etc/nginx/sites-available/grafana.conf
+    owner: root
+    group: root
+    mode: 0644
+  notify: restart nginx
+
+- name: Enable Grafana site
+  file:
+    src: /etc/nginx/sites-available/grafana.conf
+    dest: /etc/nginx/sites-enabled/grafana.conf
+    state: link
+  notify: restart nginx
+
+- name: Check if default NGINX site exists
+  stat:
+    path: /etc/nginx/sites-enabled/default
+  register: default_site
+
+- name: Remove default NGINX site
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: restart nginx
+  when: default_site.stat.exists
+
+# Remove any remnants of Let's Encrypt and Certbot
+- name: Remove Let's Encrypt and Certbot packages
+  apt:
+    name:
+      - certbot
+      - python3-certbot-nginx
+    state: absent
+    purge: yes
+  when: ansible_os_family == "Debian"
+
+- name: Remove Let's Encrypt directories
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/letsencrypt
+    - /var/lib/letsencrypt
+  when: ansible_os_family == "Debian"
+
+# Create directory for SSL certificates
+- name: Create SSL directory if not exists
+  file:
+    path: /etc/nginx/ssl
+    state: directory
+    owner: root
+    group: root
+    mode: 0700
+  when: nginx_ssl_enabled
+
+# Check if certificates already exist
+- name: Check if SSL certificate and key files already exist
+  stat:
+    path: "{{ item }}"
+  register: ssl_cert_exists
+  loop:
+    - "/etc/nginx/ssl/nginx_cert.pem"
+    - "/etc/nginx/ssl/nginx_key.pem"
+  when: nginx_ssl_enabled
+
+# Use custom certificates if provided
+- name: Check if custom SSL certificates are provided
+  local_action:
+    module: stat
+    path: "{{ item }}"
+  register: custom_ssl_cert_exists
+  loop:
+    - "{{ playbook_dir }}/roles/nginx/files/nginx_cert.pem"
+    - "{{ playbook_dir }}/roles/nginx/files/nginx_key.pem"
+  changed_when: false
+  become: false
+  when: nginx_ssl_enabled and nginx_use_custom_ssl_cert | default(false)
+
+- name: Install custom SSL certificates (if available)
+  copy:
+    src: "{{ item }}"
+    dest: "/etc/nginx/ssl/{{ item | basename }}"
+    owner: root
+    group: root
+    mode: 0600
+  loop:
+    - "nginx_cert.pem"
+    - "nginx_key.pem"
+  when: >
+    nginx_ssl_enabled and
+    nginx_use_custom_ssl_cert | default(false) and
+    custom_ssl_cert_exists.results[0].stat.exists and
+    custom_ssl_cert_exists.results[1].stat.exists
+  notify: restart nginx
+
+# Generate self-signed certificates if needed
+- name: Generate self-signed SSL certificates
+  block:
+    - name: Generate self-signed certificates with OpenSSL
+      shell: |
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 -sha256 \
+          -keyout /etc/nginx/ssl/nginx_key.pem \
+          -out /etc/nginx/ssl/nginx_cert.pem \
+          -subj "/C={{ nginx_cert_country | default('US') }}/ST={{ nginx_cert_state | default('State') }}/L={{ nginx_cert_locality | default('City') }}/O={{ nginx_cert_organization | default('Templar') }}/CN={{ grafana_domain }}"
+      args:
+        creates: /etc/nginx/ssl/nginx_cert.pem
+      notify: restart nginx
+
+    - name: Set proper permissions on SSL files
+      file:
+        path: "{{ item }}"
+        owner: root
+        group: root
+        mode: 0600
+      loop:
+        - /etc/nginx/ssl/nginx_cert.pem
+        - /etc/nginx/ssl/nginx_key.pem
+  when: >
+    nginx_ssl_enabled and
+    (not nginx_use_custom_ssl_cert | default(false)) and
+    (ssl_cert_exists.results[0].stat is not defined or not ssl_cert_exists.results[0].stat.exists or
+     ssl_cert_exists.results[1].stat is not defined or not ssl_cert_exists.results[1].stat.exists)
+
+# Copy self-signed certificates back to local control node for version control
+- name: Fetch generated SSL certificates back to control node
+  fetch:
+    src: "{{ item }}"
+    dest: "{{ playbook_dir }}/roles/nginx/files/{{ item | basename }}"
+    flat: yes
+  loop:
+    - /etc/nginx/ssl/nginx_cert.pem
+    - /etc/nginx/ssl/nginx_key.pem
+  when: nginx_ssl_enabled and not (nginx_use_custom_ssl_cert | default(false))
+  changed_when: false
+  ignore_errors: true
+
+# Certificate rotation via cron job
+- name: Create certificate rotation script
+  template:
+    src: rotate_ssl_cert.sh.j2
+    dest: /usr/local/bin/rotate_ssl_cert.sh
+    owner: root
+    group: root
+    mode: 0700
+  when: nginx_ssl_enabled and nginx_auto_rotate_cert | default(true)
+
+- name: Create cron job for yearly certificate rotation
+  cron:
+    name: "Rotate self-signed SSL certificates annually"
+    special_time: yearly
+    job: "/usr/local/bin/rotate_ssl_cert.sh"
+    user: root
+  when: nginx_ssl_enabled and nginx_auto_rotate_cert | default(true)
+
+- name: Ensure UFW is installed
+  apt:
+    name: ufw
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Allow SSH through UFW before doing anything else
+  ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+  when: ansible_os_family == "Debian"
+
+- name: Configure UFW rules for Grafana and HTTP/HTTPS
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "80"  # NGINX
+    - "443" # NGINX with SSL
+    - "{{ grafana_http_port }}"  # Direct Grafana access
+  when: ansible_os_family == "Debian"
+
+- name: Enable UFW with caution
+  block:
+    - name: Check if UFW is already enabled
+      command: ufw status
+      register: ufw_status
+      changed_when: false
+
+    - name: Enable UFW if not already enabled
+      ufw:
+        state: enabled
+        policy: deny
+      when: "'Status: active' not in ufw_status.stdout"
+  when: ansible_os_family == "Debian"
+
+- name: Start and enable NGINX
+  service:
+    name: nginx
+    state: started
+    enabled: yes
+
+- name: Test NGINX configuration
+  shell: nginx -t
+  register: nginx_test
+  changed_when: false
+
+- name: Display NGINX configuration test results
+  debug:
+    var: nginx_test.stdout_lines
+
+- name: Check NGINX status
+  shell: |
+    systemctl status nginx || echo "NGINX service issue"
+    netstat -tulpn | grep 80 || echo "NGINX not listening on port 80"
+  register: nginx_debug
+  changed_when: false
+
+- name: Display NGINX debug info
+  debug:
+    var: nginx_debug.stdout_lines
+
+# Version API setup
+- name: Create directory for Version API
+  file:
+    path: /opt/templar
+    state: directory
+    mode: '0755'
+    owner: www-data
+    group: www-data
+
+- name: Copy Version API script
+  copy:
+    src: version_api.py
+    dest: /opt/templar/version_api.py
+    mode: '0755'
+    owner: www-data
+    group: www-data
+
+- name: Install Python3 and venv
+  apt:
+    name:
+      - python3
+      - python3-venv
+      - python3-setuptools
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Check if virtual environment exists
+  stat:
+    path: /opt/templar/venv
+  register: venv_dir
+
+- name: Create virtual environment for Version API
+  command: python3 -m venv /opt/templar/venv
+  args:
+    creates: /opt/templar/venv
+  when: not ansible_check_mode and not venv_dir.stat.exists
+
+- name: Install required Python packages for Version API
+  pip:
+    name:
+      - requests
+    state: present
+    virtualenv: /opt/templar/venv
+  when: not ansible_check_mode
+
+- name: Copy Version API systemd service file
+  template:
+    src: version-api.service.j2
+    dest: /etc/systemd/system/templar-version-api.service
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Configure UFW rule for Version API (localhost only)
+  ufw:
+    rule: allow
+    port: "8585"
+    proto: tcp
+    from_ip: 127.0.0.1
+    direction: in
+  when: ansible_os_family == "Debian"
+
+- name: Enable and start Version API service
+  systemd:
+    name: templar-version-api
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  when: not ansible_check_mode
+
+- name: Wait for Version API to start
+  wait_for:
+    host: 127.0.0.1
+    port: 8585
+    timeout: 30
+  register: version_api_status
+  ignore_errors: true
+  when: not ansible_check_mode
+
+- name: Check Version API status
+  uri:
+    url: http://127.0.0.1:8585/health
+    method: GET
+  register: version_api_health
+  ignore_errors: true
+  when: not ansible_check_mode
+
+- name: Display Version API status
+  debug:
+    msg: "Version API status: {{ version_api_health.status | default('Not running or skipped in check mode') }}"
+
+- name: Create log file for Version API
+  file:
+    path: /var/log/templar-version-api.log
+    state: touch
+    owner: root
+    group: root
+    mode: 0644
+  changed_when: false
+
+- name: Ensure dashboard directories are writable by version API
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: grafana
+    group: grafana
+    mode: 0775
+  with_items:
+    - /etc/grafana/dashboards
+    - /var/lib/grafana/dashboards
+  ignore_errors: true
+  changed_when: false

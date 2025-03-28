@@ -1,0 +1,467 @@
+---
+# Tasks for comprehensive Grafana stack health checks
+# This role performs a waterfall of verification steps to ensure
+# the entire Grafana stack has been deployed correctly
+
+- name: Create verification results directory
+  file:
+    path: "{{ verification_output_dir }}"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: save_verification_results | bool
+
+- name: Set timestamp for verification report
+  set_fact:
+    verification_timestamp: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  when: save_verification_results | bool
+
+- name: Check Grafana service is active
+  systemd:
+    name: grafana-server
+  register: grafana_service
+
+- name: Verify Grafana service status
+  debug:
+    msg: "{{ 'Grafana service is active and running ✅' if grafana_service.status.ActiveState == 'active' else 'WARNING: Grafana service is not active ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - grafana_service.status.ActiveState != 'active'
+
+- name: Check Nginx service is active
+  systemd:
+    name: nginx
+  register: nginx_service
+
+- name: Verify Nginx service status
+  debug:
+    msg: "{{ 'Nginx service is active and running ✅' if nginx_service.status.ActiveState == 'active' else 'WARNING: Nginx service is not active ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - nginx_service.status.ActiveState != 'active'
+
+- name: Check if version API service is active
+  systemd:
+    name: templar-version-api
+  register: version_api_service
+  ignore_errors: true
+
+- name: Verify version API service status
+  debug:
+    msg: "{{ 'Version API service is active and running ✅' if version_api_service.status.ActiveState == 'active' else 'WARNING: Version API service is not active ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - version_api_service.status.ActiveState != 'active'
+  when: version_api_service.status is defined
+
+- name: Verify Grafana API health
+  uri:
+    url: "http://localhost:{{ grafana_http_port }}/api/health"
+    method: GET
+    status_code: 200
+    return_content: yes
+  register: health_result
+  failed_when: false
+
+- name: Report Grafana API health status
+  debug:
+    msg: "{{ 'Grafana API is healthy ✅' if health_result.status is defined and health_result.status == 200 else 'WARNING: Grafana API health check failed ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - health_result.status is not defined or health_result.status != 200
+
+- name: Verify dashboard provisioning directory structure
+  stat:
+    path: "/etc/grafana/dashboards/templar_metrics.json"
+  register: dashboard_file
+
+- name: Report dashboard file status
+  debug:
+    msg: "{{ 'Dashboard file exists ✅' if dashboard_file.stat.exists else 'WARNING: Dashboard file not found ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - not dashboard_file.stat.exists
+
+- name: Verify JSON API plugin directory structure
+  stat:
+    path: "/var/lib/grafana/plugins/marcusolsson-json-datasource"
+  register: json_plugin_dir
+
+- name: Report JSON API plugin directory status
+  debug:
+    msg: "{{ 'JSON API plugin directory exists ✅' if json_plugin_dir.stat.exists else 'WARNING: JSON API plugin directory not found ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - not json_plugin_dir.stat.exists
+
+- name: Check JSON API plugin files
+  command: "ls -la /var/lib/grafana/plugins/marcusolsson-json-datasource"
+  register: json_plugin_files
+  changed_when: false
+  failed_when: false
+
+- name: Verify JSON API plugin content
+  debug:
+    msg: "JSON API plugin directory has content ✅"
+  failed_when:
+    - fail_on_verification_error | bool
+    - json_plugin_files.rc != 0 or json_plugin_files.stdout == ""
+  when: json_plugin_dir.stat.exists
+
+- name: Verify dashboard provider configuration
+  command: "cat /etc/grafana/provisioning/dashboards/default.yml"
+  register: dashboard_provider_config
+  changed_when: false
+  failed_when: false
+
+- name: Check dashboard provider content
+  debug:
+    msg: "{{ 'Dashboard provider configuration is valid ✅' if dashboard_provider_config.rc == 0 and 'path: /etc/grafana/dashboards' in dashboard_provider_config.stdout else 'WARNING: Dashboard provider configuration issue ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - "{{ dashboard_provider_config.rc != 0 or (dashboard_provider_config.stdout is defined and 'path: /etc/grafana/dashboards' not in dashboard_provider_config.stdout) }}"
+
+- name: Verify plugins configuration in grafana.ini
+  shell: "grep -A3 '\\[plugins\\]' /etc/grafana/grafana.ini || echo 'plugins section not found'"
+  register: plugins_config
+  changed_when: false
+  failed_when: false
+
+- name: Verify anonymous access configuration in grafana.ini
+  shell: "grep -A5 '\\[auth.anonymous\\]' /etc/grafana/grafana.ini || echo 'anonymous access section not found'"
+  register: anonymous_config
+  changed_when: false
+  failed_when: false
+
+- name: Check anonymous access configuration content
+  debug:
+    msg: "{{ 'Anonymous access configuration is valid ✅' if 'enabled = true' in anonymous_config.stdout else 'WARNING: Anonymous access configuration issue ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - (anonymous_config.stdout is defined and 'enabled = true' not in anonymous_config.stdout)
+
+- name: Verify Grafana datasources via API
+  uri:
+    url: "http://localhost:{{ grafana_http_port }}/api/datasources"
+    method: GET
+    user: "{{ grafana_security_admin_user }}"
+    password: "{{ grafana_security_admin_password }}"
+    force_basic_auth: yes
+    return_content: yes
+    status_code: 200
+  register: datasources
+  failed_when: false
+
+- name: Check InfluxDB datasource
+  debug:
+    msg: "{{ 'InfluxDB datasource is configured ✅' if datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length > 0 else 'WARNING: InfluxDB datasource not found ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - (datasources is defined and datasources.status is defined and (datasources.status != 200 or (datasources.json is defined and (datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length == 0))))
+  when: datasources.status is defined and datasources.json is defined
+
+- name: Check JSON API datasource
+  debug:
+    msg: "{{ 'JSON API datasource is configured ✅' if datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'marcusolsson-json-datasource') | list | length > 0 else 'WARNING: JSON API datasource not found ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - (datasources is defined and datasources.status is defined and (datasources.status != 200 or (datasources.json is defined and (datasources.json | selectattr('type', 'equalto', 'marcusolsson-json-datasource') | list | length == 0))))
+  when: datasources.status is defined and datasources.json is defined
+
+- name: Verify dashboard access via Grafana API
+  uri:
+    url: "http://localhost:{{ grafana_http_port }}/api/search?type=dash-db"
+    method: GET
+    user: "{{ grafana_security_admin_user }}"
+    password: "{{ grafana_security_admin_password }}"
+    force_basic_auth: yes
+    return_content: yes
+    status_code: 200
+  register: dashboards
+  failed_when: false
+
+- name: Check dashboard existence
+  debug:
+    msg: "{{ 'Templar dashboard is available ✅' if dashboards.status == 200 and dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length > 0 else 'WARNING: Templar dashboard not found ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - (dashboards is defined and dashboards.status is defined and (dashboards.status != 200 or (dashboards.json is defined and (dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length == 0))))
+  when: dashboards.status is defined and dashboards.json is defined
+
+- name: Verify NGINX proxy to Grafana (HTTP)
+  uri:
+    url: "http://localhost:80/api/health"
+    method: GET
+    status_code: [200, 301, 302]
+    return_content: yes
+    follow_redirects: no
+  register: nginx_proxy_http
+  failed_when: false
+
+- name: Verify NGINX proxy to Grafana (HTTPS)
+  uri:
+    url: "https://localhost/api/health"
+    method: GET
+    status_code: 200
+    return_content: yes
+    validate_certs: no
+  register: nginx_proxy_https
+  failed_when: false
+
+- name: Check NGINX HTTP proxy status
+  debug:
+    msg: "{{ 'NGINX HTTP to HTTPS redirect is working ✅' if nginx_proxy_http.status in [301, 302] else 'WARNING: NGINX HTTP to HTTPS redirect is not working ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - nginx_proxy_http.status not in [200, 301, 302]
+
+- name: Check NGINX HTTPS proxy status
+  debug:
+    msg: "{{ 'NGINX HTTPS proxy to Grafana is working ✅' if nginx_proxy_https.status == 200 else 'WARNING: NGINX HTTPS proxy to Grafana is not working ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - nginx_proxy_https.status != 200
+
+- name: Check anonymous access to dashboard via NGINX (HTTPS)
+  uri:
+    url: "https://localhost/d/{{ dashboards.json[0].uid | default('templar_metrics') }}/templar-metrics?kiosk=tv&orgId=1"
+    method: GET
+    status_code: [200, 302]
+    return_content: yes
+    follow_redirects: all
+    validate_certs: no
+  register: dashboard_anonymous_access
+  failed_when: false
+  when: dashboards.status is defined and dashboards.json is defined and dashboards.json | length > 0
+
+- name: Set dashboard access status message
+  set_fact:
+    dashboard_access_status: "{{ 'Anonymous dashboard access is working ✅' if dashboard_anonymous_access.status in [200, 302] and not '<a href=\"/login\">' in dashboard_anonymous_access.content else 'WARNING: Anonymous dashboard access is not working ❌' }}"
+  when: dashboard_anonymous_access is defined and dashboard_anonymous_access.status is defined
+
+- name: Check anonymous access to default dashboard (HTTPS)
+  uri:
+    url: "https://localhost/"
+    method: GET
+    status_code: [200, 302]
+    return_content: yes
+    follow_redirects: all
+    validate_certs: no
+  register: default_anonymous_access
+  failed_when: false
+
+- name: Set default dashboard access status message
+  set_fact:
+    default_access_status: "{{ 'Anonymous access to default dashboard is working ✅' if default_anonymous_access.status in [200, 302] and not '<a href=\"/login\">' in default_anonymous_access.content else 'WARNING: Anonymous access to default dashboard is not working ❌' }}"
+  when: default_anonymous_access is defined and default_anonymous_access.status is defined
+
+- name: Report dashboard access status
+  debug:
+    msg: "{{ dashboard_access_status | default('Could not verify dashboard access') }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - dashboard_access_status is defined and 'WARNING' in dashboard_access_status
+  when: dashboard_access_status is defined
+
+- name: Report default dashboard access status
+  debug:
+    msg: "{{ default_access_status | default('Could not verify default dashboard access') }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - default_access_status is defined and 'WARNING' in default_access_status
+  when: default_access_status is defined
+
+- name: Check version API response (HTTPS)
+  uri:
+    url: "https://localhost/api/templar/version"
+    method: GET
+    status_code: 200
+    return_content: yes
+    validate_certs: no
+  register: version_api_response
+  failed_when: false
+
+- name: Report version API status
+  debug:
+    msg: "{{ 'Version API is working ✅' if version_api_response.status == 200 and version_api_response.json is defined and version_api_response.json.version is defined else 'WARNING: Version API is not working ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - version_api_response.status != 200 or version_api_response.json is not defined or version_api_response.json.version is not defined
+
+- name: Generate verification summary report
+  template:
+    src: verification_report.j2
+    dest: "{{ verification_output_dir }}/verification_report_{{ verification_timestamp }}.txt"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  vars:
+    verification_results:
+      - name: "Grafana Service"
+        status: "{{ grafana_service_ok }}"
+      - name: "Nginx Service"
+        status: "{{ nginx_service_ok }}"
+      - name: "Version API Service"
+        status: "{{ version_api_service_ok }}"
+      - name: "Grafana API Health"
+        status: "{{ health_result_ok }}"
+      - name: "Dashboard File"
+        status: "{{ dashboard_file_ok }}"
+      - name: "JSON API Plugin Directory"
+        status: "{{ json_plugin_dir_ok }}"
+      - name: "Dashboard Provider Config"
+        status: "{{ dashboard_provider_config_ok }}"
+      - name: "Anonymous Access Config"
+        status: "{{ anonymous_config_ok }}"
+      - name: "InfluxDB Datasource"
+        status: "{{ influxdb_datasource_ok }}"
+      - name: "JSON API Datasource"
+        status: "{{ json_api_datasource_ok }}"
+      - name: "Dashboard Availability"
+        status: "{{ dashboard_availability_ok }}"
+      - name: "NGINX Proxy"
+        status: "{{ nginx_proxy_ok }}"
+      - name: "Anonymous Dashboard Access"
+        status: "{{ dashboard_access_ok }}"
+      - name: "Default Dashboard Access"
+        status: "{{ default_access_ok }}"
+      - name: "Version API"
+        status: "{{ version_api_ok }}"
+    all_tests_passed: "{{ all_checks_passed }}"
+  when: save_verification_results | bool
+
+- name: Calculate Grafana Service status
+  set_fact:
+    grafana_service_ok: "{{ grafana_service.status.ActiveState == 'active' }}"
+
+- name: Calculate Nginx Service status
+  set_fact:
+    nginx_service_ok: "{{ nginx_service.status.ActiveState == 'active' }}"
+
+- name: Calculate Version API Service status
+  set_fact:
+    version_api_service_ok: "{{ version_api_service.status.ActiveState == 'active' if version_api_service.status is defined else false }}"
+
+- name: Calculate Grafana API Health status
+  set_fact:
+    health_result_ok: "{{ health_result.status == 200 if health_result.status is defined else false }}"
+
+- name: Calculate Dashboard File status
+  set_fact:
+    dashboard_file_ok: "{{ dashboard_file.stat.exists }}"
+
+- name: Calculate JSON API Plugin Directory status
+  set_fact:
+    json_plugin_dir_ok: "{{ json_plugin_dir.stat.exists }}"
+
+- name: Calculate Dashboard Provider Config status
+  set_fact:
+    dashboard_provider_config_ok: "{{ dashboard_provider_config.rc == 0 and 'path: /etc/grafana/dashboards' in dashboard_provider_config.stdout }}"
+
+- name: Calculate Anonymous Access Config status
+  set_fact:
+    anonymous_config_ok: "{{ 'enabled = true' in anonymous_config.stdout }}"
+
+- name: Calculate InfluxDB Datasource status
+  set_fact:
+    influxdb_datasource_ok: "{{ datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'influxdb') | list | length > 0 if datasources.status is defined and datasources.json is defined else false }}"
+
+- name: Calculate JSON API Datasource status
+  set_fact:
+    json_api_datasource_ok: "{{ datasources.status == 200 and datasources.json | selectattr('type', 'equalto', 'marcusolsson-json-datasource') | list | length > 0 if datasources.status is defined and datasources.json is defined else false }}"
+
+- name: Calculate Dashboard Availability status
+  set_fact:
+    dashboard_availability_ok: "{{ dashboards.status == 200 and dashboards.json | selectattr('title', 'equalto', 'Templar Metrics') | list | length > 0 if dashboards.status is defined and dashboards.json is defined else false }}"
+
+- name: Check SSL certificate exists and is valid
+  stat:
+    path: /etc/nginx/ssl/nginx_cert.pem
+  register: nginx_ssl_cert
+
+- name: Verify SSL certificate validity
+  shell: "openssl x509 -in /etc/nginx/ssl/nginx_cert.pem -noout -checkend 86400"
+  register: cert_valid
+  failed_when: false
+  when: nginx_ssl_cert.stat.exists
+
+- name: Display SSL certificate status
+  debug:
+    msg: "{{ 'SSL certificate is valid ✅' if nginx_ssl_cert.stat.exists and cert_valid.rc == 0 else 'WARNING: SSL certificate is missing or invalid ❌' }}"
+  failed_when:
+    - fail_on_verification_error | bool
+    - not nginx_ssl_cert.stat.exists or cert_valid.rc != 0
+  when: nginx_ssl_cert.stat.exists
+
+- name: Calculate NGINX Proxy status
+  set_fact:
+    nginx_proxy_ok: "{{ 
+      (nginx_proxy_http.status in [301, 302] if nginx_proxy_http.status is defined else false) and 
+      (nginx_proxy_https.status == 200 if nginx_proxy_https.status is defined else false) 
+    }}"
+
+- name: Calculate Anonymous Dashboard Access status
+  set_fact:
+    dashboard_access_ok: "{{ dashboard_anonymous_access.status in [200, 302] and not '<a href=\"/login\">' in dashboard_anonymous_access.content if dashboard_anonymous_access is defined and dashboard_anonymous_access.status is defined else false }}"
+
+- name: Calculate Default Dashboard Access status
+  set_fact:
+    default_access_ok: "{{ default_anonymous_access.status in [200, 302] and not '<a href=\"/login\">' in default_anonymous_access.content if default_anonymous_access is defined and default_anonymous_access.status is defined else false }}"
+
+- name: Calculate Version API status
+  set_fact:
+    version_api_ok: "{{ (version_api_response.status == 200) and (version_api_response.json is defined) if version_api_response is defined and version_api_response.status is defined else false }}"
+
+- name: Calculate SSL Certificate status
+  set_fact:
+    ssl_cert_ok: "{{ nginx_ssl_cert.stat.exists and cert_valid.rc == 0 if nginx_ssl_cert.stat.exists and cert_valid is defined else false }}"
+
+- name: Calculate overall verification result
+  set_fact:
+    all_checks_passed: >-
+      {{
+        grafana_service_ok and
+        nginx_service_ok and
+        version_api_service_ok and
+        health_result_ok and
+        dashboard_file_ok and
+        json_plugin_dir_ok and
+        dashboard_provider_config_ok and
+        anonymous_config_ok and
+        influxdb_datasource_ok and
+        json_api_datasource_ok and
+        dashboard_availability_ok and
+        nginx_proxy_ok and
+        dashboard_access_ok and
+        default_access_ok and
+        version_api_ok and
+        ssl_cert_ok
+      }}
+
+- name: Display overall verification result
+  debug:
+    msg: |
+      ==========================================
+      GRAFANA STACK VERIFICATION RESULT: {{ 'SUCCESS ✅' if all_checks_passed else 'FAILED ❌' }}
+      ==========================================
+      {{ '✅' if grafana_service_ok else '❌' }} Grafana Service
+      {{ '✅' if nginx_service_ok else '❌' }} Nginx Service
+      {{ '✅' if version_api_service_ok else '❌' }} Version API Service
+      {{ '✅' if health_result_ok else '❌' }} Grafana API Health
+      {{ '✅' if dashboard_file_ok else '❌' }} Dashboard File
+      {{ '✅' if json_plugin_dir_ok else '❌' }} JSON API Plugin Directory
+      {{ '✅' if dashboard_provider_config_ok else '❌' }} Dashboard Provider Config
+      {{ '✅' if anonymous_config_ok else '❌' }} Anonymous Access Config
+      {{ '✅' if influxdb_datasource_ok else '❌' }} InfluxDB Datasource
+      {{ '✅' if json_api_datasource_ok else '❌' }} JSON API Datasource
+      {{ '✅' if dashboard_availability_ok else '❌' }} Dashboard Availability
+      {{ '✅' if nginx_proxy_ok else '❌' }} NGINX Proxy (HTTP/HTTPS)
+      {{ '✅' if ssl_cert_ok else '❌' }} SSL Certificate
+      {{ '✅' if dashboard_access_ok else '❌' }} Anonymous Dashboard Access
+      {{ '✅' if default_access_ok else '❌' }} Default Dashboard Access
+      {{ '✅' if version_api_ok else '❌' }} Version API

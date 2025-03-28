@@ -25,7 +25,10 @@ dependencies = [
     "s3fs",
     "pyarrow",
     "scipy",
-    "rich>=13.0.0"
+    "rich>=13.0.0",
+    "lm-eval>=0.4.8",
+    "psutil>=7.0.0",
+    "influxdb-client>=1.48.0",
 ]
 
 [project.optional-dependencies]

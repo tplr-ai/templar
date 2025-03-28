@@ -1,0 +1,47 @@
+# Ansible specific
+*.retry
+*.pyc
+.ansible/
+ansible.log
+.facts_cache/
+
+# Vault files
+*.vault
+vault_password_file
+.vault_pass
+
+# Runtime and temporary files
+*.tmp
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
+
+# Credentials and secrets
+*.pem
+**/vault.yml
+!**/vault.yml.example
+group_vars/all.yml
+!group_vars/all.yml.example
+
+# SSH keys and configurations
+*.key
+id_rsa*
+known_hosts
+
+# Local environment
+venv/
+env/
+.env
+
+# Logs
+*.log
+
+# Inventory files (except examples)
+inventory
+!inventory.example
+
+# Generated files
+*.tfstate
+*.tfstate.backup

@@ -162,7 +162,7 @@ class Validator:
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
-            T_0=10000,
+            T_0=self.hparams.t_max,
             T_mult=2,
             eta_min=self.hparams.learning_rate * 0.1,
         )
@@ -257,7 +257,7 @@ class Validator:
         # Track inactive peer scores
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
-        self.missing_gradient_slash_rate = 0.25
+        self.missing_gradient_slash_rate = 0.75
 
         # Initialize final score history (for sliding-window averaging)
         self.final_score_history = defaultdict(list)
@@ -1592,7 +1592,6 @@ class Validator:
 
             # 18. Increment global step
             self.global_step += 1
-
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

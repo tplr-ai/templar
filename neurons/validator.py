@@ -241,6 +241,7 @@ class Validator:
         # Track inactive peer scores
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
+        self.missing_gradient_slash_rate = 0.25
 
         # Initialize final score history (for sliding-window averaging)
         self.final_score_history = defaultdict(list)
@@ -514,19 +515,23 @@ class Validator:
 
             tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
 
-            # Slash peers failing to submit gradients (penalize 50%)
+            # Slash peers failing to submit gradients
             for uid in gather_result.skipped_uids:
                 tplr.logger.info(
-                    f"No gradient gathered from UID {uid}. Slashing moving average score by 50%."
+                    f"No gradient gathered from UID {uid}. Slashing moving average score by {self.missing_gradient_slash_rate:.2%}."
                 )
                 if 0 <= uid < self.final_moving_avg_scores.size(0):
                     old_score = self.final_moving_avg_scores[uid].item()
 
                     # Only reduce positive scores
                     if self.final_moving_avg_scores[uid] > 0:
-                        self.final_moving_avg_scores[uid] *= 0.5
+                        self.final_moving_avg_scores[uid] *= (
+                            self.missing_gradient_slash_rate
+                        )
                         self.final_score_history[uid] = [
-                            final_score * 0.5 if final_score > 0 else final_score
+                            final_score * self.missing_gradient_slash_rate
+                            if final_score > 0
+                            else final_score
                             for final_score in self.final_score_history[uid]
                         ]
 
@@ -1187,14 +1192,18 @@ class Validator:
 
                 else:
                     tplr.logger.info(
-                        f"No gradient received from UID {eval_uid}. Slashing moving average score by 50%."
+                        f"No gradient received from UID {eval_uid}. Slashing moving average score by {self.missing_gradient_slash_rate:.2%}."
                     )
                     old_score = self.final_moving_avg_scores[eval_uid].item()
 
                     if self.final_moving_avg_scores[eval_uid] > 0:
-                        self.final_moving_avg_scores[eval_uid] *= 0.5
+                        self.final_moving_avg_scores[eval_uid] *= (
+                            self.missing_gradient_slash_rate
+                        )
                         self.final_score_history[eval_uid] = [
-                            final_score * 0.5 if final_score > 0 else final_score
+                            final_score * self.missing_gradient_slash_rate
+                            if final_score > 0
+                            else final_score
                             for final_score in self.final_score_history[eval_uid]
                         ]
                         new_score = self.final_moving_avg_scores[eval_uid].item()

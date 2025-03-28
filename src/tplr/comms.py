@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 import bittensor as bt
 
 from tqdm import tqdm as std_tqdm
-from typing import List, Dict, Literal, Optional, TypeVar, Any
+from typing import List, Dict, Literal, Optional
 from aiobotocore.session import get_session
 
 from . import __version__
@@ -51,9 +51,6 @@ from .compress import TransformDCT, CompressDCT
 # Constants
 CF_REGION_NAME: str = "enam"
 LOCAL_TMP_DIR = "/tmp/local_store"
-
-T = TypeVar("T", bound=Any)
-FixtureFunction = TypeVar("FixtureFunction", bound=Any)
 
 
 class Comms(ChainManager):
@@ -111,7 +108,11 @@ class Comms(ChainManager):
         # Start background tasks
         self.loop.create_task(self.track_active_peers())
 
-    def get_own_bucket(self, bucket_type, access_type=None) -> Bucket:
+    def get_own_bucket(
+        self,
+        bucket_type: Literal["gradients", "dataset", "aggregator"],
+        access_type=None,
+    ) -> Bucket:
         """Gets bucket configuration from environment variables via config.BUCKET_SECRETS.
 
         Args:
@@ -119,16 +120,16 @@ class Comms(ChainManager):
             access_type: For gradients bucket, either "read" or "write" to determine access level
         """
         try:
-            if bucket_type not in ["gradients", "dataset"]:
+            if bucket_type not in ["gradients", "dataset", "aggregator"]:
                 raise ValueError("bucket_type must be either 'gradients' or 'dataset'")
 
-            if bucket_type == "gradients":
+            if bucket_type in ["gradients", "aggregator"]:
                 if access_type not in ["read", "write"]:
                     raise ValueError(
-                        "For gradients bucket, access_type must be either 'read' or 'write'"
+                        f"For {bucket_type} bucket, access_type must be either 'read' or 'write'"
                     )
 
-                bucket_config = BUCKET_SECRETS["gradients"]
+                bucket_config = BUCKET_SECRETS[bucket_type]
                 credentials = bucket_config["credentials"][access_type]  # type: ignore
             else:  # dataset bucket
                 bucket_config = BUCKET_SECRETS["dataset"]
@@ -355,7 +356,7 @@ class Comms(ChainManager):
 
             async with self.session.create_client(
                 "s3",
-                endpoint_url=self.get_base_url(bucket.name),
+                endpoint_url=self.get_base_url(bucket.account_id),
                 region_name=CF_REGION_NAME,
                 config=client_config,
                 aws_access_key_id=bucket.access_key_id,
@@ -909,7 +910,7 @@ class Comms(ChainManager):
 
     async def gather(
         self,
-        my_uid: str | None,
+        my_uid: int | None,
         uids: List[int],
         window: int,
         key: str,
@@ -1370,22 +1371,16 @@ class Comms(ChainManager):
         model,
         optimizer,
         scheduler,
-        transformer,
-        compressor,
         current_window: int,
         device: str,
-        peers: list,
-        uid: str,
-        totalks: dict,
     ) -> tuple[
         bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
     ]:
         """
-        Loads the latest checkpoint and catches up across missed windows.
-        In this version, we parallelize gathers but still apply updates strictly in ascending window order.
-
+        Loads the latest checkpoint. No catchup or step simulation happens here.
         Returns:
-            tuple: (success: bool, momentum: dict, global_step: int, optimizer: Optimizer, scheduler: LRScheduler)
+            tuple: (success: bool, momentum: dict, checkpoint_current_window: int,
+                    optimizer: Optimizer, scheduler: LRScheduler)
         """
         result = await self.get_latest_checkpoint()
         if not result:
@@ -1394,7 +1389,7 @@ class Comms(ChainManager):
 
         checkpoint_data, checkpoint_window = result
         try:
-            # 1) Load checkpoint data
+            # 1) Load model and optimizer state
             model.load_state_dict(
                 {
                     k: v.to(device)
@@ -1414,33 +1409,21 @@ class Comms(ChainManager):
 
             checkpoint_start_window = checkpoint_data.get("start_window")
             checkpoint_current_window = checkpoint_data.get("current_window")
+            checkpoint_sync_window = checkpoint_data.get("sync_window")
             if checkpoint_start_window is None or checkpoint_current_window is None:
                 tplr.logger.warning(
                     "Checkpoint missing start_window or current_window info"
                 )
                 return False, {}, 0, optimizer, scheduler
 
-            # Instead of computing global_step from the entire training period,
-            # compute window_difference as the number of missed windows.
-            window_difference = current_window - checkpoint_current_window
-            global_step = current_window - checkpoint_start_window
-
             tplr.logger.info(
-                f"Checkpoint windows (start={checkpoint_start_window}, checkpoint_current={checkpoint_current_window}), "
-                f"local_current={current_window}, window_diff={window_difference}, global_step={global_step}"
+                f"Checkpoint loaded. start_window={checkpoint_start_window}, "
+                f"checkpoint_current_window={checkpoint_current_window}, "
+                f"checkpoint_sync_window={checkpoint_sync_window}, "
+                f"local_current_window={current_window}"
             )
 
-            # 2) Sync scheduler with the missing window count (only catch-up missed windows)
-            steps_needed = window_difference
-            if steps_needed > 0:
-                tplr.logger.info(
-                    f"Syncing optimizer/scheduler by stepping {steps_needed} times…"
-                )
-                for _ in range(steps_needed):
-                    optimizer.step()
-                    scheduler.step()
-
-            return True, momentum, global_step, optimizer, scheduler
+            return True, momentum, checkpoint_sync_window, optimizer, scheduler
 
         except KeyError as e:
             tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
@@ -1448,7 +1431,6 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.error(f"Failed to load checkpoint: {e}")
             return False, {}, 0, optimizer, scheduler
-        # TODO: Add more robust error handling for large window_difference or gather failures.
 
     # Start Window Operations
 
@@ -1876,7 +1858,7 @@ class Comms(ChainManager):
                 secret_access_key=credentials["secret_access_key"],
             )
 
-            filename = f"aggregation-{window}-v{tplr.__version__}.pt"
+            filename = f"aggregator-{window}-v{tplr.__version__}.pt"
 
             tplr.logger.info(f"Attempting to download aggregation file: {filename}")
 
@@ -1900,6 +1882,56 @@ class Comms(ChainManager):
             tplr.logger.error(
                 f"Error loading aggregation file for window {window}: {e}"
             )
+            return None
+
+    async def get_debug_dict(self, window: int):
+        """
+        Get debug dictionary from validator bucket for a specific window.
+
+        Args:
+            window: Specific window to retrieve debug data for
+
+        Returns:
+            Debug dictionary or None if not found
+        """
+        try:
+            (
+                validator_bucket,
+                validator_uid,
+            ) = await self._get_highest_stake_validator_bucket()
+            if not validator_bucket or validator_uid is None:
+                tplr.logger.warning(
+                    "Unable to get validator bucket - cannot proceed with catchup"
+                )
+                return
+
+            key = f"debug-{window}-{validator_uid}-v{tplr.__version__}.pt"
+            tplr.logger.info(
+                f"Attempting to retrieve debug dictionary for window {window} from validator {validator_uid}"
+            )
+
+            result = await self.s3_get_object(
+                key=key,
+                bucket=validator_bucket,
+                timeout=20,
+            )
+
+            if result is None:
+                tplr.logger.warning(f"No debug dictionary found for window {window}")
+                return None
+
+            tplr.logger.info(
+                f"Successfully retrieved debug dictionary for window {window}"
+            )
+            return result
+
+        except Exception as e:
+            tplr.logger.error(
+                f"Error getting debug dictionary for window {window}: {e}"
+            )
+            import traceback
+
+            tplr.logger.error(traceback.format_exc())
             return None
 
     def weighted_random_sample_no_replacement(

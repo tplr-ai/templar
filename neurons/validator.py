@@ -31,7 +31,6 @@ from collections import defaultdict
 from time import perf_counter
 import os
 from io import StringIO
-from types import SimpleNamespace
 from rich.console import Console
 from rich.table import Table
 
@@ -237,9 +236,7 @@ class Validator:
         # Initialize peers
         self.peers = []
         # Weighted selection counters for fair picking of eval peers
-        self.eval_peers = defaultdict(int)
-        # Track candidate weights separately
-        self.eval_candidates_counter = defaultdict(int)
+        self.eval_peers = defaultdict(lambda: 1)
 
         # Track inactive peer scores
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
@@ -258,9 +255,8 @@ class Validator:
             self.binary_moving_averages[uid] = 0.0
             self.binary_indicator_scores[uid] = 0.0
             self.normalised_binary_moving_averages[uid] = 0.0
-            self.eval_candidates_counter[uid] = 0
             if uid in self.eval_peers:
-                self.eval_peers[uid] = 0
+                del self.eval_peers[uid]
             del self.inactive_scores[uid]
             tplr.logger.info(f"UID {uid} fully reset after extended inactivity")
             return True
@@ -307,24 +303,19 @@ class Validator:
         (
             success,
             loaded_momentum,
-            loaded_global_step,
+            loaded_checkpoint_window,
             loaded_optimizer,
             loaded_scheduler,
         ) = await self.comms.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
-            transformer=self.transformer,
-            compressor=self.compressor,
             current_window=self.current_window,
             device=self.config.device,
-            peers=self.peers,
-            uid=self.uid,
-            totalks=self.totalks,
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_global_step
+            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -332,6 +323,17 @@ class Validator:
                 f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
+            # Only catch up if we're behind
+            if loaded_checkpoint_window < self.current_window:
+                tplr.logger.info(
+                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
+                )
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, loaded_checkpoint_window
+                )
+            else:
+                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
+
         else:
             tplr.logger.info("Starting from scratch")
             self.momentum = {
@@ -343,6 +345,7 @@ class Validator:
         self.comms.start_background_tasks()
         time_min = None
         while True:
+            # 1. Wait for the validator window offset
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
             ):
@@ -351,13 +354,13 @@ class Validator:
                 )
                 await asyncio.sleep(12)
 
+            # 2. Increment sync window and update peer lists
+            window_start = tplr.T()
+            self.sync_window += 1
             tplr.logger.info(
                 f"Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}"
             )
 
-            # 2. Increment sync window and update peer lists
-            window_start = tplr.T()
-            self.sync_window += 1
             tplr.logger.info(
                 f"Processing window: {self.sync_window} current: {self.current_window}"
             )
@@ -381,7 +384,7 @@ class Validator:
             newly_inactive = self.comms.inactive_peers
             current_window = self.sync_window
 
-            # Process newly inactive peers
+            # 3. Process inactive peers and apply penalties
             for uid in newly_inactive:
                 if uid not in self.inactive_scores:
                     self.inactive_scores[uid] = (
@@ -432,7 +435,7 @@ class Validator:
                     step=self.global_step,
                 )
 
-            # Calculate time window for this sync window
+            # 4. Calculate time window for this sync window
             sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
             retries = 0
             delay = 1
@@ -481,9 +484,6 @@ class Validator:
 
                 # For evaluation, also use all peers but track separately with equal initial weight
                 self.eval_peers = {uid: 1 for uid in self.peers}
-                for uid in self.peers:
-                    if uid not in self.eval_candidates_counter:
-                        self.eval_candidates_counter[uid] = 1
             else:
                 # Normal operation - update and filter peers
                 self.comms.update_peers_with_buckets()
@@ -492,40 +492,30 @@ class Validator:
 
             tplr.logger.info(f"Validator gather peers: {self.peers}")
 
-            skipped_uids = []
-            success_rate = 0.0
-            gather_result = None
-            aggregation_result = await self.comms.load_aggregation(self.sync_window)
-            if aggregation_result is None:
-                gather_result = await self.comms.gather(
-                    my_uid=self.uid,
-                    uids=self.peers,
-                    window=self.sync_window,
-                    key="gradient",
-                    timeout=35,
-                    device=self.config.device,
-                    local=False,
-                    totalks=self.totalks,
-                    time_min=time_min,
-                    time_max=time_max,
+            gather_result = await self.comms.gather(
+                my_uid=self.uid,
+                uids=self.peers,
+                window=self.sync_window,
+                key="gradient",
+                timeout=35,
+                device=self.config.device,
+                local=False,
+                totalks=self.totalks,
+                time_min=time_min,
+                time_max=time_max,
+            )
+
+            if gather_result is None:
+                tplr.logger.error(
+                    "Failed to gather gradients from peers. Waiting for next window."
                 )
+                self.global_step += 1
+                continue
 
-                if gather_result is None:
-                    tplr.logger.error(
-                        "Failed to gather gradients from peers. Waiting for next window."
-                    )
-                    self.global_step += 1
-                    continue
-                skipped_uids = gather_result.skipped_uids
-                success_rate = gather_result.success_rate
-            else:
-                skipped_uids = aggregation_result.get("skipped_uids")
-                success_rate = aggregation_result.get("success_rate")
-
-            tplr.logger.info(f"Skipped UIDs: {skipped_uids}")
+            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
 
             # Slash peers failing to submit gradients (penalize 50%)
-            for uid in skipped_uids:
+            for uid in gather_result.skipped_uids:
                 tplr.logger.info(
                     f"No gradient gathered from UID {uid}. Slashing moving average score by 50%."
                 )
@@ -567,10 +557,9 @@ class Validator:
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
 
+            # 6. Select peers to evaluate
             candidate_uids = list(self.eval_peers.keys())
-            candidate_weights = [
-                self.eval_candidates_counter[uid] for uid in candidate_uids
-            ]
+            candidate_weights = [self.eval_peers[uid] for uid in candidate_uids]
             k = min(self.hparams.uids_per_window, len(candidate_uids))
             evaluation_uids = self.comms.weighted_random_sample_no_replacement(
                 candidate_uids, candidate_weights, k
@@ -578,14 +567,12 @@ class Validator:
 
             # Reset counters for chosen peers
             for uid in evaluation_uids:
-                self.eval_peers[uid] = 0
-                self.eval_candidates_counter[uid] = 0
+                self.eval_peers[uid] = 1
 
             # Increment counters for not chosen peers
             for uid in candidate_uids:
                 if uid not in evaluation_uids:
                     self.eval_peers[uid] += 1
-                    self.eval_candidates_counter[uid] += 1
             self.comms.eval_peers = self.eval_peers
 
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
@@ -679,7 +666,8 @@ class Validator:
 
                     state_dict, _ = eval_result
                     model_own_data_eval = copy.deepcopy(self.model)
-                    # 8. Compute initial loss
+
+                    # 9. Compute loss before applying gradient
                     self.optimizer.zero_grad()
                     model_own_data_eval.zero_grad()
                     loss_before_own = 0.0
@@ -1365,7 +1353,7 @@ class Validator:
                     step=self.global_step,
                 )
 
-            # 17. Set weights periodically
+            # 13. Set weights on chain
             if self.sync_window % self.hparams.windows_per_weights == 0:
                 # Only set weights for evaluated peers with non-negative (positive) weight values.
                 positive_weighted_uids = sorted(
@@ -1381,7 +1369,116 @@ class Validator:
                         wait_for_finalization=False,
                     )
 
-            # 15. Create checkpoints periodically
+            # 14. Now, merge the gathered gradients into the model AFTER finishing evaluation
+            self.model.train()
+            update_start = tplr.T()
+            self.optimizer.zero_grad()
+            self.model.zero_grad()
+            lr = self.scheduler.get_last_lr()[0]
+            # Apply weight decay just like in the miner
+            for n, p in self.model.named_parameters():
+                p.data.mul_(1.0 - lr * self.hparams.weight_decay)
+
+            if gather_result is not None and gather_result.state_dict is not None:
+                for n, p in self.model.named_parameters():
+                    idxs_key = n + "idxs"
+                    vals_key = n + "vals"
+                    idxs = getattr(gather_result.state_dict, idxs_key, None)
+                    vals = getattr(gather_result.state_dict, vals_key, None)
+                    if idxs is not None and vals is not None:
+                        if not isinstance(idxs, (list, tuple)):
+                            idxs = [idxs]
+                        if not isinstance(vals, (list, tuple)):
+                            vals = [vals]
+                        new_grad = self.transformer.decode(
+                            self.compressor.batch_decompress(
+                                p.to(self.config.device),
+                                idxs,
+                                vals,
+                                self.xshapes[n],
+                                self.totalks[n],
+                            )
+                        )
+                        # Store pre-sign gradient in momentum
+                        self.momentum[n] = new_grad.clone()
+                        if p.grad is None:
+                            p.grad = new_grad
+                        else:
+                            p.grad.copy_(new_grad)
+                        p.grad.sign_()
+                    else:
+                        tplr.logger.info(
+                            f"Gradient data missing for parameter {n}, skipping."
+                        )
+            tplr.logger.info(
+                f"{tplr.P(self.sync_window, tplr.T() - update_start)} Updated model"
+            )
+
+            self.optimizer.step()
+            self.scheduler.step()
+            torch.cuda.empty_cache()
+
+            # Add debug data including successfully gathered peers
+            debug_dict = {}
+
+            # Add model parameters debug info
+            for name, param in self.model.named_parameters():
+                if (
+                    param is not None and param.numel() >= 2
+                ):  # Check if tensor has at least 2 elements
+                    debug_dict[name + "_debug"] = (
+                        param.flatten()[:2].detach().cpu().tolist()
+                    )
+
+            # Add successful peers information
+            if gather_result is not None:
+                debug_dict["successful_peers"] = sorted(
+                    list(set(self.peers) - set(gather_result.skipped_uids))
+                )
+                debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
+
+            # 15. Store debug values and model metadata
+            asyncio.create_task(
+                self.comms.put(
+                    state_dict=debug_dict,
+                    uid=str(self.uid),
+                    window=self.sync_window,
+                    key="debug",
+                    local=False,
+                )
+            )
+            tplr.logger.info(f"Stored debug values for window {self.current_window}")
+            # Log total window time and metrics
+            tplr.logger.info(
+                f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
+            )
+
+            # 16. Log evaluation metrics once all evaluations are done
+            evaluation_metrics = {
+                "validator/loss/own/before": self.loss_before_per_batch_own,
+                "validator/loss/own/after": self.loss_after_per_batch_own,
+                "validator/loss/random/before": self.loss_before_per_batch_random,
+                "validator/loss/random/after": self.loss_after_per_batch_random,
+                "validator/loss/own/improvement": self.relative_improvement_own,
+                "validator/loss/random/improvement": self.relative_improvement_random,
+                "validator/network/block": self.current_block,
+                "validator/network/window": self.sync_window,
+                "validator/network/step": self.global_step,
+                "validator/network/evaluated_uids": len(self.evaluated_uids),
+                "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
+                "validator/network/active_miners": len(self.valid_score_indices),
+                "validator/gather/success_rate": gather_result.success_rate * 100
+                if gather_result
+                else 0,  # Success percentage
+                "validator/timing/window_total": tplr.T() - window_start,
+                "validator/timing/peer_update": tplr.T() - peer_start,
+                "validator/timing/gather": tplr.T() - gather_start,
+                "validator/timing/evaluation": tplr.T() - eval_start,
+                "validator/timing/model_update": tplr.T() - update_start,
+            }
+            self.wandb.log(evaluation_metrics, step=self.global_step)
+
+            # 17. Create checkpoints periodically
             if (
                 self.global_step % self.hparams.checkpoint_frequency == 0
                 and self.global_step != 0
@@ -1401,185 +1498,21 @@ class Validator:
                     "momentum": {k: v.cpu().clone() for k, v in self.momentum.items()},
                     "start_window": self.start_window,
                     "current_window": self.current_window,
+                    "sync_window": self.sync_window,
                 }
                 asyncio.create_task(
                     self.comms.put(
                         state_dict=checkpoint_data,
                         uid=str(self.uid),
-                        window=self.current_window,
+                        window=self.sync_window,
                         key="checkpoint",
                         global_step=self.global_step,
                         local=False,
                     )
                 )
 
-            # 16. Now, merge the gathered gradients into the model AFTER finishing evaluation
-            self.model.train()
-            update_start = tplr.T()
-            self.optimizer.zero_grad()
-            self.model.zero_grad()
-            lr = self.scheduler.get_last_lr()[0]
-            # Apply weight decay just like in the miner
-            for n, p in self.model.named_parameters():
-                p.data.mul_(1.0 - lr * self.hparams.weight_decay)
-
-            if aggregation_result is not None:
-                self.apply_aggregated_gradients(aggregation_result=aggregation_result)
-            elif gather_result is not None and gather_result.state_dict is not None:
-                self.apply_gathered_gradients(gather_result=gather_result)
-            else:
-                tplr.logger.warning("No gradients to apply.")
-                self.scheduler.step()
-                torch.cuda.empty_cache()
-
-            tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - update_start)} Updated model"
-            )
-
-            # Add debug data including successfully gathered peers
-            debug_dict = {}
-
-            # Add model parameters debug info
-            for name, param in self.model.named_parameters():
-                if (
-                    param is not None and param.numel() >= 2
-                ):  # Check if tensor has at least 2 elements
-                    debug_dict[name + "_debug"] = (
-                        param.flatten()[:2].detach().cpu().tolist()
-                    )
-
-            # Add successful peers information
-            if len(skipped_uids) > 0:
-                debug_dict["successful_peers"] = sorted(
-                    list(set(self.peers) - set(skipped_uids))
-                )
-                debug_dict["skipped_peers"] = sorted(list(skipped_uids))
-
-            # Store the debug dictionary
-            asyncio.create_task(
-                self.comms.put(
-                    state_dict=debug_dict,
-                    uid=str(self.uid),
-                    window=self.current_window,
-                    key="debug",
-                    local=False,
-                )
-            )
-            tplr.logger.info(f"Stored debug values for window {self.current_window}")
-            # Log total window time and metrics
-            tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
-            )
-
-            # 13. Log evaluation metrics once all evaluations are done
-            evaluation_metrics = {
-                "validator/loss/own/before": self.loss_before_per_batch_own,
-                "validator/loss/own/after": self.loss_after_per_batch_own,
-                "validator/loss/random/before": self.loss_before_per_batch_random,
-                "validator/loss/random/after": self.loss_after_per_batch_random,
-                "validator/loss/own/improvement": self.relative_improvement_own,
-                "validator/loss/random/improvement": self.relative_improvement_random,
-                "validator/network/block": self.current_block,
-                "validator/network/window": self.sync_window,
-                "validator/network/step": self.global_step,
-                "validator/network/evaluated_uids": len(self.evaluated_uids),
-                "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
-                "validator/network/active_miners": len(self.valid_score_indices),
-                "validator/gather/success_rate": success_rate * 100,
-                "validator/timing/window_total": tplr.T() - window_start,
-                "validator/timing/peer_update": tplr.T() - peer_start,
-                "validator/timing/gather": tplr.T() - gather_start,
-                "validator/timing/evaluation": tplr.T() - eval_start,
-                "validator/timing/model_update": tplr.T() - update_start,
-            }
-            self.wandb.log(evaluation_metrics, step=self.global_step)
-
             # 18. Increment global step
             self.global_step += 1
-
-    def apply_aggregated_gradients(self, aggregation_result: dict):
-        """
-        Apply aggregated gradients from the aggregation server.
-
-        Args:
-            aggregation_result: Pre-loaded aggregation data from the aggregation server.
-
-        Returns:
-            bool: True if aggregation was successfully applied, False otherwise
-        """
-        for name, param in self.model.named_parameters():
-            if name in aggregation_result:
-                # Get the packed binary tensor
-                packed_tensor = aggregation_result[name]
-                if packed_tensor is None:
-                    continue
-
-                # Process aggregation using tplr.neurons utilities
-                unpacked_tensor = tplr.neurons.unpack_binary_tensor(
-                    packed_tensor, param.shape
-                )
-
-                # Probably not set the momentum
-                # Store in momentum for checkpointing
-                # self.momentum[name] = unpacked_tensor.clone()
-
-                # Set as gradient for optimizer
-                if param.grad is None:
-                    param.grad = unpacked_tensor
-                else:
-                    param.grad.copy_(unpacked_tensor)
-
-        # Update parameters with optimizer
-        self.optimizer.step()
-        self.scheduler.step()
-        torch.cuda.empty_cache()
-
-    def apply_gathered_gradients(self, gather_result: SimpleNamespace):
-        """
-        Apply gathered gradients from peers to the model.
-
-        This method:
-        1. Extracts the compressed gradients from the gather result
-        2. Decompresses them using the DCT transformer and compressor
-        3. Stores the gradients in momentum for checkpointing
-        4. Applies sign operation for SignSGD optimization
-        5. Updates the model using the optimizer and scheduler
-
-        Args:
-            gather_result: The result object from a gather operation containing
-                          compressed gradients from peers
-        """
-        for n, p in self.model.named_parameters():
-            idxs_key = n + "idxs"
-            vals_key = n + "vals"
-            idxs = getattr(gather_result.state_dict, idxs_key, None)
-            vals = getattr(gather_result.state_dict, vals_key, None)
-            if idxs is not None and vals is not None:
-                if not isinstance(idxs, (list, tuple)):
-                    idxs = [idxs]
-                if not isinstance(vals, (list, tuple)):
-                    vals = [vals]
-                new_grad = self.transformer.decode(
-                    self.compressor.batch_decompress(
-                        p.to(self.config.device),
-                        idxs,
-                        vals,
-                        self.xshapes[n],
-                        self.totalks[n],
-                    )
-                )
-                # Store pre-sign gradient in momentum
-                self.momentum[n] = new_grad.clone()
-                if p.grad is None:
-                    p.grad = new_grad
-                else:
-                    p.grad.copy_(new_grad)
-                p.grad.sign_()
-            else:
-                tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
-        self.optimizer.step()
-        self.scheduler.step()
-        torch.cuda.empty_cache()
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

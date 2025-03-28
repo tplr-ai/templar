@@ -482,51 +482,5 @@ class ChainManager:
 
         logger.debug(f"Filtered eval peers: {list(self.eval_peers.keys())}")
 
-        self.set_gather_peers()
-
-        logger.info(
-            f"Updated gather peers (top {self.hparams.topk_peers}% or "
-            f"minimum {self.hparams.minimum_peers}): {self.peers}"
-        )
         logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
         logger.info(f"Total inactive peers: {len(self.inactive_peers)}")
-
-    def set_gather_peers(self) -> None:
-        """Determines and sets the list of peers for gradient gathering based
-        on incentive scores from active peers only.
-
-        Uses the metagraph incentive scores to select peers from the set of active peers,
-        taking either:
-          - Top k% of active peers (specified by hparams.topk_peers)
-          - Minimum number of peers (specified by hparams.minimum_peers)
-          whichever is larger.
-
-        The selected peers are stored in self.peers.
-        """
-        # Get active peers from self.active_peers if set after update.
-        # Fallback to an empty list if not set.
-        active_peers = set(int(uid) for uid in getattr(self, "active_peers", []))
-        if not active_peers:
-            logger.warning(
-                "No active peers available for gathering; skipping set_gather_peers."
-            )
-            self.peers = []
-            return
-
-        uid_to_incentive = dict(
-            zip(self.metagraph.uids.tolist(), self.metagraph.I.tolist())
-        )
-
-        # Use only active peers for incentive calculation.
-        miner_incentives = [(uid, uid_to_incentive.get(uid, 0)) for uid in active_peers]
-        miner_incentives.sort(key=lambda x: x[1], reverse=True)
-
-        # Determine the number of top-k peers based on percentage from the active set.
-        n_topk_peers = int(len(miner_incentives) * (self.hparams.topk_peers / 100))
-        n_topk_peers = min(max(n_topk_peers, 1), self.hparams.max_topk_peers)
-
-        n_peers = max(self.hparams.minimum_peers, n_topk_peers)
-
-        # Take top n_peers by incentive from only the active peers.
-        self.peers = [uid for uid, _ in miner_incentives[:n_peers]]
-        logger.info(f"Updated gather peers (active only): {self.peers}")

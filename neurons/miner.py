@@ -28,10 +28,14 @@ from datetime import datetime, timedelta, timezone
 
 import bittensor as bt
 import numpy as np
+from typing import cast
 
 # Third party
+from bittensor.core.subtensor import ScaleObj
 import torch
 from torch.optim import SGD
+from torch import autocast
+from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
     LinearLR,
@@ -100,7 +104,7 @@ class Miner:
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
-        self.metagraph = self.subtensor.metagraph(self.config.netuid)
+        self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             tplr.logger.error(
                 f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
@@ -110,7 +114,7 @@ class Miner:
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)
+        self.model.to(self.config.device)  # type: ignore
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
@@ -235,24 +239,19 @@ class Miner:
         (
             success,
             loaded_momentum,
-            loaded_global_step,
+            loaded_checkpoint_window,
             loaded_optimizer,
             loaded_scheduler,
         ) = await self.comms.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
-            transformer=self.transformer,
-            compressor=self.compressor,
             current_window=self.current_window,
-            device=self.config.device,
-            peers=[],
-            uid=self.uid,
-            totalks=self.totalks,
+            device=cast(str, self.config.device),
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_global_step
+            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -260,12 +259,22 @@ class Miner:
                 f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
+            # Only catch up if we're behind
+            if loaded_checkpoint_window < self.current_window:
+                tplr.logger.info(
+                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
+                )
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, loaded_checkpoint_window
+                )
+            else:
+                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
         else:
             tplr.logger.info("Starting from scratch")
             self.momentum = {
                 n: torch.zeros_like(p) for n, p in self.model.named_parameters()
             }
-            self.model.to(self.config.device)
+            self.model.to(self.config.device)  # type: ignore
 
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
@@ -328,9 +337,7 @@ class Miner:
                     labels == self.tokenizer.pad_token_id, -100, labels
                 )
 
-                with torch.amp.autocast(
-                    device_type=self.model.device.type, dtype=torch.bfloat16
-                ):
+                with autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
                     outputs = self.model(input_ids=input_ids, labels=labels)
 
                 total_loss += outputs.loss.item()
@@ -403,7 +410,11 @@ class Miner:
                     response = self.subtensor.query_module(
                         "Timestamp", "Now", block=sync_block
                     )
-                    ts_value = response.value / 1000  # convert milliseconds to seconds
+                    if response is None or not isinstance(response, ScaleObj):
+                        raise ValueError(f"Could not query timestamp for {sync_block}")
+                    ts_value = (
+                        cast(int, response.value) / 1000
+                    )  # convert milliseconds to seconds
                     break
                 except Exception as e:
                     tplr.logger.error(
@@ -739,7 +750,7 @@ class Miner:
                 await asyncio.sleep(0.1)
 
     # Listens for new blocks and sets self.current_block and self.current_window
-    def block_listener(self, loop):
+    def block_listener(self, _):
         import websockets.exceptions  # Ensure we catch websockets errors
 
         def handler(event):

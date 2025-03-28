@@ -54,6 +54,14 @@ def load_bucket_secrets():
                         "R2_AGGREGATOR_READ_SECRET_ACCESS_KEY"
                     ),
                 },
+                "write": {
+                    "access_key_id": os.environ.get(
+                        "R2_AGGREGATOR_WRITE_ACCESS_KEY_ID"
+                    ),
+                    "secret_access_key": os.environ.get(
+                        "R2_AGGREGATOR_WRITE_SECRET_ACCESS_KEY"
+                    ),
+                },
             },
         },
         "dataset": {

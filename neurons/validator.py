@@ -1590,6 +1590,39 @@ class Validator:
             )
             tplr.logger.info("Finished metrics logging call for validator")
 
+            # 17. Create checkpoints periodically
+            if (
+                self.global_step % self.hparams.checkpoint_frequency == 0
+                and self.global_step != 0
+            ):
+                tplr.logger.info(
+                    f"Creating checkpoint at global_step {self.global_step}"
+                )
+                checkpoint_data = {
+                    "model_state_dict": {
+                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
+                    },
+                    "optimizer_state_dict": {
+                        k: v.cpu().clone() if torch.is_tensor(v) else v
+                        for k, v in self.optimizer.state_dict().items()
+                    },
+                    "scheduler_state_dict": self.scheduler.state_dict(),
+                    "momentum": {k: v.cpu().clone() for k, v in self.momentum.items()},
+                    "start_window": self.start_window,
+                    "current_window": self.current_window,
+                    "sync_window": self.sync_window,
+                }
+                asyncio.create_task(
+                    self.comms.put(
+                        state_dict=checkpoint_data,
+                        uid=str(self.uid),
+                        window=self.sync_window,
+                        key="checkpoint",
+                        global_step=self.global_step,
+                        local=False,
+                    )
+                )
+
             # 18. Increment global step
             self.global_step += 1
 

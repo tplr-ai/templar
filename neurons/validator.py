@@ -257,7 +257,7 @@ class Validator:
         # Track inactive peer scores
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
-        self.missing_gradient_slash_rate = 0.25
+        self.missing_gradient_slash_rate = 0.75
 
         # Initialize final score history (for sliding-window averaging)
         self.final_score_history = defaultdict(list)

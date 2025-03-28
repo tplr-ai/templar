@@ -610,7 +610,7 @@ class Validator:
                     )
 
             # Add check for empty peers (evaluating all peer uids)
-            if self.comms.peers.size == 0:
+            if len(self.comms.eval_peers) == 0:
                 tplr.logger.warning(
                     f"No peers available for evaluation in window {self.sync_window}. Waiting for next window."
                 )

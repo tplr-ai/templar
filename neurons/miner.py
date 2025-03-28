@@ -41,7 +41,6 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
-from transformers import LlamaForCausalLM
 
 # Local
 import tplr

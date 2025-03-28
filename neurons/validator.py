@@ -33,15 +33,12 @@ from io import StringIO
 from time import perf_counter
 import bittensor as bt
 import numpy as np
-from types import SimpleNamespace
 from rich.console import Console
 from rich.table import Table
 
 
 # Third party
 import torch
-from rich.console import Console
-from rich.table import Table
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,

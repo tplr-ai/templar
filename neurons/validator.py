@@ -162,7 +162,7 @@ class Validator:
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
-            T_0=10000,
+            T_0=self.hparams.t_max,
             T_mult=2,
             eta_min=self.hparams.learning_rate * 0.1,
         )
@@ -1592,7 +1592,6 @@ class Validator:
 
             # 18. Increment global step
             self.global_step += 1
-
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

@@ -143,7 +143,7 @@ class Miner:
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
-            T_0=10000,
+            T_0=self.hparams.t_max,
             T_mult=2,
             eta_min=self.hparams.learning_rate * 0.1,
         )

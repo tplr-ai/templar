@@ -16,7 +16,9 @@
 # DEALINGS IN THE SOFTWARE.
 
 
+from torch._prims_common import DeviceLikeType
 from tplr.logging import logger
+import torch
 
 
 def prepare_gradient_dict(miner, pages, step_window):
@@ -75,3 +77,72 @@ def prepare_gradient_dict(miner, pages, step_window):
     logger.info(f"Attached metadata to gradient: {gradient['metadata']}")
 
     return gradient, xshapes, totalks, transmitted
+
+
+def process_loaded_data(model: torch.nn.Module, compressed_data: dict):
+    """
+    Unpack the compressed tensor data from the aggregation server.
+
+    Args:
+        compressed_data: The compressed tensor data
+
+    Returns:
+        Dictionary with unpacked tensors
+    """
+    result = {
+        "timestamp": compressed_data.get("timestamp", None),
+        "window": compressed_data.get("window", None),
+        "version": compressed_data.get("version", None),
+        "tensors": {},
+    }
+
+    for name, param in model.named_parameters():
+        if name in compressed_data:
+            original_shape = param.shape
+            # Use unpack_binary_tensor from the sample, but in our context
+            unpacked = unpack_binary_tensor(compressed_data[name], original_shape)
+            result["tensors"][name] = unpacked
+            logger.debug(f"Unpacked tensor {name} with shape {original_shape}")
+
+    logger.info(f"Successfully unpacked {len(result['tensors'])} tensors")
+    return result
+
+
+def unpack_binary_tensor(packed_tensor: torch.Tensor, original_shape: torch.Size):
+    """
+    Unpack a 1-bit representation tensor back to ±1 values.
+
+    Args:
+        packed_tensor: The packed binary tensor
+        original_shape: The original shape of the tensor
+
+    Returns:
+        Unpacked tensor with original shape
+    """
+    total_elements = int(torch.prod(torch.tensor(original_shape)).item())
+
+    # Create a flat tensor to hold the unpacked values
+    unpacked = torch.zeros(total_elements, dtype=torch.float32)
+
+    for i in range(8):
+        mask = 1 << i
+        bits = (packed_tensor & mask) >> i
+        # Convert 0/1 to -1/+1
+        unpacked[i::8] = (bits.float() * 2) - 1
+
+    return unpacked.reshape(original_shape)
+
+
+# Function to pack signed weights into 1-bit representation
+def pack_binary_tensor(tensor: torch.Tensor, device: DeviceLikeType):
+    """Pack a tensor of +1/-1 values into a compact binary representation."""
+    tensor = (tensor > 0).to(torch.uint8)  # Convert +1 to 1, -1 to 0
+    tensor = tensor.view(-1)  # Flatten
+    packed_tensor = torch.zeros(
+        (tensor.shape[0] + 7) // 8, dtype=torch.uint8, device=device
+    )
+
+    for i in range(8):
+        packed_tensor |= tensor[i::8] << i  # Pack 8 values per byte
+
+    return packed_tensor

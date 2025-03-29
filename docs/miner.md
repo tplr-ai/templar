@@ -130,6 +130,11 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    R2_DATASET_READ_ACCESS_KEY_ID=7cadbe19f880785e46898b558ef70ce8
    R2_DATASET_READ_SECRET_ACCESS_KEY=9787434d676b05dce69cc4e76c6af74d795b606feafd031944444780d5f72272
 
+   R2_AGGREGATOR_ACCOUNT_ID="c17ae32eab2883094481526a22e0dfa1"
+   R2_AGGREGATOR_BUCKET_NAME="aggregator"
+   R2_AGGREGATOR_READ_ACCESS_KEY_ID="421a6f9f494fa3ee2329ec8ab8a66446"
+   R2_AGGREGATOR_READ_SECRET_ACCESS_KEY="523737ec0be417851b45aaf7ad6adf0aca8fed49729c2e99b81827e5d9a9ddd0"
+
    # Wallet Configuration
    WALLET_NAME=<your_wallet_name>
    WALLET_HOTKEY=<your_wallet_hotkey>
@@ -284,6 +289,12 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    export R2_DATASET_BUCKET_NAME=edu-dataset
    export R2_DATASET_READ_ACCESS_KEY_ID=7cadbe19f880785e46898b558ef70ce8
    export R2_DATASET_READ_SECRET_ACCESS_KEY=9787434d676b05dce69cc4e76c6af74d795b606feafd031944444780d5f72272
+
+   # Aggregator R2 credentials
+   export R2_AGGREGATOR_ACCOUNT_ID="c17ae32eab2883094481526a22e0dfa1"
+   export R2_AGGREGATOR_BUCKET_NAME="aggregator"
+   export R2_AGGREGATOR_READ_ACCESS_KEY_ID="421a6f9f494fa3ee2329ec8ab8a66446"
+   export R2_AGGREGATOR_READ_SECRET_ACCESS_KEY="523737ec0be417851b45aaf7ad6adf0aca8fed49729c2e99b81827e5d9a9ddd0"
    
    export GITHUB_USER=your_github_username
    ```

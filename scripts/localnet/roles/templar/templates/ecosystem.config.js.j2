@@ -1,0 +1,35 @@
+require('dotenv').config({ path: '.env' });
+const RANDOM_SUFFIX = require('child_process').execSync("cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 4 | head -n 1").toString().trim();
+const PROJECT_NAME = `test_${RANDOM_SUFFIX}`;
+
+module.exports = {
+    apps: [
+        {% if miner_hotkeys|length == 0 and validator_hotkeys|length == 0 %}
+        // No miners or validators configured
+        {% endif %}
+        {% for hk in miner_hotkeys %}
+        {
+            name: "TM{{ loop.index }}",
+            script: "neurons/miner.py",
+            interpreter: ".venv/bin/python",
+            env: {
+                ...process.env,
+                PROJECT_NAME: PROJECT_NAME
+            },
+            args: `--wallet.name {{ cold_wallet_name }} --wallet.hotkey {{ hk }} --device cuda:{{ miner_devices[loop.index0] if miner_devices is defined else loop.index0 }} --subtensor.network {{ network }} --netuid {{ netuid }} --enable-influxdb --use_wandb --project "${PROJECT_NAME}"`
+        }{% if not loop.last or validator_hotkeys|length > 0 %},{% endif %}
+        {% endfor %}
+        {% for hk in validator_hotkeys %}
+        {
+            name: "TV{{ loop.index }}",
+            script: "neurons/validator.py",
+            interpreter: ".venv/bin/python",
+            env: {
+                ...process.env,
+                PROJECT_NAME: PROJECT_NAME
+            },
+            args: `--wallet.name {{ cold_wallet_name }} --wallet.hotkey {{ hk }} --device cuda:{{ validator_devices[loop.index0] if validator_devices is defined else loop.index0 + (miner_hotkeys|length if miner_hotkeys is defined else 0) }} --subtensor.network {{ network }} --netuid {{ netuid }} --enable-influxdb --use_wandb --project "${PROJECT_NAME}"`
+        }{% if not loop.last %},{% endif %}
+        {% endfor %}
+    ]
+};

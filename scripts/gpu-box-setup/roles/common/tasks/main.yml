@@ -1,0 +1,208 @@
+---
+# System Setup and Hardening
+
+- name: Run setup to gather facts
+  setup: 
+    gather_subset: all
+
+# Sudo configuration is now handled in the pre-task play
+
+- name: Update package cache (RHEL family)
+  package:
+    update_cache: yes
+  when: ansible_os_family == 'RedHat'
+  
+- name: Upgrade all packages
+  package:
+    name: "*"
+    state: latest
+  when: system_upgrade | bool
+
+- name: Install essential packages
+  package:
+    name: "{{ essential_packages }}"
+    state: present
+
+# Python setup
+- name: Add deadsnakes PPA for Ubuntu
+  apt_repository:
+    repo: ppa:deadsnakes/ppa
+    state: present
+    update_cache: no  # We'll update cache separately to avoid timeout issues
+  register: deadsnakes_add
+  retries: 3
+  delay: 10
+  until: deadsnakes_add is succeeded
+  when: ansible_distribution == 'Ubuntu'
+  
+- name: Update apt cache (with increased timeout)
+  apt:
+    update_cache: yes
+    cache_valid_time: 86400  # Consider cache valid for 1 day
+  register: apt_update
+  retries: 3
+  delay: 10
+  until: apt_update is succeeded
+  when: ansible_os_family == 'Debian'
+
+- name: Install specified Python version
+  apt:
+    name:
+      - "python{{ python_version }}"
+      - "python{{ python_version }}-dev"
+      - "python{{ python_version }}-venv"
+    state: present
+  register: python_install
+  retries: 3
+  delay: 10
+  until: python_install is succeeded
+  when: ansible_os_family == 'Debian'
+
+- name: Install specified Python version on RHEL
+  dnf:
+    name:
+      - "python{{ python_version | regex_replace('\\.','')}}"
+      - "python{{ python_version | regex_replace('\\.','') }}-devel"
+    state: present
+  register: python_rhel_install
+  retries: 3
+  delay: 10
+  until: python_rhel_install is succeeded
+  when: ansible_os_family == 'RedHat'
+
+# System configuration continues here
+
+# System Tuning for AI workloads
+- name: Set swappiness
+  sysctl:
+    name: vm.swappiness
+    value: '{{ vm_swappiness }}'
+    state: present
+    reload: yes
+
+- name: Optimize transparent huge pages for memory-intensive workloads
+  sysctl:
+    name: vm.nr_hugepages
+    value: '{{ vm_nr_hugepages }}'
+    state: present
+    reload: yes
+  when: optimize_for_memory | bool
+
+- name: Optimize networking for GPU workloads
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+  loop:
+    - { key: 'net.core.rmem_max', value: '{{ tcp_rmem_max }}' }
+    - { key: 'net.core.wmem_max', value: '{{ tcp_wmem_max }}' }
+    - { key: 'net.ipv4.tcp_rmem', value: '4096 87380 {{ tcp_rmem_max }}' }
+    - { key: 'net.ipv4.tcp_wmem', value: '4096 65536 {{ tcp_wmem_max }}' }
+
+# Configure swap for AI workloads if needed
+- name: Check if swap file exists
+  stat:
+    path: /swapfile
+  register: swap_file_check
+
+- name: Create swap file if it doesn't exist and swap_size is defined
+  command: fallocate -l {{ swap_size }}G /swapfile
+  args:
+    creates: /swapfile
+  when: 
+    - not swap_file_check.stat.exists
+    - swap_size is defined and swap_size > 0
+
+- name: Set swap file permissions
+  file:
+    path: /swapfile
+    owner: root
+    group: root
+    mode: '0600'
+  when: 
+    - swap_file_check.stat is defined and swap_file_check.stat.exists
+    - swap_size is defined and swap_size > 0
+
+- name: Set up swap area
+  command: mkswap /swapfile
+  args:
+    creates: /proc/swaps
+  when: 
+    - swap_file_check.stat is defined and swap_file_check.stat.exists
+    - swap_size is defined and swap_size > 0
+  register: mkswap_result
+
+- name: Enable swap
+  command: swapon /swapfile
+  when: 
+    - swap_file_check.stat is defined and swap_file_check.stat.exists
+    - swap_size is defined and swap_size > 0
+    - mkswap_result is defined and mkswap_result.changed
+
+- name: Add swap to fstab
+  lineinfile:
+    path: /etc/fstab
+    line: "/swapfile none swap sw 0 0"
+    state: present
+  when: 
+    - swap_file_check.stat is defined and swap_file_check.stat.exists
+    - swap_size is defined and swap_size > 0
+
+# Install system monitoring tools
+- name: Install system monitoring tools
+  package:
+    name: "{{ monitoring_packages }}"
+    state: present
+  when: install_monitoring | bool
+
+# Set up Python virtual environment for AI development
+- name: Create Python virtual environment directory
+  file:
+    path: "{{ python_venv_path }}"
+    state: directory
+    mode: '0755'
+  when: install_ai_dependencies | bool
+
+- name: Create Python virtual environment
+  command: "python{{ python_version }} -m venv {{ python_venv_path }}"
+  args:
+    creates: "{{ python_venv_path }}/bin/activate"
+  when: install_ai_dependencies | bool
+
+- name: Upgrade pip in virtual environment
+  pip:
+    name: pip
+    state: latest
+    virtualenv: "{{ python_venv_path }}"
+  when: install_ai_dependencies | bool
+
+- name: Install common AI Python dependencies
+  pip:
+    name: "{{ ai_python_packages }}"
+    state: present
+    virtualenv: "{{ python_venv_path }}"
+  when: install_ai_dependencies | bool
+
+- name: Install PyTorch with CUDA support
+  pip:
+    name: "torch=={{ pytorch_version }}+cu{{ pytorch_cuda_version | replace('.', '') }}"
+    extra_args: "--index-url https://download.pytorch.org/whl/cu{{ pytorch_cuda_version | replace('.', '') }}"
+    virtualenv: "{{ python_venv_path }}"
+  when: install_ai_dependencies | bool and install_pytorch | bool
+
+- name: Install additional PyTorch components
+  pip:
+    name: 
+      - "torchvision"
+      - "torchaudio"
+    extra_args: "--index-url https://download.pytorch.org/whl/cu{{ pytorch_cuda_version | replace('.', '') }}"
+    virtualenv: "{{ python_venv_path }}"
+  when: install_ai_dependencies | bool and install_pytorch | bool
+
+- name: Create venv activation script
+  template:
+    src: activate-ai-env.sh.j2
+    dest: /etc/profile.d/activate-ai-env.sh
+    mode: '0644'
+  when: install_ai_dependencies | bool

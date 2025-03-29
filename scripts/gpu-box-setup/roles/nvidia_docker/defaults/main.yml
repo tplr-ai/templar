@@ -1,0 +1,5 @@
+---
+nvidia_docker_version: latest
+nvidia_docker_default_runtime: "nvidia"
+nvidia_docker_log_max_size: "100m"
+nvidia_docker_log_max_file: "3"

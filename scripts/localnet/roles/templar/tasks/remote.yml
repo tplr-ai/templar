@@ -1,0 +1,37 @@
+---
+
+- name: Create templar directory on remote host
+  file:
+    path: "{{ ansible_env.HOME }}/templar"
+    state: directory
+    mode: '0755'
+  tags: templar
+
+- name: Synchronize local Templar code to remote host
+  synchronize:
+    src: "{{ playbook_dir }}/../.."
+    dest: "{{ ansible_env.HOME }}/templar"
+    rsync_opts:
+      - "--exclude=.venv"
+      - "--exclude=__pycache__"
+    delete: yes
+  tags: templar
+
+- name: Set templar_path for remote deployment
+  set_fact:
+    templar_path: "{{ ansible_env.HOME }}/templar"
+  tags: templar
+
+- name: Check if src/tplr/__init__.py exists
+  stat:
+    path: "{{ templar_path }}/src/tplr/__init__.py"
+  register: init_py_stat
+  tags: templar
+
+- name: Update version in __init__.py for remote deployment
+  replace:
+    path: "{{ templar_path }}/src/tplr/__init__.py"
+    regexp: '^__version__ = "[^"]+"'
+    replace: '__version__ = "{{ templar_version | default("0.2.52dev") }}"'
+  when: init_py_stat.stat.exists
+  tags: templar

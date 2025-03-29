@@ -1,0 +1,12 @@
+---
+- name: Set templar_path for local deployment
+  set_fact:
+    templar_path: "{{ playbook_dir }}/../.."
+  tags: templar
+
+- name: Update version in __init__.py for local deployment
+  replace:
+    path: "{{ templar_path }}/src/tplr/__init__.py"
+    regexp: '^__version__ = "[^"]+"'
+    replace: '__version__ = "{{ templar_version | default("0.2.52dev") }}"'
+  tags: templar

@@ -1,0 +1,55 @@
+# Ansible Vault Example Configuration (do not store real secrets here)
+remote_mode: false
+
+# Wallet configuration
+cold_wallet_name: "default"
+bittensor_wallet_password: "your_wallet_password_here"  # Password for the coldkey
+owner_hotkey: "validator_1"            # Hotkey name to use for subnet creation (should belong to cold_wallet_name)
+validator_hotkeys: ["validator_1"]     # List of validator hotkeys (belonging to cold_wallet_name)
+miner_hotkeys: ["miner_1", "miner_2"]  # List of miner hotkeys (belonging to cold_wallet_name)
+
+# Network configuration
+network: "local"
+netuid: 2
+
+# Version override for development
+templar_version: "0.2.52dev"           # Version string to use (typically a non-production version for testing)
+
+# Staking amount (in TAO) to add to each validator
+stake_amount: 1000
+
+# Extra apt packages to install (if any)
+extra_packages: []
+
+# Secrets for telemetry/monitoring
+WANDB_API_KEY: "YOUR_WANDB_API_KEY_HERE"
+INFLUXDB_URL: "http://localhost:8086"
+INFLUXDB_ORG: "YOUR_INFLUX_ORG"
+INFLUXDB_BUCKET: "YOUR_INFLUX_BUCKET"
+INFLUXDB_TOKEN: "YOUR_INFLUXDB_TOKEN"
+
+# R2 Cloud Storage secrets
+R2_ACCOUNT_ID: "YOUR_R2_ACCOUNT_ID"
+R2_GRADIENTS_ACCOUNT_ID: "YOUR_R2_GRADIENTS_ACCOUNT_ID"
+R2_GRADIENTS_BUCKET_NAME: "YOUR_R2_GRADIENTS_BUCKET_NAME"
+R2_READ_ACCESS_KEY_ID: "YOUR_R2_READ_ACCESS_KEY_ID"
+R2_READ_SECRET_ACCESS_KEY: "YOUR_R2_READ_SECRET_ACCESS_KEY"
+R2_GRADIENTS_READ_ACCESS_KEY_ID: "YOUR_R2_GRADIENTS_READ_ACCESS_KEY_ID"
+R2_GRADIENTS_READ_SECRET_ACCESS_KEY: "YOUR_R2_GRADIENTS_READ_SECRET_ACCESS_KEY"
+R2_WRITE_ACCESS_KEY_ID: "YOUR_R2_WRITE_ACCESS_KEY_ID"
+R2_WRITE_SECRET_ACCESS_KEY: "YOUR_R2_WRITE_SECRET_ACCESS_KEY"
+R2_GRADIENTS_WRITE_ACCESS_KEY_ID: "YOUR_R2_GRADIENTS_WRITE_ACCESS_KEY_ID"
+R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY: "YOUR_R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"
+R2_DATASET_WRITE_ACCESS_KEY_ID: "YOUR_R2_DATASET_WRITE_ACCESS_KEY_ID"
+R2_DATASET_WRITE_SECRET_ACCESS_KEY: "YOUR_R2_DATASET_WRITE_SECRET_ACCESS_KEY"
+
+# R2 Dataset variables with default values (can be overridden)
+# R2_DATASET_ACCOUNT_ID: "dd08f378791881bf6bbb7f161c78a220" # default in env.j2
+# R2_DATASET_BUCKET_NAME: "edu-dataset" # default in env.j2
+# R2_DATASET_READ_ACCESS_KEY_ID: "7cadbe19f880785e46898b558ef70ce8" # default in env.j2
+# R2_DATASET_READ_SECRET_ACCESS_KEY: "9787434d676b05dce69cc4e76c6af74d795b606feafd031944444780d5f72272" # default in env.j2
+
+# R2_AGGREGATOR_ACCOUNT_ID: "c17ae32eab2883094481526a22e0dfa1" # default in env.j2
+# R2_AGGREGATOR_BUCKET_NAME: "aggregator" # default in env.j2
+# R2_AGGREGATOR_READ_ACCESS_KEY_ID: "421a6f9f494fa3ee2329ec8ab8a66446" # default in env.j2
+# R2_AGGREGATOR_READ_SECRET_ACCESS_KEY: "523737ec0be417851b45aaf7ad6adf0aca8fed49729c2e99b81827e5d9a9ddd0" # default in env.j2

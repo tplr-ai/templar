@@ -1,6 +1,6 @@
 from(bucket: "tplr")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
-  |> filter(fn: (r) => r._measurement == "Mtraining_step")
+  |> filter(fn: (r) => r._measurement == "Mtraining_step_v2")
   |> filter(fn: (r) => r._field == "tokens_per_sec")
   |> filter(fn: (r) => r["uid"] =~ /${uid:regex}/)
   |> filter(fn: (r) => r["role"] =~ /${role:regex}/)

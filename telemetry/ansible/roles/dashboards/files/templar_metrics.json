@@ -186,7 +186,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step\")\n  |> filter(fn: (r) => r._field == \"active_peers\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] == \"miner\")\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\")\n  |> filter(fn: (r) => r._field == \"active_peers\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] == \"miner\")\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -278,7 +278,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step\" or r._measurement == \"Vvalidator_window\")\n  |> filter(fn: (r) => r._field == \"gather_success_rate\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> map(fn: (r) => ({ r with _value: r._value * 100.0 }))\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\" or r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"gather_success_rate\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -370,7 +370,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step\")\n  |> filter(fn: (r) => r._field == \"loss\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\")\n  |> filter(fn: (r) => r._field == \"loss\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -462,7 +462,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step\")\n  |> filter(fn: (r) => r._field == \"tokens_per_sec\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\")\n  |> filter(fn: (r) => r._field == \"tokens_per_sec\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -567,7 +567,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window\")\n  |> filter(fn: (r) => r._field == \"loss_own_before\" or r._field == \"loss_own_after\" or r._field == \"loss_random_before\" or r._field == \"loss_random_after\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"loss_own_before\" or r._field == \"loss_own_after\" or r._field == \"loss_random_before\" or r._field == \"loss_random_after\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -659,7 +659,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window\")\n  |> filter(fn: (r) => r._field == \"loss_own_improvement\" or r._field == \"loss_random_improvement\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"loss_own_improvement\" or r._field == \"loss_random_improvement\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -751,7 +751,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vtemplar_metrics_v2\")\n  |> filter(fn: (r) => r._field == \"weight\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r._field == \"weight\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\", \"eval_uid\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -843,7 +843,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vtemplar_metrics_v2\")\n  |> filter(fn: (r) => r._field == \"binary_indicator\" or r._field == \"binary_moving_avg\" or r._field == \"normalised_binary\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r._field == \"binary_indicator\" or r._field == \"binary_moving_avg\" or r._field == \"normalised_binary\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\", \"eval_uid\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -935,7 +935,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_inactivity\" or r._measurement == \"Vvalidator_slash\")\n  |> filter(fn: (r) => r._field == \"score_before\" or r._field == \"score_after\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_inactivity\" or r._measurement == \"Vvalidator_slash\")\n  |> filter(fn: (r) => r._field == \"score_before\" or r._field == \"score_after\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\", \"eval_uid\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1027,7 +1027,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window\")\n  |> filter(fn: (r) => r._field == \"gather_time\" or r._field == \"evaluation_time\" or r._field == \"model_update_time\" or r._field == \"peer_update_time\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"gather_time\" or r._field == \"evaluation_time\" or r._field == \"model_update_time\" or r._field == \"peer_update_time\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1132,7 +1132,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step\")\n  |> filter(fn: (r) => r._field == \"batch_time\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\")\n  |> filter(fn: (r) => r._field == \"batch_duration\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1224,7 +1224,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step\")\n  |> filter(fn: (r) => r._field == \"grad_step_time\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\")\n  |> filter(fn: (r) => r._field == \"model_update_time\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1315,7 +1315,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step\")\n  |> filter(fn: (r) => r._field == \"optimizer_state_size\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "// This measurement isn't currently submitted; once added to metrics_logger.log(), uncomment this query\n// Currently not used - keeping for future implementation\n/*\nfrom(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\")\n  |> filter(fn: (r) => r._field == \"optimizer_state_size\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")\n*/",
           "refId": "A"
         }
       ],
@@ -1406,7 +1406,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step\")\n  |> filter(fn: (r) => r._field == \"batch_size\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\")\n  |> filter(fn: (r) => r._field == \"effective_batch_size\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /${uid:regex}/)\n  |> filter(fn: (r) => r[\"role\"] =~ /${role:regex}/)\n  |> filter(fn: (r) => r[\"group\"] =~ /${group:regex}/)\n  |> filter(fn: (r) => r[\"version\"] =~ /${version:regex}/)\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],

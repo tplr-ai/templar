@@ -10,7 +10,16 @@ import torch
 import tplr.comms as comms_module
 import tplr.compress as compress
 from types import SimpleNamespace
-import tplr.logging
+import tplr
+import os
+import sys
+
+
+# Get the project root directory (one level up from tests/)
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# Add project root to Python path so we can import from neurons/
+sys.path.insert(0, project_root)
 
 
 # Dummy wallet and other objects (adjust based on your actual code structure)
@@ -96,5 +105,5 @@ async def comms_instance():
 
 @pytest.fixture(autouse=True)
 def enable_tplr_logger_propagation():
-    tplr.logging.logger.setLevel("INFO")
-    tplr.logging.logger.propagate = True
+    tplr.logger.setLevel("INFO")
+    tplr.logger.propagate = True

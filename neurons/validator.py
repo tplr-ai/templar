@@ -209,21 +209,13 @@ class Validator:
         self.relative_improvement_own = 0.0
         self.relative_improvement_random = 0.0
         self.valid_score_indices = []
-        self.gradient_scores = torch.zeros(self.metagraph.n, dtype=torch.float32)
-        self.binary_indicator_scores = torch.zeros(
-            self.metagraph.n, dtype=torch.float32
-        )
-        self.gradient_moving_avg_scores = torch.zeros(
-            self.metagraph.n, dtype=torch.float32
-        )
-        self.final_moving_avg_scores = torch.zeros(
-            self.metagraph.n, dtype=torch.float32
-        )
-        self.binary_moving_averages = torch.zeros(self.metagraph.n, dtype=torch.float32)
-        self.weights = torch.zeros(self.metagraph.n, dtype=torch.float32)
-        self.normalised_binary_moving_averages = torch.zeros(
-            self.metagraph.n, dtype=torch.float32
-        )
+        self.gradient_scores = torch.zeros(256, dtype=torch.float32)
+        self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
+        self.gradient_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
+        self.final_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
+        self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
+        self.weights = torch.zeros(256, dtype=torch.float32)
+        self.normalised_binary_moving_averages = torch.zeros(256, dtype=torch.float32)
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -248,9 +240,6 @@ class Validator:
             group="validator",
             job_type="validation",
         )
-
-        # Initialize peers
-        self.peers = []
         # Weighted selection counters for fair picking of eval peers
         self.eval_peers = defaultdict(lambda: 1)
 
@@ -286,13 +275,10 @@ class Validator:
             target=self.block_listener, args=(self.loop,), daemon=True
         ).start()
         # Load Peers
-        if not self.config.peers:
-            self.peers = self.comms.peers
-            tplr.logger.info(f"Filtered gather peers with buckets: {self.peers}")
-        else:
-            self.peers = self.config.peers
-        if self.uid not in self.peers:
-            self.peers.append(self.uid)
+        self.next_peers = None
+        self.peers_update_window = -1
+        if self.config.peers:
+            self.comms.peers = self.config.peers
 
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
@@ -361,6 +347,8 @@ class Validator:
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
         time_min = None
+        self.last_peer_update_window = None
+        self.last_peer_post_window = None
         while True:
             # 1. Wait for the validator window offset
             while self.sync_window >= (
@@ -382,18 +370,54 @@ class Validator:
                 f"Processing window: {self.sync_window} current: {self.current_window}"
             )
 
-            peer_start = tplr.T()
+            # Create and post peers
+            initial_selection = False
+            if (
+                self.last_peer_update_window is None
+                or self.sync_window - self.last_peer_update_window
+                >= self.hparams.peer_replacement_frequency
+            ):
+                reason = (
+                    f"{self.last_peer_update_window=}"
+                    if self.last_peer_update_window is None
+                    else f"{self.sync_window=}>="
+                    f"{self.last_peer_update_window}+"
+                    f"{self.hparams.peer_replacement_frequency}="
+                    "self.last_peer_update_window+"
+                    "self.hparams.peer_replacement_frequency"
+                )
+
+                tplr.logger.info(
+                    f"Time to create and post a new peer list because {reason}"
+                )
+                if self.last_peer_update_window is None:
+                    success = self.select_initial_peers()
+                    initial_selection = True
+                else:
+                    success = self.select_next_peers()
+                if success:
+                    self.last_peer_update_window = self.sync_window
+                    await self.comms.post_peer_list(
+                        first_effective_window=self.current_window
+                        + self.hparams.peer_list_window_margin,
+                        sync_window=self.sync_window,
+                        weights=self.weights,
+                        initial_selection=initial_selection,
+                    )
+
             self.comms.update_peers_with_buckets()
-            self.peers = self.comms.peers
+            self.peer_start = tplr.T()
+            await self.update_peers()
+
             self.eval_peers = self.comms.eval_peers
             tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}, eval:{len(self.eval_peers)}"
+                f"{tplr.P(self.sync_window, tplr.T() - self.peer_start)} Updated peers - eval:{len(self.eval_peers)}"
             )
 
-            tplr.logger.info(f"Current gather peers: {self.peers}")
+            tplr.logger.info(f"Current gather peers: {self.comms.peers}")
             tplr.logger.info(f"Current evaluation peers: {self.eval_peers}")
 
-            tplr.logger.info(f"Current gather peers: {self.peers}")
+            tplr.logger.info(f"Current gather peers: {self.comms.peers}")
             tplr.logger.info(
                 f"Current evaluation peers: {list(self.eval_peers.keys())}"
             )
@@ -502,31 +526,30 @@ class Validator:
 
             # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
-            tplr.logger.info(f"We are using peers {self.peers}")
+            tplr.logger.info(f"We are using peers {self.comms.peers}")
 
             gather_start = tplr.T()
             # Refresh peers explicitly before starting gather to avoid missing updated active peers.
-            tplr.logger.info("Refreshing peers before gather task in validator...")
+            tplr.logger.info("Refreshing eval peers before gather task in validator...")
 
             if self.config.test:
                 # In test mode, use all UIDs from metagraph except self
                 tplr.logger.info("Test mode active: Using all peers from metagraph.")
                 all_uids = list(range(len(self.metagraph.S)))
-                self.peers = [uid for uid in all_uids if uid != self.uid]
+                self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
                 # For evaluation, also use all peers but track separately with equal initial weight
-                self.eval_peers = {uid: 1 for uid in self.peers}
+                self.eval_peers = {uid: 1 for uid in self.comms.peers}
             else:
                 # Normal operation - update and filter peers
                 self.comms.update_peers_with_buckets()
-                self.peers = self.comms.peers
                 self.eval_peers = self.comms.eval_peers
 
-            tplr.logger.info(f"Validator gather peers: {self.peers}")
+            tplr.logger.info(f"Validator gather peers: {self.comms.peers}")
 
             gather_result = await self.comms.gather(
                 my_uid=self.uid,
-                uids=self.peers,
+                uids=self.comms.peers,
                 window=self.sync_window,
                 key="gradient",
                 timeout=35,
@@ -583,7 +606,7 @@ class Validator:
                     )
 
             # Add check for empty peers (evaluating all peer uids)
-            if not self.peers:
+            if len(self.comms.eval_peers) == 0:
                 tplr.logger.warning(
                     f"No peers available for evaluation in window {self.sync_window}. Waiting for next window."
                 )
@@ -1625,6 +1648,157 @@ class Validator:
 
             # 18. Increment global step
             self.global_step += 1
+
+    async def update_peers(self) -> None:
+        # Get next peers
+        if (
+            self.next_peers is None  # next peers are not fetched yet
+            and self.peers_update_window  # they should be on bucket by now
+            + self.hparams.peer_replacement_frequency
+            - self.sync_window
+            < self.hparams.peer_list_window_margin
+        ):
+            result = await self.comms.get_peer_list()
+            if result is None:
+                tplr.logger.info("Unable to get peer list from bucket")
+            else:
+                next_peers, peers_update_window = result
+                tplr.logger.info(
+                    f"Got peer list {next_peers} and update window "
+                    f"{peers_update_window} from bucket"
+                )
+                if (
+                    self.peers_update_window is None
+                    or peers_update_window > self.peers_update_window
+                ):
+                    self.next_peers = next_peers
+                    self.peers_update_window = peers_update_window
+                    tplr.logger.info("This list is new, updating next_peers")
+
+        # Update peers, if it's time
+        if self.next_peers is not None and self.sync_window >= self.peers_update_window:
+            self.comms.peers = self.next_peers
+            late_text = (
+                f"{self.sync_window - self.peers_update_window} windows late"
+                if self.sync_window - self.peers_update_window > 0
+                else "on time"
+            )
+            tplr.logger.info(
+                f"{tplr.P(self.sync_window, tplr.T() - self.peer_start)} Updated peers "
+                f"{late_text} - gather:{len(self.comms.peers)}. Next update "
+                f"expected on step window "
+                f"{self.peers_update_window + self.hparams.peer_list_window_margin}"
+            )
+            self.next_peers = None
+        else:
+            reason = (
+                "next peers are not defined yet"
+                if self.next_peers is None
+                else f"sync window is {self.sync_window} and peers update window "
+                f"is {self.peers_update_window}"
+            )
+            tplr.logger.info(f"Not time to replace peers yet: {reason}")
+
+    def select_initial_peers(self) -> bool:
+        try:
+            tplr.logger.info("Starting selection of initial gather peers")
+            # 1. Add top incentive peers
+            uid_to_non_zero_incentive = {
+                uid: incentive
+                for uid, incentive in zip(self.metagraph.uids, self.metagraph.I)
+                if incentive > 0 and uid in self.comms.active_peers
+            }
+            top_incentive_peers = sorted(
+                uid_to_non_zero_incentive,
+                key=uid_to_non_zero_incentive.get,
+                reverse=True,
+            )[: self.hparams.max_topk_peers]
+
+            # Convert to list to ensure it's not a dict_keys object
+            top_incentive_peers = np.array(top_incentive_peers, dtype=np.int64)
+
+            assert len(top_incentive_peers) <= self.hparams.max_topk_peers
+            if len(top_incentive_peers) >= self.hparams.minimum_peers:
+                self.comms.peers = top_incentive_peers
+                tplr.logger.info(
+                    f"Selected {len(self.comms.peers)} purely based on incentive: "
+                    f"{self.comms.peers}"
+                )
+                return True
+
+            # 2. If needed, fill up with active peers
+            remaining_active_peers = np.array(
+                list(set(self.comms.active_peers) - set(top_incentive_peers))
+            )
+            top_incentive_and_active_peers = np.concatenate(
+                [top_incentive_peers, remaining_active_peers]
+            )[: self.hparams.max_topk_peers]
+
+            assert len(top_incentive_and_active_peers) <= self.hparams.max_topk_peers
+            if len(top_incentive_and_active_peers) >= self.hparams.minimum_peers:
+                self.comms.peers = top_incentive_and_active_peers
+                tplr.logger.info(
+                    f"Selected {len(self.comms.peers)} initial peers. "
+                    f"{len(top_incentive_peers)} with incentive: {top_incentive_peers} "
+                    f"and {len(remaining_active_peers)} without: "
+                    f"{remaining_active_peers}"
+                )
+                return True
+
+            # 3. Give up
+            tplr.logger.info(
+                f"Failed to find at least {self.hparams.minimum_peers} initial gather "
+                f"peers. Found only {len(top_incentive_and_active_peers)} active "
+                f"peers, of which {len(top_incentive_peers)} had incentive and "
+                f"{len(top_incentive_and_active_peers) - len(top_incentive_peers)} "
+                f"were incentiveless active peers."
+            )
+            return False
+
+        except Exception as e:
+            tplr.logger.error(f"Failed to create new peer list: {e}")
+            return False
+
+    def select_next_peers(self) -> bool:
+        # 1. Define candidate peers
+        non_zero_weight_uids = torch.nonzero(self.weights).flatten().numpy()
+        candidates = list(set(non_zero_weight_uids) - set(self.comms.peers))
+
+        if len(candidates) < self.hparams.peers_to_replace:
+            tplr.logger.info(
+                "Skipping update because there are insufficient candidate UIDs: "
+                f"{len(non_zero_weight_uids)} available and minimum is "
+                f"{self.hparams.peers_to_replace}. There are "
+                f"{len(non_zero_weight_uids)} UIDs with non-zero weight, "
+                f"{len(candidates)} of which are not already in the peer list (these "
+                f"are the candidates)."
+            )
+            return False
+
+        # 2. Pick ingoing and ingoing peers
+        ingoing_peers = np.random.choice(
+            a=candidates,
+            size=self.hparams.peers_to_replace,
+            replace=False,
+        )
+        outgoing_peers = np.random.choice(
+            a=self.comms.peers,
+            size=self.hparams.peers_to_replace,
+            replace=False,
+        )
+
+        # 3. Replace
+        self.comms.peers = np.concatenate(
+            [
+                self.comms.peers[~np.isin(self.comms.peers, outgoing_peers)],
+                ingoing_peers,
+            ]
+        )
+        tplr.logger.info(
+            f"Updated peer list by swapping {outgoing_peers} for "
+            f"{ingoing_peers}. Current peers are {self.comms.peers}."
+        )
+        return True
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

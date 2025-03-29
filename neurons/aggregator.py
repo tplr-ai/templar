@@ -221,7 +221,7 @@ class AggregationServer:
             )
 
         # Use comms to select gather peers
-        self.comms.set_gather_peers()
+        await self.update_peers(self.sync_window - 1)
         selected_uids = self.comms.peers
 
         tplr.logger.info(
@@ -452,6 +452,56 @@ class AggregationServer:
                 )
                 time.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
+
+    async def update_peers(self, window) -> None:
+        # Get next peers
+        if (
+            self.next_peers is None  # next peers are not fetched yet
+            and self.peers_update_window  # they should be on bucket by now
+            + self.hparams.peer_replacement_frequency
+            - window
+            < self.hparams.peer_list_window_margin
+        ):
+            result = await self.comms.get_peer_list()
+            if result is None:
+                tplr.logger.info("Unable to get peer list from bucket")
+            else:
+                next_peers, peers_update_window = result
+                tplr.logger.info(
+                    f"Got peer list {next_peers} and update window "
+                    f"{peers_update_window} from bucket"
+                )
+                if (
+                    self.peers_update_window is None
+                    or peers_update_window > self.peers_update_window
+                ):
+                    self.next_peers = next_peers
+                    self.peers_update_window = peers_update_window
+                    tplr.logger.info("This list is new, updating next_peers")
+
+        # Update peers, if it's time
+        if self.next_peers is not None and window >= self.peers_update_window:
+            self.comms.peers = self.next_peers
+            late_text = (
+                f"{window - self.peers_update_window} windows late"
+                if window - self.peers_update_window > 0
+                else "on time"
+            )
+            tplr.logger.info(
+                f"{window} Updated peers "
+                f"{late_text} - gather:{len(self.comms.peers)}. Next update "
+                f"expected on step window "
+                f"{self.peers_update_window + self.hparams.peer_list_window_margin}"
+            )
+            self.next_peers = None
+        else:
+            reason = (
+                "next peers are not defined yet"
+                if self.next_peers is None
+                else f"sync window is {window} and peers update window "
+                f"is {self.peers_update_window}"
+            )
+            tplr.logger.info(f"Not time to replace peers yet: {reason}")
 
 
 # Start the aggregation server

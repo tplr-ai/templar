@@ -215,16 +215,12 @@ class Miner:
         )
         self.listener.start()  #
         # Load Peers
-        if not self.config.peers:
-            self.peers = self.comms.peers
-            tplr.logger.info(f"Filtered gather peers with buckets: {self.peers}")
-        else:
-            self.peers = self.config.peers
-        if self.uid not in self.peers:
-            self.peers.append(self.uid)
+        self.next_peers = None
+        self.peers_update_window = -1
+        if self.config.peers:
+            self.comms.peers = self.config.peers
 
         self.comms.commitments = await self.comms.get_commitments()
-        self.comms.set_gather_peers()
         tplr.logger.info("Loaded commitments")
 
         # Fetch start_window from highest stake validator
@@ -276,7 +272,6 @@ class Miner:
             self.model.to(self.config.device)  # type: ignore
 
         self.comms.start_commitment_fetcher()
-        self.comms.start_background_tasks()
 
         while True:
             # 1. Initialize window and update peers
@@ -291,12 +286,8 @@ class Miner:
                 f"\n{'-' * 40} Window: {step_window} (Global Step: {self.global_step}) {'-' * 40}"
             )
 
-            peer_start = tplr.T()
-            self.comms.set_gather_peers()
-            self.peers = self.comms.peers
-            tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}"
-            )
+            self.peer_start = tplr.T()
+            await self.update_peers(step_window)
 
             # 2. Load training data for this window
             data_start = tplr.T()
@@ -443,19 +434,15 @@ class Miner:
                 # In test mode, use all UIDs from metagraph except self
                 tplr.logger.info("Test mode active: Using all peers from metagraph.")
                 all_uids = list(range(len(self.metagraph.S)))
-                self.peers = [uid for uid in all_uids if uid != self.uid]
-            else:
-                # Normal operation - update and filter peers
-                self.comms.set_gather_peers()
-                self.peers = self.comms.peers
+                self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
-            tplr.logger.info(f"Final peers for gather: {self.peers}")
+            tplr.logger.info(f"Final peers for gather: {self.comms.peers}")
 
             # Create a task for gathering gradients asynchronously
             gather_task = asyncio.create_task(
                 self.comms.gather(
                     my_uid=self.uid,
-                    uids=self.peers,
+                    uids=self.comms.peers,
                     window=step_window,
                     key="gradient",
                     timeout=35,
@@ -499,8 +486,8 @@ class Miner:
                     "miner/gpu_memory_cached": torch.cuda.memory_reserved()
                     / 1024**2,  # MB
                     # Network metrics
-                    "miner/gather_peers": len(self.peers),
-                    "miner/effective_batch_size": len(self.peers)
+                    "miner/gather_peers": len(self.comms.peers),
+                    "miner/effective_batch_size": len(self.comms.peers)
                     * self.hparams.batch_size,
                     # Optimization metrics
                     "miner/learning_rate": self.scheduler.get_last_lr()[0],
@@ -601,7 +588,7 @@ class Miner:
             # Add successful peers information
             if gather_result is not None:
                 debug_dict["successful_peers"] = sorted(
-                    list(set(self.peers) - set(gather_result.skipped_uids))
+                    list(set(self.comms.peers) - set(gather_result.skipped_uids))
                 )
                 debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
 
@@ -632,7 +619,7 @@ class Miner:
                 sum(momentum_norms) / len(momentum_norms) if momentum_norms else 0
             )
             window_total_time = tplr.T() - window_start
-            peer_update_time = tplr.T() - peer_start
+            peer_update_time = tplr.T() - self.peer_start
             data_loading_time = tplr.T() - data_start
             training_time = tplr.T() - train_start
             compression_time = tplr.T() - compress_start
@@ -663,8 +650,8 @@ class Miner:
                     "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
                     / 1024**2,
                     "miner/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,
-                    "miner/gather_peers": len(self.peers),
-                    "miner/effective_batch_size": len(self.peers)
+                    "miner/gather_peers": len(self.comms.peers),
+                    "miner/effective_batch_size": len(self.comms.peers)
                     * self.hparams.batch_size,
                     "miner/learning_rate": self.scheduler.get_last_lr()[0],
                     "miner/mean_grad_norm": mean_grad_norm,
@@ -747,6 +734,56 @@ class Miner:
             tplr.logger.info("Wait for next window...")
             while self.current_window == step_window:
                 await asyncio.sleep(0.1)
+
+    async def update_peers(self, step_window: int) -> None:
+        # Get next peers
+        if (
+            self.next_peers is None  # next peers are not fetched yet
+            and self.peers_update_window  # they should be on bucket by now
+            + self.hparams.peer_replacement_frequency
+            - step_window
+            < self.hparams.peer_list_window_margin
+        ):
+            result = await self.comms.get_peer_list()
+            if result is None:
+                tplr.logger.info("Unable to get peer list from bucket")
+            else:
+                next_peers, peers_update_window = result
+                tplr.logger.info(
+                    f"Got peer list {next_peers} and update window "
+                    f"{peers_update_window} from bucket"
+                )
+                if (
+                    self.peers_update_window is None
+                    or peers_update_window > self.peers_update_window
+                ):
+                    self.next_peers = next_peers
+                    self.peers_update_window = peers_update_window
+                    tplr.logger.info("This list is new, updating next_peers")
+
+        # Update peers, if it's time
+        if self.next_peers is not None and step_window >= self.peers_update_window:
+            self.comms.peers = self.next_peers
+            late_text = (
+                f"{step_window - self.peers_update_window} windows late"
+                if step_window - self.peers_update_window > 0
+                else "on time"
+            )
+            tplr.logger.info(
+                f"{tplr.P(step_window, tplr.T() - self.peer_start)} Updated peers "
+                f"{late_text} - gather:{len(self.comms.peers)}. Next update "
+                f"expected on step window "
+                f"{self.peers_update_window + self.hparams.peer_list_window_margin}"
+            )
+            self.next_peers = None
+        else:
+            reason = (
+                "next peers are not defined yet"
+                if self.next_peers is None
+                else f"sync window is {step_window} and peers update window "
+                f"is {self.peers_update_window}"
+            )
+            tplr.logger.info(f"Not time to replace peers yet: {reason}")
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, _):

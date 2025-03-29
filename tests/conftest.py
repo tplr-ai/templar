@@ -10,7 +10,7 @@ import torch
 import tplr.comms as comms_module
 import tplr.compress as compress
 from types import SimpleNamespace
-import tplr.logging
+import tplr
 import os
 import sys
 
@@ -105,5 +105,5 @@ async def comms_instance():
 
 @pytest.fixture(autouse=True)
 def enable_tplr_logger_propagation():
-    tplr.logging.logger.setLevel("INFO")
-    tplr.logging.logger.propagate = True
+    tplr.logger.setLevel("INFO")
+    tplr.logger.propagate = True

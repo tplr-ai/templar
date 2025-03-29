@@ -1,0 +1,71 @@
+---
+# Python configuration
+python_version: "3.12"
+python_venv_path: "/opt/ai-env"
+install_ai_dependencies: true
+
+# System Configuration
+system_upgrade: true
+optimize_for_memory: true
+install_monitoring: true
+
+# Performance Tuning
+vm_swappiness: 10
+vm_nr_hugepages: 128 
+tcp_rmem_max: 16777216
+tcp_wmem_max: 16777216
+
+# Swap configuration
+swap_size: 64
+
+# Common packages to install on all systems
+essential_packages:
+  - vim
+  - curl
+  - wget
+  - git
+  - tmux
+  - ca-certificates
+  - apt-transport-https
+  - gnupg
+  - lsb-release
+  - software-properties-common
+  - unzip
+  - lshw
+  - net-tools
+  - iftop
+  - rsync
+  - ncdu
+  - iputils-ping
+  - build-essential
+  - cmake
+  - pkg-config
+
+# Monitoring packages
+monitoring_packages:
+  - prometheus-node-exporter
+  - htop
+  - iotop
+  - dstat
+
+# AI development Python packages
+ai_python_packages:
+  - pip
+  - setuptools
+  - wheel
+  - numpy
+  - pandas
+  - matplotlib
+  - scikit-learn
+  - jupyter
+  - ipython
+  - pillow
+  - tqdm
+  - requests
+  - transformers
+  - tensorboard
+
+# PyTorch specific configuration
+pytorch_cuda_version: "12.1"
+pytorch_version: "2.2.0"
+install_pytorch: true

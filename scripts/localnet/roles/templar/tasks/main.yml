@@ -1,0 +1,87 @@
+- name: Include local deployment tasks
+  include_tasks: local.yml
+  when: not remote_mode | bool
+  tags: templar
+
+- name: Include remote deployment tasks
+  include_tasks: remote.yml
+  when: remote_mode | bool
+  tags: templar
+
+- name: Check available GPU count (informational only)
+  shell: nvidia-smi --list-gpu | wc -l
+  register: gpu_count
+  changed_when: false
+  failed_when: false
+  tags: templar
+
+- name: Report available GPUs (informational only)
+  debug:
+    msg: "Found {{ gpu_count.stdout|int if gpu_count.stdout is defined else 0 }} GPU(s)"
+  tags: templar
+
+# uv installation is now handled in the common role
+
+- name: Check if Python venv exists
+  stat:
+    path: "{{ templar_path }}/.venv"
+  register: venv_exists
+  tags: templar
+
+- name: Create Python virtual environment with uv
+  shell: uv venv
+  args:
+    chdir: "{{ templar_path }}"
+  when: not venv_exists.stat.exists
+  tags: templar
+
+- name: Install dependencies with uv sync
+  shell: |
+    source .venv/bin/activate
+    uv sync
+  args:
+    chdir: "{{ templar_path }}"
+    executable: /bin/bash
+  tags: templar
+
+- name: Install Node dotenv package in templar dir
+  shell: npm install dotenv
+  args:
+    chdir: "{{ templar_path }}"
+  tags: templar
+
+- name: Ensure .env file has proper permissions
+  file:
+    path: "{{ templar_path }}/.env"
+    mode: "0644"
+  tags: templar
+
+- name: Configure .env for templar
+  template:
+    src: env.j2
+    dest: "{{ templar_path }}/.env"
+    mode: "0644"
+  tags: templar
+
+- name: Configure PM2 ecosystem file
+  template:
+    src: ecosystem.config.js.j2
+    dest: "{{ templar_path }}/ecosystem.config.js"
+    mode: "0644"
+  tags: templar
+
+- name: Start validator processes via PM2
+  shell: pm2 start ecosystem.config.js --only "TV{{ item }}"
+  args:
+    chdir: "{{ templar_path }}"
+  loop: "{{ range(1, validator_hotkeys|length + 1) | list }}"
+  when: validator_hotkeys|length > 0
+  tags: templar
+
+- name: Start miner processes via PM2
+  shell: pm2 start ecosystem.config.js --only "TM{{ item }}"
+  args:
+    chdir: "{{ templar_path }}"
+  loop: "{{ range(1, miner_hotkeys|length + 1) | list }}"
+  when: miner_hotkeys|length > 0
+  tags: templar

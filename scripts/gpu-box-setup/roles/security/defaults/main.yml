@@ -1,0 +1,17 @@
+---
+# SSH Security Configuration
+ssh_permit_root_login: "no"
+ssh_password_authentication: "no"
+ssh_challenge_response_auth: "no"
+ssh_x11_forwarding: "no"
+ssh_allow_tcp_forwarding: "yes"
+ssh_max_auth_tries: 4
+
+# Firewall Configuration
+enable_firewall: true
+firewall_allowed_tcp_ports:
+  - 22  # SSH
+
+# System Security Settings
+disable_core_dumps: true
+enable_process_accounting: false

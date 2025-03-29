@@ -1,0 +1,94 @@
+---
+# Initial setup to establish sudo access
+- name: Setup initial sudo access
+  hosts: all
+  gather_facts: true
+  become: true
+  vars_files:
+    - group_vars/all/vault.yml
+  tasks:
+    - name: Ensure sudo is installed
+      package:
+        name: sudo
+        state: present
+
+    - name: Add ansible user to sudoers with NOPASSWD
+      lineinfile:
+        path: /etc/sudoers.d/ansible-user
+        line: "{{ ansible_user }} ALL=(ALL) NOPASSWD: ALL"
+        state: present
+        mode: '0440'
+        validate: 'visudo -cf %s'
+        create: yes
+
+- name: Setup AI GPU server
+  hosts: all
+  become: true
+  vars_files:
+    - group_vars/all/vault.yml
+  roles:
+    - role: common
+      vars:
+        python_version: "3.12"
+        system_upgrade: true
+        optimize_for_memory: true
+        install_monitoring: true
+        swap_size: 64
+        install_ai_dependencies: true
+        pytorch_version: "2.2.0"
+        pytorch_cuda_version: "12.1"
+        vm_swappiness: 10
+        vm_nr_hugepages: 128
+    - role: security
+      vars:
+        ssh_permit_root_login: "no"
+        ssh_password_authentication: "no"
+        enable_firewall: true
+        firewall_allowed_tcp_ports:
+          - 22
+    - role: geerlingguy.docker
+      vars:
+        docker_package_state: present
+        docker_install_compose_plugin: true
+        docker_compose_package: docker-compose-plugin
+        docker_compose_package_state: present
+        docker_install_compose: true
+        docker_service_manage: true
+        docker_users:
+          - "{{ ansible_user }}"
+        docker_add_repo: true
+        docker_service_state: started
+        docker_service_enabled: true
+        docker_restart_handler_state: restarted
+        docker_edition: "ce"
+        docker_packages:
+          - "docker-{{ docker_edition }}"
+          - "docker-{{ docker_edition }}-cli"
+          - "docker-{{ docker_edition }}-rootless-extras"
+        docker_obsolete_packages:
+          - docker
+          - docker.io
+          - docker-engine
+          - podman-docker
+          - containerd
+          - runc
+    - role: nvidia_driver
+      vars:
+        nvidia_driver_persistence_mode_on: yes
+        nvidia_driver_module_params: 'NVreg_PreserveVideoMemoryAllocations=1 NVreg_TemporaryFilePath=/var/tmp'
+        nvidia_driver_ubuntu_install_from_cuda_repo: yes
+        nvidia_driver_skip_reboot: no
+      tags: nvidia_driver
+    - role: nvidia_docker
+      vars:
+        nvidia_docker_default_runtime: "nvidia"
+        nvidia_docker_log_max_size: "100m"
+        nvidia_docker_log_max_file: "3"
+    - role: nvidia_verify
+    - role: nvidia_benchmark
+      vars:
+        run_benchmark: true
+        benchmark_duration: 30
+        benchmark_iterations: 20
+      tags: nvidia_benchmark
+

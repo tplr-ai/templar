@@ -1,0 +1,7 @@
+# Example for local deployment:
+[localnet]
+localhost ansible_connection=local  remote_mode=true
+
+# Example for remote deployment (uncomment and edit the following lines):
+# [localnet]
+# myserver ansible_host=203.0.113.10 ansible_user=ubuntu  remote_mode=false

@@ -1,0 +1,10 @@
+- name: List PM2 processes
+  shell: pm2 list
+  register: pm2_list
+  changed_when: false
+  tags: network_verify
+
+- name: Display PM2 process status
+  debug:
+    msg: "{{ pm2_list.stdout }}"
+  tags: network_verify

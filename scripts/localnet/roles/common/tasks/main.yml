@@ -1,0 +1,103 @@
+- name: Update apt cache
+  become: true
+  apt:
+    update_cache: yes
+  tags: common
+
+- name: Install base apt packages
+  become: true
+  apt:
+    name:
+      - build-essential
+      - make
+      - git
+      - clang
+      - curl
+      - libssl-dev
+      - llvm
+      - libudev-dev
+      - pkg-config
+      - protobuf-compiler
+      - python3-pip
+      - nodejs
+      - npm
+      - rsync
+    state: present
+  tags: common
+
+- name: Install extra apt packages (if any)
+  become: true
+  apt:
+    name: "{{ extra_packages }}"
+    state: present
+  when: extra_packages is defined and extra_packages|length > 0
+  tags: common
+
+- name: Install Rust toolchain (rustup)
+  shell: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  args:
+    creates: "{{ ansible_env.HOME }}/.cargo/bin/cargo"
+    executable: /bin/bash
+  changed_when: false
+  tags: common
+
+- name: Ensure cargo in PATH for subsequent tasks
+  shell: "echo $PATH"
+  environment:
+    PATH: "{{ ansible_env.HOME }}/.cargo/bin:{{ ansible_env.PATH }}"
+  register: cargo_path
+  changed_when: false
+  tags: common
+
+- name: Install PM2 (Node process manager)
+  become: true
+  npm:
+    name: pm2
+    global: yes
+    state: present
+  tags: common
+
+- name: Install Bittensor CLI and Python dependencies
+  become: true
+  pip:
+    name:
+      - bittensor-cli
+      - bt-decode
+      - torch
+      - boto3
+      - einops
+      - aiofiles==24.1.0
+      - aioboto3==13.2.0
+      - transformers
+      - wandb
+      - python-dotenv
+      - zstandard
+      - s3fs
+      - pyarrow
+      - scipy
+      - "rich>=13.0.0"
+    state: present
+    extra_args: --no-cache-dir
+  tags: common
+  
+- name: Install uv package installer
+  become: true
+  shell: |
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    PATH=$PATH:$HOME/.cargo/bin:$HOME/.local/bin
+    cp $(which uv 2>/dev/null || echo "/root/.cargo/bin/uv") /usr/local/bin/uv || true
+    chmod +x /usr/local/bin/uv
+  args:
+    executable: /bin/bash
+  tags: common
+  
+- name: Verify uv installation
+  shell: which uv
+  register: uv_which
+  changed_when: false
+  tags: common
+  
+- name: Show uv location
+  debug:
+    var: uv_which.stdout
+  tags: common

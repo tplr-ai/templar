@@ -1,0 +1,11 @@
+---
+- name: restart docker
+  systemd:
+    name: docker
+    daemon_reload: yes
+    state: restarted
+  ignore_errors: "{{ ansible_check_mode }}"
+  register: docker_restart_result
+  retries: 3
+  delay: 10
+  until: docker_restart_result.status.ActiveState == 'active'

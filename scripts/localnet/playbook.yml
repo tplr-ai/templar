@@ -1,0 +1,12 @@
+- hosts: localnet
+  vars_files:
+    - group_vars/all/vault.yml
+  become: false
+
+  roles:
+    - { role: common, tags: ["common"] }
+    # - { role: subtensor, tags: ["subtensor"] }
+    # - { role: bittensor_wallet, tags: ["bittensor_wallet"] }
+    - { role: templar, tags: ["templar"] }
+    - { role: templar_restart, tags: ["templar_restart"], when: "'templar_restart' in ansible_run_tags" }
+    - { role: network_verify, tags: ["network_verify"] }

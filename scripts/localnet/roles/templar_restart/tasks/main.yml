@@ -1,0 +1,26 @@
+---
+- name: Include local deployment tasks
+  include_tasks: local.yml
+  when: not remote_mode | bool
+  tags: templar_restart
+
+- name: Include remote deployment tasks
+  include_tasks: remote.yml
+  when: remote_mode | bool
+  tags: templar_restart
+
+- name: Restart validator processes via PM2
+  shell: pm2 restart ecosystem.config.js --only "TV{{ item }}"
+  args:
+    chdir: "{{ templar_path }}"
+  loop: "{{ range(1, validator_hotkeys|length + 1) | list }}"
+  when: validator_hotkeys|length > 0
+  tags: templar_restart
+
+- name: Restart miner processes via PM2
+  shell: pm2 restart ecosystem.config.js --only "TM{{ item }}"
+  args:
+    chdir: "{{ templar_path }}"
+  loop: "{{ range(1, miner_hotkeys|length + 1) | list }}"
+  when: miner_hotkeys|length > 0
+  tags: templar_restart

@@ -1,0 +1,44 @@
+---
+- name: remove ppa
+  apt_repository:
+    repo: ppa:graphics-drivers/ppa
+    state: absent
+
+- name: install driver packages
+  apt:
+    name: "{{ nvidia_driver_package_version | ternary(item+'='+nvidia_driver_package_version, item) }}"
+    state: "{{ nvidia_driver_package_state }}"
+    autoremove: "{{ nvidia_driver_package_state == 'absent' }}"
+    purge: "{{ nvidia_driver_package_state == 'absent' }}"
+  loop: "{{ nvidia_driver_ubuntu_packages }}"
+  register: install_driver
+  environment: "{{proxy_env if proxy_env is defined else {}}}"
+  retries: "{{ nvidia_driver_install_retries }}"
+  delay: "{{ nvidia_driver_install_retry_delay }}"
+  until: install_driver is succeeded
+
+- name: Detect NVIDIA GPU model
+  shell: nvidia-smi --query-gpu=name --format=csv,noheader | grep -i h100 | wc -l
+  register: h100_gpu_count
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+
+- name: Install NVIDIA Fabric Manager for H100 GPUs
+  apt:
+    name: nvidia-fabricmanager-{{ nvidia_driver_version | default('570') }}
+    state: present
+  when: h100_gpu_count.stdout is defined and h100_gpu_count.stdout|int > 0
+  register: install_fabricmanager
+  retries: "{{ nvidia_driver_install_retries }}"
+  delay: "{{ nvidia_driver_install_retry_delay }}"
+  until: install_fabricmanager is succeeded
+  ignore_errors: true
+
+- name: Enable and start NVIDIA Fabric Manager service
+  systemd:
+    name: nvidia-fabricmanager
+    state: started
+    enabled: yes
+  when: h100_gpu_count.stdout is defined and h100_gpu_count.stdout|int > 0
+  ignore_errors: true

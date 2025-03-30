@@ -305,7 +305,7 @@ class Comms(ChainManager):
 
             # Handle PyTorch files
             file_size = os.path.getsize(file_path)
-            multipart_threshold = 500 * 1024 * 1024  # 500MB
+            multipart_threshold = 100 * 1024 * 1024  # 100MB
 
             async with self.session.create_client(
                 "s3",
@@ -455,15 +455,13 @@ class Comms(ChainManager):
     #  Large File Operations
 
     async def upload_large_file(self, file_path: str, key: str, s3_client):
-        """Uploads a large file to S3 using asynchronous multipart upload with improved connection handling."""
+        """Uploads a large file to S3 using asynchronous multipart upload with 5MB chunks."""
         upload_id = None
         MAX_RETRIES = 3
-        PART_SIZE = 50 * 1024 * 1024  # 50MB chunks for better throughput
-        MAX_CONCURRENT_PARTS = 5  # Reduced from 8 to prevent connection issues
+        PART_SIZE = 5 * 1024 * 1024  # 5MB
 
         try:
-            async with self.client_semaphore:  # Use existing connection semaphore
-                # Initiate multipart upload with retry
+            async with self.client_semaphore:
                 for attempt in range(MAX_RETRIES):
                     try:
                         response = await s3_client.create_multipart_upload(
@@ -478,85 +476,52 @@ class Comms(ChainManager):
 
                 file_size = os.path.getsize(file_path)
                 total_parts = math.ceil(file_size / PART_SIZE)
-
-                # Process parts in smaller batches
                 parts = []
-                for batch_start in range(1, total_parts + 1, MAX_CONCURRENT_PARTS):
-                    batch_end = min(batch_start + MAX_CONCURRENT_PARTS, total_parts + 1)
-                    batch_parts = range(batch_start, batch_end)
 
-                    # Create queue for this batch
-                    part_queue = asyncio.Queue()
-                    for part_number in batch_parts:
-                        part_queue.put_nowait(part_number)
+                async def upload_part(part_number: int):
+                    byte_range_start = (part_number - 1) * PART_SIZE
+                    byte_range_end = min(byte_range_start + PART_SIZE, file_size)
 
-                    async def upload_part():
-                        part_results = []
-                        while not part_queue.empty():
-                            part_number = await part_queue.get()
-                            byte_range_start = (part_number - 1) * PART_SIZE
-                            byte_range_end = min(
-                                byte_range_start + PART_SIZE, file_size
+                    for attempt in range(MAX_RETRIES):
+                        try:
+                            async with aiofiles.open(file_path, "rb") as f:
+                                await f.seek(byte_range_start)
+                                data = await f.read(byte_range_end - byte_range_start)
+
+                            response = await s3_client.upload_part(
+                                Bucket=self.bucket.name,
+                                Key=key,
+                                PartNumber=part_number,
+                                UploadId=upload_id,
+                                Body=data,
                             )
+                            return {
+                                "ETag": response["ETag"],
+                                "PartNumber": part_number,
+                            }
+                        except Exception as e:
+                            if attempt == MAX_RETRIES - 1:
+                                tplr.logger.error(
+                                    f"Failed to upload part {part_number} after {MAX_RETRIES} attempts: {e}"
+                                )
+                                raise
+                            await asyncio.sleep(2**attempt)
 
-                            # Retry logic for each part
-                            for attempt in range(MAX_RETRIES):
-                                try:
-                                    async with aiofiles.open(file_path, "rb") as f:
-                                        await f.seek(byte_range_start)
-                                        data = await f.read(
-                                            byte_range_end - byte_range_start
-                                        )
+                # Launch one coroutine per part
+                try:
+                    part_results = await asyncio.gather(
+                        *[
+                            upload_part(part_number)
+                            for part_number in range(1, total_parts + 1)
+                        ]
+                    )
+                    parts.extend(part_results)
+                except Exception as e:
+                    tplr.logger.error(f"Multipart upload failed: {e}")
+                    raise
 
-                                        response = await s3_client.upload_part(
-                                            Bucket=self.bucket.name,
-                                            Key=key,
-                                            PartNumber=part_number,
-                                            UploadId=upload_id,
-                                            Body=data,
-                                        )
-                                        part_results.append(
-                                            {
-                                                "ETag": response["ETag"],
-                                                "PartNumber": part_number,
-                                            }
-                                        )
-                                        break
-                                except Exception as e:
-                                    if attempt == MAX_RETRIES - 1:
-                                        tplr.logger.error(
-                                            f"Failed to upload part {part_number} after {MAX_RETRIES} attempts: {e}"
-                                        )
-                                        raise
-                                    await asyncio.sleep(2**attempt)
-
-                            part_queue.task_done()
-                        return part_results
-
-                    # Start workers for this batch
-                    workers = [
-                        upload_part()
-                        for _ in range(min(MAX_CONCURRENT_PARTS, len(batch_parts)))
-                    ]
-                    try:
-                        batch_results = await asyncio.gather(*workers)
-                        # Add successful parts from this batch
-                        parts.extend(
-                            [item for sublist in batch_results for item in sublist]
-                        )
-                    except Exception as e:
-                        tplr.logger.error(
-                            f"Batch upload failed for parts {batch_start}-{batch_end - 1}: {e}"
-                        )
-                        raise
-
-                    # Small delay between batches
-                    await asyncio.sleep(0.1)
-
-                # Sort parts by part number
                 parts.sort(key=lambda x: x["PartNumber"])
 
-                # Complete multipart upload with retry
                 for attempt in range(MAX_RETRIES):
                     try:
                         await s3_client.complete_multipart_upload(

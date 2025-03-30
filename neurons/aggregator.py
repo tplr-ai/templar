@@ -46,6 +46,9 @@ class AggregationServer:
         parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
         )
+        parser.add_argument(
+            "--project", type=str, default="templar", help="Wandb project."
+        )
         parser.add_argument("--debug", action="store_true", help="Enable debug output")
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
@@ -115,6 +118,14 @@ class AggregationServer:
         # Initialize state
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+
+        self.wandb = tplr.initialize_wandb(
+            run_prefix="A",
+            uid=self.uid,
+            config=self.config,
+            group="aggregator",
+            job_type="aggregation",
+        )
 
         self.iteration_counter = 0
 
@@ -346,6 +357,27 @@ class AggregationServer:
             tplr.logger.info(f"Store time: {store_time:.2f} seconds")
             tplr.logger.info(f"Total time: {total_time:.2f} seconds")
 
+            # Create metrics dictionary
+            aggregation_metrics = {
+                # Network metrics
+                "aggregator/network/block": self.current_block,
+                "aggregator/network/window": self.sync_window - 1,
+                "aggregator/network/selected_uids": len(selected_uids),
+                # Gather metrics
+                "aggregator/gather/success_rate": gather_result.success_rate * 100,
+                "aggregator/gather/successful_uids": len(selected_uids)
+                - len(gather_result.skipped_uids),
+                "aggregator/gather/failed_uids": len(gather_result.skipped_uids),
+                # Timing metrics
+                "aggregator/timing/window_total": total_time,
+                "aggregator/timing/gather": gather_time,
+                "aggregator/timing/process": process_time,
+                "aggregator/timing/put": store_time,
+            }
+
+            # Log to wandb
+            self.wandb.log(aggregation_metrics, step=self.global_step)
+
             return True
 
         except Exception:
@@ -373,12 +405,18 @@ class AggregationServer:
         self.sync_window = self.current_window
         self.comms.current_window = self.current_window
 
+        self.comms.commitments = await self.comms.get_commitments()
+        self.comms.set_gather_peers()
+        self.start_window = await self.comms.get_start_window()
+        self.global_step = self.current_window - self.start_window
+
         tplr.logger.info(f"Starting with window {self.current_window}")
 
         while True:
             try:
                 # Update commitments and peers for upcoming process
                 self.comms.commitments = await self.comms.get_commitments()
+                self.global_step = self.current_window - self.start_window
 
                 # Process the current window
                 await self.process_window()

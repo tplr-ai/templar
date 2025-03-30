@@ -127,6 +127,16 @@ class AggregationServer:
             job_type="aggregation",
         )
 
+        # Initialize metrics logger for InfluxDB if available
+        self.metrics_logger = tplr.metrics.MetricsLogger(
+            prefix="A",
+            uid=self.uid,
+            config=self.config,
+            role="aggregator",
+            group="aggregator",
+            job_type="aggregation",
+        )
+
         self.iteration_counter = 0
 
     async def get_current_window(
@@ -377,6 +387,28 @@ class AggregationServer:
 
             # Log to wandb
             self.wandb.log(aggregation_metrics, step=self.global_step)
+
+            self.metrics_logger.log(
+                measurement="aggregation_step",
+                tags={
+                    "window": self.sync_window - 1,
+                    "iteration": self.iteration_counter,
+                },
+                fields={
+                    "success_rate": gather_result.success_rate * 100,
+                    "peers_selected": len(selected_uids),
+                    "successful_peers": len(selected_uids)
+                    - len(gather_result.skipped_uids),
+                    "failed_peers": len(gather_result.skipped_uids),
+                    "gather_time": gather_time,
+                    "process_time": process_time,
+                    "put_time": store_time,
+                    "total_time": total_time,
+                    "selected_uids": str(selected_uids),
+                    "skipped_uids": str(gather_result.skipped_uids),
+                    "block": self.current_block,
+                },
+            )
 
             return True
 

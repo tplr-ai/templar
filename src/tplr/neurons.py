@@ -22,11 +22,14 @@ from typing import TYPE_CHECKING, TypeVar, cast
 import torch
 from torch._prims_common import DeviceLikeType
 
+import tplr
 from tplr.logging import logger
+
 
 if TYPE_CHECKING:
     from neurons.miner import Miner
     from neurons.validator import Validator
+    from neurons.aggregator import AggregationServer
 
 NeuronT = TypeVar("NeuronT", "Miner", "Validator")
 
@@ -87,6 +90,59 @@ def prepare_gradient_dict(miner, pages, step_window):
     logger.info(f"Attached metadata to gradient: {gradient['metadata']}")
 
     return gradient, xshapes, totalks, transmitted
+
+
+async def update_peers(
+    instance: NeuronT | "AggregationServer", window: int, peer_start: float
+) -> None:
+    # Get next peers
+    if (
+        instance.next_peers is None  # next peers are not fetched yet
+        and instance.peers_update_window  # they should be on bucket by now
+        + instance.hparams.peer_replacement_frequency
+        - window
+        < instance.hparams.peer_list_window_margin
+    ):
+        result = await instance.comms.get_peer_list()
+        if result is None:
+            logger.info("Unable to get peer list from bucket")
+        else:
+            next_peers, peers_update_window = result
+            logger.info(
+                f"Got peer list {next_peers} and update window "
+                f"{peers_update_window} from bucket"
+            )
+            if (
+                instance.peers_update_window is None
+                or peers_update_window > instance.peers_update_window
+            ):
+                instance.next_peers = next_peers
+                instance.peers_update_window = peers_update_window
+                logger.info("This list is new, updating next_peers")
+
+    # Update peers, if it's time
+    if instance.next_peers is not None and window >= instance.peers_update_window:
+        instance.comms.peers = instance.next_peers
+        late_text = (
+            f"{window - instance.peers_update_window} windows late"
+            if window - instance.peers_update_window > 0
+            else "on time"
+        )
+        logger.info(
+            f"{tplr.P(window, tplr.T() - peer_start)} Updated peers "
+            f"{late_text} - gather:{len(instance.comms.peers)}. Next update "
+            f"expected on step window "
+            f"{instance.peers_update_window + instance.hparams.peer_list_window_margin}"
+        )
+        instance.next_peers = None
+    else:
+        reason = (
+            "next peers are not defined yet"
+            if instance.next_peers is None
+            else f"sync window is {window} and peers update window "
+            f"is {instance.peers_update_window}"
+        )
+        logger.info(f"Not time to replace peers: {reason}")
 
 
 async def catchup_with_aggregation_server(

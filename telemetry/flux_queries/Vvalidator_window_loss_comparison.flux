@@ -1,6 +1,6 @@
 from(bucket: "tplr")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
-  |> filter(fn: (r) => r._measurement == "Vvalidator_window")
+  |> filter(fn: (r) => r._measurement == "Vvalidator_window_v2")
   |> filter(fn: (r) => r._field == "loss_own_before" or r._field == "loss_own_after" or r._field == "loss_random_before" or r._field == "loss_random_after")
   |> filter(fn: (r) => r["uid"] =~ /${uid:regex}/)
   |> filter(fn: (r) => r["role"] =~ /${role:regex}/)

@@ -17,6 +17,7 @@
 
 
 # Standard library
+import os
 import argparse
 import asyncio
 import json
@@ -41,6 +42,10 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Local
 import tplr
@@ -586,36 +591,38 @@ class Miner:
                 f"{tplr.P(step_window, tplr.T() - window_start)} Completed window iteration"
             )
 
-            # Add debug data including successfully gathered peers
-            debug_dict = {}
+            if os.environ.get("DEBUG", "").lower() == "true":
+                # Add debug data including successfully gathered peers
+                debug_dict = {}
 
-            # Add model parameters debug info
-            for name, param in self.model.named_parameters():
-                if (
-                    param is not None and param.numel() >= 2
-                ):  # Check if tensor has at least 2 elements
-                    debug_dict[name + "_debug"] = (
-                        param.flatten()[:2].detach().cpu().tolist()
+                # Add model parameters debug info
+                for name, param in self.model.named_parameters():
+                    if (
+                        param is not None and param.numel() >= 2
+                    ):  # Check if tensor has at least 2 elements
+                        debug_dict[name + "_debug"] = (
+                            param.flatten()[:2].detach().cpu().tolist()
+                        )
+
+                # Add successful peers information
+                if gather_result is not None:
+                    debug_dict["successful_peers"] = sorted(
+                        list(set(self.peers) - set(gather_result.skipped_uids))
                     )
+                    debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
 
-            # Add successful peers information
-            if gather_result is not None:
-                debug_dict["successful_peers"] = sorted(
-                    list(set(self.peers) - set(gather_result.skipped_uids))
+                # Store the debug dictionary
+                asyncio.create_task(
+                    self.comms.put(
+                        state_dict=debug_dict,
+                        uid=str(self.uid),
+                        window=step_window,
+                        key="debug",
+                        local=False,
+                    )
                 )
-                debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
+                tplr.logger.info(f"Stored debug values for window {self.current_window}")
 
-            # Store the debug dictionary
-            asyncio.create_task(
-                self.comms.put(
-                    state_dict=debug_dict,
-                    uid=str(self.uid),
-                    window=step_window,
-                    key="debug",
-                    local=False,
-                )
-            )
-            tplr.logger.info(f"Stored debug values for window {self.current_window}")
             # Log total window time and metrics
             tplr.logger.info(
                 f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"

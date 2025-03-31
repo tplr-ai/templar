@@ -537,14 +537,14 @@ async def test_scheduler_optimizer_sync_after_catch_up(dummy_components):
     expected_calls = ((current_window - checkpoint_start_window) - 2) + (
         current_window - checkpoint_current_window
     )
-    assert (
-        opt_calls == expected_calls
-    ), f"Expected {expected_calls} optimizer.step() calls, got {opt_calls}"
+    assert opt_calls == expected_calls, (
+        f"Expected {expected_calls} optimizer.step() calls, got {opt_calls}"
+    )
 
     # Also verify that the scheduler state is in sync: final scheduler.last_epoch should equal global_step.
-    assert (
-        sched_after.last_epoch == global_step
-    ), f"Expected scheduler.last_epoch ({sched_after.last_epoch}) to equal global_step ({global_step})"
+    assert sched_after.last_epoch == global_step, (
+        f"Expected scheduler.last_epoch ({sched_after.last_epoch}) to equal global_step ({global_step})"
+    )
 
     # TODO: In the future, consider patching scheduler.step as well to independently verify its call count.
 
@@ -762,9 +762,9 @@ async def test_checkpoint_save_and_load_cycle(dummy_components, tmp_path):
     assert success, "Checkpoint loading failed."
     # Expected global_step computed as: current_window - start_window (sync + catch-up handled inside)
     expected_global_step = current_window - start_window
-    assert (
-        loaded_global_step == expected_global_step
-    ), f"Expected global_step {expected_global_step}, got {loaded_global_step}"
+    assert loaded_global_step == expected_global_step, (
+        f"Expected global_step {expected_global_step}, got {loaded_global_step}"
+    )
 
     # Verify that model parameters are restored exactly
     for (k1, v1), (k2, v2) in zip(

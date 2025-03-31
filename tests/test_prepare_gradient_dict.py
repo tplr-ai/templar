@@ -115,9 +115,9 @@ def test_return_structure_and_types(caplog):
 
     # Instead of checking miner.logger.messages, use captured logs.
     expected_log_fragment = "Attached metadata to gradient:"
-    assert (
-        expected_log_fragment in caplog.text
-    ), f"Expected string '{expected_log_fragment}' not found in log:\n{caplog.text}"
+    assert expected_log_fragment in caplog.text, (
+        f"Expected string '{expected_log_fragment}' not found in log:\n{caplog.text}"
+    )
 
 
 def test_metadata_attachment():
@@ -141,9 +141,9 @@ def test_metadata_attachment():
 
     # Verify that gradient["metadata"] exactly equals the expected dictionary.
     expected_metadata = {"pages_info": pages, "window": step_window}
-    assert (
-        gradient.get("metadata") == expected_metadata
-    ), f"Metadata does not match. Expected: {expected_metadata}, Got: {gradient.get('metadata')}"
+    assert gradient.get("metadata") == expected_metadata, (
+        f"Metadata does not match. Expected: {expected_metadata}, Got: {gradient.get('metadata')}"
+    )
 
 
 def test_weight_decay_application():
@@ -289,9 +289,9 @@ def test_compressor_and_transformer_calls():
         expected_new_momentum,
         msg="compressor.compress argument (encoded tensor) does not match expected value.",
     )
-    assert (
-        recorded_topk == miner.hparams.topk_compression
-    ), f"Expected topk {miner.hparams.topk_compression}, but got {recorded_topk}."
+    assert recorded_topk == miner.hparams.topk_compression, (
+        f"Expected topk {miner.hparams.topk_compression}, but got {recorded_topk}."
+    )
 
     # Check that transformer.decode was called with the result of decompress,
     # which should be torch.tensor([0.2, 0.2]) in our DummyRecordingCompressor.
@@ -306,12 +306,12 @@ def test_compressor_and_transformer_calls():
     # Also verify that the returned dummy values from compressor.compress are in the output dictionaries.
     result = prepare_gradient_dict(miner, pages, step_window)
     gradient, xshapes, totalks, transmitted = result
-    assert (
-        gradient["weightidxs"] == "recorded_dummy_idxs"
-    ), "Gradient idxs not set correctly."
-    assert (
-        gradient["weightvals"] == "recorded_dummy_vals"
-    ), "Gradient vals not set correctly."
+    assert gradient["weightidxs"] == "recorded_dummy_idxs", (
+        "Gradient idxs not set correctly."
+    )
+    assert gradient["weightvals"] == "recorded_dummy_vals", (
+        "Gradient vals not set correctly."
+    )
     assert xshapes["weight"] == "recorded_dummy_xshape", "xshapes not set correctly."
     assert totalks["weight"] == "recorded_dummy_totalk", "totalks not set correctly."
 
@@ -416,9 +416,9 @@ def test_logging_behavior(caplog):
         prepare_gradient_dict(miner, pages, step_window)
 
     expected_str = f"Attached metadata to gradient: {{'pages_info': {pages}, 'window': {step_window}}}"
-    assert (
-        expected_str in caplog.text
-    ), f"Expected log message not found in logs: {caplog.text}"
+    assert expected_str in caplog.text, (
+        f"Expected log message not found in logs: {caplog.text}"
+    )
 
 
 def test_correct_use_of_scheduler_learning_rate():

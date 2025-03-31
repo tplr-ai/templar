@@ -2,7 +2,7 @@
 # System Setup and Hardening
 
 - name: Run setup to gather facts
-  setup: 
+  setup:
     gather_subset: all
 
 # Sudo configuration is now handled in the pre-task play
@@ -11,7 +11,7 @@
   package:
     update_cache: yes
   when: ansible_os_family == 'RedHat'
-  
+
 - name: Upgrade all packages
   package:
     name: "*"
@@ -34,7 +34,7 @@
   delay: 10
   until: deadsnakes_add is succeeded
   when: ansible_distribution == 'Ubuntu'
-  
+
 - name: Update apt cache (with increased timeout)
   apt:
     update_cache: yes
@@ -69,6 +69,42 @@
   delay: 10
   until: python_rhel_install is succeeded
   when: ansible_os_family == 'RedHat'
+
+- name: Install Rust toolchain (rustup)
+  shell: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  args:
+    creates: "{{ ansible_env.HOME }}/.cargo/bin/cargo"
+    executable: /bin/bash
+  changed_when: false
+
+- name: Ensure cargo in PATH for subsequent tasks
+  shell: "echo $PATH"
+  environment:
+    PATH: "{{ ansible_env.HOME }}/.cargo/bin:{{ ansible_env.PATH }}"
+  register: cargo_path
+  changed_when: false
+
+- name: Install PM2 (Node process manager)
+  become: true
+  npm:
+    name: pm2
+    global: yes
+    state: present
+
+- name: Install uv package installer
+  become: true
+  shell: |
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    PATH=$PATH:$HOME/.cargo/bin:$HOME/.local/bin
+    cp $(which uv 2>/dev/null || echo "/root/.cargo/bin/uv") /usr/local/bin/uv || true
+    chmod +x /usr/local/bin/uv
+  args:
+    executable: /bin/bash
+
+- name: Verify uv installation
+  shell: which uv
+  register: uv_which
+  changed_when: false
 
 # System configuration continues here
 
@@ -110,7 +146,7 @@
   command: fallocate -l {{ swap_size }}G /swapfile
   args:
     creates: /swapfile
-  when: 
+  when:
     - not swap_file_check.stat.exists
     - swap_size is defined and swap_size > 0
 
@@ -120,7 +156,7 @@
     owner: root
     group: root
     mode: '0600'
-  when: 
+  when:
     - swap_file_check.stat is defined and swap_file_check.stat.exists
     - swap_size is defined and swap_size > 0
 
@@ -128,14 +164,14 @@
   command: mkswap /swapfile
   args:
     creates: /proc/swaps
-  when: 
+  when:
     - swap_file_check.stat is defined and swap_file_check.stat.exists
     - swap_size is defined and swap_size > 0
   register: mkswap_result
 
 - name: Enable swap
   command: swapon /swapfile
-  when: 
+  when:
     - swap_file_check.stat is defined and swap_file_check.stat.exists
     - swap_size is defined and swap_size > 0
     - mkswap_result is defined and mkswap_result.changed
@@ -145,7 +181,7 @@
     path: /etc/fstab
     line: "/swapfile none swap sw 0 0"
     state: present
-  when: 
+  when:
     - swap_file_check.stat is defined and swap_file_check.stat.exists
     - swap_size is defined and swap_size > 0
 
@@ -193,7 +229,7 @@
 
 - name: Install additional PyTorch components
   pip:
-    name: 
+    name:
       - "torchvision"
       - "torchaudio"
     extra_args: "--index-url https://download.pytorch.org/whl/cu{{ pytorch_cuda_version | replace('.', '') }}"

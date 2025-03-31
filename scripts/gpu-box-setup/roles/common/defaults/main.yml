@@ -11,7 +11,7 @@ install_monitoring: true
 
 # Performance Tuning
 vm_swappiness: 10
-vm_nr_hugepages: 128 
+vm_nr_hugepages: 128
 tcp_rmem_max: 16777216
 tcp_wmem_max: 16777216
 
@@ -38,8 +38,18 @@ essential_packages:
   - ncdu
   - iputils-ping
   - build-essential
+  - make
   - cmake
   - pkg-config
+  - less
+  - clang
+  - libssl-dev
+  - llvm
+  - libudev-dev
+  - protobuf-compiler
+  - python3-pip
+  - nodejs
+  - npm
 
 # Monitoring packages
 monitoring_packages:
@@ -47,6 +57,8 @@ monitoring_packages:
   - htop
   - iotop
   - dstat
+  - btm
+  - nvtop
 
 # AI development Python packages
 ai_python_packages:

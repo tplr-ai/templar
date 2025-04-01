@@ -277,9 +277,9 @@ async def test_seed_consistency():
     batch2 = torch.tensor(next(iter(loader2)))
 
     # Test content consistency
-    assert torch.equal(batch1, batch2), (
-        "Same seed should produce identical batch content"
-    )
+    assert torch.equal(
+        batch1, batch2
+    ), "Same seed should produce identical batch content"
 
     # Test seed range
     seeds = [random.randint(0, 10000) for _ in range(10)]
@@ -377,9 +377,9 @@ async def test_retry_mechanism_success(monkeypatch):
     assert isinstance(tokens, list), "Tokens should be a list"
     assert len(tokens) > 0, "Tokens list should not be empty"
     # The DummyFS should have failed exactly 2 times before succeeding.
-    assert dummy_fs.call_count == 2, (
-        "DummyFS did not simulate the expected number of transient errors"
-    )
+    assert (
+        dummy_fs.call_count == 2
+    ), "DummyFS did not simulate the expected number of transient errors"
 
 
 # --- Test: Persistent failure raises exception ---

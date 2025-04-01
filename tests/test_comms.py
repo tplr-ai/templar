@@ -339,9 +339,9 @@ async def test_gather_basic_functionality(comms_instance):
     aggregated = result.state_dict.__dict__
     for key in ["0.weightidxs", "0.weightvals"]:
         assert key in aggregated, f"Expected key {key} in aggregated state_dict"
-        assert len(aggregated[key]) == 2, (
-            f"Expected 2 tensors for key {key}, got {len(aggregated[key])}"
-        )
+        assert (
+            len(aggregated[key]) == 2
+        ), f"Expected 2 tensors for key {key}, got {len(aggregated[key])}"
 
 
 @pytest.mark.asyncio
@@ -596,9 +596,9 @@ async def test_gather_averaging(comms_instance):
     aggregated = result.state_dict.__dict__
     for key in ["layer.idxs", "layer.vals"]:
         assert key in aggregated, f"Expected key {key} in state_dict"
-        assert len(aggregated[key]) == 2, (
-            f"Expected 2 tensors for key {key}, got {len(aggregated[key])}"
-        )
+        assert (
+            len(aggregated[key]) == 2
+        ), f"Expected 2 tensors for key {key}, got {len(aggregated[key])}"
 
 
 async def test_gather_complex_normalization(comms_instance):
@@ -688,9 +688,9 @@ async def test_gather_complex_normalization(comms_instance):
     # Floating point comparisons with tolerances.
     assert torch.allclose(actual_vals, expected_vals, rtol=1e-3, atol=1e-3)
     # Additional assertions to verify that all peers were processed.
-    assert len(normalized_tensors) == 3, (
-        f"Expected 3 normalized tensors, got {len(normalized_tensors)}"
-    )
+    assert (
+        len(normalized_tensors) == 3
+    ), f"Expected 3 normalized tensors, got {len(normalized_tensors)}"
     assert len(result.uids) == 3, f"Expected 3 valid UIDs, got {len(result.uids)}"
 
 
@@ -1658,9 +1658,9 @@ async def test_missing_idxs_key(comms_instance, model):
         "uid2",
         "uid3",
     ], f"Expected valid_uids ['uid2', 'uid3'], got {result.uids}"
-    assert result.skipped_uids == ["uid1"], (
-        f"Expected skipped_uids ['uid1'], got {result.skipped_uids}"
-    )
+    assert result.skipped_uids == [
+        "uid1"
+    ], f"Expected skipped_uids ['uid1'], got {result.skipped_uids}"
     # Global steps should match those from valid responses.
     assert result.global_steps == [
         20,
@@ -1673,15 +1673,15 @@ async def test_missing_idxs_key(comms_instance, model):
         key_vals = name + "vals"
         assert key_vals in aggregated, f"Missing aggregated key {key_vals}"
         tensor_list = aggregated[key_vals]
-        assert len(tensor_list) == 2, (
-            f"Expected 2 tensors in {key_vals}, got {len(tensor_list)}"
-        )
+        assert (
+            len(tensor_list) == 2
+        ), f"Expected 2 tensors in {key_vals}, got {len(tensor_list)}"
         # Verify each tensor gets normalized (norm approx. 1).
         for tensor in tensor_list:
             norm = torch.norm(tensor)
-            assert torch.isclose(norm, torch.tensor(1.0, device=device), atol=1e-5), (
-                f"Tensor in {key_vals} is not normalized: norm = {norm}"
-            )
+            assert torch.isclose(
+                norm, torch.tensor(1.0, device=device), atol=1e-5
+            ), f"Tensor in {key_vals} is not normalized: norm = {norm}"
 
     # Confirm the download_bytes metric is computed.
     assert result.download_bytes > 0, "Expected download_bytes to be > 0"
@@ -2151,25 +2151,25 @@ async def test_update_peers_with_buckets(comms_instance):
 
     # 6. Verify the results:
     #    a) No one should be newly inactive, since all old eval_peers are still active.
-    assert comms_instance.inactive_peers == set(), (
-        f"Expected no newly inactive peers, got: {comms_instance.inactive_peers}"
-    )
+    assert (
+        comms_instance.inactive_peers == set()
+    ), f"Expected no newly inactive peers, got: {comms_instance.inactive_peers}"
 
     #    b) eval_peers must filter out stake>1000, so peer #1 is excluded.
     #       That leaves UIDs 0,2,3. Keep old counters for 0,2 => 2,1; new peer 3 => default=1
     expected_eval_peers = {0: 2, 2: 1, 3: 1}
     actual_eval_dict = dict(comms_instance.eval_peers)
-    assert actual_eval_dict == expected_eval_peers, (
-        f"eval_peers mismatch.\nExpected: {expected_eval_peers}\nGot: {actual_eval_dict}"
-    )
+    assert (
+        actual_eval_dict == expected_eval_peers
+    ), f"eval_peers mismatch.\nExpected: {expected_eval_peers}\nGot: {actual_eval_dict}"
 
     #    c) aggregator peers should be top 2 by incentive among (0->5, 2->10, 3->1).
     #       Incentives sorted desc => (2->10), (0->5), (3->1).
     #       topk_peers=50% of length=3 => 1, but we do max(minimum_peers=2,1)=2 => top2 => [2,0]
     expected_peers = [2, 0]
-    assert comms_instance.peers == expected_peers, (
-        f"Aggregator peers mismatch.\nExpected: {expected_peers}\nGot: {comms_instance.peers}"
-    )
+    assert (
+        comms_instance.peers == expected_peers
+    ), f"Aggregator peers mismatch.\nExpected: {expected_peers}\nGot: {comms_instance.peers}"
 
 
 # Time-based Filtering Tests for comms.s3_get_object
@@ -2392,9 +2392,9 @@ async def test_s3_get_object_before_time_min(comms_instance):
         # Print all captured debug messages to help diagnose
         print("Debug messages captured:", debug_messages)
 
-        assert any(expected_msg in msg for msg in debug_messages), (
-            f"Expected debug message not found. Captured messages: {debug_messages}"
-        )
+        assert any(
+            expected_msg in msg for msg in debug_messages
+        ), f"Expected debug message not found. Captured messages: {debug_messages}"
 
     finally:
         # Restore the original method
@@ -2472,9 +2472,9 @@ async def test_s3_get_object_after_time_max(comms_instance):
         )
         debug_messages = [call.args[0] for call in mock_debug.call_args_list]
 
-        assert any(expected_msg in msg for msg in debug_messages), (
-            f"Expected debug message not found. Captured messages: {debug_messages}"
-        )
+        assert any(
+            expected_msg in msg for msg in debug_messages
+        ), f"Expected debug message not found. Captured messages: {debug_messages}"
 
     finally:
         # Restore the original method
@@ -2518,9 +2518,9 @@ async def test_s3_get_object_none_time_bounds(comms_instance):
         )
 
         # Verify result contains the expected data
-        assert result == {"test": "data"}, (
-            "Object should be retrieved when time bounds are None"
-        )
+        assert result == {
+            "test": "data"
+        }, "Object should be retrieved when time bounds are None"
 
     finally:
         # Restore the original method
@@ -2592,9 +2592,9 @@ async def test_s3_get_object_timezone_aware_dates(comms_instance):
         )
 
         # Verify result contains the expected data
-        assert result == {"test": "data"}, (
-            "Object should be retrieved with timezone-aware dates"
-        )
+        assert result == {
+            "test": "data"
+        }, "Object should be retrieved with timezone-aware dates"
 
     finally:
         # Restore the original method
@@ -2666,9 +2666,9 @@ async def test_s3_get_object_timezone_naive_dates(comms_instance):
         )
 
         # Verify result contains the expected data
-        assert result == {"test": "data"}, (
-            "Object should be retrieved with timezone normalization"
-        )
+        assert result == {
+            "test": "data"
+        }, "Object should be retrieved with timezone normalization"
 
     finally:
         # Restore the original method
@@ -2725,9 +2725,9 @@ async def test_s3_get_object_missing_last_modified(comms_instance):
 
         # Verify our debug message was logged
         debug_messages = [call.args[0] for call in mock_debug.call_args_list]
-        assert any("Object does not exist" in msg for msg in debug_messages), (
-            "Expected debug message about missing LastModified not found"
-        )
+        assert any(
+            "Object does not exist" in msg for msg in debug_messages
+        ), "Expected debug message about missing LastModified not found"
 
     finally:
         # Restore the original method
@@ -2809,9 +2809,9 @@ async def test_s3_get_object_exact_time_boundaries(comms_instance):
         )
 
         # Should pass when timestamp is equal to time_min
-        assert result1 == {"test": "data"}, (
-            "Object with timestamp equal to time_min should be retrieved"
-        )
+        assert result1 == {
+            "test": "data"
+        }, "Object with timestamp equal to time_min should be retrieved"
 
         # Case 2: LastModified exactly equal to time_max (should pass)
         test_case = "time_max"
@@ -2824,9 +2824,9 @@ async def test_s3_get_object_exact_time_boundaries(comms_instance):
         )
 
         # Should pass when timestamp is equal to time_max
-        assert result2 == {"test": "data"}, (
-            "Object with timestamp equal to time_max should be retrieved"
-        )
+        assert result2 == {
+            "test": "data"
+        }, "Object with timestamp equal to time_max should be retrieved"
 
     finally:
         # Restore the original method
@@ -2907,12 +2907,12 @@ async def test_s3_get_object_gather_integration(comms_instance):
 
         # Verify debug message shows time bounds were passed correctly
         debug_messages = [call.args[0] for call in mock_debug.call_args_list]
-        assert any(f"time_min={time_min}" in msg for msg in debug_messages), (
-            f"Expected debug message with time_min not found in: {debug_messages}"
-        )
-        assert any(f"time_max={time_max}" in msg for msg in debug_messages), (
-            f"Expected debug message with time_max not found in: {debug_messages}"
-        )
+        assert any(
+            f"time_min={time_min}" in msg for msg in debug_messages
+        ), f"Expected debug message with time_min not found in: {debug_messages}"
+        assert any(
+            f"time_max={time_max}" in msg for msg in debug_messages
+        ), f"Expected debug message with time_max not found in: {debug_messages}"
 
     finally:
         # Restore the original method

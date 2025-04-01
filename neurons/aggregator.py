@@ -75,7 +75,9 @@ class AggregationServer:
 
         try:
             version = tplr.__version__
-            tplr.setup_loki_logger(version=version, uid=str(self.uid))
+            tplr.setup_loki_logger(
+                service="aggregator", uid=str(self.uid), version=version
+            )
             tplr.logger.info(f"Loki logging enabled for aggregator UID: {self.uid}")
         except Exception as e:
             tplr.logger.warning(f"Failed to initialize Loki logging: {e}")

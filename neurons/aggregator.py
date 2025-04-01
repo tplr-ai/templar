@@ -139,6 +139,10 @@ class AggregationServer:
 
         self.iteration_counter = 0
 
+        # Initialize peer related attributes
+        self.next_peers: tplr.comms.PeerArray | None = None
+        self.peers_update_window = -1
+
     async def get_current_window(
         self, wait_for_completion=True
     ) -> tuple[int, datetime, datetime]:
@@ -242,7 +246,10 @@ class AggregationServer:
             )
 
         # Use comms to select gather peers
-        self.comms.set_gather_peers()
+        peer_start = tplr.T()
+        await tplr.neurons.update_peers(
+            instance=self, window=self.sync_window - 1, peer_start=peer_start
+        )
         selected_uids = self.comms.peers
 
         tplr.logger.info(
@@ -438,7 +445,6 @@ class AggregationServer:
         self.comms.current_window = self.current_window
 
         self.comms.commitments = await self.comms.get_commitments()
-        self.comms.set_gather_peers()
         self.start_window = await self.comms.get_start_window()
         self.global_step = self.current_window - self.start_window
 

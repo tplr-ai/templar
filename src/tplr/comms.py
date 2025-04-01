@@ -21,6 +21,7 @@ import re
 import math
 import json
 import time
+import numpy as np
 import torch
 import asyncio
 import aiofiles
@@ -41,7 +42,7 @@ import tplr as tplr
 # from .hparams import HParams
 
 from types import SimpleNamespace
-from typing import Tuple
+from typing import Any, Tuple
 from transformers import LlamaForCausalLM
 from torch.optim import SGD
 from torch.optim.lr_scheduler import SequentialLR
@@ -51,6 +52,10 @@ from .compress import TransformDCT, CompressDCT
 # Constants
 CF_REGION_NAME: str = "enam"
 LOCAL_TMP_DIR = "/tmp/local_store"
+PEERS_FILE_PREFIX = "peers_"
+
+# Types
+PeerArray = np.ndarray[Any, np.dtype[np.int64]]
 
 
 class Comms(ChainManager):
@@ -1397,8 +1402,50 @@ class Comms(ChainManager):
             tplr.logger.error(f"Failed to load checkpoint: {e}")
             return False, {}, 0, optimizer, scheduler
 
-    # Start Window Operations
+    async def post_peer_list(
+        self,
+        peers: PeerArray,
+        first_effective_window: int,
+        sync_window: int,
+        weights: torch.Tensor,
+        initial_selection: bool,
+    ):
+        """Upload peer list and debug data as JSON to the node's R2 bucket.
 
+        The first_effective_window is a future window (>current_window) from
+        which this list peer list will be used.
+
+        The following debugging fields are included in the JSON:
+        - sync_window: when the peer list was updated in "validator time"
+        - weights: weights for all UIDs, which were used to update the peer
+          list (except for during the initial peer selection)
+        - initial selection: whether this peer list is the first one in the
+          current run
+        """
+        key = f"{PEERS_FILE_PREFIX}{first_effective_window}_v{__version__}.json"
+        peers_and_weights = {
+            "peers": peers.tolist(),
+            "weights": weights.tolist(),
+            "initial_selection": initial_selection,
+            "sync_window": sync_window,
+            "first_effective_window": first_effective_window,
+        }
+
+        # Create temporary JSON file
+        temp_file = os.path.join(self.temp_dir, f"temp_{key}")
+        try:
+            async with aiofiles.open(temp_file, "w") as f:
+                await f.write(json.dumps(peers_and_weights))
+
+            await self.s3_put_object(key=key, file_path=temp_file)
+            tplr.logger.info(f"PUT {key} <--")
+        except Exception as e:
+            tplr.logger.info(f"Failed to upload peer list: {e}")
+        finally:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+
+    # Start Window Operations
     async def post_start_window(self, start_window: int):
         """Upload the start window as a JSON object to the node's R2 bucket."""
         key = f"start_window_v{__version__}.json"
@@ -1414,6 +1461,88 @@ class Comms(ChainManager):
         finally:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
+
+    async def get_peer_list(self) -> tuple[PeerArray, int] | None:
+        tplr.logger.info("Starting to look for a peer list on a validator bucket")
+        while True:
+            try:
+                (
+                    validator_bucket,
+                    validator_uid,
+                ) = await self._get_highest_stake_validator_bucket()
+                if validator_bucket is None:
+                    tplr.logger.warning(
+                        "No highest staked validator bucket found. Retrying in 10 seconds."
+                    )
+                    await asyncio.sleep(10)
+                    continue
+
+                tplr.logger.info(
+                    f"Attempting to fetch peer list from UID {validator_uid} bucket {validator_bucket.name}"
+                )
+
+                session = get_session()
+                async with session.create_client(
+                    "s3",
+                    endpoint_url=self.get_base_url(
+                        BUCKET_SECRETS["gradients"]["account_id"]
+                    ),
+                    region_name=CF_REGION_NAME,
+                    config=client_config,
+                    aws_access_key_id=BUCKET_SECRETS["gradients"]["credentials"][
+                        "write"
+                    ]["access_key_id"],
+                    aws_secret_access_key=BUCKET_SECRETS["gradients"]["credentials"][
+                        "write"
+                    ]["secret_access_key"],
+                ) as s3_client:
+                    list_args = {
+                        "Bucket": BUCKET_SECRETS["gradients"]["name"],
+                        "Prefix": "peers_",
+                    }
+                    response = await s3_client.list_objects_v2(**list_args)
+
+                pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{__version__}\.json$"
+                # Filter keys that match the pattern
+                keys = [
+                    obj["Key"]
+                    for obj in response.get("Contents", [])
+                    if re.match(pattern, obj["Key"])
+                ]
+                if len(keys) == 0:
+                    tplr.logger.info("No peer list files found")
+                    return None
+                max_window = -1
+                selected_key = None
+                for key in keys:
+                    match = re.match(pattern, key)
+                    if match:
+                        window = int(match.group("window"))
+                        if window > max_window:
+                            max_window = window
+                            selected_key = key
+                if selected_key is None:
+                    tplr.logger.error(
+                        f"Failed to select most recent peers file on bucket. First "
+                        f"{len(keys[:5])} peer list files are {keys[:5]}"
+                    )
+                    return None
+                else:
+                    # get the file
+                    peers_data = await self.s3_get_object(
+                        key=selected_key, bucket=validator_bucket
+                    )
+                    if isinstance(peers_data, dict):
+                        peers_dict = peers_data
+                    else:
+                        # If it's bytes, decode and load JSON
+                        peers_dict = json.loads(peers_data.decode("utf-8"))
+                    return np.array(peers_dict["peers"]), peers_dict[
+                        "first_effective_window"
+                    ]
+            except Exception as e:
+                tplr.logger.error(f"Error fetching start_window: {e}")
+                await asyncio.sleep(10)
 
     async def get_start_window(self) -> int:
         while True:

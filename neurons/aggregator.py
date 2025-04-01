@@ -15,19 +15,20 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-import asyncio
 import argparse
+import asyncio
+import gc
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import cast
-from bittensor.core.subtensor import ScaleObj
+
 import bittensor as bt
-from datetime import datetime, timezone, timedelta
-import gc
+from bittensor.core.subtensor import ScaleObj
+from transformers import LlamaConfig, LlamaForCausalLM
 
 # Import tplr functions
 import tplr
-from transformers import LlamaConfig, LlamaForCausalLM
 
 
 class AggregationServer:
@@ -71,6 +72,13 @@ class AggregationServer:
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+
+        try:
+            version = tplr.__version__
+            tplr.setup_loki_logger(version=version, uid=str(self.uid))
+            tplr.logger.info(f"Loki logging enabled for aggregator UID: {self.uid}")
+        except Exception as e:
+            tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
         # Initialize model for gradient processing
         self.model_config = LlamaConfig(

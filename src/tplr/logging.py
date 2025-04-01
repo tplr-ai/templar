@@ -16,11 +16,25 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Global imports
-import time
+import json
 import logging
-from rich.logging import RichHandler
-from rich.highlighter import NullHighlighter
+import os
+import socket
+import time
+import uuid
+from datetime import datetime
+from multiprocessing.queues import Queue
+from typing import Final
+
 import bittensor as bt
+from logging_loki import LokiQueueHandler
+from rich.highlighter import NullHighlighter
+from rich.logging import RichHandler
+
+LOKI_URL: Final[str] = os.environ.get(
+    "LOKI_URL", "https://logs.tplr.ai/loki/api/v1/push"
+)
+TRACE_ID: Final[str] = str(uuid.uuid4())
 
 
 def T() -> float:
@@ -130,4 +144,88 @@ logger.addHandler(
     )
 )
 
-__all__ = ["logger", "debug", "trace", "P", "T"]
+
+def setup_loki_logger(
+    service: str,
+    uid: str,
+    version: str,
+    environment="finney",
+    url=LOKI_URL,
+):
+    """
+    Hijack the templar logger with Loki logging.
+
+    Args:
+        uid: UID identifier for filtering logs
+        version: Version identifier for filtering logs
+        url: Loki server URL
+    """
+
+    host = socket.gethostname()
+    pid = os.getpid()
+
+    class StructuredLogFormatter(logging.Formatter):
+        """Custom formatter that outputs logs in a structured format with metadata."""
+
+        def format(self, record: logging.LogRecord) -> str:
+            log_data = {
+                "timestamp": datetime.fromtimestamp(record.created).isoformat(),
+                "level": record.levelname,
+                "logger": record.name,
+                "message": record.getMessage(),
+                "pathname": record.pathname,
+                "filename": record.filename,
+                "module": record.module,
+                "lineno": record.lineno,
+                "exc_info": record.exc_info,
+                "funcName": record.funcName,
+                "stack_info": record.stack_info,
+                "thread": record.threadName,
+                "thread_id": record.thread,
+                "time": T(),
+                "host": host,
+                "pid": pid,
+                "process": pid,
+                "trace_id": TRACE_ID,
+                "service": service,
+                "environment": environment,
+                "version": version,
+                "uid": uid,
+                # this duplication is needed for loki to work with labels
+                "severity": record.levelname.lower(),
+                "tags": {
+                    "service": service,
+                    "environment": environment,
+                    "version": version,
+                    "uid": uid,
+                },
+            }
+
+            return json.dumps(log_data)
+
+    try:
+        log_queue = Queue(-1)
+
+        loki_handler = LokiQueueHandler(
+            queue=log_queue,  # type: ignore
+            url=url,
+            tags={},
+            version="1",
+            # TODO Add auth=(username, password) when available
+            auth=None,
+        )
+
+        loki_handler.setFormatter(StructuredLogFormatter())
+
+        loki_handler.setLevel(logger.level)
+
+        loki_handler.addFilter(NoSubtensorWarning())
+
+        logger.addHandler(loki_handler)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to add Loki logging: {e}")
+        return False
+
+
+__all__ = ["logger", "debug", "trace", "P", "T", "setup_loki_logger"]

@@ -25,22 +25,22 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 import bittensor as bt
 import numpy as np
-from typing import cast
+import torch
 
 # Third party
 from bittensor.core.subtensor import ScaleObj
-import torch
-from torch.optim import SGD
 from torch import autocast
-from transformers import LlamaForCausalLM
+from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
     LinearLR,
     SequentialLR,
 )
+from transformers import LlamaForCausalLM
 
 # Local
 import tplr
@@ -110,6 +110,13 @@ class Miner:
             )
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+
+        try:
+            version = tplr.__version__
+            tplr.setup_loki_logger(version=version, uid=str(self.uid))
+            tplr.logger.info(f"Loki logging enabled for miner UID: {self.uid}")
+        except Exception as e:
+            tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)

@@ -44,6 +44,26 @@ def load_bucket_secrets():
                 },
             },
         },
+        "aggregator": {
+            "account_id": os.environ.get("R2_AGGREGATOR_ACCOUNT_ID"),
+            "name": os.environ.get("R2_AGGREGATOR_BUCKET_NAME"),
+            "credentials": {
+                "read": {
+                    "access_key_id": os.environ.get("R2_AGGREGATOR_READ_ACCESS_KEY_ID"),
+                    "secret_access_key": os.environ.get(
+                        "R2_AGGREGATOR_READ_SECRET_ACCESS_KEY"
+                    ),
+                },
+                "write": {
+                    "access_key_id": os.environ.get(
+                        "R2_AGGREGATOR_WRITE_ACCESS_KEY_ID"
+                    ),
+                    "secret_access_key": os.environ.get(
+                        "R2_AGGREGATOR_WRITE_SECRET_ACCESS_KEY"
+                    ),
+                },
+            },
+        },
         "dataset": {
             "account_id": os.environ.get("R2_DATASET_ACCOUNT_ID"),
             "name": os.environ.get("R2_DATASET_BUCKET_NAME"),
@@ -71,6 +91,10 @@ def load_bucket_secrets():
         "R2_GRADIENTS_READ_SECRET_ACCESS_KEY",
         "R2_GRADIENTS_WRITE_ACCESS_KEY_ID",
         "R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY",
+        "R2_AGGREGATOR_ACCOUNT_ID",
+        "R2_AGGREGATOR_BUCKET_NAME",
+        "R2_AGGREGATOR_READ_ACCESS_KEY_ID",
+        "R2_AGGREGATOR_READ_SECRET_ACCESS_KEY",
         "R2_DATASET_ACCOUNT_ID",
         "R2_DATASET_BUCKET_NAME",
         "R2_DATASET_READ_ACCESS_KEY_ID",

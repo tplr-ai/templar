@@ -112,9 +112,10 @@ def pytest_configure(config):
     setup_test_environment()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def mock_wallet():
     """Provide a standard mock wallet"""
+    from tests.mocks import MockWallet
     return MockWallet()
 
 
@@ -256,8 +257,8 @@ async def comms_instance():
 
 @pytest.fixture(autouse=True)
 def enable_tplr_logger_propagation():
-    tplr.logging.logger.setLevel("INFO")
-    tplr.logging.logger.propagate = True
+    tplr.logger.setLevel("INFO")
+    tplr.logger.propagate = True
 
 
 @pytest.fixture(scope="session")
@@ -270,14 +271,16 @@ def hparams():
 
 
 @pytest.fixture(autouse=True)
-def cleanup_torch_state():
+async def cleanup_torch_state():
     """Reset PyTorch state between tests"""
     yield
     # Clear any cached tensors
     torch.cuda.empty_cache()
+    # Briefly yield to let any pending async tasks finish.
+    import asyncio
+    await asyncio.sleep(0.01)
     # Force garbage collection
     import gc
-
     gc.collect()
 
 
@@ -298,15 +301,20 @@ def initialize_torch_once():
         _TORCH_OPERATORS_INITIALIZED = True
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def storage_manager(temp_dirs, mock_wallet):
     """
-    Create a StorageManager instance for testing.
-    Uses the temporary directory from temp_dirs and the mock_wallet fixture.
+    Create a singleton StorageManager instance for testing.
+    Uses create_storage_manager with use_mock=True to prevent external S3 calls.
     """
-    from tplr.storage import StorageManager  # Import the real StorageManager
-
+    from tplr.storage import create_storage_manager
     temp_dir, save_location = temp_dirs
-    return StorageManager(
-        temp_dir=temp_dir, save_location=save_location, wallet=mock_wallet
-    )
+    return create_storage_manager(temp_dir, save_location, wallet=mock_wallet, use_mock=True)
+
+
+@pytest.fixture(scope="session")
+def temp_dirs():
+    # Implementation of the fixture (ensure this returns a tuple: (temp_dir, save_location))
+    temp_dir = "/tmp/test_temp_dir"
+    save_location = "/tmp/test_save_location"
+    yield (temp_dir, save_location)

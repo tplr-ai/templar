@@ -20,8 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-
-__version__ = "0.2.49"
+__version__ = "0.2.61tty"
 
 
 from .logging import logger, debug
@@ -39,3 +38,4 @@ from .neurons import *
 from .r2_dataset import *
 from .hparams import *
 from .wandb import initialize_wandb
+from .metrics import *

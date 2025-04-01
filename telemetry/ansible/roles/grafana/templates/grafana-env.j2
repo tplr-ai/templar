@@ -1,0 +1,17 @@
+# Basic environment configuration for Grafana
+CONF_FILE=/etc/grafana/grafana.ini
+CONF_DIR=/etc/grafana
+DATA_DIR={{ grafana_data_dir }}
+PLUGINS_DIR={{ grafana_plugins_dir }}
+LOG_DIR={{ grafana_logs_dir }}
+PID_FILE_DIR=/var/run/grafana
+
+# Authentication settings for anonymous access
+GF_AUTH_ANONYMOUS_ENABLED={{ grafana_auth_anonymous_enabled }}
+GF_AUTH_ANONYMOUS_ORG_NAME="{{ grafana_auth_anonymous_org_name }}"
+GF_AUTH_ANONYMOUS_ORG_ROLE="{{ grafana_auth_anonymous_org_role }}"
+GF_AUTH_ANONYMOUS_HIDE_VERSION={{ grafana_auth_anonymous_hide_version }}
+GF_AUTH_DISABLE_LOGIN_FORM={{ grafana_disable_login_form }}
+
+# Dashboard settings
+GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH={{ grafana_dashboards_local_path }}/{{ grafana_home_dashboard }}.json

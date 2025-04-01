@@ -8,7 +8,10 @@ from unittest.mock import AsyncMock
 class MockStorageManager(BaseMock):
     """Mock implementation of StorageManager for testing"""
 
-    def __init__(self, temp_dir=None, save_location=None, wallet=None):
+    # Class-level AsyncMock to track s3_head_object calls
+    s3_head_object = AsyncMock(return_value=True)
+
+    def __init__(self, temp_dir=None, save_location=None, wallet=None, active: bool = False):
         super().__init__()
         self.temp_dir = temp_dir or "/tmp/mock_temp"
         self.save_location = save_location or "/tmp/mock_save"
@@ -28,7 +31,9 @@ class MockStorageManager(BaseMock):
         self._cleanup_temp_file = AsyncMock()
         self.s3_put_object = AsyncMock(return_value=True)
         self.s3_get_object = AsyncMock(return_value=None)
-        self.s3_head_object = AsyncMock(return_value=False)
+
+        # Update the class-level s3_head_object's return value based on active flag.
+        type(self).s3_head_object.return_value = True if active else False
 
     async def s3_put_object(self, key, data, bucket=None, content_type=None):
         """Mock S3 upload operation"""
@@ -38,7 +43,5 @@ class MockStorageManager(BaseMock):
         self, key, bucket=None, timeout=10, time_min=None, time_max=None
     ):
         """Mock S3 download operation with time window support"""
-        # Return success status and empty dict to simulate download
         import torch
-
         return {"success": True, "data": {"test": torch.tensor([1.0])}}, 1

@@ -1,0 +1,17 @@
+[Unit]
+Description=Templar Version API
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=/opt/templar
+ExecStart=/opt/templar/venv/bin/python /opt/templar/version_api.py
+StandardOutput=append:/var/log/templar-version-api.log
+StandardError=append:/var/log/templar-version-api.log
+Restart=always
+RestartSec=5
+SyslogIdentifier=templar-version-api
+
+[Install]
+WantedBy=multi-user.target

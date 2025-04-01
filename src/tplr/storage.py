@@ -15,12 +15,14 @@ from aiobotocore.session import get_session
 class StorageManager:
     """Handles all storage operations, both local and remote"""
 
-    def __init__(self, temp_dir, save_location, wallet=None):
+    def __init__(self, temp_dir, save_location, wallet=None, s3_client=None):
         self.temp_dir = temp_dir
         self.save_location = save_location
         self.wallet = wallet
         self.session = get_session()
         self.lock = asyncio.Lock()
+        # Allow injection of an S3 client (useful for tests).
+        self.s3_client = s3_client
 
     async def store_local(self, state_dict, uid, window, key):
         """Store data in local filesystem"""
@@ -38,7 +40,7 @@ class StorageManager:
             logger.error(f"Error storing local data: {e}")
             return False
 
-    async def store_remote(self, state_dict, uid, window, key, bucket):
+    async def store_remote(self, state_dict, uid, window, key, bucket, global_step=None):
         """Store data in remote bucket"""
         if bucket is None:
             logger.error("Cannot store remotely: no bucket provided")
@@ -52,9 +54,7 @@ class StorageManager:
             torch.save(state_dict, temp_path)
 
             # Upload to S3
-            success = await self.s3_put_object(
-                key=filename, file_path=temp_path, bucket=bucket
-            )
+            success = await self.s3_put_object(key=filename, file_path=temp_path, bucket=bucket)
 
             # Clean up temp file
             asyncio.create_task(self._cleanup_temp_file(temp_path))
@@ -118,7 +118,7 @@ class StorageManager:
         bucket,
         timeout=30,
         stale_retention=10,
-        time_min=None,
+        time_min=None, 
         time_max=None,
     ):
         """Get data from remote bucket"""
@@ -278,50 +278,42 @@ class StorageManager:
 
     # S3 operations
     async def s3_head_object(self, key: str, bucket, timeout=10) -> bool:
-        """Check if an object exists in S3 using a HEAD request."""
+        """Check if an object exists in S3 using a HEAD request asynchronously."""
         if bucket is None:
             logger.error("Cannot perform head: no bucket provided")
             return False
 
         try:
-            import boto3
             from botocore.client import Config
 
-            # Create a properly configured S3 client for Cloudflare R2
             s3_config = Config(
                 region_name="auto",
                 signature_version="s3v4",
                 max_pool_connections=256,
                 retries={"max_attempts": 3, "mode": "standard"},
             )
-
-            # Create client with proper endpoint URL format
-            s3_client = boto3.client(
-                "s3",
+            client_params = dict(
                 endpoint_url=f"https://{bucket.account_id}.r2.cloudflarestorage.com",
                 aws_access_key_id=bucket.access_key_id,
                 aws_secret_access_key=bucket.secret_access_key,
                 config=s3_config,
             )
 
-            # Use head_object API call instead of raw HTTP
-            s3_client.head_object(Bucket=bucket.name, Key=key)
+            async with self.session.create_client("s3", **client_params) as s3_client:
+                await s3_client.head_object(Bucket=bucket.name, Key=key)
             return True
         except Exception as e:
             logger.error(f"Error in s3_head_object for key {key}: {e}")
             return False
 
     async def s3_put_object(self, key, file_path, bucket):
-        """Upload a file to S3"""
-        import boto3
+        """Upload a file to S3 asynchronously using aiobotocore"""
         from botocore.client import Config
 
         s3_config = Config(
             region_name="auto", retries={"max_attempts": 3, "mode": "standard"}
         )
-
-        s3_client = boto3.client(
-            "s3",
+        client_params = dict(
             endpoint_url=f"https://{bucket.account_id}.r2.cloudflarestorage.com",
             aws_access_key_id=bucket.access_key_id,
             aws_secret_access_key=bucket.secret_access_key,
@@ -329,7 +321,11 @@ class StorageManager:
         )
 
         try:
-            s3_client.upload_file(Filename=file_path, Bucket=bucket.name, Key=key)
+            async with self.session.create_client("s3", **client_params) as s3_client:
+                # Read file data synchronously since file I/O is fast locally.
+                with open(file_path, "rb") as f:
+                    data = f.read()
+                await s3_client.put_object(Bucket=bucket.name, Key=key, Body=data)
             return True
         except Exception as e:
             logger.error(f"S3 put error: {e}")
@@ -344,50 +340,45 @@ class StorageManager:
         time_min=None,
         time_max=None,
     ):
-        """Download an object from S3"""
+        """Download an object from S3 asynchronously using aiobotocore"""
         if bucket is None:
             logger.error("Cannot get remote data: no bucket provided")
             return None
 
-        # Create temp directory if it doesn't exist
         os.makedirs(self.temp_dir, exist_ok=True)
-
-        # Normalize timezone information BEFORE comparisons
         if time_min is not None and not time_min.tzinfo:
             time_min = time_min.replace(tzinfo=timezone.utc)
         if time_max is not None and not time_max.tzinfo:
             time_max = time_max.replace(tzinfo=timezone.utc)
 
         try:
-            import boto3
             from botocore.client import Config
 
-            # Create a properly configured S3 client for Cloudflare R2
             s3_config = Config(
                 region_name="auto",
                 signature_version="s3v4",
                 max_pool_connections=256,
                 retries={"max_attempts": 3, "mode": "standard"},
             )
-
-            # Create client with proper endpoint URL format
-            s3_client = boto3.client(
-                "s3",
+            client_params = dict(
                 endpoint_url=f"https://{bucket.account_id}.r2.cloudflarestorage.com",
                 aws_access_key_id=bucket.access_key_id,
                 aws_secret_access_key=bucket.secret_access_key,
                 config=s3_config,
             )
 
-            # Use get_object API call
-            response = s3_client.get_object(Bucket=bucket.name, Key=key)
+            if self.s3_client is not None:
+                # Use injected client (expected to be async)
+                s3_client = self.s3_client
+                response = await s3_client.get_object(Bucket=bucket.name, Key=key)
+                loaded_data = await response["Body"].read()
+            else:
+                async with self.session.create_client("s3", **client_params) as s3_client:
+                    response = await s3_client.get_object(Bucket=bucket.name, Key=key)
+                    loaded_data = await response["Body"].read()
 
-            # Process the data from the response
-            loaded_data = response["Body"].read()
-
-            # Check if this is JSON data with status flags
+            # Check if the loaded data contains JSON status flags.
             import json
-
             json_data = None
             try:
                 if isinstance(loaded_data, bytes):
@@ -403,16 +394,11 @@ class StorageManager:
             if json_data is not None:
                 status = json_data.get("__status")
                 if status in ["TOO_EARLY", "TOO_LATE"]:
-                    # Return status so miners/validators can use it
                     return status
 
-            # Save to file if path provided
             if file_path is not None:
                 with open(file_path, "wb") as f:
-                    if isinstance(loaded_data, bytes):
-                        f.write(loaded_data)
-                    else:
-                        f.write(bytes(str(loaded_data), "utf-8"))
+                    f.write(loaded_data)
                 return True
 
             return loaded_data
@@ -459,57 +445,60 @@ class StorageManager:
     async def cleanup_remote_gradients(
         self, uid: str, key: str, retention: int = 10, bucket=None
     ):
-        """
-        Cleanup remote gradient files for a given uid and key in the storage bucket.
-        The function lists all objects with keys matching the expected pattern and deletes
-        the oldest ones if their count exceeds 'retention'.
-        Expected filename structure: {key}-{window}-{uid}-v{__version__}.pt
-        """
-        if bucket is None:
-            logger.error("No bucket provided for remote cleanup.")
-            return
-
-        import boto3
-        from botocore.client import Config
-
+        """Clean up stale remote gradient files asynchronously."""
         try:
+            from botocore.client import Config
+
             s3_config = Config(
                 region_name="auto", retries={"max_attempts": 3, "mode": "standard"}
             )
-            s3_client = boto3.client(
-                "s3",
+            client_params = dict(
                 endpoint_url=f"https://{bucket.account_id}.r2.cloudflarestorage.com",
                 aws_access_key_id=bucket.access_key_id,
                 aws_secret_access_key=bucket.secret_access_key,
                 config=s3_config,
             )
-            prefix = f"{key}-"
-            response = s3_client.list_objects_v2(Bucket=bucket.name, Prefix=prefix)
-            gradient_files = []
-            pattern = re.compile(rf"^{key}-(\d+)-{uid}-v{__version__}\.pt$")
-            if "Contents" in response:
-                for obj in response["Contents"]:
-                    file_key = obj["Key"]
-                    m = pattern.match(file_key)
-                    if m:
+
+            async with self.session.create_client("s3", **client_params) as s3_client:
+                prefix = f"{key}-"
+                response = await s3_client.list_objects_v2(
+                    Bucket=bucket.name, Prefix=prefix
+                )
+                gradient_files = []
+                pattern = re.compile(rf"^{key}-(\d+)-{uid}-v{__version__}\.pt$")
+                if "Contents" in response:
+                    for obj in response["Contents"]:
+                        file_key = obj["Key"]
+                        m = pattern.match(file_key)
+                        if m:
+                            try:
+                                window = int(m.group(1))
+                                gradient_files.append((window, file_key))
+                            except Exception as e:
+                                logger.error(
+                                    f"Error parsing window from remote file {file_key}: {e}"
+                                )
+                gradient_files.sort(key=lambda x: x[0])
+                if len(gradient_files) > retention:
+                    for window, file_key in gradient_files[: len(gradient_files) - retention]:
                         try:
-                            window = int(m.group(1))
-                            gradient_files.append((window, file_key))
+                            await s3_client.delete_object(Bucket=bucket.name, Key=file_key)
+                            logger.info(
+                                f"Removed stale remote gradient file: {file_key}"
+                            )
                         except Exception as e:
                             logger.error(
-                                f"Error parsing window from remote file {file_key}: {e}"
+                                f"Error removing stale remote gradient file {file_key}: {e}"
                             )
-            gradient_files.sort(key=lambda x: x[0])
-            if len(gradient_files) > retention:
-                for window, file_key in gradient_files[
-                    : len(gradient_files) - retention
-                ]:
-                    try:
-                        s3_client.delete_object(Bucket=bucket.name, Key=file_key)
-                        logger.info(f"Removed stale remote gradient file: {file_key}")
-                    except Exception as e:
-                        logger.error(
-                            f"Error removing stale remote gradient file {file_key}: {e}"
-                        )
         except Exception as e:
             logger.error(f"Error during remote cleanup: {e}")
+
+def create_storage_manager(temp_dir, save_location, wallet=None, use_mock: bool = False):
+    """
+    Factory function to create a StorageManager or MockStorageManager instance.
+    In testing, set use_mock=True to inject the mock version.
+    """
+    if use_mock:
+        from tests.mocks.storage import MockStorageManager
+        return MockStorageManager(temp_dir=temp_dir, save_location=save_location, wallet=wallet)
+    return StorageManager(temp_dir, save_location, wallet)

@@ -1,0 +1,103 @@
+---
+# Tasks for managing Grafana dashboards
+
+- name: Ensure dashboard directory exists
+  file:
+    path: "{{ grafana_dashboards_local_path }}"
+    state: directory
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0755
+
+- name: Copy all dashboard JSON files to Grafana dashboards directory
+  copy:
+    src: "{{ item }}"
+    dest: "{{ grafana_dashboards_local_path }}/{{ item | basename }}"
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0644
+  with_fileglob:
+    - "files/*.json"
+  notify: restart grafana
+
+- name: Set main dashboard to miner dashboard by copying it to home dashboard path
+  copy:
+    src: "files/templar_metrics.json"
+    dest: "{{ grafana_dashboards_local_path }}/templar_metrics.json"
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0644
+  notify: restart grafana
+
+- name: Set permissions on dashboard files
+  file:
+    path: "{{ grafana_dashboards_local_path }}"
+    state: directory
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    recurse: yes
+    mode: 0755
+
+- name: Verify dashboard files exist and are accessible
+  stat:
+    path: "{{ grafana_dashboards_local_path }}/{{ grafana_home_dashboard }}.json"
+  register: home_dashboard_stat
+
+- name: Fail if home dashboard doesn't exist
+  fail:
+    msg: "Home dashboard file {{ grafana_dashboards_local_path }}/{{ grafana_home_dashboard }}.json does not exist or is not readable by Grafana"
+  when: not home_dashboard_stat.stat.exists
+
+- name: Check if Grafana is running
+  uri:
+    url: "http://localhost:{{ grafana_http_port }}/api/health"
+    method: GET
+  register: grafana_health
+  failed_when: false
+  changed_when: false
+  retries: 3
+  delay: 5
+  until: grafana_health is defined and grafana_health.status is defined and (grafana_health.status == 200 or grafana_health.status == -1)
+  when: not ansible_check_mode
+
+- name: Reload Grafana provisioning
+  uri:
+    url: "http://localhost:{{ grafana_http_port }}/api/admin/provisioning/dashboards/reload"
+    method: POST
+    user: "{{ grafana_security_admin_user }}"
+    password: "{{ grafana_security_admin_password }}"
+    force_basic_auth: yes
+    status_code: [200, 204]
+  ignore_errors: true
+  when: not ansible_check_mode and grafana_health is defined and grafana_health.status is defined and grafana_health.status == 200
+
+- name: Get dashboard ID from search 
+  uri:
+    url: "http://localhost:{{ grafana_http_port }}/api/search?query=templar_metrics&type=dash-db"
+    method: GET
+    user: "{{ grafana_security_admin_user }}"
+    password: "{{ grafana_security_admin_password }}"
+    force_basic_auth: yes
+    status_code: 200
+    return_content: yes
+  register: dashboard_search
+  ignore_errors: true
+  when: not ansible_check_mode and grafana_health is defined and grafana_health.status is defined and grafana_health.status == 200
+
+- name: Set home dashboard via API using returned UID
+  uri:
+    url: "http://localhost:{{ grafana_http_port }}/api/org/preferences"
+    method: PUT
+    user: "{{ grafana_security_admin_user }}"
+    password: "{{ grafana_security_admin_password }}"
+    force_basic_auth: yes
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      homeDashboardUID: "{{ (dashboard_search.json | first).uid }}"
+    status_code: [200, 204]
+  ignore_errors: true
+  when: not ansible_check_mode and grafana_health is defined and grafana_health.status is defined and grafana_health.status == 200 and dashboard_search is defined and dashboard_search.json is defined and dashboard_search.json | length > 0
+
+# Note: Version reporting is handled by telemetry/ansible/roles/nginx/files/version_api.py

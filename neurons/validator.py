@@ -19,29 +19,35 @@
 
 # Standard library
 import os
-import sys
-import time
-import random
-import asyncio
 import argparse
+import asyncio
+import os
+import random
+import sys
 import threading
+import time
+from collections import defaultdict
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from io import StringIO
+from time import perf_counter
+import bittensor as bt
+import numpy as np
 from rich.table import Table
 from rich.console import Console
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+
 # Third party
 import torch
-import numpy as np
-import bittensor as bt
 from torch.optim import SGD
-from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
     LinearLR,
     SequentialLR,
 )
+from transformers import LlamaForCausalLM
 
 # Local
 import tplr
@@ -91,6 +97,7 @@ class Validator:
             tplr.debug()
         if config.trace:
             tplr.trace()
+
         return config
 
     def __init__(self):
@@ -144,7 +151,7 @@ class Validator:
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
-            T_0=10000,
+            T_0=self.hparams.t_max,
             T_mult=2,
             eta_min=self.hparams.learning_rate * 0.1,
         )
@@ -224,16 +231,25 @@ class Validator:
             job_type="validation",
         )
 
+        # Initialize metrics logger for InfluxDB
+        self.metrics_logger = tplr.metrics.MetricsLogger(
+            prefix="V",
+            uid=self.uid,
+            config=self.config,
+            role="validator",
+            group="validator",
+            job_type="validation",
+        )
+
         # Initialize peers
         self.peers = []
         # Weighted selection counters for fair picking of eval peers
-        self.eval_peers = defaultdict(int)
-        # Track candidate weights separately
-        self.eval_candidates_counter = defaultdict(int)
+        self.eval_peers = defaultdict(lambda: 1)
 
         # Track inactive peer scores
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
+        self.missing_gradient_slash_rate = 0.75
 
         # Initialize final score history (for sliding-window averaging)
         self.final_score_history = defaultdict(list)
@@ -252,9 +268,8 @@ class Validator:
                 self.binary_moving_averages[uid] = 0.0
                 self.binary_indicator_scores[uid] = 0.0
                 self.normalised_binary_moving_averages[uid] = 0.0
-                self.eval_candidates_counter[uid] = 0
                 if uid in self.eval_peers:
-                    self.eval_peers[uid] = 0
+                    del self.eval_peers[uid]
                 del self.inactive_scores[uid]
                 tplr.logger.info(f"UID {uid} fully reset after extended inactivity")
                 return True
@@ -313,18 +328,19 @@ class Validator:
         (
             success,
             loaded_momentum,
-            loaded_global_step,
+            loaded_checkpoint_window,
             loaded_optimizer,
             loaded_scheduler,
         ) = await self.comms.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
+            current_window=self.current_window,
             device=self.config.device,
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_global_step
+            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -332,6 +348,17 @@ class Validator:
                 f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
+            # Only catch up if we're behind
+            if loaded_checkpoint_window < self.current_window:
+                tplr.logger.info(
+                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
+                )
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, loaded_checkpoint_window
+                )
+            else:
+                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
+
         else:
             tplr.logger.info("Starting from scratch")
             self.momentum = {
@@ -341,7 +368,7 @@ class Validator:
 
         time_min = None
         while True:
-            # Wait for validator offset before continuing
+            # 1. Wait for the validator window offset
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
             ):
@@ -349,13 +376,15 @@ class Validator:
                     f"Waiting for validator window offset, synced: {self.sync_window}, current: {self.current_window}, offset: {self.hparams.validator_offset}"
                 )
                 await asyncio.sleep(12)
-            window_start = tplr.T()  # overall window timer
             # Reset timer for peer update right after waiting
             peer_start = tplr.T()
+            # 2. Increment sync window and update peer lists
+            window_start = tplr.T()
+            self.sync_window += 1
             tplr.logger.info(
                 f"Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}"
             )
-            self.sync_window += 1
+
             tplr.logger.info(
                 f"Processing window: {self.sync_window} current: {self.current_window}"
             )
@@ -377,7 +406,7 @@ class Validator:
             newly_inactive = self.comms.inactive_peers
             current_window = self.sync_window
 
-            # Process newly inactive peers
+            # 3. Process inactive peers and apply penalties
             for uid in newly_inactive:
                 if uid not in self.inactive_scores:
                     self.inactive_scores[uid] = (
@@ -419,7 +448,7 @@ class Validator:
                         f"{old_score:.4f} -> {new_score:.4f}"
                     )
 
-                # Log slash metrics
+                # Log slash metrics to WandB
                 self.wandb.log(
                     {
                         f"validator/inactivity/{uid}/score_before": old_score,
@@ -428,7 +457,22 @@ class Validator:
                     step=self.global_step,
                 )
 
+                # Log slash metrics to InfluxDB with primitive types
+                self.metrics_logger.log(
+                    measurement="validator_inactivity",
+                    tags={
+                        "uid": str(uid),
+                        "window": int(current_window),
+                        "global_step": int(self.global_step),
+                    },
+                    fields={
+                        "score_before": float(old_score),
+                        "score_after": float(new_score),
+                    },
+                )
+
             # Calculate time window for this sync window
+
             sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
             retries = 0
             delay = 1
@@ -539,9 +583,7 @@ class Validator:
             eval_start = tplr.T()
             # Use weighted candidate selection instead of random sampling.
             candidate_uids = list(self.eval_peers.keys())
-            candidate_weights = [
-                self.eval_candidates_counter[uid] for uid in candidate_uids
-            ]
+            candidate_weights = [self.eval_peers[uid] for uid in candidate_uids]
             k = min(self.hparams.uids_per_window, len(candidate_uids))
             evaluation_uids = evaluation.weighted_random_sample_no_replacement(
                 candidate_uids, candidate_weights, k
@@ -549,14 +591,12 @@ class Validator:
 
             # Reset counters for chosen peers.
             for uid in evaluation_uids:
-                self.eval_peers[uid] = 0
-                self.eval_candidates_counter[uid] = 0
+                self.eval_peers[uid] = 1
 
             # Increment counters for peers not chosen.
             for uid in candidate_uids:
                 if uid not in evaluation_uids:
                     self.eval_peers[uid] += 1
-                    self.eval_candidates_counter[uid] += 1
             self.comms.eval_peers = self.eval_peers
 
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
@@ -800,29 +840,48 @@ class Validator:
 
             # Log WandB metrics per UID
             for uid in sorted(self.evaluated_uids):
+                # Extract primitive values from tensors for WandB
+                gradient_score = float(self.gradient_scores[uid].item())
+                binary_indicator = float(self.binary_indicator_scores[uid].item())
+                binary_moving_avg = float(self.binary_moving_averages[uid].item())
+                normalised_binary = float(
+                    self.normalised_binary_moving_averages[uid].item()
+                )
+                final_moving_avg = float(self.final_moving_avg_scores[uid].item())
+                weight = float(self.weights[uid].item())
+
                 self.wandb.log(
                     {
-                        f"validator/gradient_scores/{uid}": self.gradient_scores[
-                            uid
-                        ].item(),
-                        f"validator/binary_indicators/{uid}": self.binary_indicator_scores[
-                            uid
-                        ].item(),
-                        f"validator/binary_moving_averages/{uid}": self.binary_moving_averages[
-                            uid
-                        ].item(),
-                        f"validator/normalised_binary_scores/{uid}": self.normalised_binary_moving_averages[
-                            uid
-                        ].item(),
-                        f"validator/final_moving_avg_scores/{uid}": self.final_moving_avg_scores[
-                            uid
-                        ].item(),
-                        f"validator/weights/{uid}": self.weights[uid].item(),
+                        f"validator/gradient_scores/{uid}": gradient_score,
+                        f"validator/binary_indicators/{uid}": binary_indicator,
+                        f"validator/binary_moving_averages/{uid}": binary_moving_avg,
+                        f"validator/normalised_binary_scores/{uid}": normalised_binary,
+                        f"validator/final_moving_avg_scores/{uid}": final_moving_avg,
+                        f"validator/weights/{uid}": weight,
                     },
                     step=self.global_step,
                 )
 
+                # Log to InfluxDB metrics per UID with primitive types
+                self.metrics_logger.log(
+                    measurement="validator_scores",
+                    tags={
+                        "eval_uid": str(uid),
+                        "window": int(self.sync_window),
+                        "global_step": int(self.global_step),
+                    },
+                    fields={
+                        "gradient_score": gradient_score,
+                        "binary_indicator": binary_indicator,
+                        "binary_moving_avg": binary_moving_avg,
+                        "normalised_binary": normalised_binary,
+                        "final_moving_avg_score": final_moving_avg,
+                        "weight": weight,
+                    },
+                )
+
             # 17. Set weights periodically
+
             if self.sync_window % self.hparams.windows_per_weights == 0:
                 # Only set weights for evaluated peers with non-negative (positive) weight values.
                 positive_weighted_uids = sorted(
@@ -838,39 +897,7 @@ class Validator:
                         wait_for_finalization=False,
                     )
 
-            # 15. Create checkpoints periodically
-            if (
-                self.global_step % self.hparams.checkpoint_frequency == 0
-                and self.global_step != 0
-            ):
-                tplr.logger.info(
-                    f"Creating checkpoint at global_step {self.global_step}"
-                )
-                checkpoint_data = {
-                    "model_state_dict": {
-                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                    },
-                    "optimizer_state_dict": {
-                        k: v.cpu().clone() if torch.is_tensor(v) else v
-                        for k, v in self.optimizer.state_dict().items()
-                    },
-                    "scheduler_state_dict": self.scheduler.state_dict(),
-                    "momentum": {k: v.cpu().clone() for k, v in self.momentum.items()},
-                    "start_window": self.start_window,
-                    "current_window": self.current_window,
-                }
-                asyncio.create_task(
-                    self.comms.put(
-                        state_dict=checkpoint_data,
-                        uid=str(self.uid),
-                        window=self.current_window,
-                        key="checkpoint",
-                        global_step=self.global_step,
-                        local=False,
-                    )
-                )
-
-            # 16. Now, merge the gathered gradients into the model AFTER finishing evaluation
+            # 14. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
             self.optimizer.zero_grad()
@@ -938,12 +965,12 @@ class Validator:
                 )
                 debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
 
-            # Store the debug dictionary
+            # 15. Store debug values and model metadata
             asyncio.create_task(
                 self.comms.put(
                     state_dict=debug_dict,
                     uid=str(self.uid),
-                    window=self.current_window,
+                    window=self.sync_window,
                     key="debug",
                     local=False,
                 )
@@ -954,6 +981,100 @@ class Validator:
                 f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
             )
 
+            # 16. Log evaluation metrics once all evaluations are done
+            evaluation_metrics = {
+                "validator/loss/own/before": self.loss_before_per_batch_own,
+                "validator/loss/own/after": self.loss_after_per_batch_own,
+                "validator/loss/random/before": self.loss_before_per_batch_random,
+                "validator/loss/random/after": self.loss_after_per_batch_random,
+                "validator/loss/own/improvement": self.relative_improvement_own,
+                "validator/loss/random/improvement": self.relative_improvement_random,
+                "validator/network/block": self.current_block,
+                "validator/network/window": self.sync_window,
+                "validator/network/step": self.global_step,
+                "validator/network/evaluated_uids": len(self.evaluated_uids),
+                "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
+                "validator/network/active_miners": len(self.valid_score_indices),
+                "validator/gather/success_rate": gather_result.success_rate * 100
+                if gather_result
+                else 0,  # Success percentage
+                "validator/timing/window_total": tplr.T() - window_start,
+                "validator/timing/peer_update": tplr.T() - peer_start,
+                "validator/timing/gather": tplr.T() - gather_start,
+                "validator/timing/evaluation": tplr.T() - eval_start,
+                "validator/timing/model_update": tplr.T() - update_start,
+            }
+            self.wandb.log(evaluation_metrics, step=self.global_step)
+
+            # Log metrics to InfluxDB in parallel using primitive types
+            gather_success_rate = (
+                float(gather_result.success_rate * 100) if gather_result else 0.0
+            )
+            total_skipped = len(gather_result.skipped_uids) if gather_result else 0
+
+            self.metrics_logger.log(
+                measurement="validator_window_v2",
+                tags={
+                    "window": int(self.sync_window),
+                    "global_step": int(self.global_step),
+                },
+                fields={
+                    "loss_own_before": float(self.loss_before_per_batch_own),
+                    "loss_own_after": float(self.loss_after_per_batch_own),
+                    "loss_random_before": float(self.loss_before_per_batch_random),
+                    "loss_random_after": float(self.loss_after_per_batch_random),
+                    "loss_own_improvement": float(self.relative_improvement_own),
+                    "loss_random_improvement": float(self.relative_improvement_random),
+                    "current_block": int(self.current_block),
+                    "evaluated_uids_count": int(len(self.evaluated_uids)),
+                    "learning_rate": float(self.scheduler.get_last_lr()[0]),
+                    "active_miners_count": int(len(self.valid_score_indices)),
+                    "gather_success_rate": gather_success_rate,
+                    "window_total_time": float(tplr.T() - window_start),
+                    "peer_update_time": float(tplr.T() - peer_start),
+                    "gather_time": float(tplr.T() - gather_start),
+                    "evaluation_time": float(tplr.T() - eval_start),
+                    "model_update_time": float(tplr.T() - update_start),
+                    "total_peers": int(len(self.peers)),
+                    "total_skipped": int(total_skipped),
+                },
+            )
+            tplr.logger.info("Finished metrics logging call for validator")
+
+            # 17. Create checkpoints periodically
+            if (
+                self.global_step % self.hparams.checkpoint_frequency == 0
+                and self.global_step != 0
+            ):
+                tplr.logger.info(
+                    f"Creating checkpoint at global_step {self.global_step}"
+                )
+                checkpoint_data = {
+                    "model_state_dict": {
+                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
+                    },
+                    "optimizer_state_dict": {
+                        k: v.cpu().clone() if torch.is_tensor(v) else v
+                        for k, v in self.optimizer.state_dict().items()
+                    },
+                    "scheduler_state_dict": self.scheduler.state_dict(),
+                    "momentum": {k: v.cpu().clone() for k, v in self.momentum.items()},
+                    "start_window": self.start_window,
+                    "current_window": self.current_window,
+                    "sync_window": self.sync_window,
+                }
+                asyncio.create_task(
+                    self.comms.put(
+                        state_dict=checkpoint_data,
+                        uid=str(self.uid),
+                        window=self.sync_window,
+                        key="checkpoint",
+                        global_step=self.global_step,
+                        local=False,
+                    )
+                )
+
+            # 18. Increment global step
             self.global_step += 1
 
     # Listens for new blocks and sets self.current_block and self.current_window

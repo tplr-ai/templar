@@ -79,3 +79,4 @@ data/
 chain-specs/
 .env.backup
 CLAUDE.md
+.cache

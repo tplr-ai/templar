@@ -17,19 +17,24 @@
 
 
 # Standard library
-from datetime import datetime, timedelta, timezone
-import sys
-import time
-import random
-import asyncio
 import argparse
+import asyncio
+import json
+import random
+import sys
 import threading
+import time
+from datetime import datetime, timedelta, timezone
+
+import bittensor as bt
+import numpy as np
+from typing import cast
 
 # Third party
+from bittensor.core.subtensor import ScaleObj
 import torch
-import numpy as np
-import bittensor as bt
 from torch.optim import SGD
+from torch import autocast
 from transformers import LlamaForCausalLM
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
@@ -39,7 +44,6 @@ from torch.optim.lr_scheduler import (
 
 # Local
 import tplr
-
 
 # GPU optimizations
 torch.manual_seed(42)
@@ -86,6 +90,7 @@ class Miner:
             tplr.debug()
         if config.trace:
             tplr.trace()
+
         return config
 
     def __init__(self):
@@ -98,7 +103,7 @@ class Miner:
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
-        self.metagraph = self.subtensor.metagraph(self.config.netuid)
+        self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             tplr.logger.error(
                 f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
@@ -108,7 +113,7 @@ class Miner:
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)
+        self.model.to(self.config.device)  # type: ignore
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
@@ -138,7 +143,7 @@ class Miner:
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
-            T_0=10000,
+            T_0=self.hparams.t_max,
             T_mult=2,
             eta_min=self.hparams.learning_rate * 0.1,
         )
@@ -195,6 +200,16 @@ class Miner:
             job_type="mining",
         )
 
+        # Initialize metrics logger for InfluxDB
+        self.metrics_logger = tplr.metrics.MetricsLogger(
+            prefix="M",
+            uid=self.uid,
+            config=self.config,
+            role="miner",
+            group="miner",
+            job_type="mining",
+        )
+
     # Main training loop.
     async def run(self):
         # Start background block listener
@@ -219,18 +234,19 @@ class Miner:
         (
             success,
             loaded_momentum,
-            loaded_global_step,
+            loaded_checkpoint_window,
             loaded_optimizer,
             loaded_scheduler,
         ) = await self.comms.load_checkpoint(
             model=self.model,
             optimizer=self.optimizer,
             scheduler=self.scheduler,
-            device=self.config.device,
+            current_window=self.current_window,
+            device=cast(str, self.config.device),
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_global_step
+            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -238,12 +254,25 @@ class Miner:
                 f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
+            # Only catch up if we're behind
+            if loaded_checkpoint_window < self.current_window:
+                tplr.logger.info(
+                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
+                )
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, loaded_checkpoint_window
+                )
+            else:
+                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
         else:
             tplr.logger.info("Starting from scratch")
             self.momentum = {
                 n: torch.zeros_like(p) for n, p in self.model.named_parameters()
             }
             self.model.to(self.config.device)
+
+        self.comms.start_commitment_fetcher()
+        self.comms.start_background_tasks()
 
         while True:
             # 1. Initialize window and update peers
@@ -292,17 +321,18 @@ class Miner:
             self.model.zero_grad()
             total_loss = 0.0
             n_batches = 0
+            window_tokens = 0  # Initialize token count for this window
 
             for i, batch in enumerate(loader):
                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
+                tokens_this_batch = input_ids.numel()  # Tokens in current batch
+                window_tokens += tokens_this_batch  # Accumulate tokens
                 labels = input_ids.clone()
                 labels = torch.where(
                     labels == self.tokenizer.pad_token_id, -100, labels
                 )
 
-                with torch.amp.autocast(
-                    device_type=self.model.device.type, dtype=torch.bfloat16
-                ):
+                with autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
                     outputs = self.model(input_ids=input_ids, labels=labels)
 
                 total_loss += outputs.loss.item()
@@ -375,7 +405,11 @@ class Miner:
                     response = self.subtensor.query_module(
                         "Timestamp", "Now", block=sync_block
                     )
-                    ts_value = response.value / 1000  # convert milliseconds to seconds
+                    if response is None or not isinstance(response, ScaleObj):
+                        raise ValueError(f"Could not query timestamp for {sync_block}")
+                    ts_value = (
+                        cast(int, response.value) / 1000
+                    )  # convert milliseconds to seconds
                     break
                 except Exception as e:
                     tplr.logger.error(
@@ -455,7 +489,8 @@ class Miner:
             # 5. Calculate and log metrics
             duration = time.time() - train_start
             self.batch_times.append(duration)
-            self.total_tokens_processed += n_batches
+            self.total_tokens_processed += window_tokens
+            tokens_per_sec = window_tokens / duration
 
             grad_norms = [
                 p.grad.norm().item()
@@ -468,10 +503,10 @@ class Miner:
                 {
                     # Training metrics
                     "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
-                    "miner/tokens_per_sec": n_batches / duration,
+                    "miner/tokens_per_sec": tokens_per_sec,
                     "miner/batch_duration": duration,
                     "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": n_batches,
+                    "miner/batch_tokens": window_tokens,
                     "miner/global_step": self.global_step,
                     # Resource metrics
                     "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
@@ -520,45 +555,46 @@ class Miner:
 
             # 8. Apply gathered gradients
             update_start = tplr.T()
-            for n, p in self.model.named_parameters():
-                idxs_key = n + "idxs"
-                vals_key = n + "vals"
-                all_idxs = []
-                all_vals = []
-                # Aggregate gradients from all valid peers
-                for uid, state in gather_result.state_dicts.items():
-                    if idxs_key in state and vals_key in state:
-                        idx = state[idxs_key]
-                        val = state[vals_key]
-                        if not isinstance(idx, (list, tuple)):
-                            idx = [idx]
-                        if not isinstance(val, (list, tuple)):
-                            val = [val]
-                        all_idxs.extend(idx)
-                        all_vals.extend(val)
-                if all_idxs and all_vals:
-                    new_grad = self.transformer.decode(
-                        self.compressor.batch_decompress(
-                            p.to(self.config.device),
-                            all_idxs,
-                            all_vals,
-                            self.xshapes[n],
-                            self.totalks[n],
+            self.model.train()
+            self.optimizer.zero_grad()
+
+            if gather_result is not None and gather_result.state_dict is not None:
+                for n, p in self.model.named_parameters():
+                    idxs_key = n + "idxs"
+                    vals_key = n + "vals"
+                    idxs = getattr(gather_result.state_dict, idxs_key, None)
+                    vals = getattr(gather_result.state_dict, vals_key, None)
+                    if idxs is not None and vals is not None:
+                        if not isinstance(idxs, (list, tuple)):
+                            idxs = [idxs]
+                        if not isinstance(vals, (list, tuple)):
+                            vals = [vals]
+                        new_grad = self.transformer.decode(
+                            self.compressor.batch_decompress(
+                                p.to(self.config.device),
+                                idxs,
+                                vals,
+                                xshapes[n],
+                                totalks[n],
+                            )
                         )
-                    )
-                    p.data.sub_(new_grad.sign(), alpha=self.scheduler.get_last_lr()[0])
-                else:
-                    tplr.logger.info(
-                        f"Gradient data missing for parameter {n}, skipping."
-                    )
+
+                        if p.grad is None:
+                            p.grad = new_grad
+                        else:
+                            p.grad.copy_(new_grad)
+                        p.grad.sign_()
+                    else:
+                        tplr.logger.info(
+                            f"Gradient data missing for parameter {n}, skipping."
+                        )
             tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - update_start)} Updated model"
+                f"{tplr.P(self.start_window, tplr.T() - update_start)} Updated model"
             )
 
-            # 10. Optimization step
-            tplr.logger.info("Finish and step.")
             self.optimizer.step()
             self.scheduler.step()
+            torch.cuda.empty_cache()
 
             # Log total window time and add timing metrics to existing wandb logging
             tplr.logger.info(
@@ -600,49 +636,102 @@ class Miner:
                 f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"
             )
 
+            # Calculate common metrics values
+            loss_value = total_loss / n_batches if n_batches > 0 else 0
+            mean_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0
+            grad_norm_std = torch.tensor(grad_norms).std().item() if grad_norms else 0
+            mean_weight_norm = (
+                sum(weight_norms) / len(weight_norms) if weight_norms else 0
+            )
+            mean_momentum_norm = (
+                sum(momentum_norms) / len(momentum_norms) if momentum_norms else 0
+            )
+            window_total_time = tplr.T() - window_start
+            peer_update_time = tplr.T() - peer_start
+            data_loading_time = tplr.T() - data_start
+            training_time = tplr.T() - train_start
+            compression_time = tplr.T() - compress_start
+            gather_time = tplr.T() - gather_start
+            model_update_time = tplr.T() - update_start
+            gather_success_rate = (
+                gather_result.success_rate * 100 if gather_result else 0
+            )
+
+            # Log metrics to WandB
             self.wandb.log(
                 {
                     # Add timing metrics
-                    "miner/timing/window_total": tplr.T() - window_start,
-                    "miner/timing/peer_update": tplr.T() - peer_start,
-                    "miner/timing/data_loading": tplr.T() - data_start,
-                    "miner/timing/training": tplr.T() - train_start,
-                    "miner/timing/compression": tplr.T() - compress_start,
-                    "miner/timing/gather": tplr.T() - gather_start,
+                    "miner/timing/window_total": window_total_time,
+                    "miner/timing/peer_update": peer_update_time,
+                    "miner/timing/data_loading": data_loading_time,
+                    "miner/timing/training": training_time,
+                    "miner/timing/compression": compression_time,
+                    "miner/timing/gather": gather_time,
                     "miner/timing/put": put_completion_time,
-                    "miner/timing/model_update": tplr.T() - update_start,
+                    "miner/timing/model_update": model_update_time,
                     # Existing metrics
-                    "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
-                    "miner/tokens_per_sec": n_batches / duration,
+                    "miner/loss": loss_value,
+                    "miner/tokens_per_sec": tokens_per_sec,
                     "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": n_batches,
+                    "miner/batch_tokens": window_tokens,
                     "miner/global_step": self.global_step,
                     "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                    / 1024**2,  # MB
-                    "miner/gpu_memory_cached": torch.cuda.memory_reserved()
-                    / 1024**2,  # MB
+                    / 1024**2,
+                    "miner/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,
                     "miner/gather_peers": len(self.peers),
                     "miner/effective_batch_size": len(self.peers)
                     * self.hparams.batch_size,
                     "miner/learning_rate": self.scheduler.get_last_lr()[0],
-                    "miner/mean_grad_norm": sum(grad_norms) / len(grad_norms)
-                    if grad_norms
-                    else 0,
+                    "miner/mean_grad_norm": mean_grad_norm,
                     "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
                     "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                    "miner/grad_norm_std": torch.tensor(grad_norms).std().item()
-                    if grad_norms
-                    else 0,
-                    "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
-                    "miner/mean_momentum_norm": sum(momentum_norms)
-                    / len(momentum_norms),
+                    "miner/grad_norm_std": grad_norm_std,
+                    "miner/mean_weight_norm": mean_weight_norm,
+                    "miner/mean_momentum_norm": mean_momentum_norm,
                     # Added gather success rate in %
-                    "miner/gather/success_rate": gather_result.success_rate * 100
-                    if gather_result
-                    else 0,
+                    "miner/gather/success_rate": gather_success_rate,
                 },
                 step=self.global_step,
             )
+
+            self.metrics_logger.log(
+                measurement="training_step_v2",
+                tags={
+                    "window": self.current_window,
+                    "global_step": self.global_step,
+                },
+                fields={
+                    "loss": loss_value,
+                    "tokens_per_sec": tokens_per_sec,
+                    "batch_tokens": int(window_tokens),
+                    "grad_norm_std": grad_norm_std,
+                    "mean_weight_norm": mean_weight_norm,
+                    "mean_momentum_norm": mean_momentum_norm,
+                    "batch_duration": duration,
+                    "total_tokens": int(self.total_tokens_processed),
+                    "active_peers": int(len(self.peers)),
+                    "effective_batch_size": int(
+                        len(self.peers) * self.hparams.batch_size
+                    ),
+                    "learning_rate": self.scheduler.get_last_lr()[0],
+                    "mean_grad_norm": mean_grad_norm,
+                    "gather_success_rate": gather_success_rate,
+                    "max_grad_norm": max(grad_norms) if grad_norms else 0,
+                    "min_grad_norm": min(grad_norms) if grad_norms else 0,
+                    "gather_peers": json.dumps(self.peers),
+                    "skipped_peers": json.dumps(
+                        gather_result.skipped_uids if gather_result else []
+                    ),
+                    "window_total_time": window_total_time,
+                    "peer_update_time": peer_update_time,
+                    "data_loading_time": data_loading_time,
+                    "training_time": training_time,
+                    "compression_time": compression_time,
+                    "gather_time": gather_time,
+                    "model_update_time": model_update_time,
+                },
+            )
+            tplr.logger.info("Finished metrics logging call for miner")
 
             self.global_step += 1
             self.window_step += 1
@@ -675,7 +764,7 @@ class Miner:
                 await asyncio.sleep(0.1)
 
     # Listens for new blocks and sets self.current_block and self.current_window
-    def block_listener(self, loop):
+    def block_listener(self, _):
         import websockets.exceptions  # Ensure we catch websockets errors
 
         def handler(event):

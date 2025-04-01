@@ -270,44 +270,36 @@ class ChainSync:
         logger.debug(f"Available commitment UIDs: {list(self.commitments.keys())}")
 
         # Check if this uid exists in our commitments
-        if uid not in self.commitments:
-            logger.warning(f"No commitment found for UID {uid}")
-            return None
-
-        # Retrieve the commitment
-        commitment = self.commitments[uid]
-
-        # Check if the commitment is already a Bucket instance
-        if isinstance(commitment, Bucket):
+        if uid in self.commitments:
             logger.debug(
-                f"Retrieved bucket from commitment for UID {uid}: {commitment}"
+                f"Retrieved bucket from commitment for UID {uid}: {self.commitments[uid]}"
             )
-            return commitment
+            return self.commitments[uid]
 
         # If it's a string or bytes, convert to Bucket
-        if isinstance(commitment, (str, bytes)):
+        if isinstance(self.commitments.get(uid), (str, bytes)):
             try:
                 # Ensure we have a properly sized commitment
-                if len(commitment) != 128:
+                if len(self.commitments.get(uid)) != 128:
                     logger.error(
-                        f"Invalid commitment length for UID {uid}: {len(commitment)}"
+                        f"Invalid commitment length for UID {uid}: {len(self.commitments.get(uid))}"
                     )
                     return None
 
                 # Parse the commitment into a Bucket object
                 bucket = Bucket(
-                    name=commitment[:32].decode("utf-8").rstrip("\0")
-                    if isinstance(commitment, bytes)
-                    else commitment[:32].rstrip("\0"),
-                    account_id=commitment[32:64].decode("utf-8").rstrip("\0")
-                    if isinstance(commitment, bytes)
-                    else commitment[32:64].rstrip("\0"),
-                    access_key_id=commitment[64:96].decode("utf-8").rstrip("\0")
-                    if isinstance(commitment, bytes)
-                    else commitment[64:96].rstrip("\0"),
-                    secret_access_key=commitment[96:].decode("utf-8").rstrip("\0")
-                    if isinstance(commitment, bytes)
-                    else commitment[96:].rstrip("\0"),
+                    name=self.commitments.get(uid)[:32].decode("utf-8").rstrip("\0")
+                    if isinstance(self.commitments.get(uid), bytes)
+                    else self.commitments.get(uid)[:32].rstrip("\0"),
+                    account_id=self.commitments.get(uid)[32:64].decode("utf-8").rstrip("\0")
+                    if isinstance(self.commitments.get(uid), bytes)
+                    else self.commitments.get(uid)[32:64].rstrip("\0"),
+                    access_key_id=self.commitments.get(uid)[64:96].decode("utf-8").rstrip("\0")
+                    if isinstance(self.commitments.get(uid), bytes)
+                    else self.commitments.get(uid)[64:96].rstrip("\0"),
+                    secret_access_key=self.commitments.get(uid)[96:].decode("utf-8").rstrip("\0")
+                    if isinstance(self.commitments.get(uid), bytes)
+                    else self.commitments.get(uid)[96:].rstrip("\0"),
                 )
                 logger.debug(f"Created Bucket from commitment for UID {uid}: {bucket}")
                 return bucket
@@ -315,7 +307,7 @@ class ChainSync:
                 logger.error(f"Failed to decode commitment for UID {uid}: {e}")
                 return None
 
-        logger.error(f"Unexpected commitment format for UID {uid}: {type(commitment)}")
+        logger.error(f"Unexpected commitment format for UID {uid}: {type(self.commitments.get(uid))}")
         return None
 
     def update_peers_with_buckets(self):

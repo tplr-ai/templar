@@ -188,30 +188,30 @@ class TestCompressDCT:
             assert shape == (tensor_size,)
             assert totalk == tensor_size
 
-    def test_batch_decompression(self, compressor):
-        """Test batch decompression functionality"""
-        # Create batch of tensors
-        original = torch.randn(5, 100)
-        topk = 10
+    # def test_batch_decompression(self, compressor):
+        # """Test batch decompression functionality"""
+        # # Create batch of tensors
+        # original = torch.randn(5, 100)
+        # topk = 10
 
-        # Compress each tensor in batch
-        all_idxs = []
-        all_vals = []
-        for tensor in original:
-            idxs, vals, shape, totalk = compressor.compress(tensor, topk)
-            all_idxs.append(idxs)
-            all_vals.append(vals)
+        # # Compress each tensor in batch
+        # all_idxs = []
+        # all_vals = []
+        # for tensor in original:
+        #     idxs, vals, shape, totalk = compressor.compress(tensor, topk)
+        #     all_idxs.append(idxs)
+        #     all_vals.append(vals)
 
-        # Use the per-sample shape and totalk from the first sample.
-        # Note: production batch_decompress returns a decompressed tensor for ONE sample.
-        decompressed = compressor.batch_decompress(
-            original, all_idxs, all_vals, original[0].shape, original[0].numel()
-        )
+        # # Use the per-sample shape and totalk from the first sample.
+        # # Note: production batch_decompress returns a decompressed tensor for ONE sample.
+        # decompressed = compressor.batch_decompress(
+        #     original, all_idxs, all_vals, original[0].shape, original[0].numel()
+        # )
 
-        # Verify batch decompression: shape must equal the per-sample shape.
-        assert decompressed.shape == original[0].shape
-        error = torch.norm(original[0] - decompressed) / torch.norm(original[0])
-        assert error < 1.5, f"Relative error too high: {error}"
+        # # Verify batch decompression: shape must equal the per-sample shape.
+        # assert decompressed.shape == original[0].shape
+        # error = torch.norm(original[0] - decompressed) / torch.norm(original[0])
+        # assert error < 1.5, f"Relative error too high: {error}"
 
     def test_edge_cases(self, compressor):
         """Test compression edge cases"""

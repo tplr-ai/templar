@@ -1,0 +1,5 @@
+---
+# Defaults for the Grafana plugins role
+templar_version_api_url: "http://18.217.218.11/api/templar/version"
+grafana_plugins_to_allow:
+  - "marcusolsson-json-datasource"

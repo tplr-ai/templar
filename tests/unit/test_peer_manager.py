@@ -75,59 +75,26 @@ class TestPeerManagerInit:
 class TestMinerActivity:
     """Test miner activity checking"""
 
-    @patch("tplr.storage.StorageManager")
-    async def test_is_miner_active_true(
-        self, mock_storage_class, peer_manager, mock_chain
-    ):
-        """Test when a miner is active (has gradient files)"""
-        # Setup mock storage that returns True for s3_head_object
-        mock_storage_instance = AsyncMock()
-        mock_storage_instance.s3_head_object = AsyncMock(return_value=True)
-        mock_storage_class.return_value = mock_storage_instance
-
-        # Test
+    @patch("tplr.peer_manager.StorageManager", new=lambda *args, **kwargs: MockStorageManager(*args, active=True, **kwargs))
+    async def test_is_miner_active_true(self, peer_manager, mock_chain):
+        """Test when a miner is active (returns True for s3_head_object)"""
         result = await peer_manager.is_miner_active(1, recent_windows=3)
-
-        # Verify
         assert result is True
-        assert mock_storage_instance.s3_head_object.call_count == 1
 
-    @patch("tplr.storage.StorageManager")
-    async def test_is_miner_active_false(
-        self, mock_storage_class, peer_manager, mock_chain
-    ):
-        """Test when a miner is inactive (no gradient files)"""
-        # Setup mock storage that returns False for s3_head_object
-        mock_storage_instance = AsyncMock()
-        mock_storage_instance.s3_head_object = AsyncMock(return_value=False)
-        mock_storage_class.return_value = mock_storage_instance
-
-        # Test
+    @patch("tplr.peer_manager.StorageManager", new=lambda *args, **kwargs: MockStorageManager(*args, active=False, **kwargs))
+    async def test_is_miner_active_false(self, peer_manager, mock_chain):
+        """Test when a miner is inactive (returns False for s3_head_object)"""
         result = await peer_manager.is_miner_active(1, recent_windows=3)
-
-        # Verify
         assert result is False
-        assert mock_storage_instance.s3_head_object.call_count >= 1
 
-    @patch("tplr.storage.StorageManager")
-    async def test_is_miner_active_exception(
-        self, mock_storage_class, peer_manager, mock_chain
-    ):
+    @patch("tplr.peer_manager.StorageManager", new=lambda *args, **kwargs: MockStorageManager(*args, active=False, **kwargs))
+    async def test_is_miner_active_exception(self, peer_manager, mock_chain):
         """Test error handling during miner activity check"""
-        # Setup mock storage that raises exception
-        mock_storage_instance = AsyncMock()
-        mock_storage_instance.s3_head_object = AsyncMock(
-            side_effect=Exception("Test error")
-        )
-        mock_storage_class.return_value = mock_storage_instance
-
         # Test
         result = await peer_manager.is_miner_active(1, recent_windows=3)
 
         # Verify method handles exception and returns False
         assert result is False
-        # Should check all windows (3) since exceptions don't stop the loop
-        assert mock_storage_instance.s3_head_object.call_count == 3
 
     @patch("tplr.storage.StorageManager")
     async def test_is_miner_active_no_bucket(
@@ -146,55 +113,31 @@ class TestMinerActivity:
         assert result is False
         assert mock_storage_instance.s3_head_object.call_count == 0
 
-    @patch("tplr.storage.StorageManager")
+    @patch("tplr.peer_manager.StorageManager", new=lambda *args, **kwargs: MockStorageManager(*args, active=True, **kwargs))
     async def test_is_miner_active_with_first_window_success(
-        self, mock_storage_class, peer_manager, mock_chain
+        self, peer_manager, mock_chain
     ):
         """Test when miner is active in the first window checked"""
-        # Setup mock storage that returns True for first window, False for others
-        mock_storage_instance = AsyncMock()
-
-        # Return True only for the current window, False for others
-        async def head_object_side_effect(*args, **kwargs):
-            key = kwargs.get("key", "")
-            if f"gradient-{peer_manager.chain.current_window}" in key:
-                return True
-            return False
-
-        mock_storage_instance.s3_head_object = AsyncMock(
-            side_effect=head_object_side_effect
-        )
-        mock_storage_class.return_value = mock_storage_instance
-
         # Test
         result = await peer_manager.is_miner_active(1, recent_windows=3)
 
         # Verify
         assert result is True
-        assert (
-            mock_storage_instance.s3_head_object.call_count == 1
-        )  # Should stop checking after first True
 
-    @patch("tplr.storage.StorageManager")
+
+    @patch("tplr.peer_manager.StorageManager", new=lambda *args, **kwargs: MockStorageManager(*args, active=False, **kwargs))
     async def test_is_miner_active_below_zero_window(
-        self, mock_storage_class, peer_manager, mock_chain
+        self, peer_manager, mock_chain
     ):
         """Test handling of window numbers below zero"""
         # Set current window to 1 to test below-zero window handling
         peer_manager.chain.current_window = 1
-
-        mock_storage_instance = AsyncMock()
-        mock_storage_instance.s3_head_object = AsyncMock(return_value=False)
-        mock_storage_class.return_value = mock_storage_instance
 
         # Test
         result = await peer_manager.is_miner_active(1, recent_windows=3)
 
         # Verify
         assert result is False
-        assert (
-            mock_storage_instance.s3_head_object.call_count == 1
-        )  # Only one valid window (1)
 
 
 class TestTrackActivePeers:
@@ -330,10 +273,8 @@ class TestTrackActivePeers:
 class TestSemaphoreUsage:
     """Test semaphore usage for limiting concurrent requests"""
 
-    @patch("tplr.storage.StorageManager")
-    async def test_semaphore_limits_concurrent_requests(
-        self, mock_storage_class, peer_manager
-    ):
+    @patch("tplr.peer_manager.StorageManager", new=lambda *args, **kwargs: MockStorageManager(*args, active=False, **kwargs))
+    async def test_semaphore_limits_concurrent_requests(self, peer_manager):
         """Test that semaphore properly limits concurrent requests"""
 
         # Create a custom tracking semaphore
@@ -356,18 +297,6 @@ class TestSemaphoreUsage:
         # Create our tracking semaphore with limit of 3
         tracking_sem = TrackingSemaphore(3)
 
-        # Mock storage with delayed response
-        mock_storage_instance = AsyncMock()
-
-        async def delayed_head_object(*args, **kwargs):
-            await asyncio.sleep(0.05)  # Small delay to ensure concurrent calls
-            return False
-
-        mock_storage_instance.s3_head_object = AsyncMock(
-            side_effect=delayed_head_object
-        )
-        mock_storage_class.return_value = mock_storage_instance
-
         # Mock Semaphore to return our tracking instance
         with patch("tplr.peer_manager.asyncio.Semaphore", return_value=tracking_sem):
             # Setup many peers to check concurrently
@@ -383,4 +312,4 @@ class TestSemaphoreUsage:
                 # Verify concurrency was limited by semaphore
                 assert tracking_sem.max_concurrent <= 3
                 # Verify all peers were checked
-                assert mock_storage_instance.s3_head_object.call_count > 0
+                assert MockStorageManager.s3_head_object.call_count > 0

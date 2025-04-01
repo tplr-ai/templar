@@ -268,11 +268,17 @@ class Miner:
             else:
                 tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
         else:
-            tplr.logger.info("Starting from scratch")
+            tplr.logger.info("No checkpoint found, initializing model from scratch")
             self.momentum = {
                 n: torch.zeros_like(p) for n, p in self.model.named_parameters()
             }
             self.model.to(self.config.device)  # type: ignore
+
+            # Catch up with aggregation server from start window.
+            tplr.logger.info(
+                f"Starting catchup from start window {self.start_window} to current window {self.current_window})..."
+            )
+            await tplr.neurons.catchup_with_aggregation_server(self, self.start_window)
 
         self.comms.start_commitment_fetcher()
 

@@ -1481,23 +1481,16 @@ class Comms(ChainManager):
                     f"Attempting to fetch peer list from UID {validator_uid} bucket {validator_bucket.name}"
                 )
 
-                session = get_session()
-                async with session.create_client(
+                async with self.session.create_client(
                     "s3",
-                    endpoint_url=self.get_base_url(
-                        BUCKET_SECRETS["gradients"]["account_id"]
-                    ),
+                    endpoint_url=self.get_base_url(validator_bucket.account_id),
                     region_name=CF_REGION_NAME,
                     config=client_config,
-                    aws_access_key_id=BUCKET_SECRETS["gradients"]["credentials"][
-                        "write"
-                    ]["access_key_id"],
-                    aws_secret_access_key=BUCKET_SECRETS["gradients"]["credentials"][
-                        "write"
-                    ]["secret_access_key"],
+                    aws_access_key_id=validator_bucket.access_key_id,
+                    aws_secret_access_key=validator_bucket.secret_access_key,
                 ) as s3_client:
                     list_args = {
-                        "Bucket": BUCKET_SECRETS["gradients"]["name"],
+                        "Bucket": validator_bucket.name,
                         "Prefix": "peers_",
                     }
                     response = await s3_client.list_objects_v2(**list_args)

@@ -1,0 +1,285 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "target": {
+          "limit": 100,
+          "matchAny": false,
+          "tags": [],
+          "type": "dashboard"
+        },
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": 5,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Templar Metrics",
+      "tooltip": "",
+      "type": "link",
+      "url": "/d/templar_metrics/templar-metrics"
+    }
+  ],
+  "liveNow": true,
+  "panels": [
+    {
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "# Templar Logs Dashboard\n\n<p style=\"text-align: center; font-size: 1em; color: #aaa;\">Filter logs by service, version, and UID</p>",
+        "mode": "markdown"
+      },
+      "pluginVersion": "10.4.0",
+      "transparent": true,
+      "type": "text"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 31,
+        "w": 24,
+        "x": 0,
+        "y": 2
+      },
+      "id": 2,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "builder",
+          "expr": "{service=~\"$service\"} | json | uid =~ `$uid` | version = `$templar_version`",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Service Logs Overview",
+      "type": "logs"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": [
+    "logs",
+    "loki",
+    "monitoring"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "definition": "label_values(service)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "service",
+        "options": [],
+        "query": {
+          "label": "service",
+          "refId": "LokiVariableQueryEditor-VariableQuery",
+          "stream": "",
+          "type": 1
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "0.2.62"
+          ],
+          "value": [
+            "0.2.62"
+          ]
+        },
+        "datasource": {
+          "type": "marcusolsson-json-datasource",
+          "uid": "templar-version-json"
+        },
+        "definition": "$.version",
+        "hide": 1,
+        "includeAll": false,
+        "label": "templar project version",
+        "multi": false,
+        "name": "templar_version",
+        "options": [],
+        "query": {
+          "cacheDurationSeconds": 300,
+          "fields": [
+            {
+              "jsonPath": "$.version"
+            }
+          ],
+          "method": "GET",
+          "queryParams": "",
+          "urlPath": ""
+        },
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "definition": "import \"influxdata/influxdb/schema\"\r\n\r\nschema.tagValues(bucket: \"tplr\", tag: \"uid\")",
+        "hide": 0,
+        "includeAll": true,
+        "label": "UID",
+        "multi": true,
+        "name": "uid",
+        "options": [],
+        "query": "import \"influxdata/influxdb/schema\"\r\n\r\nschema.tagValues(bucket: \"tplr\", tag: \"uid\")",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 3,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "error",
+            "critical",
+            "warning",
+            "info",
+            "debug"
+          ],
+          "value": [
+            "error",
+            "critical",
+            "warning",
+            "info",
+            "debug"
+          ]
+        },
+        "hide": 0,
+        "includeAll": false,
+        "multi": true,
+        "name": "log_level",
+        "options": [
+          {
+            "selected": true,
+            "text": "error",
+            "value": "error"
+          },
+          {
+            "selected": true,
+            "text": "critical",
+            "value": "critical"
+          },
+          {
+            "selected": true,
+            "text": "warning",
+            "value": "warning"
+          },
+          {
+            "selected": true,
+            "text": "info",
+            "value": "info"
+          },
+          {
+            "selected": true,
+            "text": "debug",
+            "value": "debug"
+          }
+        ],
+        "query": "error, critical, warning, info, debug",
+        "queryValue": "",
+        "skipUrlSync": false,
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-5m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "1d"
+    ]
+  },
+  "timezone": "",
+  "title": "Service Logs",
+  "uid": "service_logs",
+  "version": 2,
+  "weekStart": ""
+}

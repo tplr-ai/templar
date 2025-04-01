@@ -327,12 +327,14 @@ async def test_gather_basic_functionality(comms_instance):
     )
 
     assert result is not None, "Expected a non-None result"
-    assert result.uids == ["1", "2"], (
-        f"Expected valid_uids ['1', '2'], got {result.uids}"
-    )
-    assert result.global_steps == [1, 2], (
-        f"Expected global_steps [1, 2], got {result.global_steps}"
-    )
+    assert result.uids == [
+        "1",
+        "2",
+    ], f"Expected valid_uids ['1', '2'], got {result.uids}"
+    assert result.global_steps == [
+        1,
+        2,
+    ], f"Expected global_steps [1, 2], got {result.global_steps}"
 
     aggregated = result.state_dict.__dict__
     for key in ["0.weightidxs", "0.weightvals"]:
@@ -586,9 +588,10 @@ async def test_gather_averaging(comms_instance):
     # Validate the aggregated result.
     assert result is not None, "Expected a non-None gather result"
     assert result.uids == ["1", "2"], f"Expected UIDs ['1', '2'], got {result.uids}"
-    assert result.global_steps == [1, 2], (
-        f"Expected global_steps [1, 2] got {result.global_steps}"
-    )
+    assert result.global_steps == [
+        1,
+        2,
+    ], f"Expected global_steps [1, 2] got {result.global_steps}"
 
     aggregated = result.state_dict.__dict__
     for key in ["layer.idxs", "layer.vals"]:
@@ -1651,16 +1654,18 @@ async def test_missing_idxs_key(comms_instance, model):
     # Validate the result.
     # Expect only valid UIDs "uid2" and "uid3" to be present.
     assert result is not None, "Expected non-None result from gather()"
-    assert result.uids == ["uid2", "uid3"], (
-        f"Expected valid_uids ['uid2', 'uid3'], got {result.uids}"
-    )
+    assert result.uids == [
+        "uid2",
+        "uid3",
+    ], f"Expected valid_uids ['uid2', 'uid3'], got {result.uids}"
     assert result.skipped_uids == ["uid1"], (
         f"Expected skipped_uids ['uid1'], got {result.skipped_uids}"
     )
     # Global steps should match those from valid responses.
-    assert result.global_steps == [20, 30], (
-        f"Expected global_steps [20, 30], got {result.global_steps}"
-    )
+    assert result.global_steps == [
+        20,
+        30,
+    ], f"Expected global_steps [20, 30], got {result.global_steps}"
 
     # Check aggregated state_dict: only valid UIDs (2 responses) should be aggregated.
     aggregated = result.state_dict.__dict__
@@ -1763,9 +1768,10 @@ async def test_missing_vals_key(comms_instance, model):
     )
 
     assert result is not None, "Expected non-None result from gather()"
-    assert result.uids == ["uid2", "uid3"], (
-        f"Expected valid_uids ['uid2', 'uid3'], got {result.uids}"
-    )
+    assert result.uids == [
+        "uid2",
+        "uid3",
+    ], f"Expected valid_uids ['uid2', 'uid3'], got {result.uids}"
 
 
 @pytest.mark.asyncio

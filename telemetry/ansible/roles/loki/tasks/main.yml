@@ -1,0 +1,131 @@
+---
+- name: Install required packages
+  become: true
+  apt:
+    name: "{{ loki_required_packages }}"
+    state: present
+    update_cache: yes
+  register: apt_result
+  until: apt_result is success
+  retries: 3
+  delay: 5
+
+- name: Create Loki system group
+  become: true
+  group:
+    name: "{{ loki_group }}"
+    system: "{{ loki_system_user }}"
+    state: present
+
+- name: Create Loki system user
+  become: true
+  user:
+    name: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    system: "{{ loki_system_user }}"
+    shell: /usr/sbin/nologin
+    home: "{{ loki_user_home }}"
+    createhome: false
+    state: present
+
+- name: Create Loki configuration directory
+  become: true
+  file:
+    path: "{{ loki_config_dir }}"
+    state: directory
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: '0750'
+
+- name: Create Loki data directories
+  become: true
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: "0750"
+  loop:
+    - "{{ loki_data_dir }}"
+    - "{{ loki_filesystem_directory }}"
+    - "{{ loki_data_dir }}/index"
+    - "{{ loki_data_dir }}/index_cache"
+    - "{{ loki_data_dir }}/wal"
+    - "{{ loki_compactor_working_directory }}"
+    - "{{ loki_data_dir }}/rules"
+  tags: ['loki', 'directories']
+
+- name: Create temporary installation directory
+  become: true
+  file:
+    path: "{{ loki_tmp_dir }}"
+    state: directory
+    mode: '0750'
+
+- name: Download Loki binary
+  become: true
+  get_url:
+    url: "{{ loki_download_url }}"
+    dest: "{{ loki_tmp_dir }}/loki.zip"
+    mode: '0644'
+  register: loki_download
+  until: loki_download is success
+  retries: 3
+  delay: 5
+
+- name: Extract Loki binary
+  become: true
+  unarchive:
+    src: "{{ loki_tmp_dir }}/loki.zip"
+    dest: "{{ loki_tmp_dir }}"
+    remote_src: yes
+
+- name: Install Loki binary
+  become: true
+  copy:
+    src: "{{ loki_tmp_dir }}/loki-linux-amd64"
+    dest: "{{ loki_binary_path }}"
+    mode: '0755'
+    owner: root
+    group: root
+    remote_src: yes
+  notify:
+    - Clean loki temp files
+    - Restart loki service
+
+- name: Deploy Loki configuration
+  become: true
+  template:
+    src: loki-config.yaml.j2
+    dest: "{{ loki_config_file }}"
+    owner: "{{ loki_user }}"
+    group: "{{ loki_group }}"
+    mode: '0640'
+  notify: Restart loki service
+
+- name: Create Loki systemd service file
+  become: true
+  template:
+    src: loki.service.j2
+    dest: "{{ loki_systemd_service_file }}"
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Reload systemd daemon
+    - Restart loki service
+
+- name: Enable and start Loki service
+  become: true
+  systemd:
+    name: loki
+    state: started
+    enabled: yes
+  register: service_start
+  retries: 3
+  delay: 10
+  until: service_start is success
+
+# Include verification tasks
+- name: Run verification checks
+  include_tasks: verify.yml

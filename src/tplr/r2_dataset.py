@@ -336,6 +336,7 @@ class R2DatasetLoader(DatasetLoader):
                     "region_name": R2DatasetLoader.CF_REGION_NAME,
                 },
                 config_kwargs={
+                    "tcp_keepalive": True,
                     "max_pool_connections": 50,
                     "connect_timeout": 5,
                     "read_timeout": 10,

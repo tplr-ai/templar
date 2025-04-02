@@ -91,7 +91,7 @@
             "uid": "loki"
           },
           "editorMode": "builder",
-          "expr": "{service=~\"$service\"} | json | uid =~ `$uid` | version = `$templar_version`",
+          "expr": "{service=~\"$service\"} |~ `$Search` | json | uid =~ `$uid` | version = `$templar_version` | severity =~ `$log_level`",
           "queryType": "range",
           "refId": "A"
         }
@@ -111,7 +111,7 @@
     "list": [
       {
         "current": {
-          "selected": true,
+          "selected": false,
           "text": [
             "All"
           ],
@@ -143,13 +143,9 @@
       },
       {
         "current": {
-          "selected": true,
-          "text": [
-            "0.2.62"
-          ],
-          "value": [
-            "0.2.62"
-          ]
+          "selected": false,
+          "text": "0.2.62",
+          "value": "0.2.62"
         },
         "datasource": {
           "type": "marcusolsson-json-datasource",
@@ -181,13 +177,17 @@
       },
       {
         "current": {
-          "selected": true,
+          "selected": false,
           "text": [
             "All"
           ],
           "value": [
             "$__all"
           ]
+        },
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influx"
         },
         "definition": "import \"influxdata/influxdb/schema\"\r\n\r\nschema.tagValues(bucket: \"tplr\", tag: \"uid\")",
         "hide": 0,
@@ -256,11 +256,32 @@
         "queryValue": "",
         "skipUrlSync": false,
         "type": "custom"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": "",
+          "value": ""
+        },
+        "description": "Search with regex for a specific log entry",
+        "hide": 0,
+        "label": "Search",
+        "name": "Search",
+        "options": [
+          {
+            "selected": true,
+            "text": "",
+            "value": ""
+          }
+        ],
+        "query": "",
+        "skipUrlSync": false,
+        "type": "textbox"
       }
     ]
   },
   "time": {
-    "from": "now-5m",
+    "from": "now-1h",
     "to": "now"
   },
   "timepicker": {
@@ -280,6 +301,6 @@
   "timezone": "",
   "title": "Service Logs",
   "uid": "service_logs",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

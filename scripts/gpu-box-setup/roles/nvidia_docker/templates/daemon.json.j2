@@ -1,0 +1,15 @@
+{
+  "runtimes": {
+    "nvidia": {
+      "path": "nvidia-container-runtime",
+      "runtimeArgs": []
+    }
+  },
+  "default-runtime": "{{ nvidia_docker_default_runtime }}",
+  "exec-opts": ["native.cgroupdriver=cgroupfs"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "{{ nvidia_docker_log_max_size }}",
+    "max-file": "{{ nvidia_docker_log_max_file }}"
+  }
+}

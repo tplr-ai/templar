@@ -1,0 +1,97 @@
+---
+- name: Check if NVIDIA drivers are loaded
+  ansible.builtin.shell: lsmod | grep nvidia
+  register: nvidia_modules
+  changed_when: false
+  failed_when: false
+
+- name: Verify NVIDIA driver installation with nvidia-smi
+  ansible.builtin.command: nvidia-smi
+  register: nvidia_smi_output
+  changed_when: false
+  failed_when: false
+
+- name: Check if nvidia-persistenced is running
+  ansible.builtin.service:
+    name: nvidia-persistenced
+    state: started
+  check_mode: true
+  register: nvidia_persistence_status
+  failed_when: false
+
+- name: Get GPU count
+  ansible.builtin.shell: nvidia-smi --query-gpu=count --format=csv,noheader
+  register: gpu_count
+  changed_when: false
+  failed_when: false
+  when: nvidia_smi_output.rc == 0
+
+- name: Set GPU count fact
+  ansible.builtin.set_fact:
+    nvidia_gpu_count: "{{ gpu_count.stdout | int }}"
+  when: gpu_count.rc == 0
+
+- name: Verify CUDA version
+  ansible.builtin.shell: nvidia-smi | grep "CUDA Version" | awk '{print $9}'
+  register: cuda_version_output
+  changed_when: false
+  failed_when: false
+  when: nvidia_smi_output.rc == 0
+
+- name: Test NVIDIA Docker integration
+  community.docker.docker_container:
+    name: nvidia_test_container
+    image: nvidia/cuda:12.8.0-base-ubuntu22.04
+    command: nvidia-smi
+    state: started
+    auto_remove: yes
+    device_requests:
+      - # Add NVIDIA GPUs
+        driver: nvidia
+        count: -1
+        capabilities: [gpu]
+  register: nvidia_docker_test
+  failed_when: false
+
+- name: Verify NVIDIA Container Toolkit version
+  ansible.builtin.command: nvidia-ctk --version
+  register: nvidia_ctk_version
+  changed_when: false
+  failed_when: false
+
+- name: Run container with specific compute workload test
+  community.docker.docker_container:
+    name: cuda_samples_test
+    image: nvidia/cuda:12.8.0-devel-ubuntu22.04
+    command: bash -c "cd /opt && git clone https://github.com/NVIDIA/cuda-samples.git && cd cuda-samples/Samples/1_Utilities/deviceQuery && make && ./deviceQuery"
+    state: started
+    auto_remove: yes
+    device_requests:
+      - driver: nvidia
+        count: -1
+        capabilities: [gpu]
+  register: compute_test
+  failed_when: false
+  when: nvidia_docker_test.failed == false
+
+- name: Generate verification summary
+  ansible.builtin.set_fact:
+    verification_summary:
+      driver_installed: "{{ nvidia_modules.rc == 0 }}"
+      nvidia_smi_working: "{{ nvidia_smi_output.rc == 0 }}"
+      persistence_daemon: "{{ nvidia_persistence_status.changed == false }}"
+      gpu_count: "{{ nvidia_gpu_count | default(0) }}"
+      cuda_version: "{{ cuda_version_output.stdout | default('Not detected') if cuda_version_output.rc == 0 else 'Not detected' }}"
+      docker_integration: "{{ nvidia_docker_test.failed == false }}"
+      container_toolkit: "{{ nvidia_ctk_version.rc == 0 }}"
+      compute_test: "{{ compute_test.failed == false if compute_test is defined else false }}"
+
+- name: Display verification summary
+  ansible.builtin.debug:
+    var: verification_summary
+    verbosity: 0
+
+- name: Fail if critical components are not working
+  ansible.builtin.fail:
+    msg: "NVIDIA GPU setup verification failed. Check logs for details."
+  when: not verification_summary.driver_installed or not verification_summary.nvidia_smi_working

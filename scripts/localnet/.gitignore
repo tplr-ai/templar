@@ -1,0 +1,9 @@
+# Ansible vault file containing sensitive variables
+group_vars/all/vault.yml
+inventory
+
+# Do not commit local wallet keys
+.bittensor/
+
+# Ansible retry files
+*.retry

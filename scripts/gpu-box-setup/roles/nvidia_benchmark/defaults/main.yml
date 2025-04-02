@@ -1,0 +1,15 @@
+---
+# Default variables for the nvidia_benchmark role
+
+# Whether to run benchmark after setup
+run_benchmark: true
+
+# Path to Python virtual environment
+python_venv_path: "{{ ansible_env.HOME }}/ai-env"
+
+# Whether to keep benchmark results
+keep_benchmark_results: true
+
+# Benchmark parameters
+benchmark_duration: 30  # Duration for thermal test in seconds
+benchmark_iterations: 20  # Number of iterations for tests

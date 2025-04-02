@@ -1,0 +1,244 @@
+- name: Wait for Subtensor node to be ready
+  command: btcli subnet list --subtensor.network local
+  register: wait_node
+  retries: 20
+  delay: 3
+  until: wait_node.rc == 0
+  changed_when: false
+  tags: bittensor_wallet
+
+- name: Debug subnet list
+  debug:
+    msg: "{{ wait_node.stdout_lines }}"
+  tags: bittensor_wallet
+
+- name: Set flag if subnet netuid {{ netuid }} exists
+  set_fact:
+    net2_exists: "{{ 'NetUID: ' ~ netuid ~ ' ' in wait_node.stdout }}"
+  tags: bittensor_wallet
+
+- name: Debug net2_exists status
+  debug:
+    msg: "Subnet netuid {{ netuid }} exists: {{ net2_exists }}"
+  tags: bittensor_wallet
+
+- name: Check required coldkey on local machine
+  delegate_to: localhost
+  stat:
+    path: "{{ lookup('env','HOME') }}/.bittensor/wallets/{{ cold_wallet_name }}/coldkey"
+  register: coldkey_stat
+  failed_when: not coldkey_stat.stat.exists
+  tags: bittensor_wallet
+
+- name: Check required hotkeys on local machine
+  delegate_to: localhost
+  stat:
+    path: "{{ lookup('env','HOME') }}/.bittensor/wallets/{{ cold_wallet_name }}/hotkeys/{{ item }}"
+  register: hotkey_stat
+  loop: "{{ validator_hotkeys + miner_hotkeys + ([owner_hotkey] if owner_hotkey is defined and owner_hotkey not in (validator_hotkeys + miner_hotkeys) else []) }}"
+  failed_when: not hotkey_stat.stat.exists
+  tags: bittensor_wallet
+
+- name: Synchronize wallet keys to remote target
+  synchronize:
+    src: "{{ lookup('env','HOME') }}/.bittensor/wallets/"
+    dest: "{{ ansible_env.HOME }}/.bittensor/wallets/"
+    mode: push
+    archive: yes
+    rsync_opts:
+      - "--delete"
+  when: remote_mode | bool
+  tags: bittensor_wallet
+
+- name: Set wallet path variable
+  set_fact:
+    wallet_path: "{{ ansible_env.HOME }}/.bittensor/wallets/{{ cold_wallet_name }}"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Generate environment variable name for coldwallet wallet password
+  set_fact:
+    wallet_env_var: "BT_PW_{{ wallet_path | replace('/', '_') | replace('.', '_') | upper }}_COLDKEY"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Debug wallet environment variable
+  debug:
+    msg: "Using wallet environment variable: {{ wallet_env_var }}"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Check if wallet has funds already
+  shell: btcli wallet overview --wallet.name "{{ cold_wallet_name }}" --subtensor.network local
+  register: wallet_overview
+  when: not net2_exists
+  tags: bittensor_wallet
+  no_log: false
+  args:
+    executable: /bin/bash
+
+- name: Debug wallet overview
+  debug:
+    msg: "{{ wallet_overview.stdout_lines }}"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Fund cold wallet with environment variable password
+  shell: >
+    {{ wallet_env_var }}=$(python -c "from bittensor_wallet import Wallet; print(Wallet('{{ cold_wallet_name }}').coldkey_file.save_password_to_env('{{ bittensor_wallet_password }}'))")
+    btcli wallet faucet --wallet.name "{{ cold_wallet_name }}" --subtensor.network local -y --max-successes 3
+  register: direct_faucet_result
+  when: not net2_exists
+  tags: bittensor_wallet
+  no_log: false
+  args:
+    executable: /bin/bash
+
+- name: Debug direct faucet result
+  debug:
+    msg: "{{ direct_faucet_result.stdout_lines | default([]) + direct_faucet_result.stderr_lines | default([]) }}"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Check wallet balance after faucet
+  shell: btcli wallet overview --wallet.name "{{ cold_wallet_name }}" --subtensor.network local
+  register: wallet_after_faucet
+  when: not net2_exists
+  tags: bittensor_wallet
+  no_log: false
+  args:
+    executable: /bin/bash
+
+- name: Debug wallet after faucet
+  debug:
+    msg: "{{ wallet_after_faucet.stdout_lines }}"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Check local network status
+  shell: btcli subnet list --subtensor.network local
+  register: subnet_list
+  when: not net2_exists
+  tags: bittensor_wallet
+  no_log: false
+  args:
+    executable: /bin/bash
+
+- name: Debug subnet list
+  debug:
+    msg: "{{ subnet_list.stdout_lines }}"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Check balance before subnet creation
+  shell: btcli wallet overview --wallet.name "{{ cold_wallet_name }}" --subtensor.network local
+  register: balance_before_subnet
+  when: not net2_exists
+  tags: bittensor_wallet
+  no_log: false
+  args:
+    executable: /bin/bash
+
+- name: Debug balance before subnet creation
+  debug:
+    msg: "{{ balance_before_subnet.stdout_lines }}"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Subnet creation
+  shell: >
+    export {{ wallet_env_var }}=$(python -c "from bittensor_wallet import Wallet; print(Wallet('{{ cold_wallet_name }}').coldkey_file.save_password_to_env('{{ bittensor_wallet_password }}'))");
+    printf "\n\n\n\n\n\n" | btcli subnet create --wallet.name "{{ cold_wallet_name }}" --wallet.hotkey "{{ owner_hotkey }}" --subtensor.network local --subnet-name "templar_subnet" -y
+  register: direct_subnet_create
+  when: not net2_exists
+  tags: bittensor_wallet
+  no_log: false
+  args:
+    executable: /bin/bash
+
+- name: Debug Subnet creation result
+  debug:
+    msg: "{{ direct_subnet_create.stdout_lines | default([]) + direct_subnet_create.stderr_lines | default([]) }}"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Subnet validator registeration
+  shell: >
+    {{ wallet_env_var }}=$(python -c "from bittensor_wallet import Wallet; print(Wallet('{{ cold_wallet_name }}').coldkey_file.save_password_to_env('{{ bittensor_wallet_password }}'))")
+    btcli subnet register --wallet.name "{{ cold_wallet_name }}" --wallet.hotkey "{{ owner_hotkey }}" --netuid {{ netuid }} --subtensor.network local -y
+  register: validator_subnet_register
+  ignore_errors: true
+  when: not net2_exists
+  tags: bittensor_wallet
+  no_log: false
+  args:
+    executable: /bin/bash
+
+- name: Debug Subnet registeration result
+  debug:
+    msg: "{{ validator_subnet_register.stdout_lines | default([]) + validator_subnet_register.stderr_lines | default([]) }}"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Register validators hotkeys on subnet
+  shell: >
+    {{ wallet_env_var }}=$(python -c "from bittensor_wallet import Wallet; print(Wallet('{{ cold_wallet_name }}').coldkey_file.save_password_to_env('{{ bittensor_wallet_password }}'))")
+    btcli subnet register --wallet.name "{{ cold_wallet_name }}" --wallet.hotkey "{{ item }}" --netuid {{ netuid }} --network local -y
+  loop: "{{ validator_hotkeys }}"
+  register: register_validators_result
+  retries: 3
+  delay: 10
+  until: register_validators_result.rc == 0
+  when: not net2_exists
+  tags: bittensor_wallet
+  no_log: false
+  args:
+    executable: /bin/bash
+
+- name: Debug Register validators result
+  debug:
+    msg: "{{ register_validators_result.stdout_lines | default([]) + register_validators_result.stderr_lines | default([]) }}"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Register miners hotkeys on subnet
+  shell: >
+    {{ wallet_env_var }}=$(python -c "from bittensor_wallet import Wallet; print(Wallet('{{ cold_wallet_name }}').coldkey_file.save_password_to_env('{{ bittensor_wallet_password }}'))")
+    btcli subnet register --wallet.name "{{ cold_wallet_name }}" --wallet.hotkey "{{ item }}" --netuid {{ netuid }} --network local -y
+  loop: "{{ miner_hotkeys }}"
+  register: register_miners_result
+  retries: 3
+  delay: 10
+  until: register_miners_result.rc == 0
+  when: not net2_exists
+  tags: bittensor_wallet
+  no_log: false
+  args:
+    executable: /bin/bash
+
+- name: Debug Register miners result
+  debug:
+    msg: "{{ register_miners_result.stdout_lines | default([]) + register_miners_result.stderr_lines | default([]) }}"
+  when: not net2_exists
+  tags: bittensor_wallet
+
+- name: Stake TAO to validator(s)
+  shell: >
+    {{ wallet_env_var }}=$(python -c "from bittensor_wallet import Wallet; print(Wallet('{{ cold_wallet_name }}').coldkey_file.save_password_to_env('{{ bittensor_wallet_password }}'))")
+    btcli stake add --wallet.name "{{ cold_wallet_name }}" --wallet.hotkey "{{ item }}" --netuid {{ netuid }} --subtensor.network local --amount {{ stake_amount }} --unsafe -y
+  loop: "{{ validator_hotkeys }}"
+  register: stake_result
+  retries: 3
+  delay: 10
+  until: stake_result.rc == 0
+  when: not net2_exists
+  tags: bittensor_wallet
+  no_log: false
+  args:
+    executable: /bin/bash
+
+- name: Debug Stake result
+  debug:
+    msg: "{{ stake_result.stdout_lines | default([]) + stake_result.stderr_lines | default([]) }}"
+  when: not net2_exists
+  tags: bittensor_wallet

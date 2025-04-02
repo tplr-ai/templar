@@ -1,0 +1,24 @@
+[gpu_nodes]
+gpu-server ansible_host=192.168.1.1 ansible_user=admin ansible_port=22
+
+[gpu_nodes:vars]
+ansible_connection=ssh
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+ansible_become=yes
+ansible_become_method=sudo
+ansible_become_pass="{{ vault_sudo_password }}"
+
+# Ubuntu-specific settings
+[ubuntu_nodes:children]
+gpu_nodes
+
+[ubuntu_nodes:vars]
+ansible_python_interpreter=/usr/bin/python3
+
+# RedHat/CentOS specific settings
+[redhat_nodes]
+# Add your RedHat nodes here if needed
+# redhat-gpu ansible_host=192.168.1.2 ansible_user=admin
+
+[redhat_nodes:vars]
+ansible_python_interpreter=/usr/bin/python3

@@ -1,0 +1,113 @@
+---
+# SSH Configuration
+- name: Harden SSH configuration
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    state: present
+  loop:
+    - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin {{ ssh_permit_root_login }}' }
+    - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication {{ ssh_password_authentication }}' }
+    - { regexp: '^#?ChallengeResponseAuthentication', line: 'ChallengeResponseAuthentication {{ ssh_challenge_response_auth }}' }
+    - { regexp: '^#?X11Forwarding', line: 'X11Forwarding {{ ssh_x11_forwarding }}' }
+    - { regexp: '^#?AllowTcpForwarding', line: 'AllowTcpForwarding {{ ssh_allow_tcp_forwarding }}' }
+    - { regexp: '^#?MaxAuthTries', line: 'MaxAuthTries {{ ssh_max_auth_tries }}' }
+  notify: restart sshd
+
+- name: Create .ssh directory for ansible user
+  file:
+    path: "/home/{{ ansible_user }}/.ssh"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0700'
+
+- name: Add SSH authorized keys
+  authorized_key:
+    user: "{{ ansible_user }}"
+    key: "{{ item }}"
+    state: present
+  loop: "{{ ssh_public_keys }}"
+  when: ssh_public_keys is defined
+
+# Firewall Setup (Ubuntu)
+- name: Install UFW (Ubuntu)
+  apt:
+    name: ufw
+    state: present
+  when: ansible_distribution == 'Ubuntu' and enable_firewall | bool
+
+- name: Configure UFW defaults (Ubuntu)
+  ufw:
+    state: enabled
+    policy: deny
+    direction: incoming
+  when: ansible_distribution == 'Ubuntu' and enable_firewall | bool
+
+- name: Allow SSH through UFW (Ubuntu)
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop: "{{ firewall_allowed_tcp_ports }}"
+  when: ansible_distribution == 'Ubuntu' and enable_firewall | bool
+
+# Firewall Setup (RHEL)
+- name: Install firewalld (RHEL)
+  dnf:
+    name: firewalld
+    state: present
+  when: ansible_os_family == 'RedHat' and enable_firewall | bool
+
+- name: Start and enable firewalld (RHEL)
+  service:
+    name: firewalld
+    state: started
+    enabled: yes
+  when: ansible_os_family == 'RedHat' and enable_firewall | bool
+
+- name: Allow TCP ports through firewalld (RHEL)
+  firewalld:
+    port: "{{ item }}/tcp"
+    permanent: yes
+    state: enabled
+  loop: "{{ firewall_allowed_tcp_ports }}"
+  when: ansible_os_family == 'RedHat' and enable_firewall | bool
+
+# System Security Settings
+- name: Disable core dumps
+  lineinfile:
+    path: /etc/security/limits.conf
+    line: "* hard core 0"
+    state: present
+  when: disable_core_dumps | bool
+  
+# Ensure sudo configuration is secure but allows NOPASSWD for our user
+- name: Set secure sudo defaults
+  lineinfile:
+    path: /etc/sudoers
+    regexp: '^Defaults\s+secure_path'
+    line: 'Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+    validate: 'visudo -cf %s'
+    state: present
+
+- name: Configure sudo timeout (session timeout after 15 minutes)
+  lineinfile:
+    path: /etc/sudoers
+    regexp: '^Defaults\s+timestamp_timeout'
+    line: 'Defaults timestamp_timeout=15'
+    validate: 'visudo -cf %s'
+    state: present
+
+- name: Set system-wide security limits
+  pam_limits:
+    domain: '*'
+    limit_type: "{{ item.limit_type }}"
+    limit_item: "{{ item.limit_item }}"
+    value: "{{ item.value }}"
+  loop:
+    - { limit_type: 'hard', limit_item: 'core', value: '0' }
+    - { limit_type: 'hard', limit_item: 'nofile', value: '65536' }
+    - { limit_type: 'soft', limit_item: 'nofile', value: '65536' }
+  when: disable_core_dumps | bool

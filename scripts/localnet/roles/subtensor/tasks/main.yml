@@ -1,0 +1,60 @@
+- name: Clone Subtensor repository
+  git:
+    repo: https://github.com/opentensor/subtensor.git
+    dest: "{{ ansible_env.HOME }}/subtensor"
+    version: main
+    update: yes
+  tags: subtensor
+
+- name: Check if init has been run
+  stat:
+    path: "{{ ansible_env.HOME }}/.cargo/env"
+  register: cargo_env
+  tags: subtensor
+
+- name: Initialize Subtensor (Rust nightly toolchain)
+  shell: "bash -c 'source {{ ansible_env.HOME }}/.cargo/env && ./scripts/init.sh'"
+  args:
+    chdir: "{{ ansible_env.HOME }}/subtensor"
+  when: not cargo_env.stat.exists
+  tags: subtensor
+
+- name: Check if binary is built
+  stat:
+    path: "{{ ansible_env.HOME }}/subtensor/target/release/node-subtensor"
+  register: subtensor_binary
+  tags: subtensor
+
+- name: Check if binary has been built before
+  shell: "bash -c 'if [ -f {{ ansible_env.HOME }}/subtensor/.build_done ]; then echo \"found\"; else echo \"notfound\"; fi'"
+  register: build_done_check
+  changed_when: false
+  tags: subtensor
+
+- name: Run cargo build
+  shell: "bash -c 'source {{ ansible_env.HOME }}/.cargo/env && cargo build --release'"
+  args:
+    chdir: "{{ ansible_env.HOME }}/subtensor"
+  when: not subtensor_binary.stat.exists or build_done_check.stdout == "notfound"
+  tags: subtensor
+
+- name: Build Subtensor node (fast blocks disabled)
+  shell: "bash -c 'source {{ ansible_env.HOME }}/.cargo/env && BUILD_BINARY=1 ./scripts/localnet.sh --build-only && touch {{ ansible_env.HOME }}/subtensor/.build_done'"
+  args:
+    chdir: "{{ ansible_env.HOME }}/subtensor"
+  when: not subtensor_binary.stat.exists or build_done_check.stdout == "notfound"
+  tags: subtensor
+
+- name: Check if Subtensor PM2 process is running
+  shell: pm2 list | grep Subtensor
+  register: pm2_check
+  failed_when: false
+  changed_when: false
+  tags: subtensor
+
+- name: Start Subtensor node with PM2
+  shell: pm2 start ./scripts/localnet.sh --name "Subtensor" --interpreter bash --cwd "{{ ansible_env.HOME }}/subtensor" -- False --no-purge
+  args:
+    chdir: "{{ ansible_env.HOME }}/subtensor"
+  when: pm2_check.rc != 0
+  tags: subtensor

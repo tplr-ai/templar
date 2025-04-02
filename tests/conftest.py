@@ -174,4 +174,25 @@ def mock_validator(mocker, mock_metagraph, num_active_miners):
         validator.comms.active_peers = np.array([])
     tplr.logger.info(f"Created {len(validator.comms.active_peers)} active peers.")
 
+    mocker.patch("bittensor.logging")
+    mocker.patch("bittensor.wallet")
+    mocker.patch("bittensor.subtensor")
+    mocker.patch("bittensor.metagraph")
+
+    # Mock config
+    mock_config = mocker.MagicMock()
+    mock_config.save_location = "/mock/path"
+    validator.config = mock_config
+
+    # Set state filename
+    validator.state_filename = "validator_state.npz"
+
+    # Set up test data
+    validator.gradient_scores = np.zeros(256)
+    validator.binary_indicator_scores = np.zeros(256)
+    validator.gradient_moving_avg_scores = np.zeros(256)
+    validator.final_moving_avg_scores = np.zeros(256)
+    validator.binary_moving_averages = np.zeros(256)
+    validator.weights = np.zeros(256)
+
     return validator

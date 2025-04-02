@@ -89,7 +89,7 @@ class R2DatasetLoader(DatasetLoader):
     _prefetch_queue = None
 
     _round_robin_index = 0  # global counter for dataset round-robin selection
-    _fs_cache = {}          # maps account_id to a cached s3fs.S3FileSystem
+    _fs_cache = {}  # maps account_id to a cached s3fs.S3FileSystem
     _fs_lock = threading.Lock()  # lock for fs cache and round robin
 
     def __init__(

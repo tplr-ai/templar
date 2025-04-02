@@ -228,14 +228,22 @@ class Validator:
         self.relative_improvement_own = 0.0
         self.relative_improvement_random = 0.0
         self.valid_score_indices = []
-        self.gradient_scores = torch.zeros(256, dtype=torch.float32)
-        self.sync_scores = torch.zeros(256, dtype=torch.float32)
-        self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
-        self.gradient_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
-        self.final_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
-        self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
-        self.weights = torch.zeros(256, dtype=torch.float32)
-        self.normalised_binary_moving_averages = torch.zeros(256, dtype=torch.float32)
+
+        # Caching
+        self.state_path = f"validator-state-{tplr.__version__}.npz"
+        if os.path.isfile(self.state_path):
+            self.load_state()
+        else:
+            self.gradient_scores = torch.zeros(256, dtype=torch.float32)
+            self.sync_scores = torch.zeros(256, dtype=torch.float32)
+            self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
+            self.gradient_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
+            self.final_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
+            self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
+            self.weights = torch.zeros(256, dtype=torch.float32)
+            self.normalised_binary_moving_averages = torch.zeros(
+                256, dtype=torch.float32
+            )
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -275,9 +283,6 @@ class Validator:
         # Initialize peer related attributes
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
-
-        # Caching
-        self.state_path = f"validator-state-{tplr.__version__}.npz"
 
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:

@@ -39,18 +39,19 @@ For additional environment setup, refer to the miner documentation:
 https://github.com/tplr-ai/templar/blob/main/docs/miner.md
 """
 
-import os
-import json
-import shutil
-import torch
-import asyncio
 import argparse
+import asyncio
+import json
+import os
+import shutil
 import time
-import tplr
-import bittensor as bt
-
 from typing import Optional, Tuple
+
+import bittensor as bt
+import torch
 from transformers.models.llama import LlamaForCausalLM
+
+import tplr
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"
@@ -222,13 +223,14 @@ class Evaluator:
             - global_step (int): Global training step
         """
         result = await self.comms.get_latest_checkpoint()
-        tplr.logger.info(f"[DEBUG] get_latest_checkpoint() result: {result}")
         if not result:
             tplr.logger.error(
                 f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket_name', 'unknown')}, "
                 f"key_prefix: {self.comms.key_prefix}"
             )
             return (False, {}, 0, 0)
+
+        tplr.logger.info(f"[DEBUG] get_latest_checkpoint() result: {result}")
 
         checkpoint_data, _ = result
         tplr.logger.info(f"[DEBUG] Checkpoint data: {checkpoint_data}")

@@ -55,4 +55,4 @@ module.exports = {
             args: `--wallet.name templar --wallet.hotkey templar_validator --device cuda:4 --subtensor.network ws://159.69.219.238:11144 --netuid 3 --use_wandb --project templar`
         },
     ]
-} 
+}

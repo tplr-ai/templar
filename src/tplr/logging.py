@@ -18,16 +18,17 @@
 # Global imports
 import json
 import logging
+import logging.handlers
 import os
 import socket
 import time
 import uuid
 from datetime import datetime
-from multiprocessing.queues import Queue
+from queue import Queue
 from typing import Final
 
 import bittensor as bt
-from logging_loki import LokiQueueHandler
+import logging_loki
 from rich.highlighter import NullHighlighter
 from rich.logging import RichHandler
 
@@ -151,18 +152,34 @@ def setup_loki_logger(
     version: str,
     environment="finney",
     url=LOKI_URL,
-):
+) -> logging.Logger:
     """
-    Hijack the templar logger with Loki logging.
+    Add Loki logging to templar logger.
+
+    Configures the logger to send logs to both Loki (asynchronously) and stdout.
+    Uses a Queue for asynchronous logging to avoid blocking the main thread.
 
     Args:
+        service: Service name (e.g., 'miner', 'validator')
         uid: UID identifier for filtering logs
         version: Version identifier for filtering logs
+        environment: Environment name
         url: Loki server URL
-    """
 
+    Returns:
+        The configured logger instance
+    """
     host = socket.gethostname()
     pid = os.getpid()
+    tags = {
+        "service": service,
+        "host": host,
+        "pid": pid,
+        "environment": environment,
+        "version": version,
+        "uid": uid,
+        "trace_id": TRACE_ID,
+    }
 
     class StructuredLogFormatter(logging.Formatter):
         """Custom formatter that outputs logs in a structured format with metadata."""
@@ -173,59 +190,131 @@ def setup_loki_logger(
                 "level": record.levelname,
                 "logger": record.name,
                 "message": record.getMessage(),
-                "pathname": record.pathname,
-                "filename": record.filename,
-                "module": record.module,
-                "lineno": record.lineno,
-                "exc_info": record.exc_info,
-                "funcName": record.funcName,
-                "stack_info": record.stack_info,
-                "thread": record.threadName,
-                "thread_id": record.thread,
-                "time": T(),
                 "host": host,
                 "pid": pid,
-                "process": pid,
-                "trace_id": TRACE_ID,
                 "service": service,
                 "environment": environment,
                 "version": version,
                 "uid": uid,
-                # this duplication is needed for loki to work with labels
-                "severity": record.levelname.lower(),
-                "tags": {
-                    "service": service,
-                    "environment": environment,
-                    "version": version,
-                    "uid": uid,
-                },
+                "trace_id": TRACE_ID,
             }
+
+            if hasattr(record, "extra_data") and record.extra_data:  # type: ignore
+                log_data.update(record.extra_data)  # type: ignore
 
             return json.dumps(log_data)
 
+    def log_with_context(logger, level, message, **context):
+        """Log a message with additional context data."""
+        record = logging.LogRecord(
+            name=logger.name,
+            level=getattr(logging, level.upper()),
+            pathname=__file__,
+            lineno=0,
+            msg=message,
+            args=(),
+            exc_info=None,
+        )
+
+        record.extra_data = context
+
+        for handler in logger.handlers:
+            if record.levelno >= handler.level:
+                handler.handle(record)
+
     try:
+        logger = logging.getLogger("templar")
+
         log_queue = Queue(-1)
 
-        loki_handler = LokiQueueHandler(
-            queue=log_queue,  # type: ignore
+        queue_handler = logging.handlers.QueueHandler(log_queue)
+        listener = logging.handlers.QueueListener(log_queue, respect_handler_level=True)
+
+        loki_handler = logging_loki.LokiHandler(
             url=url,
-            tags={},
+            tags=tags,
+            auth=None,  # TODO Add auth=(username, password) when available
             version="1",
-            # TODO Add auth=(username, password) when available
-            auth=None,
+        )
+
+        listener.handlers = [loki_handler]  # type: ignore
+
+        console_handler = RichHandler(
+            markup=True,
+            rich_tracebacks=True,
+            highlighter=NullHighlighter(),
+            show_level=False,
+            show_time=True,
+            show_path=False,
         )
 
         loki_handler.setFormatter(StructuredLogFormatter())
 
-        loki_handler.setLevel(logger.level)
+        logger.setLevel(logging.INFO)
 
-        loki_handler.addFilter(NoSubtensorWarning())
+        logger.handlers.clear()
+        listener.start()
 
-        logger.addHandler(loki_handler)
-        return True
+        logger.addHandler(queue_handler)
+
+        logger.addHandler(console_handler)
+
+        logger.log_with_context = lambda level, message, **kwargs: log_with_context(  # type: ignore
+            logger, level, message, **kwargs
+        )
+
+        logger.propagate = False
+
+        logger._listener = listener  # type: ignore
+
+        return logger
     except Exception as e:
+        logger = logging.getLogger("templar")
         logger.error(f"Failed to add Loki logging: {e}")
-        return False
+
+        if not logger.handlers:
+            logger.addHandler(
+                RichHandler(
+                    markup=True,
+                    rich_tracebacks=True,
+                    highlighter=NullHighlighter(),
+                    show_level=False,
+                    show_time=True,
+                    show_path=False,
+                )
+            )
+
+        return logger
 
 
-__all__ = ["logger", "debug", "trace", "P", "T", "setup_loki_logger"]
+def log_with_context(level, message, **context):
+    """
+    Log a message with additional context data.
+
+    This is a convenience function for logging with extra context data
+    when the logger hasn't been initialized with setup_loki_logger.
+
+    Args:
+        level: Log level (e.g., 'info', 'error', 'warning')
+        message: The log message
+        **context: Additional context data to include with the log
+
+    Example:
+        log_with_context('info', 'Processing batch', batch_size=32, batch_id='abc123')
+    """
+    if not hasattr(logger, "log_with_context"):
+        getattr(logger, level.lower())(message)
+        return
+
+    logger.log_with_context(level, message, **context)  # type: ignore
+
+
+__all__ = [
+    "logger",
+    "debug",
+    "trace",
+    "P",
+    "T",
+    "setup_loki_logger",
+    "log_with_context",
+]

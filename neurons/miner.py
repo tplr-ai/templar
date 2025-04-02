@@ -113,7 +113,9 @@ class Miner:
 
         try:
             version = tplr.__version__
-            tplr.setup_loki_logger(service="miner", uid=str(self.uid), version=version)
+            tplr.logger = tplr.setup_loki_logger(
+                service="miner", uid=str(self.uid), version=version
+            )
             tplr.logger.info(f"Loki logging enabled for miner UID: {self.uid}")
         except Exception as e:
             tplr.logger.warning(f"Failed to initialize Loki logging: {e}")

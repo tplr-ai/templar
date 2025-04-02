@@ -32,15 +32,11 @@ def load_bucket_secrets():
             "credentials": {
                 "read": {
                     "access_key_id": os.environ.get("R2_GRADIENTS_READ_ACCESS_KEY_ID"),
-                    "secret_access_key": os.environ.get(
-                        "R2_GRADIENTS_READ_SECRET_ACCESS_KEY"
-                    ),
+                    "secret_access_key": os.environ.get("R2_GRADIENTS_READ_SECRET_ACCESS_KEY"),
                 },
                 "write": {
                     "access_key_id": os.environ.get("R2_GRADIENTS_WRITE_ACCESS_KEY_ID"),
-                    "secret_access_key": os.environ.get(
-                        "R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"
-                    ),
+                    "secret_access_key": os.environ.get("R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"),
                 },
             },
         },
@@ -50,17 +46,11 @@ def load_bucket_secrets():
             "credentials": {
                 "read": {
                     "access_key_id": os.environ.get("R2_AGGREGATOR_READ_ACCESS_KEY_ID"),
-                    "secret_access_key": os.environ.get(
-                        "R2_AGGREGATOR_READ_SECRET_ACCESS_KEY"
-                    ),
+                    "secret_access_key": os.environ.get("R2_AGGREGATOR_READ_SECRET_ACCESS_KEY"),
                 },
                 "write": {
-                    "access_key_id": os.environ.get(
-                        "R2_AGGREGATOR_WRITE_ACCESS_KEY_ID"
-                    ),
-                    "secret_access_key": os.environ.get(
-                        "R2_AGGREGATOR_WRITE_SECRET_ACCESS_KEY"
-                    ),
+                    "access_key_id": os.environ.get("R2_AGGREGATOR_WRITE_ACCESS_KEY_ID"),
+                    "secret_access_key": os.environ.get("R2_AGGREGATOR_WRITE_SECRET_ACCESS_KEY"),
                 },
             },
         },
@@ -70,19 +60,27 @@ def load_bucket_secrets():
             "credentials": {
                 "read": {
                     "access_key_id": os.environ.get("R2_DATASET_READ_ACCESS_KEY_ID"),
-                    "secret_access_key": os.environ.get(
-                        "R2_DATASET_READ_SECRET_ACCESS_KEY"
-                    ),
+                    "secret_access_key": os.environ.get("R2_DATASET_READ_SECRET_ACCESS_KEY"),
                 },
                 "write": {
                     "access_key_id": os.environ.get("R2_DATASET_WRITE_ACCESS_KEY_ID"),
-                    "secret_access_key": os.environ.get(
-                        "R2_DATASET_WRITE_SECRET_ACCESS_KEY"
-                    ),
+                    "secret_access_key": os.environ.get("R2_DATASET_WRITE_SECRET_ACCESS_KEY"),
                 },
             },
         },
     }
+
+    # Optional override: use multiple dataset endpoints to avoid rate limiting.
+    bucket_list = os.environ.get("R2_DATASET_BUCKET_LIST")
+    if bucket_list:
+        try:
+            dataset_configs = __import__("json").loads(bucket_list)
+            if isinstance(dataset_configs, list) and len(dataset_configs) > 0:
+                # Each entry in dataset_configs should be a dict that contains keys such as:
+                # account_id, name, and credentials (with "read" and "write")
+                secrets["dataset"] = {"multiple": dataset_configs}
+        except Exception as e:
+            logger.warning(f"Error parsing R2_DATASET_BUCKET_LIST: {e}")
 
     required_vars = [
         "R2_GRADIENTS_ACCOUNT_ID",

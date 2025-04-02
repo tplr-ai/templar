@@ -24,6 +24,7 @@ import numpy as np
 from pathlib import Path
 import pyarrow.parquet as pq
 from functools import lru_cache
+import threading
 
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
@@ -86,6 +87,10 @@ class R2DatasetLoader(DatasetLoader):
     _token_cache = {}  # Cache for tokenized results
     _fs = None
     _prefetch_queue = None
+
+    _round_robin_index = 0  # global counter for dataset round-robin selection
+    _fs_cache = {}  # maps account_id to a cached s3fs.S3FileSystem
+    _fs_lock = threading.Lock()  # lock for fs cache and round robin
 
     def __init__(
         self,
@@ -286,12 +291,15 @@ class R2DatasetLoader(DatasetLoader):
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Define R2 and local paths
-        r2_base = (
-            f"{BUCKET_SECRETS['dataset']['name']}/{R2DatasetLoader.DATASET_SUBFOLDER}"
+        bucket_name = (
+            BUCKET_SECRETS["dataset"].get("name")
+            if "name" in BUCKET_SECRETS["dataset"]
+            else BUCKET_SECRETS["dataset"]["multiple"][0]["name"]
         )
+        bucket_path = f"{bucket_name}/{R2DatasetLoader.DATASET_SUBFOLDER}"
         r2_paths = {
-            "shard_sizes": f"{r2_base}/_shard_sizes.json",
-            "metadata": f"{r2_base}/_metadata.yaml",
+            "shard_sizes": f"{bucket_path}/_shard_sizes.json",
+            "metadata": f"{bucket_path}/_metadata.yaml",
         }
         local_paths = {
             "shard_sizes": cache_dir / "shard_sizes.json",
@@ -324,30 +332,50 @@ class R2DatasetLoader(DatasetLoader):
 
     @staticmethod
     def _get_fs():
-        if not R2DatasetLoader._fs:
-            dataset_config = BUCKET_SECRETS["dataset"]
-            read_credentials = dataset_config["credentials"]["read"]  # type: ignore
+        dataset_config = BUCKET_SECRETS["dataset"]
+        # For debugging: log the full dataset configuration to check if 'multiple' is present
+        logger.debug(f"Dataset config loaded: {dataset_config}")
 
-            R2DatasetLoader._fs = s3fs.S3FileSystem(
-                key=read_credentials["access_key_id"],
-                secret=read_credentials["secret_access_key"],
-                client_kwargs={
-                    "endpoint_url": f"https://{dataset_config['account_id']}.r2.cloudflarestorage.com",
-                    "region_name": R2DatasetLoader.CF_REGION_NAME,
-                },
-                config_kwargs={
-                    "tcp_keepalive": True,
-                    "max_pool_connections": 50,
-                    "connect_timeout": 5,
-                    "read_timeout": 10,
-                    "retries": {"max_attempts": 3},
-                },
-                use_listings_cache=True,
-                skip_instance_cache=False,
-                default_block_size=R2DatasetLoader.READ_BUFFER_SIZE,
-                default_cache_type="readahead",
+        with R2DatasetLoader._fs_lock:
+            # Pick config in round robin if multiple endpoints are supplied
+            if "multiple" in dataset_config:
+                configs = dataset_config["multiple"]
+                idx = R2DatasetLoader._round_robin_index % len(configs)
+                selected_config = configs[idx]
+                R2DatasetLoader._round_robin_index += 1
+            else:
+                selected_config = dataset_config
+
+            # Log the selected bucket name for round robin tracing (should show e.g. "dataset-bucket-1" then "dataset-bucket-2")
+            logger.debug(
+                f"Using dataset bucket: {selected_config.get('name', 'default')}"
             )
-        return R2DatasetLoader._fs
+
+            fs_cache_key = selected_config["account_id"]
+
+            if fs_cache_key not in R2DatasetLoader._fs_cache:
+                read_credentials = selected_config["credentials"]["read"]
+                fs = s3fs.S3FileSystem(
+                    key=read_credentials["access_key_id"],
+                    secret=read_credentials["secret_access_key"],
+                    client_kwargs={
+                        "endpoint_url": f"https://{selected_config['account_id']}.r2.cloudflarestorage.com",
+                        "region_name": R2DatasetLoader.CF_REGION_NAME,
+                    },
+                    config_kwargs={
+                        "tcp_keepalive": True,
+                        "max_pool_connections": 50,
+                        "connect_timeout": 5,
+                        "read_timeout": 10,
+                        "retries": {"max_attempts": 3},
+                    },
+                    use_listings_cache=True,
+                    skip_instance_cache=False,
+                    default_block_size=R2DatasetLoader.READ_BUFFER_SIZE,
+                    default_cache_type="readahead",
+                )
+                R2DatasetLoader._fs_cache[fs_cache_key] = fs
+            return R2DatasetLoader._fs_cache[fs_cache_key]
 
     async def _get_next_page(self):
         """Get next page from the queue"""

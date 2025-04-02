@@ -1167,8 +1167,6 @@ def test_validate_configuration_correctness(monkeypatch):
         assert account is not None, (
             f"Endpoint {ep} does not match any expected configuration."
         )
-        # Optionally, check other parameters if needed.
-        # For instance, verify that the 'region_name' is set correctly (assuming CF_REGION_NAME is defined in R2DatasetLoader).
         expected_region = R2DatasetLoader.CF_REGION_NAME
         region = inst.kwargs["client_kwargs"].get("region_name")
         assert region == expected_region, (

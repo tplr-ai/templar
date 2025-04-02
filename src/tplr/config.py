@@ -84,17 +84,28 @@ def load_bucket_secrets():
         },
     }
 
-    # Optional override: use multiple dataset endpoints to avoid rate limiting.
+    # Override with multiple endpoints if provided by environment variable.
     bucket_list = os.environ.get("R2_DATASET_BUCKET_LIST")
     if bucket_list:
+        bucket_list_str = bucket_list.strip()
+        logger.debug(f"Raw R2_DATASET_BUCKET_LIST: {bucket_list_str}")
         try:
-            dataset_configs = __import__("json").loads(bucket_list)
+            dataset_configs = __import__("json").loads(bucket_list_str)
             if isinstance(dataset_configs, list) and len(dataset_configs) > 0:
-                # Each entry in dataset_configs should be a dict that contains keys such as:
-                # account_id, name, and credentials (with "read" and "write")
+                logger.debug(
+                    "R2_DATASET_BUCKET_LIST found, using multiple dataset endpoints"
+                )
                 secrets["dataset"] = {"multiple": dataset_configs}
+            else:
+                logger.debug(
+                    "R2_DATASET_BUCKET_LIST is empty or not a valid list, using default dataset configuration"
+                )
         except Exception as e:
             logger.warning(f"Error parsing R2_DATASET_BUCKET_LIST: {e}")
+    else:
+        logger.debug(
+            "R2_DATASET_BUCKET_LIST not found, using default dataset configuration"
+        )
 
     required_vars = [
         "R2_GRADIENTS_ACCOUNT_ID",

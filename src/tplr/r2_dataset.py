@@ -291,12 +291,15 @@ class R2DatasetLoader(DatasetLoader):
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Define R2 and local paths
-        r2_base = (
-            f"{BUCKET_SECRETS['dataset']['name']}/{R2DatasetLoader.DATASET_SUBFOLDER}"
+        bucket_name = (
+            BUCKET_SECRETS["dataset"].get("name")
+            if "name" in BUCKET_SECRETS["dataset"]
+            else BUCKET_SECRETS["dataset"]["multiple"][0]["name"]
         )
+        bucket_path = f"{bucket_name}/{R2DatasetLoader.DATASET_SUBFOLDER}"
         r2_paths = {
-            "shard_sizes": f"{r2_base}/_shard_sizes.json",
-            "metadata": f"{r2_base}/_metadata.yaml",
+            "shard_sizes": f"{bucket_path}/_shard_sizes.json",
+            "metadata": f"{bucket_path}/_metadata.yaml",
         }
         local_paths = {
             "shard_sizes": cache_dir / "shard_sizes.json",
@@ -330,6 +333,8 @@ class R2DatasetLoader(DatasetLoader):
     @staticmethod
     def _get_fs():
         dataset_config = BUCKET_SECRETS["dataset"]
+        # For debugging: log the full dataset configuration to check if 'multiple' is present
+        logger.debug(f"Dataset config loaded: {dataset_config}")
 
         with R2DatasetLoader._fs_lock:
             # Pick config in round robin if multiple endpoints are supplied
@@ -340,6 +345,11 @@ class R2DatasetLoader(DatasetLoader):
                 R2DatasetLoader._round_robin_index += 1
             else:
                 selected_config = dataset_config
+
+            # Log the selected bucket name for round robin tracing (should show e.g. "dataset-bucket-1" then "dataset-bucket-2")
+            logger.debug(
+                f"Using dataset bucket: {selected_config.get('name', 'default')}"
+            )
 
             fs_cache_key = selected_config["account_id"]
 

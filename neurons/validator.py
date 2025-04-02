@@ -276,6 +276,9 @@ class Validator:
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
 
+        # Caching
+        self.state_path = f"validator-state-{tplr.__version__}.npz"
+
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
             self.final_score_history[uid] = []
@@ -2073,6 +2076,46 @@ class Validator:
         self.optimizer.step()
         self.scheduler.step()
         torch.cuda.empty_cache()
+
+    def save_state(self):
+        """Saves the state of the validator to a file."""
+        try:
+            tplr.logger.info("Saving validator state.")
+
+            # Save the state of the validator to file.
+            np.savez(
+                self.state_path,
+                global_step=self.global_step,
+                gradient_scores=self.gradient_scores,
+                sync_scores=self.sync_scores,
+                binary_indicator_scores=self.binary_indicator_scores,
+                gradient_moving_avg_scores=self.gradient_moving_avg_scores,
+                final_moving_avg_scores=self.final_moving_avg_scores,
+                binary_moving_averages=self.binary_moving_averages,
+                weights=self.weights,
+            )
+        except Exception as e:
+            tplr.logger.warning(f"Failed to save validator state: {e}")
+
+    def load_state(self):
+        """Loads the state of the validator from a file."""
+        try:
+            tplr.logger.info("Loading validator state.")
+
+            # Load the state of the validator from file.
+            state = np.load(self.state_path)
+            self.gradient_scores = state["gradient_scores"]
+            self.sync_scores = state["sync_scores"]
+            self.binary_indicator_scores = state["binary_indicator_scores"]
+            self.gradient_moving_avg_scores = state["gradient_moving_avg_scores"]
+            self.final_moving_avg_scores = state["final_moving_avg_scores"]
+            self.binary_moving_averages = state["binary_moving_averages"]
+            self.weights = state["weights"]
+            tplr.logger.info(
+                f"Loaded state from global state {state.global_state}: {state}"
+            )
+        except Exception as e:
+            tplr.logger.warning(f"Failed to load validator state: {e}")
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

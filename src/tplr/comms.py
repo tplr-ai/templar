@@ -443,7 +443,6 @@ class Comms(ChainManager):
                             temp_file_path,
                             map_location=self.config.device,
                         )
-                        
                     return loaded_data
 
                 except asyncio.TimeoutError:

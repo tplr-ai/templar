@@ -16,10 +16,12 @@
 # DEALINGS IN THE SOFTWARE.
 
 
+import math
 import time
 from typing import TYPE_CHECKING, TypeVar, cast
 
 import torch
+import torch.nn as nn
 from torch._prims_common import DeviceLikeType
 
 import tplr
@@ -223,43 +225,48 @@ async def catchup_with_aggregation_server(
                     f"Successfully applied aggregation for window {current_step}"
                 )
 
-                # Calculate L2 norm of difference between model and debug values after this step
-                debug_dict = await instance.comms.get_debug_dict(current_step)
-                if isinstance(debug_dict, dict) and "state_dict" in debug_dict:
-                    debug_state_dict = cast(dict, debug_dict["state_dict"])
-                    total_squared_diff = 0.0
-                    param_count = 0
-                    abs_diff = 0
-
-                    for name, param in instance.model.named_parameters():
-                        # Check if there's a corresponding debug entry
-                        debug_key = name + "_debug"
-                        if debug_key in debug_state_dict:
-                            # Calculate L2 norm for this parameter on GPU
-                            param_data = param.data.flatten()[
-                                :2
-                            ]  # Take only first two values, keep on GPU
-                            debug_data = torch.tensor(
-                                debug_state_dict[debug_key],
-                                device=instance.config.device,  # type: ignore
-                            )
-                            squared_diff = torch.sum(
-                                (param_data - debug_data) ** 2
-                            ).item()
-                            total_squared_diff += squared_diff
-                            abs_diff += torch.abs(param_data - debug_data).mean().item()
-                            param_count += param_data.numel()
-
-                    # Final L2 norm across all parameters
-                    final_l2_norm = torch.sqrt(torch.tensor(total_squared_diff)).item()
-                    logger.info(
-                        f"Window {current_step} - L2 norm difference between model and debug values: {final_l2_norm}"
+                # Get debug dict and compare with current model parameters
+                debug_dict_result = await instance.comms.get_debug_dict(current_step)
+                if (
+                    isinstance(debug_dict_result, dict)
+                    and "state_dict" in debug_dict_result
+                ):
+                    debug_state_dict = cast(
+                        dict[str, list[float]], debug_dict_result["state_dict"]
                     )
-                    logger.info(
-                        f"Window {current_step} - Average L2 norm per parameter: {final_l2_norm / param_count if param_count > 0 else 0}"
+
+                    # Use our new function to compare model with debug dict
+                    comparison_metrics = await compare_model_with_debug_dict(
+                        model=instance.model,
+                        debug_dict=debug_state_dict,
+                        learning_rate=lr,
                     )
-                    logger.info(
-                        f"Window {current_step} - Average absolute difference per parameter: {abs_diff / param_count / lr if param_count > 0 else 0}"
+
+                    if comparison_metrics["success"]:
+                        # Log the comparison metrics
+                        logger.info(
+                            f"Window {current_step} - L2 norm difference between model and debug values: "
+                            f"{comparison_metrics['l2_norm']}"
+                        )
+                        logger.info(
+                            f"Window {current_step} - Average L2 norm per parameter: "
+                            f"{comparison_metrics['avg_l2_norm']}"
+                        )
+                        logger.info(
+                            f"Window {current_step} - Average absolute difference per parameter: "
+                            f"{comparison_metrics['avg_abs_diff']}"
+                        )
+                        logger.info(
+                            f"Window {current_step} - Average steps behind: "
+                            f"{comparison_metrics['avg_steps_behind']}"
+                        )
+                    else:
+                        logger.warning(
+                            f"Failed to compare model with debug dict for window {current_step}"
+                        )
+                else:
+                    logger.warning(
+                        f"Invalid debug dict format for window {current_step}"
                     )
             else:
                 logger.warning(
@@ -312,6 +319,76 @@ def process_loaded_data(model: torch.nn.Module, compressed_data: dict) -> dict |
 
     logger.info(f"Successfully unpacked {len(result['tensors'])} tensors")
     return result
+
+
+async def compare_model_with_debug_dict(
+    model: nn.Module, debug_dict: dict[str, list[float]], learning_rate: float
+) -> dict[str, bool | float | int]:
+    """
+    Compares a model's parameters with a debug dictionary to measure synchronization.
+
+    Args:
+        model: The PyTorch model with parameters to compare
+        debug_dict: Debug dictionary containing parameter debug values
+        learning_rate: Current learning rate to normalize differences
+
+    Returns:
+        dict: Comparison metrics including L2 norm, absolute differences, and steps behind measurements
+    """
+    # Initialize metrics
+    total_squared_diff = 0.0
+    total_abs_diff = 0.0
+    param_count = 0
+    max_diff = 0.0
+
+    # Compare each parameter with its debug entry
+    for name, param in model.named_parameters():
+        debug_key = name + "_debug"
+
+        if debug_key in debug_dict and isinstance(debug_dict[debug_key], list):
+            # Get the parameter values (first two elements to match debug dict)
+            param_data = param.data.flatten()[:2].detach()  # Keep on device
+
+            # Convert debug data to tensor on the same device
+            debug_data = torch.tensor(
+                debug_dict[debug_key], device=param.device, dtype=param.dtype
+            )
+
+            # Compute differences
+            diffs = param_data - debug_data
+            squared_diff = torch.sum(diffs**2).item()
+            abs_diff = torch.abs(diffs).sum().item()
+            max_param_diff = torch.max(torch.abs(diffs)).item()
+
+            # Update totals
+            total_squared_diff += squared_diff
+            total_abs_diff += abs_diff
+            param_count += param_data.numel()
+            max_diff = max(max_diff, max_param_diff)
+
+    # Calculate final metrics
+    l2_norm = torch.sqrt(torch.tensor(total_squared_diff)).item()
+    avg_l2_norm = l2_norm / param_count if param_count > 0 else math.inf
+    avg_abs_diff = total_abs_diff / param_count if param_count > 0 else math.inf
+
+    # Normalize differences by learning rate to get "steps behind" metric
+    avg_steps_behind = avg_abs_diff / learning_rate if learning_rate > 0 else math.inf
+    max_steps_behind = max_diff / learning_rate if learning_rate > 0 else math.inf
+
+    # Prepare return metrics
+    metrics: dict[str, bool | float | int] = {
+        "success": True,
+        "l2_norm": l2_norm,
+        "avg_l2_norm": avg_l2_norm,
+        "avg_abs_diff": avg_abs_diff,
+        "max_diff": max_diff,
+        "avg_steps_behind": avg_steps_behind,
+        "max_steps_behind": max_steps_behind,
+        "param_count": param_count,
+        "learning_rate": learning_rate,
+    }
+
+    return metrics
 
 
 def unpack_binary_tensor(packed_tensor: torch.Tensor, original_shape: torch.Size):

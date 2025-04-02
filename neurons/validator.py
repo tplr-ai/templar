@@ -440,6 +440,9 @@ class Validator:
                 f"Processing window: {self.sync_window} current: {self.current_window}"
             )
 
+            # Save state
+            self.save_state()
+
             # Create and post peers
             initial_selection = False
             if (

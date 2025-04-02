@@ -111,15 +111,6 @@ class Miner:
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
 
-        try:
-            version = tplr.__version__
-            tplr.logger = tplr.setup_loki_logger(
-                service="miner", uid=str(self.uid), version=version
-            )
-            tplr.logger.info(f"Loki logging enabled for miner UID: {self.uid}")
-        except Exception as e:
-            tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
-
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
         self.model.to(self.config.device)  # type: ignore

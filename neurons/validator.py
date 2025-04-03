@@ -612,7 +612,7 @@ class Validator:
             # Slash peers failing to submit gradients
             for uid in gather_result.skipped_uids:
                 tplr.logger.info(
-                    f"No gradient gathered from UID {uid}. Slashing moving average score by {self.missing_gradient_slash_rate:.2%}."
+                    f"No gradient gathered from UID {uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}."
                 )
                 if 0 <= uid < self.final_moving_avg_scores.size(0):
                     old_score = self.final_moving_avg_scores[uid].item()
@@ -1316,7 +1316,7 @@ class Validator:
 
                 else:
                     tplr.logger.info(
-                        f"No gradient received from UID {eval_uid}. Slashing moving average score by {self.missing_gradient_slash_rate:.2%}."
+                        f"No gradient received from UID {eval_uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}"
                     )
                     old_score = self.final_moving_avg_scores[eval_uid].item()
 

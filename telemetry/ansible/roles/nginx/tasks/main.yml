@@ -38,10 +38,26 @@
     mode: 0644
   notify: restart nginx
 
+- name: Configure NGINX for Loki
+  template:
+    src: loki-nginx.conf.j2
+    dest: /etc/nginx/sites-available/loki.conf
+    owner: root
+    group: root
+    mode: 0644
+  notify: restart nginx
+
 - name: Enable Grafana site
   file:
     src: /etc/nginx/sites-available/grafana.conf
     dest: /etc/nginx/sites-enabled/grafana.conf
+    state: link
+  notify: restart nginx
+
+- name: Enable Loki site
+  file:
+    src: /etc/nginx/sites-available/loki.conf
+    dest: /etc/nginx/sites-enabled/loki.conf
     state: link
   notify: restart nginx
 
@@ -198,15 +214,16 @@
     proto: tcp
   when: ansible_os_family == "Debian"
 
-- name: Configure UFW rules for Grafana and HTTP/HTTPS
+- name: Configure UFW rules for Grafana, Loki, and HTTP/HTTPS
   ufw:
     rule: allow
     port: "{{ item }}"
     proto: tcp
   loop:
-    - "80"  # NGINX
-    - "443" # NGINX with SSL
+    - "80"  # NGINX HTTP
+    - "443" # NGINX HTTPS
     - "{{ grafana_http_port }}"  # Direct Grafana access
+    - "{{ loki_http_listen_port }}"  # Direct Loki access
   when: ansible_os_family == "Debian"
 
 - name: Enable UFW with caution

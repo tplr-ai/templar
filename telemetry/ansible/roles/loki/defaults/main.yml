@@ -1,0 +1,92 @@
+---
+# Loki version and installation paths
+loki_version: "2.8.2"
+loki_download_url: "https://github.com/grafana/loki/releases/download/v{{ loki_version }}/loki-linux-amd64.zip"
+loki_binary_path: "/usr/local/bin/loki"
+
+# System user and group for running Loki
+loki_user: "loki"
+loki_group: "loki"
+loki_user_home: "/var/lib/loki"
+loki_system_user: true
+
+# Directory and file paths
+loki_config_dir: "/etc/loki"
+loki_config_file: "{{ loki_config_dir }}/loki-config.yaml"
+loki_data_dir: "/var/lib/loki"
+loki_tmp_dir: "/tmp/loki-install"
+loki_systemd_service_file: "/etc/systemd/system/loki.service"
+
+# Server configuration
+loki_http_listen_port: 3100
+loki_grpc_listen_port: 9096
+loki_http_server_read_timeout: "30s"
+loki_http_server_write_timeout: "30s"
+loki_http_server_idle_timeout: "120s"
+
+# Log level: debug, info, warn, error
+loki_log_level: "info"
+
+# Common storage configuration
+loki_storage_type: "filesystem"  # Options: filesystem, s3, gcs, azure
+
+# Filesystem storage configuration (default)
+loki_filesystem_directory: "{{ loki_data_dir }}/chunks"
+
+# S3 storage configuration (optional)
+loki_s3_enabled: false
+loki_s3_bucket_name: ""
+loki_s3_endpoint: ""
+loki_s3_region: ""
+loki_s3_access_key_id: ""
+loki_s3_secret_access_key: ""
+
+# Schema configuration
+loki_schema_configs:
+  - from: "2020-07-01"
+    store: "boltdb-shipper"
+    object_store: "{{ loki_storage_type }}"
+    schema: "v11"
+    index:
+      prefix: "index_"
+      period: "24h"
+
+# Compactor configuration
+loki_compactor_working_directory: "{{ loki_data_dir }}/compactor"
+loki_compactor_retention_enabled: true
+loki_compactor_retention_delete_delay: "2h"
+loki_compactor_retention_delete_worker_count: 150
+
+# Retention configuration (defaults to 30 days)
+loki_retention_period: "720h" # 30 days
+
+# Ingester configuration
+loki_ingester_chunk_idle_period: "1h"
+loki_ingester_chunk_retain_period: "30s"
+loki_ingester_lifecycler_ring_kvstore: "inmemory"
+loki_ingester_lifecycler_final_sleep: "0s"
+loki_ingester_chunk_target_size: 1048576
+loki_ingester_max_chunk_age: "1h"
+loki_ingester_chunk_encoding: "snappy"
+
+# Query limits configuration
+loki_limits_ingestion_rate_mb: 10
+loki_limits_ingestion_burst_size_mb: 20
+loki_limits_max_query_parallelism: 32
+loki_limits_cardinality_limit: 100000
+loki_limits_max_query_series: 500
+loki_limits_max_query_lookback: "720h" # 30 days
+loki_limits_max_query_range: "721h"  # 30 days + 1h buffer
+
+# Table manager configuration
+loki_table_manager_retention_deletes_enabled: true
+loki_table_manager_retention_period: "{{ loki_retention_period }}"
+
+# Required packages
+loki_required_packages:
+  - unzip
+  - curl
+  - ca-certificates
+
+# Enable metrics endpoint
+loki_metrics_enabled: true

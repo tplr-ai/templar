@@ -1,0 +1,88 @@
+---
+# Verification tasks for Loki installation - focused only on Loki functionality
+- name: Verify Loki is running
+  uri:
+    url: "http://{{ ansible_host }}:{{ loki_http_listen_port }}/ready"
+    method: GET
+    status_code: 200
+    validate_certs: no
+    timeout: 5
+  register: loki_ready
+  retries: 5
+  delay: 5
+  until: loki_ready.status is defined and loki_ready.status == 200
+  failed_when: false
+  ignore_errors: true
+  when: not ansible_check_mode
+  delegate_to: localhost
+
+- name: Report Loki readiness status
+  debug:
+    msg: >-
+      {{ 'Loki is ready and running!' 
+         if not ansible_check_mode and loki_ready is succeeded and loki_ready.status is defined and loki_ready.status == 200
+         else 'WARNING: Loki readiness check failed or skipped in check mode.' }}
+
+- name: Verify Loki health endpoint
+  uri:
+    url: "http://{{ ansible_host }}:{{ loki_http_listen_port }}/healthy"
+    method: GET
+    status_code: 200
+    validate_certs: no
+    timeout: 5
+  register: loki_health
+  failed_when: false
+  ignore_errors: true
+  when: not ansible_check_mode
+  delegate_to: localhost
+
+- name: Report Loki health status
+  debug:
+    msg: >-
+      {{ 'Loki is healthy!' 
+         if not ansible_check_mode and loki_health is succeeded and loki_health.status is defined and loki_health.status == 200
+         else 'WARNING: Loki health check failed or skipped in check mode.' }}
+
+- name: Verify Loki metrics endpoint
+  uri:
+    url: "http://{{ ansible_host }}:{{ loki_http_listen_port }}/metrics"
+    method: GET
+    status_code: 200
+    validate_certs: no
+    timeout: 5
+  register: loki_metrics
+  failed_when: false
+  ignore_errors: true
+  when: not ansible_check_mode and loki_metrics_enabled | default(true)
+  delegate_to: localhost
+
+- name: Report Loki metrics status
+  debug:
+    msg: >-
+      {{ 'Loki metrics endpoint is accessible!'
+         if not ansible_check_mode and loki_metrics_enabled | default(true) and loki_metrics is succeeded and loki_metrics.status is defined and loki_metrics.status == 200
+         else 'WARNING: Loki metrics check failed, skipped in check mode, or metrics are disabled.' }}
+
+- name: Verify Loki API endpoints
+  uri:
+    url: "http://{{ ansible_host }}:{{ loki_http_listen_port }}/loki/api/v1/labels"
+    method: GET
+    status_code: 200
+    validate_certs: no
+    timeout: 5
+  register: loki_api
+  failed_when: false
+  ignore_errors: true
+  when: not ansible_check_mode
+  delegate_to: localhost
+
+- name: Report Loki API status
+  debug:
+    msg: >-
+      {{ 'Loki API endpoints are accessible!'
+         if not ansible_check_mode and loki_api is succeeded and loki_api.status is defined and (loki_api.status == 200 or loki_api.status == 204)
+         else 'WARNING: Loki API check failed or skipped in check mode.' }}
+
+- name: Provide Loki URL for Python services
+  debug:
+    msg: "Python services can send logs to: http://{{ ansible_host }}:{{ loki_http_listen_port }}/loki/api/v1/push"

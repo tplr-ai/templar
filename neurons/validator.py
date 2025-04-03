@@ -29,14 +29,14 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
+
 import bittensor as bt
 import numpy as np
-from rich.console import Console
-from rich.table import Table
-
 
 # Third party
 import torch
+from rich.console import Console
+from rich.table import Table
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
@@ -126,6 +126,15 @@ class Validator:
             )
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+
+        try:
+            version = tplr.__version__
+            tplr.logger = tplr.setup_loki_logger(
+                service="validator", uid=str(self.uid), version=version
+            )
+            tplr.logger.info(f"Loki logging enabled for validator UID: {self.uid}")
+        except Exception as e:
+            tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)

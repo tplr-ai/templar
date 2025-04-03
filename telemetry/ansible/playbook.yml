@@ -24,6 +24,9 @@
     - role: dashboards
       tags: [dashboards]
 
+    - role: loki
+      tags: [logs, loki]
+
     - role: nginx
       tags: [nginx, proxy]
       
@@ -101,8 +104,16 @@
     - name: Output success message
       debug:
         msg: |
-          Grafana deployment complete! Your Grafana instance is now:
+          Telemetry stack deployment complete! 
+          
+          Grafana:
           - Running on http://{{ ansible_host }}:80 (via NGINX) and http://{{ ansible_host }}:{{ grafana_http_port }} (direct)
           - Configured for anonymous access without login
           - Connected to InfluxDB at {{ grafana_influxdb_host }}
           - Displaying your dashboards from the configured location
+          
+          Loki:
+          - Running on http://{{ loki_domain }}/loki/api/ (via NGINX) and http://{{ ansible_host }}:{{ loki_http_listen_port }} (direct)
+          - Ready to collect and query logs
+          - Integrated with Grafana as a data source
+          - Python services can send logs to: http://{{ ansible_host }}:{{ loki_http_listen_port }}/loki/api/v1/push

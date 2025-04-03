@@ -1,0 +1,32 @@
+provisioning:
+  type: ansible
+
+  playbook: ./playbook.yml
+  root_dir: ../localnet
+  hosts_group: localnet
+  vars_file: group_vars/all/vault.yml
+  extra_vars:
+    remote_mode: true
+    gpu_driver: nvidia-latest
+
+reload:
+  type: ansible
+
+  playbook: ./reload.yml
+  root_dir: ../localnet
+  hosts_group: localnet
+  vars_file: group_vars/all/vault.yml
+  extra_vars:
+    remote_mode: true
+    gpu_driver: nvidia-latest
+
+environment:
+  DEBUG: "true"
+
+sync:
+  - source: ../../scripts
+    destination: ~/templar/scripts
+  - source: ../../neurons
+    destination: ~/templar/neurons
+  - source: ../../src
+    destination: ~/templar/src

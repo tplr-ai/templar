@@ -1,0 +1,66 @@
+# RentCompute Provisioning Configuration Example
+# Use this template to create your own .rentcompute.yml file
+
+# Instance provisioning configuration
+provisioning:
+  # Type of provisioning to use (ansible, script, or docker)
+  type: ansible
+  
+  # Ansible provisioning configuration
+  playbook: ./playbook.yml
+  # Optional: Root directory where Ansible playbooks and related files are located
+  # Can be absolute or relative path (relative to current directory)
+  # Example: ~/workspace/project/ansible or ../scripts/localnet
+  root_dir: ../localnet
+  # Optional: Target hosts group for inventory (default: rentcompute)
+  # Should match the hosts: line in your playbook
+  hosts_group: localnet
+  # Optional: Path to a vars file (relative to root_dir if specified, or current directory)
+  # This will be used with the --extra-vars @file.yml argument
+  vars_file: group_vars/all/vault.yml
+  # Extra variables to pass directly to ansible-playbook
+  extra_vars:
+    app_env: development
+    gpu_driver: nvidia-latest
+  
+  # For script provisioning (uncomment to use):
+  # type: script
+  # script: ./setup.sh
+  
+  # For docker provisioning (uncomment to use):
+  # type: docker
+  # compose_file: ./docker-compose.yml
+
+# Optional environment variables to set on the instance
+environment:
+  CUDA_VISIBLE_DEVICES: "0,1"
+  TF_FORCE_GPU_ALLOW_GROWTH: "true"
+
+# Directories to sync with the instance using the rsync command
+# These will be synced when running: rentcompute rsync
+sync:
+  - source: ./data
+    destination: ~/data
+  - source: ./src
+    destination: ~/project/src
+  - source: ./scripts
+    destination: ~/scripts
+
+# Configuration for reloading instances after changes
+# This is used by the reload command and by rsync --reload
+reload:
+  # Type of reload mechanism to use (currently only ansible is supported)
+  type: ansible
+  
+  # Ansible reload configuration
+  playbook: ./reload.yml
+  # Root directory where Ansible files are located
+  root_dir: ../localnet
+  # Target hosts group (should match hosts: in playbook)
+  hosts_group: localnet
+  # Optional path to vars file (relative to root_dir)
+  vars_file: group_vars/all/vault.yml
+  # Extra variables for ansible-playbook
+  extra_vars:
+    remote_mode: true
+    gpu_driver: nvidia-latest

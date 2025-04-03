@@ -142,8 +142,10 @@ class CompressDCT:
         totalk = x.shape[-1]
         topk = self._clamp_topk(x, topk)
 
-        idx = torch.topk(x.abs(), k=topk, dim=-1, largest=True, sorted=False).indices
-        val = torch.gather(x, dim=-1, index=idx)
+        idx_int64 = torch.topk(x.abs(), k=topk, dim=-1, largest=True, sorted=False).indices
+        val = torch.gather(x, dim=-1, index=idx_int64)
+        # Cast idx to int16 for saving or transmission
+        idx = idx_int64.to(torch.int16)
 
         return idx, val, xshape, totalk
 
@@ -156,8 +158,11 @@ class CompressDCT:
             x = rearrange(x, "y x h w -> y x (h w)")
 
         # TODO: Careful, this is nondeterministic across different CUDA devices! might cause errors to accumulate between nodes!
+
+        # Cast back to int64 before using scatter/gather
+        idx_int64 = idx.to(torch.int64)
         x.scatter_reduce_(
-            dim=-1, index=idx, src=val, reduce="mean", include_self=False
+            dim=-1, index=idx_int64, src=val, reduce="mean", include_self=False
         ).reshape(xshape)
 
         if len(x.shape) > 2:  # 2D weights

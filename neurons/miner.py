@@ -593,7 +593,7 @@ class Miner:
                     param is not None and param.numel() >= 2
                 ):  # Check if tensor has at least 2 elements
                     debug_dict[name + "_debug"] = (
-                        param.flatten()[:2].detach().cpu().tolist()
+                        param.flatten()[10:12].detach().cpu().tolist()
                     )
 
             # Add successful peers information

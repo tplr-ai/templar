@@ -45,5 +45,6 @@
     "uids_per_window": 2,
     "time_window_delta_seconds": 25,
     "reset_inactivity_windows": 25,
-    "max_gradient_score": 0.05
+    "max_gradient_score": 0.05,
+    "sync_max_steps_behind": 3
 }

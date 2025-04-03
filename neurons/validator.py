@@ -1886,7 +1886,10 @@ class Validator:
 
         # Compare miner's debug dict with validator's model
         comparison_metrics = await tplr.neurons.compare_model_with_debug_dict(
-            model=self.model, debug_dict=miner_debug_dict, learning_rate=current_lr
+            model=self.model,
+            debug_dict=miner_debug_dict,
+            learning_rate=current_lr,
+            index_range=(10, 12),
         )
 
         if not comparison_metrics["success"]:

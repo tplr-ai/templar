@@ -322,7 +322,10 @@ def process_loaded_data(model: torch.nn.Module, compressed_data: dict) -> dict |
 
 
 async def compare_model_with_debug_dict(
-    model: nn.Module, debug_dict: dict[str, list[float]], learning_rate: float
+    model: nn.Module,
+    debug_dict: dict[str, list[float]],
+    learning_rate: float,
+    index_range: tuple[int, int] = (0, 2),
 ) -> dict[str, bool | float | int]:
     """
     Compares a model's parameters with a debug dictionary to measure synchronization.
@@ -347,7 +350,9 @@ async def compare_model_with_debug_dict(
 
         if debug_key in debug_dict and isinstance(debug_dict[debug_key], list):
             # Get the parameter values (first two elements to match debug dict)
-            param_data = param.data.flatten()[:2].detach()  # Keep on device
+            param_data = param.data.flatten()[
+                index_range[0] : index_range[1]
+            ].detach()  # Keep on device
 
             # Convert debug data to tensor on the same device
             debug_data = torch.tensor(

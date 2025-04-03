@@ -256,6 +256,7 @@ class Validator:
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
         self.missing_gradient_slash_rate = 0.75
+        self.sync_score_slash_rate = 0.75
 
         # Initialize final score history (for sliding-window averaging)
         self.final_score_history = defaultdict(list)
@@ -575,6 +576,29 @@ class Validator:
                 time_min=time_min,
                 time_max=time_max,
             )
+
+            gather_sync_scores = await asyncio.gather(
+                *(self.evaluate_miner_sync(uid) for uid in self.comms.peers)
+            )
+
+            for score_info, uid in zip(gather_sync_scores, self.comms.peers):
+                avg_steps_behind = score_info.get("avg_steps_behind", 99.0)
+                success = score_info.get("success", False)
+                if not success or avg_steps_behind > self.hparams.sync_max_steps_behind:
+                    tplr.logger.info(
+                        "Slashing %s: avg_steps_behind=%.2f > max=%d",
+                        uid,
+                        avg_steps_behind,
+                        self.hparams.sync_max_steps_behind,
+                    )
+                    if self.final_moving_avg_scores[uid] > 0:
+                        self.final_moving_avg_scores[uid] *= self.sync_score_slash_rate
+                        self.final_score_history[uid] = [
+                            final_score * self.sync_score_slash_rate
+                            if final_score > 0
+                            else final_score
+                            for final_score in self.final_score_history[uid]
+                        ]
 
             if gather_result is None:
                 tplr.logger.error(

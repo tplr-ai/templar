@@ -29,6 +29,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
+from typing import cast
 
 import bittensor as bt
 import numpy as np
@@ -217,6 +218,7 @@ class Validator:
         self.relative_improvement_random = 0.0
         self.valid_score_indices = []
         self.gradient_scores = torch.zeros(256, dtype=torch.float32)
+        self.sync_scores = torch.zeros(256, dtype=torch.float32)
         self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
         self.gradient_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
         self.final_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
@@ -272,6 +274,7 @@ class Validator:
             self.binary_moving_averages[uid] = 0.0
             self.binary_indicator_scores[uid] = 0.0
             self.normalised_binary_moving_averages[uid] = 0.0
+            self.sync_scores[uid] = 0.0
             if uid in self.eval_peers:
                 del self.eval_peers[uid]
             del self.inactive_scores[uid]
@@ -1223,10 +1226,22 @@ class Validator:
                     tplr.logger.debug(
                         f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[eval_uid]}"
                     )
-                    # Calculate final score incorporating both metrics
-                    final_score = sign_preserving_multiplication(
-                        self.gradient_moving_avg_scores[eval_uid],
-                        self.normalised_binary_moving_averages[eval_uid],
+
+                    sync_result = await self.evaluate_miner_sync(eval_uid)
+                    sync_score = cast(
+                        float,
+                        (sync_result["sync_score"] if sync_result["success"] else 0.0),
+                    )
+                    # Store the sync score for this miner
+                    self.sync_scores[eval_uid] = sync_score
+
+                    # Your existing final_score calculation with sync_score added
+                    final_score = (
+                        sign_preserving_multiplication(
+                            self.gradient_moving_avg_scores[eval_uid],
+                            self.normalised_binary_moving_averages[eval_uid],
+                        )
+                        * sync_score
                     )
                     tplr.logger.debug(
                         f"Computed Final Score for UID {eval_uid}: {final_score}"
@@ -1370,6 +1385,7 @@ class Validator:
                 "Binary Moving Avg",
                 "Norm Binary Score",
                 "Final Moving Avg",
+                "Sync score",
                 "Weight",
             ]
             table = [headers]
@@ -1381,6 +1397,7 @@ class Validator:
                     f"{self.binary_moving_averages[uid]:.4f}",
                     f"{self.normalised_binary_moving_averages[uid]:.4f}",
                     f"{self.final_moving_avg_scores[uid]:.4f}",
+                    f"{self.sync_scores[uid]:.4f}",
                     f"{self.weights[uid]:.4f}",
                 ]
                 table.append(row)
@@ -1432,6 +1449,7 @@ class Validator:
                 normalised_binary = float(
                     self.normalised_binary_moving_averages[uid].item()
                 )
+                sync_score = float(self.sync_scores[uid].item())
                 final_moving_avg = float(self.final_moving_avg_scores[uid].item())
                 weight = float(self.weights[uid].item())
 
@@ -1442,6 +1460,7 @@ class Validator:
                         f"validator/binary_moving_averages/{uid}": binary_moving_avg,
                         f"validator/normalised_binary_scores/{uid}": normalised_binary,
                         f"validator/final_moving_avg_scores/{uid}": final_moving_avg,
+                        f"validator/sync_score/{uid}": sync_score,
                         f"validator/weights/{uid}": weight,
                     },
                     step=self.global_step,
@@ -1460,6 +1479,7 @@ class Validator:
                         "binary_indicator": binary_indicator,
                         "binary_moving_avg": binary_moving_avg,
                         "normalised_binary": normalised_binary,
+                        "sync_score": sync_score,
                         "final_moving_avg_score": final_moving_avg,
                         "weight": weight,
                     },
@@ -1820,6 +1840,72 @@ class Validator:
         selected_peers = selected_peers.astype(np.int64)
         tplr.logger.info(f"Final peers after selection: {selected_peers.tolist()}")
         return selected_peers
+
+    async def evaluate_miner_sync(
+        self, eval_uid: int
+    ) -> dict[str, bool | float | int | str]:
+        """
+        Evaluates the synchronization of a specific miner with the validator's model.
+
+        Args:
+            validator: The validator instance
+            eval_uid: The UID of the miner to evaluate
+
+        Returns:
+            dict: Synchronization metrics and score
+        """
+        # Fetch the miner's debug dictionary
+        debug_result = await self.comms.get(
+            uid=str(eval_uid),
+            window=self.sync_window - 1,
+            key="debug",
+            local=False,
+            stale_retention=10,
+        )
+
+        # Check if we got a valid result
+        if debug_result is None:
+            return {
+                "success": False,
+                "error": "Failed to retrieve debug dictionary",
+                "sync_score": 0.0,
+            }
+
+        miner_debug_dict = cast(dict, debug_result[0])
+
+        # Validate debug dictionary format
+        if miner_debug_dict is None or not isinstance(miner_debug_dict, dict):
+            return {
+                "success": False,
+                "error": "Invalid debug dictionary format",
+                "sync_score": 0.0,
+            }
+
+        # Get current learning rate
+        current_lr = self.scheduler.get_last_lr()[0]
+
+        # Compare miner's debug dict with validator's model
+        comparison_metrics = await tplr.neurons.compare_model_with_debug_dict(
+            model=self.model, debug_dict=miner_debug_dict, learning_rate=current_lr
+        )
+
+        if not comparison_metrics["success"]:
+            return {
+                "success": False,
+                "error": "Failed to compare model with debug dictionary",
+                "sync_score": 0.0,
+            }
+
+        # Calculate sync score using the formula: score = (1-x/5)^2.5
+        # where x is the average steps behind, capped at 5
+        avg_steps_behind = comparison_metrics["avg_steps_behind"]
+        x = min(avg_steps_behind, 5.0)
+        sync_score = max(0.0, (1.0 - x / 5.0) ** 2.5)
+
+        # Add the sync score to the metrics
+        result = {**comparison_metrics, "sync_score": sync_score}
+
+        return result
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

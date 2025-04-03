@@ -270,9 +270,7 @@ async def catchup_with_aggregation_server(
                 instance.scheduler.step()
         else:
             logger.warning(f"No aggregation data found for window {current_step}")
-            # Still advance the optimizer and scheduler
-            instance.optimizer.step()
-            instance.scheduler.step()
+            # Don't advance the optimizer and scheduler
 
         # Update global step and move to next window
         instance.global_step = current_step - instance.start_window

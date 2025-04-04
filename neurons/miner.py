@@ -286,7 +286,6 @@ class Miner:
             # 1. Initialize window and update peers
             window_start = tplr.T()
             # Start the gather in the background:
-            gather_start = tplr.T()
             step_window = self.current_window
             self.global_step = (
                 self.current_window - self.start_window
@@ -389,6 +388,7 @@ class Miner:
                 local=False,
                 stale_retention=100,
             )
+            tplr.logger.info("Put task completed!")
 
             upload_size = sum(
                 tensor.element_size() * tensor.nelement()
@@ -449,25 +449,23 @@ class Miner:
 
             tplr.logger.info(f"Final peers for gather: {self.comms.peers}")
 
-            # Create a task for gathering gradients asynchronously
-            gather_task = asyncio.create_task(
-                self.comms.gather(
-                    my_uid=self.uid,
-                    uids=self.comms.peers,
-                    window=step_window,
-                    key="gradient",
-                    timeout=35,
-                    device="cpu",
-                    local=False,
-                    stale_retention=100,
-                    totalks=self.totalks,
-                    time_min=time_min,
-                    time_max=time_max,
-                )
+            gather_start = tplr.T()
+            tplr.logger.info("Waiting on gather task...")
+            gather_result = await self.comms.gather(
+                my_uid=self.uid,
+                uids=self.comms.peers,
+                window=step_window,
+                key="gradient",
+                timeout=35,
+                device="cpu",
+                local=False,
+                stale_retention=100,
+                totalks=self.totalks,
+                time_min=time_min,
+                time_max=time_max,
             )
-
-            # Await the task to get the result
-            gather_result = await gather_task
+            tplr.logger.info("Gather task completed!")
+            gather_time = tplr.T() - gather_start
 
             # 5. Calculate and log metrics
             duration = time.time() - train_start
@@ -521,12 +519,6 @@ class Miner:
             # ---------------------------------------------------------------------
             # 6. Await both gather
             # ---------------------------------------------------------------------
-
-            tplr.logger.info("Put task completed!")
-
-            tplr.logger.info("Waiting on gather task...")
-            gather_result = await gather_task
-            tplr.logger.info("Gather task completed!")
 
             # 8. Apply gathered gradients
             update_start = tplr.T()
@@ -627,7 +619,6 @@ class Miner:
             data_loading_time = tplr.T() - data_start
             training_time = tplr.T() - train_start
             compression_time = tplr.T() - compress_start
-            gather_time = tplr.T() - gather_start
             model_update_time = tplr.T() - update_start
             gather_success_rate = (
                 gather_result.success_rate * 100 if gather_result else 0.0
@@ -690,6 +681,7 @@ class Miner:
                     "peer_update_time": peer_update_time,
                     "compression_time": compression_time,
                     "gather_time": gather_time,
+                    "put_time": put_completion_time,
                     "model_update_time": model_update_time,
                 },
             )

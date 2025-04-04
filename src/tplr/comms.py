@@ -312,7 +312,7 @@ class Comms(ChainManager):
                 else:
                     break
         except (ConnectionClosedError, ClientError):
-            self._purge_s3_client(self.bucket)
+            await self._purge_s3_client(self.bucket)
 
     async def s3_put_object(
         self,
@@ -357,7 +357,7 @@ class Comms(ChainManager):
                 await self.upload_large_file(file_path, key, s3_client)
 
         except (ConnectionClosedError, ClientError):
-            self._purge_s3_client(bucket)
+            await self._purge_s3_client(bucket)
         except Exception as e:
             tplr.logger.error(f"Error uploading {key} to S3: {e}")
             raise
@@ -414,7 +414,7 @@ class Comms(ChainManager):
                 tplr.logger.debug(f"Timeout checking for {key}")
                 return None
             except (ConnectionClosedError, ClientError) as e:
-                self._purge_s3_client(bucket)
+                await self._purge_s3_client(bucket)
                 if "404" in str(e):
                     tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
                     return None
@@ -550,7 +550,7 @@ class Comms(ChainManager):
                         await asyncio.sleep(2**attempt)
 
         except (ConnectionClosedError, ClientError):
-            self._purge_s3_client(self.bucket)
+            await self._purge_s3_client(self.bucket)
         except Exception as e:
             tplr.logger.error(f"Error during multipart upload of {key}: {e}")
             if upload_id:
@@ -682,7 +682,7 @@ class Comms(ChainManager):
                 pbar.close()
 
         except (ConnectionClosedError, ClientError):
-            self._purge_s3_client(bucket)
+            await self._purge_s3_client(bucket)
         except Exception as e:
             tplr.logger.error(f"Error in download_large_file for {key}: {e}")
             return False
@@ -1085,7 +1085,7 @@ class Comms(ChainManager):
                 tplr.logger.info(f"Deleted {len(to_delete)} old checkpoints")
 
         except (ConnectionClosedError, ClientError):
-            self._purge_s3_client(self.bucket)
+            await self._purge_s3_client(self.bucket)
         except Exception as e:
             tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
 
@@ -1125,7 +1125,7 @@ class Comms(ChainManager):
                     tplr.logger.debug(f"{filename} not found for UID {uid}")
 
         except (ConnectionClosedError, ClientError):
-            self._purge_s3_client(peer_bucket)
+            await self._purge_s3_client(peer_bucket)
         except Exception as e:
             tplr.logger.error(f"Error accessing bucket for UID {uid}: {e}")
             return False
@@ -1295,7 +1295,7 @@ class Comms(ChainManager):
                     return loaded_data, latest["window"]
             return None
         except (ConnectionClosedError, ClientError):
-            self._purge_s3_client(bucket)
+            await self._purge_s3_client(bucket)
 
     async def load_checkpoint(
         self,
@@ -1488,7 +1488,7 @@ class Comms(ChainManager):
                 ]
 
             except (ConnectionClosedError, ClientError):
-                self._purge_s3_client(validator_bucket)
+                await self._purge_s3_client(validator_bucket)
             except Exception as e:
                 tplr.logger.error(f"Error fetching peer list: {e}")
                 await asyncio.sleep(10)

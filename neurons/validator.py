@@ -1789,8 +1789,8 @@ class Validator:
                 tplr.logger.info(
                     f"Selected {len(top_incentive_and_active_peers)} initial peers. "
                     f"{len(top_incentive_peers)} with incentive: {top_incentive_peers} "
-                    f"and {len(remaining_active_peers)} without: "
-                    f"{remaining_active_peers}"
+                    f"and {len(top_incentive_and_active_peers) - len(top_incentive_peers)} without: "
+                    f"{remaining_active_peers[: len(top_incentive_and_active_peers) - len(top_incentive_peers)]}"
                 )
                 return top_incentive_and_active_peers
 

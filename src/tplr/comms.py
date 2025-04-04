@@ -1887,8 +1887,8 @@ class Comms(ChainManager):
             return None
 
     def weighted_random_sample_no_replacement(
-        self, candidates: list[str], weights: list[int], k: int
-    ) -> list[str]:
+        self, candidates: list[int], weights: list[int], k: int
+    ) -> list[int]:
         """
         Perform a weighted random sample (without replacement) of size k.
         candidates: list of items (uids).

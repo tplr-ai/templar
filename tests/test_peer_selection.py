@@ -7,9 +7,21 @@ from neurons.validator import Validator
 
 hparams = tplr.load_hparams()
 
+NUM_MINERS = 250
+NUM_NEURONS = 256
+
 
 class TestPeerSelection:
     """Tests for peer selection functionality."""
+
+    @staticmethod
+    def active_non_zero_weight_uids(
+        mock_validator: Validator,
+    ) -> tplr.comms.PeerArray:
+        non_zero_weight_uids = torch.nonzero(mock_validator.weights).flatten().numpy()
+        return np.intersect1d(
+            np.array(list(mock_validator.comms.active_peers)), non_zero_weight_uids
+        )
 
     @classmethod
     def assert_basic_requirements(
@@ -28,9 +40,6 @@ class TestPeerSelection:
         assert isinstance(selected_peers, np.ndarray)
         assert selected_peers.dtype == np.int64
 
-        # All peers should be active
-        assert set(selected_peers).issubset(set(mock_validator.comms.active_peers))
-
         # Number of peers is within range
         assert (
             mock_validator.hparams.minimum_peers
@@ -40,6 +49,27 @@ class TestPeerSelection:
 
         # Verify peer list hasn't changed
         assert np.array_equal(mock_validator.comms.peers, initial_peers)
+
+        # All peers are active
+        assert np.isin(
+            selected_peers, np.array(list(mock_validator.comms.active_peers))
+        ).all()
+
+        # Number of peers is the smallest of max_topk_peers and number of
+        # active peers
+        assert len(selected_peers) == min(
+            hparams.max_topk_peers, len(mock_validator.comms.active_peers)
+        )
+
+        # All active peers are selected, if there are <= max_topk_peers of them
+        if len(mock_validator.comms.active_peers) <= hparams.max_topk_peers:
+            assert np.isin(
+                np.array(list(mock_validator.comms.active_peers)), selected_peers
+            ).all(), (
+                f"Not all active peers were selected: {len(selected_peers)=}: "
+                f"{selected_peers}, {len(mock_validator.comms.active_peers)=}: "
+                f"{mock_validator.comms.active_peers}"
+            )
 
     class TestSelectNextPeers:
         """Tests for select_next_peers method."""
@@ -51,17 +81,13 @@ class TestPeerSelection:
             peers_to_replace: int = 2,
             num_initial_peers: int = hparams.minimum_peers,
         ):
-            """Helper to setup common validator test state.
-
-            Args:
-                mock_validator: The mock validator instance
-                weight_indices: Tuple of (start, end) indices for non-zero weights, or single index
-                peers_to_replace: Number of peers to replace
-            """
-            mock_validator.comms.peers = np.arange(num_initial_peers)
+            """Helper to setup common validator test state."""
+            mock_validator.comms.peers = np.random.choice(
+                np.arange(NUM_MINERS), num_initial_peers, replace=False
+            )
             mock_validator.hparams.peers_to_replace = peers_to_replace
 
-            mock_validator.weights = torch.zeros(250)
+            mock_validator.weights = torch.zeros(NUM_NEURONS)
             mock_validator.weights[:num_non_zero_weights] = torch.rand(
                 num_non_zero_weights
             )
@@ -72,9 +98,9 @@ class TestPeerSelection:
         @pytest.mark.parametrize(
             "num_non_zero_weights",
             [
-                4 + hparams.max_topk_peers,  # Default case
-                10 + hparams.max_topk_peers,  # More candidates
-                250,  # Many candidates
+                5,
+                10,
+                NUM_MINERS,
             ],
         )
         @pytest.mark.parametrize(
@@ -82,13 +108,28 @@ class TestPeerSelection:
             [
                 1,  # Minimum replacement
                 2,  # Default case
-                4,  # Maximum replacement
+                4,
+            ],
+        )
+        @pytest.mark.parametrize(
+            "num_initial_peers",
+            [
+                5,
+                10,
+                hparams.max_topk_peers,
             ],
         )
         def test_successful_peer_update(
-            self, mock_validator, num_non_zero_weights, peers_to_replace
+            self,
+            mock_validator,
+            num_non_zero_weights,
+            peers_to_replace,
+            num_initial_peers,
         ):
             """Test successful peer update with sufficient candidates."""
+            tplr.logger.info(
+                f"Using {num_initial_peers=}, {peers_to_replace=}, {num_non_zero_weights=}"
+            )
             # Setup initial peers and weights
             self._setup_validator_state(
                 mock_validator,
@@ -105,41 +146,48 @@ class TestPeerSelection:
                 selected_peers=selected_peers,
                 initial_peers=initial_peers,
             )
+            # Selected peers are not exactly current peers
+            assert np.setdiff1d(selected_peers, mock_validator.comms.peers).size != 0
 
-            # Verify some peers were replaced
-            assert set(selected_peers) != {0, 1, 2, 3, 4}
+            # All active peers with non-zero weight are selected, if there are <=
+            # max_topk_peers of them
+            non_zero_weight_uids = (
+                torch.nonzero(mock_validator.weights).flatten().numpy()
+            )
+            active_peers_with_weights = TestPeerSelection.active_non_zero_weight_uids(
+                mock_validator
+            )
+            np.intersect1d(
+                np.array(list(mock_validator.comms.active_peers)), non_zero_weight_uids
+            )
+            if len(active_peers_with_weights) <= hparams.max_topk_peers:
+                assert np.isin(active_peers_with_weights, selected_peers).all(), (
+                    f"Not all active peers with non-zero weights were selected: "
+                    f"{len(selected_peers)=}: {selected_peers}, "
+                    f"{len(active_peers_with_weights)=}: {active_peers_with_weights}"
+                )
 
-            # Verify new peers came from candidates with non-zero weights
-            new_peers = set(selected_peers) - {0, 1, 2, 3, 4}
-            assert all(mock_validator.weights[peer] > 0 for peer in new_peers)
+            # The correct number of peers are replaced, if we get
+            # to the last (replacement) step
+            active_peers_with_weights = TestPeerSelection.active_non_zero_weight_uids(
+                mock_validator
+            )
+            if len(active_peers_with_weights) > hparams.max_topk_peers:
+                num_replaced = np.setdiff1d(initial_peers, selected_peers).size
+                assert num_replaced == min(
+                    peers_to_replace,
+                    active_peers_with_weights.size - hparams.max_topk_peers,
+                )
 
-        def test_maintains_peer_list_size(self, mock_validator):
-            """Test peer list size remains constant after update."""
+        def test_random_selection(self, mock_validator):
+            """Test that peer selection has random behavior."""
             # Setup
             self._setup_validator_state(
                 mock_validator,
-                num_non_zero_weights=250,
+                num_non_zero_weights=NUM_MINERS,
+                peers_to_replace=2,
                 num_initial_peers=hparams.max_topk_peers,
             )
-            initial_peers = mock_validator.comms.peers
-
-            # Call select_next_peers
-            selected_peers = mock_validator.select_next_peers()
-
-            TestPeerSelection.assert_basic_requirements(
-                mock_validator=mock_validator,
-                selected_peers=selected_peers,
-                initial_peers=initial_peers,
-            )
-
-            # Verify size hasn't changed
-            assert len(selected_peers) == len(initial_peers)
-
-        @pytest.mark.parametrize("seed", [42, 123, 456])
-        def test_random_selection(self, mock_validator, seed):
-            """Test that peer selection has random behavior."""
-            # Setup
-            self._setup_validator_state(mock_validator, num_non_zero_weights=10)
 
             # Do multiple updates and collect results
             results = []
@@ -160,6 +208,33 @@ class TestPeerSelection:
 
             # Verify we got different peer lists
             assert not all(np.array_equal(r, results[0]) for r in results[1:])
+
+        def test_unsuccessful_peer_update(
+            self,
+            mock_validator,
+        ):
+            """Test unsuccessful peer update."""
+            # Setup initial peers and weights
+            self._setup_validator_state(
+                mock_validator,
+                num_non_zero_weights=hparams.max_topk_peers,
+                peers_to_replace=2,
+            )
+            mock_validator.comms.peers = np.random.choice(
+                a=TestPeerSelection.active_non_zero_weight_uids(mock_validator),
+                size=hparams.max_topk_peers,
+                replace=False,
+            )
+            initial_peers = mock_validator.comms.peers
+
+            # Call select_next_peers
+            selected_peers = mock_validator.select_next_peers()
+
+            # Verify None is returned
+            assert selected_peers is None
+
+            # Verify peer list hasn't changed
+            assert np.array_equal(mock_validator.comms.peers, initial_peers)
 
     class TestSelectInitialPeers:
         """Tests for select_initial_peers method."""
@@ -273,10 +348,10 @@ class TestPeerSelection:
         try:
             return request.param
         except AttributeError:
-            return 250  # Default value if not parameterized
+            return NUM_MINERS  # Default value if not parameterized
 
     @pytest.fixture
-    def mock_metagraph(self, mocker, num_non_zero_incentive, num_miners=250):
+    def mock_metagraph(self, mocker, num_non_zero_incentive, num_miners=NUM_MINERS):
         """Fixture that creates a mock metagraph with a specified number of miners and incentive distribution."""
         metagraph = mocker.Mock()
 

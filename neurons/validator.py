@@ -1769,7 +1769,7 @@ class Validator:
             top_incentive_peers = np.array(top_incentive_peers, dtype=np.int64)
 
             assert len(top_incentive_peers) <= self.hparams.max_topk_peers
-            if len(top_incentive_peers) >= self.hparams.minimum_peers:
+            if len(top_incentive_peers) == self.hparams.max_topk_peers:
                 tplr.logger.info(
                     f"Selected {len(top_incentive_peers)} initial peers purely based "
                     f"on incentive: {top_incentive_peers}"
@@ -1796,7 +1796,7 @@ class Validator:
 
             # 3. Give up
             tplr.logger.info(
-                f"Failed to find at least {self.hparams.minimum_peers} initial gather "
+                f"Failed to select at least {self.hparams.minimum_peers} initial gather "
                 f"peers. Found only {len(top_incentive_and_active_peers)} active "
                 f"peers, of which {len(top_incentive_peers)} had incentive and "
                 f"{len(top_incentive_and_active_peers) - len(top_incentive_peers)} "

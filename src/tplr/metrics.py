@@ -151,8 +151,8 @@ class MetricsLogger:
         tags: dict,
         fields: dict,
         timestamp=None,
-        with_system_metrics=True,
-        with_gpu_metrics=True,
+        with_system_metrics=False,
+        with_gpu_metrics=False,
     ):
         """
         Logs metrics to InfluxDB.

@@ -678,22 +678,8 @@ class Miner:
                 },
                 fields={
                     "loss": loss_value,
-                    "tokens_per_sec": tokens_per_sec,
-                    "batch_tokens": int(window_tokens),
-                    "grad_norm_std": grad_norm_std,
-                    "mean_weight_norm": mean_weight_norm,
-                    "mean_momentum_norm": mean_momentum_norm,
-                    "batch_duration": duration,
-                    "total_tokens": int(self.total_tokens_processed),
-                    "active_peers": int(len(self.comms.peers)),
-                    "effective_batch_size": int(
-                        len(self.comms.peers) * self.hparams.batch_size
-                    ),
-                    "learning_rate": self.scheduler.get_last_lr()[0],
-                    "mean_grad_norm": mean_grad_norm,
+                    "n_gather_peers": int(len(self.comms.peers)),
                     "gather_success_rate": gather_success_rate,
-                    "max_grad_norm": max(grad_norms) if grad_norms else 0,
-                    "min_grad_norm": min(grad_norms) if grad_norms else 0,
                     "gather_peers": json.dumps(self.comms.peers.tolist()),
                     "skipped_peers": json.dumps(
                         np.array(gather_result.skipped_uids).tolist()
@@ -702,8 +688,6 @@ class Miner:
                     ),
                     "window_total_time": window_total_time,
                     "peer_update_time": peer_update_time,
-                    "data_loading_time": data_loading_time,
-                    "training_time": training_time,
                     "compression_time": compression_time,
                     "gather_time": gather_time,
                     "model_update_time": model_update_time,

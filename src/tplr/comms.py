@@ -442,17 +442,20 @@ class Comms(ChainManager):
                 if not success:
                     return None
 
-            # Now load the data
-            if key.endswith(".json") or "start_window" in key:
-                async with aiofiles.open(temp_file_path, "r") as f:
-                    data = await f.read()
-                    loaded_data = json.loads(data)
-            else:
-                loaded_data = torch.load(
-                    temp_file_path, map_location=self.config.device
-                )
-
-            return loaded_data
+                    # Load data based on file type
+                    if key.endswith(".json") or "start_window" in key:
+                        # For JSON files
+                        async with aiofiles.open(temp_file_path, "r") as f:
+                            data = await f.read()
+                            loaded_data = json.loads(data)
+                    else:
+                        # For PyTorch checkpoint files
+                        loaded_data = torch.load(
+                            temp_file_path,
+                            map_location=self.config.device,
+                            weights_only=False,
+                        )
+                    return loaded_data
 
         except asyncio.TimeoutError:
             tplr.logger.debug(f"Timeout downloading {key}")

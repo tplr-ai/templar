@@ -104,7 +104,9 @@ def create_namespace(hparams: dict) -> SimpleNamespace:
     return hparams_ns
 
 
-def load_hparams(hparams_file: str = "hparams.json") -> SimpleNamespace:
+def load_hparams(
+    hparams_file: str = "hparams.json", use_local_run_hparams: bool = False
+) -> SimpleNamespace:
     """
     Load hyperparameters from a JSON file.
 
@@ -122,6 +124,15 @@ def load_hparams(hparams_file: str = "hparams.json") -> SimpleNamespace:
     try:
         with open(hparams_file, "r") as f:
             hparams = json.load(f)
+        if use_local_run_hparams:
+            with open("hparams-local-run.json", "r") as f:
+                hparams_local_run = json.load(f)
+            hparams.update(hparams_local_run)
+            logger.info(
+                f"Using these special hparams for a local run: {hparams_local_run}"
+            )
+        else:
+            logger.info("Using hparams for a normal run (not local)")
         return create_namespace(hparams)
     except FileNotFoundError:
         logger.warning(f"No {hparams_file} found, using default hyperparameters")

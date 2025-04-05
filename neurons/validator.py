@@ -104,6 +104,11 @@ class Validator:
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        parser.add_argument(
+            "--log-to-private-wandb",
+            action="store_true",
+            help="Logs to the entity you are signed in to if true, else to the public 'tplr'.",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)

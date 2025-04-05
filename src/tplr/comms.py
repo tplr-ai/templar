@@ -1445,7 +1445,7 @@ class Comms(ChainManager):
                 s3_client = await self._get_s3_client(validator_bucket)
                 list_args = {
                     "Bucket": validator_bucket.name,
-                    "Prefix": "peers_",
+                    "Prefix": PEERS_FILE_PREFIX,
                 }
                 response = await s3_client.list_objects_v2(**list_args)
 

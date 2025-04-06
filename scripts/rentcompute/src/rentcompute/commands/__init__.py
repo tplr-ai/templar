@@ -13,4 +13,13 @@ from rentcompute.commands import rsync
 from rentcompute.commands import reload
 
 # Define public API
-__all__ = ["login", "start", "list_instances", "stop", "search", "provision", "rsync", "reload"]
+__all__ = [
+    "login",
+    "start",
+    "list_instances",
+    "stop",
+    "search",
+    "provision",
+    "rsync",
+    "reload",
+]

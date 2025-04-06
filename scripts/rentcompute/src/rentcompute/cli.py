@@ -9,7 +9,16 @@ import argparse
 from typing import List, Optional
 
 from rentcompute import __version__
-from rentcompute.commands import login, start, list_instances, stop, search, provision, rsync, reload
+from rentcompute.commands import (
+    login,
+    start,
+    list_instances,
+    stop,
+    search,
+    provision,
+    rsync,
+    reload,
+)
 from rentcompute.config import Config
 
 # Configure logging
@@ -40,19 +49,19 @@ def create_parser() -> argparse.ArgumentParser:
 
     # Start command
     start_parser = subparsers.add_parser("start", help="Start a new compute instance")
-    
+
     # Provision command
-    provision_parser = subparsers.add_parser("provision", help="Provision an existing compute instance")
-    provision_parser.add_argument(
-        "--id", 
-        dest="instance_id",
-        required=True,
-        help="ID of the instance to provision"
+    provision_parser = subparsers.add_parser(
+        "provision", help="Provision an existing compute instance"
     )
     provision_parser.add_argument(
-        "-y", "--yes",
-        action="store_true",
-        help="Skip confirmation prompt"
+        "--id",
+        dest="instance_id",
+        required=True,
+        help="ID of the instance to provision",
+    )
+    provision_parser.add_argument(
+        "-y", "--yes", action="store_true", help="Skip confirmation prompt"
     )
     start_parser.add_argument(
         "--name",
@@ -177,19 +186,33 @@ def create_parser() -> argparse.ArgumentParser:
     # Stop command
     stop_parser = subparsers.add_parser("stop", help="Stop a compute instance")
     stop_group = stop_parser.add_mutually_exclusive_group(required=True)
-    stop_group.add_argument("--all", action="store_true", help="Stop all active instances")
-    stop_group.add_argument("--id", dest="instance_id", help="ID of a specific instance to stop")
+    stop_group.add_argument(
+        "--all", action="store_true", help="Stop all active instances"
+    )
+    stop_group.add_argument(
+        "--id", dest="instance_id", help="ID of a specific instance to stop"
+    )
     stop_parser.add_argument(
-        "-y", "--yes",
+        "-y",
+        "--yes",
         action="store_true",
         help="Skip confirmation prompt",
     )
-    
+
     # Rsync command
-    rsync_parser = subparsers.add_parser("rsync", help="Sync directories with compute instances")
+    rsync_parser = subparsers.add_parser(
+        "rsync", help="Sync directories with compute instances"
+    )
     rsync_group = rsync_parser.add_mutually_exclusive_group()
-    rsync_group.add_argument("--all", action="store_true", help="Sync with all active instances", default=True)
-    rsync_group.add_argument("--id", dest="instance_id", help="ID of a specific instance to sync with")
+    rsync_group.add_argument(
+        "--all",
+        action="store_true",
+        help="Sync with all active instances",
+        default=True,
+    )
+    rsync_group.add_argument(
+        "--id", dest="instance_id", help="ID of a specific instance to sync with"
+    )
     rsync_parser.add_argument(
         "--config",
         dest="config_path",
@@ -197,7 +220,8 @@ def create_parser() -> argparse.ArgumentParser:
         help="Path to the configuration file (default: .rentcompute.yml)",
     )
     rsync_parser.add_argument(
-        "-y", "--yes",
+        "-y",
+        "--yes",
         action="store_true",
         help="Skip confirmation prompt",
     )
@@ -206,12 +230,18 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reload instances after sync",
     )
-    
+
     # Reload command
-    reload_parser = subparsers.add_parser("reload", help="Reload running compute instances")
+    reload_parser = subparsers.add_parser(
+        "reload", help="Reload running compute instances"
+    )
     reload_group = reload_parser.add_mutually_exclusive_group(required=True)
-    reload_group.add_argument("--all", action="store_true", help="Reload all active instances")
-    reload_group.add_argument("--id", dest="instance_id", help="ID of a specific instance to reload")
+    reload_group.add_argument(
+        "--all", action="store_true", help="Reload all active instances"
+    )
+    reload_group.add_argument(
+        "--id", dest="instance_id", help="ID of a specific instance to reload"
+    )
     reload_parser.add_argument(
         "--config",
         dest="config_path",
@@ -219,7 +249,8 @@ def create_parser() -> argparse.ArgumentParser:
         help="Path to the configuration file (default: .rentcompute.yml)",
     )
     reload_parser.add_argument(
-        "-y", "--yes",
+        "-y",
+        "--yes",
         action="store_true",
         help="Skip confirmation prompt",
     )
@@ -310,15 +341,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "rsync":
             # Determine if we're using --all or a specific instance
             instance_id = None if args.all or not args.instance_id else args.instance_id
-            rsync.run(config, instance_id=instance_id, config_path=args.config_path, 
-                     skip_confirmation=args.yes, reload_after=args.reload)
+            rsync.run(
+                config,
+                instance_id=instance_id,
+                config_path=args.config_path,
+                skip_confirmation=args.yes,
+                reload_after=args.reload,
+            )
         elif args.command == "reload":
             # Determine if we're using --all or a specific instance
             if args.all:
-                reload.reload_all(config, config_path=args.config_path, skip_confirmation=args.yes)
+                reload.reload_all(
+                    config, config_path=args.config_path, skip_confirmation=args.yes
+                )
             else:
-                reload.reload_instance(config, args.instance_id, config_path=args.config_path, 
-                                     skip_confirmation=args.yes)
+                reload.reload_instance(
+                    config,
+                    args.instance_id,
+                    config_path=args.config_path,
+                    skip_confirmation=args.yes,
+                )
         else:
             parser.print_help()
             return 1

@@ -6,11 +6,9 @@ import os
 import subprocess
 import yaml
 import logging
-from typing import Dict, Any, List, Optional, Tuple
-from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 from rentcompute.config import Config
-from rentcompute.providers.base import Pod
 
 logger = logging.getLogger(__name__)
 
@@ -100,36 +98,31 @@ def run(
     for pod in target_pods:
         pod_results = []
         print(f"\nSyncing with {pod.name} (ID: {pod.id})...")
-        
+
         # Get the SSH key path (private key, not .pub)
         private_key_path = (
             pod.key_path.replace(".pub", "")
             if pod.key_path.endswith(".pub")
             else pod.key_path
         )
-        
+
         for sync_item in sync_config:
             source = os.path.abspath(os.path.expanduser(sync_item["source"]))
             destination = sync_item["destination"]
-            
+
             # Verify source exists
             if not os.path.exists(source):
                 print(f"Warning: Source path does not exist: {source}")
                 pod_results.append((sync_item, False, "Source path does not exist"))
                 continue
-                
+
             # Run rsync command
             success, error = rsync_directories(
-                source,
-                destination,
-                pod.host,
-                pod.user,
-                pod.port,
-                private_key_path
+                source, destination, pod.host, pod.user, pod.port, private_key_path
             )
-            
+
             pod_results.append((sync_item, success, error))
-            
+
         results.append((pod, pod_results))
 
     # Print summary
@@ -138,39 +131,41 @@ def run(
         print(f"\n{pod.name} (ID: {pod.id}):")
         success_count = sum(1 for _, success, _ in pod_results if success)
         print(f"  {success_count}/{len(pod_results)} directories synced successfully")
-        
+
         for sync_item, success, error in pod_results:
             source = os.path.abspath(os.path.expanduser(sync_item["source"]))
             destination = sync_item["destination"]
-            
+
             if success:
                 print(f"  ✓ {source} -> {destination}")
             else:
                 print(f"  ✗ {source} -> {destination}: {error}")
-    
+
     # Reload instances if requested
     if reload_after:
         print("\n=== Reloading instances after sync ===")
-        
+
         # Import reload module here to avoid circular imports
         from rentcompute.commands import reload as reload_cmd
-        
+
         # Load reload configuration
         reload_config = reload_cmd.load_reload_config(config_path)
         if not reload_config:
             print(f"No reload configuration found in {config_path}")
             print("Please add a 'reload' section to enable automatic reload after sync")
             return
-        
+
         # Reload each instance that was synced
         reload_success_count = 0
         for pod, _ in results:
             print(f"\nReloading {pod.name} (ID: {pod.id})...")
             if reload_cmd.reload_pod(pod, reload_config):
                 reload_success_count += 1
-        
+
         # Print reload summary
-        print(f"\nReload summary: {reload_success_count}/{len(results)} instances reloaded successfully")
+        print(
+            f"\nReload summary: {reload_success_count}/{len(results)} instances reloaded successfully"
+        )
 
 
 def load_sync_config(config_path: str) -> List[Dict[str, str]]:
@@ -230,20 +225,20 @@ def rsync_directories(
         "-avzP",  # archive, verbose, compress, show progress
         "--delete",  # delete extraneous files on destination
     ]
-    
+
     # Add standard exclusions
     rsync_cmd.extend(STANDARD_EXCLUSIONS)
-    
+
     # Add SSH options
     ssh_options = f"ssh -p {port} -i {private_key_path} -o StrictHostKeyChecking=no"
     rsync_cmd.extend(["-e", ssh_options])
-    
+
     # Add source and destination
     rsync_cmd.append(source)
     rsync_cmd.append(f"{user}@{host}:{destination}")
-    
+
     print(f"Syncing: {source} -> {user}@{host}:{destination}")
-    
+
     try:
         # Execute rsync command
         process = subprocess.Popen(
@@ -251,17 +246,17 @@ def rsync_directories(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1  # Line buffered
+            bufsize=1,  # Line buffered
         )
-        
+
         # Stream output line by line
-        for line in iter(process.stdout.readline, ''):
+        for line in iter(process.stdout.readline, ""):
             print(f"  {line.rstrip()}")
-        
+
         # Wait for process to complete
         process.stdout.close()
         return_code = process.wait()
-        
+
         if return_code == 0:
             return True, ""
         else:

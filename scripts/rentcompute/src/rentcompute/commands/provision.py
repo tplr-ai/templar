@@ -2,7 +2,6 @@
 Provision command implementation.
 """
 
-from typing import Dict, Any, List, Optional
 import logging
 
 from rentcompute.config import Config
@@ -53,10 +52,12 @@ def run(config: Config, instance_id: str, skip_confirmation: bool = False) -> No
         print("Skipping confirmation due to -y/--yes flag")
 
     # Provision the instance
-    print("\nProvisioning requested. Looking for .rentcompute.yml in current directory...")
+    print(
+        "\nProvisioning requested. Looking for .rentcompute.yml in current directory..."
+    )
     if provision_instance(target_pod):
         print("Provisioning completed successfully.")
-        
+
         # Reprint SSH connection details
         private_key_path = (
             target_pod.key_path.replace(".pub", "")
@@ -68,7 +69,11 @@ def run(config: Config, instance_id: str, skip_confirmation: bool = False) -> No
         print(f"User: {target_pod.user}")
         print(f"Port: {target_pod.port}")
         print(f"SSH Key: {private_key_path}")
-        print(f"\nConnection command:")
-        print(f"ssh {target_pod.user}@{target_pod.host} -p {target_pod.port} -i {private_key_path}")
+        print("\nConnection command:")
+        print(
+            f"ssh {target_pod.user}@{target_pod.host} -p {target_pod.port} -i {private_key_path}"
+        )
     else:
-        print("Provisioning failed. Instance is still running but may require manual setup.")
+        print(
+            "Provisioning failed. Instance is still running but may require manual setup."
+        )

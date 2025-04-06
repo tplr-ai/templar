@@ -8,3 +8,31 @@
   debug:
     msg: "{{ pm2_list.stdout }}"
   tags: network_verify
+
+- name: Check Subtensor RPC connectivity
+  shell: btcli subnet list --subtensor.network local
+  register: rpc_check
+  failed_when: false
+  changed_when: false
+  timeout: 10
+  tags: network_verify
+
+- name: Display Subtensor status
+  debug:
+    msg: "Subtensor connectivity: {{ 'OK' if rpc_check.rc == 0 else 'FAILED' }}"
+  tags: network_verify
+
+- name: Check subnet metagraph
+  shell: btcli subnet metagraph --netuid {{ netuid }} --subtensor.network local
+  register: subnet_metagraph
+  failed_when: false
+  changed_when: false
+  when: rpc_check.rc == 0
+  tags: network_verify
+
+- name: Display subnet metagraph
+  debug:
+    msg: "{{ subnet_metagraph.stdout_lines }}"
+  when: rpc_check.rc == 0
+  tags: network_verify
+

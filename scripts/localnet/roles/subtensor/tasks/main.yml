@@ -25,24 +25,18 @@
   register: subtensor_binary
   tags: subtensor
 
-- name: Check if binary has been built before
-  shell: "bash -c 'if [ -f {{ ansible_env.HOME }}/subtensor/.build_done ]; then echo \"found\"; else echo \"notfound\"; fi'"
-  register: build_done_check
-  changed_when: false
-  tags: subtensor
-
 - name: Run cargo build
   shell: "bash -c 'source {{ ansible_env.HOME }}/.cargo/env && cargo build --release'"
   args:
     chdir: "{{ ansible_env.HOME }}/subtensor"
-  when: not subtensor_binary.stat.exists or build_done_check.stdout == "notfound"
+  when: not subtensor_binary.stat.exists
   tags: subtensor
 
 - name: Build Subtensor node (fast blocks disabled)
-  shell: "bash -c 'source {{ ansible_env.HOME }}/.cargo/env && BUILD_BINARY=1 ./scripts/localnet.sh --build-only && touch {{ ansible_env.HOME }}/subtensor/.build_done'"
+  shell: "bash -c 'source {{ ansible_env.HOME }}/.cargo/env && BUILD_BINARY=1 ./scripts/localnet.sh --build-only'"
   args:
     chdir: "{{ ansible_env.HOME }}/subtensor"
-  when: not subtensor_binary.stat.exists or build_done_check.stdout == "notfound"
+  when: not subtensor_binary.stat.exists
   tags: subtensor
 
 - name: Check if Subtensor PM2 process is running
@@ -56,5 +50,25 @@
   shell: pm2 start ./scripts/localnet.sh --name "Subtensor" --interpreter bash --cwd "{{ ansible_env.HOME }}/subtensor" -- False --no-purge
   args:
     chdir: "{{ ansible_env.HOME }}/subtensor"
+  environment:
+    PATH: "{{ ansible_env.HOME }}/.cargo/bin:{{ ansible_env.PATH }}"
   when: pm2_check.rc != 0
+  tags: subtensor
+
+- name: Wait for Subtensor RPC port 9944 to be available
+  wait_for:
+    host: 127.0.0.1
+    port: 9944
+    state: started
+    timeout: 180
+    delay: 5
+  tags: subtensor
+
+- name: Verify Subtensor node is responding to RPC requests
+  shell: "curl -s -H 'Content-Type: application/json' -d '{\"id\":1, \"jsonrpc\":\"2.0\", \"method\": \"system_health\", \"params\":[]}' http://127.0.0.1:9944 | grep -q result"
+  register: rpc_check
+  retries: 20
+  delay: 10
+  until: rpc_check.rc == 0
+  failed_when: rpc_check.rc != 0 and rpc_check.attempts|default(0) >= 20
   tags: subtensor

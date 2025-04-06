@@ -22,6 +22,7 @@
       - nodejs
       - npm
       - rsync
+      - jq
     state: present
   tags: common
 
@@ -41,12 +42,29 @@
   changed_when: false
   tags: common
 
-- name: Ensure cargo in PATH for subsequent tasks
-  shell: "echo $PATH"
-  environment:
-    PATH: "{{ ansible_env.HOME }}/.cargo/bin:{{ ansible_env.PATH }}"
-  register: cargo_path
+- name: Add Cargo to the PATH in .bashrc
+  lineinfile:
+    path: "{{ ansible_env.HOME }}/.bashrc"
+    line: 'export PATH="{{ ansible_env.HOME }}/.cargo/bin:$PATH"'
+    state: present
+  tags: common
+
+- name: Source cargo env
+  shell: source "{{ ansible_env.HOME }}/.cargo/env"
+  args:
+    executable: /bin/bash
   changed_when: false
+  tags: common
+
+- name: Check if cargo is accessible
+  shell: command -v cargo || echo "not found"
+  register: cargo_check
+  changed_when: false
+  tags: common
+
+- name: Display cargo location
+  debug:
+    var: cargo_check.stdout
   tags: common
 
 - name: Install PM2 (Node process manager)

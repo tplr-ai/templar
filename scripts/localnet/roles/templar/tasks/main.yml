@@ -20,8 +20,6 @@
     msg: "Found {{ gpu_count.stdout|int if gpu_count.stdout is defined else 0 }} GPU(s)"
   tags: templar
 
-# uv installation is now handled in the common role
-
 - name: Check if Python venv exists
   stat:
     path: "{{ templar_path }}/.venv"
@@ -76,6 +74,14 @@
     chdir: "{{ templar_path }}"
   loop: "{{ range(1, validator_hotkeys|length + 1) | list }}"
   when: validator_hotkeys|length > 0
+  tags: templar
+
+- name: Start aggregator processes via PM2
+  shell: pm2 start ecosystem.config.js --only "TA{{ item }}"
+  args:
+    chdir: "{{ templar_path }}"
+  loop: "{{ range(1, (aggregator_hotkeys|default([]))|length + 1) | list }}"
+  when: (aggregator_hotkeys|default([]))|length > 0
   tags: templar
 
 - name: Start miner processes via PM2

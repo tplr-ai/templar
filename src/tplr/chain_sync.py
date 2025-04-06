@@ -17,7 +17,7 @@
 # type: ignore
 
 import asyncio
-from typing import Dict, Optional, Tuple, List
+from typing import Optional, Tuple, List
 from collections import defaultdict
 import re
 
@@ -221,7 +221,7 @@ class ChainSync:
             and bucket1.secret_access_key == bucket2.secret_access_key
         )
 
-    async def get_commitments(self) -> Dict[int, Bucket]:
+    async def get_commitments(self) -> dict[int, Bucket]:
         """Fetch commitments from the blockchain"""
         try:
             subtensor = bt.subtensor(config=self.config)

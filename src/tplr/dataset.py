@@ -450,7 +450,7 @@ class DatasetLoader(SubsetLoader):
         return page_names
 
     @staticmethod
-    async def fetch_dataset_configs() -> typing.Dict[str, typing.Dict]:
+    async def fetch_dataset_configs() -> dict[str, dict]:
         """
         Fetch the different dump names, aka configs, aka samples, of the
         dataset.

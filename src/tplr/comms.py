@@ -21,7 +21,7 @@ import json
 import torch
 import asyncio
 from datetime import datetime, timezone
-from typing import List, Dict, Optional, Literal, Tuple
+from typing import List, Optional, Literal, Tuple
 from types import SimpleNamespace
 
 from aiobotocore.session import get_session
@@ -111,7 +111,7 @@ class Comms:
 
     async def put(
         self,
-        state_dict: Dict,
+        state_dict: dict,
         uid: str,
         window: int,
         key: str,
@@ -160,7 +160,7 @@ class Comms:
         stale_retention: int = 10,
         time_min: Optional[str] = None,
         time_max: Optional[str] = None,
-    ) -> Tuple[Dict, int]:
+    ) -> Tuple[dict, int]:
         """
         Retrieve stored gradients or checkpoints.
         """

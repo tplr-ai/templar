@@ -21,7 +21,7 @@ import statistics
 import time
 import uuid
 from threading import Lock
-from typing import Any, Dict, Final
+from typing import Any, Final
 
 import psutil
 import torch
@@ -260,12 +260,12 @@ class MetricsLogger:
         return point
 
 
-def get_gpu_metrics() -> Dict[str, Any]:
+def get_gpu_metrics() -> dict[str, Any]:
     """
     Retrieves real-time GPU utilization metrics.
 
     Returns:
-    Dict[str, Any]: GPU utilization metrics for each GPU.
+    dict[str, Any]: GPU utilization metrics for each GPU.
     """
     current_device = torch.cuda.current_device()
 
@@ -281,12 +281,12 @@ def get_gpu_metrics() -> Dict[str, Any]:
     }
 
 
-def get_system_metrics() -> Dict[str, Any]:
+def get_system_metrics() -> dict[str, Any]:
     """
     Retrieves CPU and RAM usage metrics.
 
     Returns:
-        Dict[str, Any]: Dictionary containing CPU and RAM usage metrics.
+        dict[str, Any]: Dictionary containing CPU and RAM usage metrics.
     """
     cpu_usage = psutil.cpu_percent()
     mem = psutil.virtual_memory()

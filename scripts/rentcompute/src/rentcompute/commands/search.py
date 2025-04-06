@@ -131,7 +131,7 @@ def run(config: Config, instance_config: Dict[str, Any], name: str = None) -> No
         print(
             f"{name:<{name_width}} | {machine_dict['id']:<{id_width}} | {machine_dict['provider']:<{provider_width}} | "
             f"{gpu_type:<{gpu_type_width}} | {machine_dict['gpu_count']:<{gpu_count_width}} | "
-            f"${machine_dict['hourly_rate']:<{price_width-1}.2f}"
+            f"${machine_dict['hourly_rate']:<{price_width - 1}.2f}"
         )
 
     print(

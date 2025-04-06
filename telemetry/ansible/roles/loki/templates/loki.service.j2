@@ -1,0 +1,49 @@
+# {{ ansible_managed }} - Managed by Ansible
+[Unit]
+Description=Loki log aggregation system
+Documentation=https://grafana.com/docs/loki/latest/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Run as loki user for security reasons
+User={{ loki_user }}
+Group={{ loki_group }}
+
+# Start the loki binary with the configuration file
+ExecStart={{ loki_binary_path }} -config.file={{ loki_config_file }}
+
+# Restart settings for robustness
+Restart=always
+RestartSec=10s
+
+# Set sensible security limitations
+NoNewPrivileges=true
+MemoryDenyWriteExecute=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+
+# Resource limits to prevent the service from consuming excessive resources
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Runtime directory
+RuntimeDirectory=loki
+RuntimeDirectoryMode=0750
+
+# Set working directory
+WorkingDirectory={{ loki_data_dir }}
+
+# Configure timeouts
+TimeoutStopSec=20s
+
+# Configure service type
+Type=simple
+
+[Install]
+WantedBy=multi-user.target

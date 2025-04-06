@@ -84,6 +84,29 @@ def load_bucket_secrets():
         },
     }
 
+    # Override with multiple endpoints if provided by environment variable.
+    bucket_list = os.environ.get("R2_DATASET_BUCKET_LIST")
+    if bucket_list:
+        bucket_list_str = bucket_list.strip()
+        logger.debug(f"Raw R2_DATASET_BUCKET_LIST: {bucket_list_str}")
+        try:
+            dataset_configs = __import__("json").loads(bucket_list_str)
+            if isinstance(dataset_configs, list) and len(dataset_configs) > 0:
+                logger.debug(
+                    "R2_DATASET_BUCKET_LIST found, using multiple dataset endpoints"
+                )
+                secrets["dataset"] = {"multiple": dataset_configs}
+            else:
+                logger.debug(
+                    "R2_DATASET_BUCKET_LIST is empty or not a valid list, using default dataset configuration"
+                )
+        except Exception as e:
+            logger.warning(f"Error parsing R2_DATASET_BUCKET_LIST: {e}")
+    else:
+        logger.debug(
+            "R2_DATASET_BUCKET_LIST not found, using default dataset configuration"
+        )
+
     required_vars = [
         "R2_GRADIENTS_ACCOUNT_ID",
         "R2_GRADIENTS_BUCKET_NAME",
@@ -112,5 +135,5 @@ def load_bucket_secrets():
 
 
 # Initialize config after env vars are loaded
-client_config = botocore.config.Config(max_pool_connections=256)
+client_config = botocore.config.Config(max_pool_connections=256, tcp_keepalive=True)
 BUCKET_SECRETS = load_bucket_secrets()

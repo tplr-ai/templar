@@ -49,6 +49,11 @@ from tplr.hparams import load_hparams
 import torch
 import random
 from neurons.validator import retry_call
+import s3fs
+from tplr.config import BUCKET_SECRETS
+import threading
+import time
+import concurrent.futures
 
 
 # Enable debug logging for tests
@@ -525,3 +530,645 @@ async def test_retry_in_next_pages(monkeypatch):
 
     # Restore the original method to avoid side effects.
     R2DatasetLoader.next_pages = original_next_pages
+
+
+# Dummy S3FileSystem for testing
+class DummyS3FileSystem:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+
+def test_round_robin_sequential(monkeypatch):
+    # Setup: Configure BUCKET_SECRETS with a "multiple" key containing two endpoints.
+    test_dataset_config = {
+        "multiple": [
+            {
+                "account_id": "accountA",
+                "name": "bucketA",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "AKIAA",
+                        "secret_access_key": "secretA",
+                    },
+                    "write": {
+                        "access_key_id": "AKIAA",
+                        "secret_access_key": "secretA",
+                    },
+                },
+            },
+            {
+                "account_id": "accountB",
+                "name": "bucketB",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "AKIAB",
+                        "secret_access_key": "secretB",
+                    },
+                    "write": {
+                        "access_key_id": "AKIAB",
+                        "secret_access_key": "secretB",
+                    },
+                },
+            },
+        ]
+    }
+    # Override the dataset configuration in the global BUCKET_SECRETS.
+    BUCKET_SECRETS["dataset"] = test_dataset_config
+
+    # Reset round robin counter and fs cache
+    R2DatasetLoader._round_robin_index = 0
+    R2DatasetLoader._fs_cache = {}
+
+    # Monkey-patch s3fs.S3FileSystem to use our DummyS3FileSystem
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+
+    # Action: Call _get_fs() three times
+    fs1 = R2DatasetLoader._get_fs()  # Expect accountA
+    fs2 = R2DatasetLoader._get_fs()  # Expect accountB
+    fs3 = (
+        R2DatasetLoader._get_fs()
+    )  # Expect cycle back to accountA (likely returning the cached instance)
+
+    # Expectations:
+    # First call should return instance configured for accountA.
+    endpoint1 = fs1.kwargs["client_kwargs"]["endpoint_url"]
+    assert endpoint1 == "https://accountA.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountA, got {endpoint1}"
+    )
+
+    # Second call should return instance configured for accountB.
+    endpoint2 = fs2.kwargs["client_kwargs"]["endpoint_url"]
+    assert endpoint2 == "https://accountB.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountB, got {endpoint2}"
+    )
+
+    # Third call should cycle back to accountA.
+    endpoint3 = fs3.kwargs["client_kwargs"]["endpoint_url"]
+    assert endpoint3 == "https://accountA.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountA on cycle, got {endpoint3}"
+    )
+    # Verify that the fs instance is cached: fs1 and fs3 should be the same object.
+    assert fs1 is fs3, (
+        "Expected the same cached S3FileSystem instance for repeated accountA selection"
+    )
+
+
+def test_round_robin_single_entry(monkeypatch):
+    # Setup: Configure BUCKET_SECRETS["dataset"] with a "multiple" key containing a single endpoint (endpoint A).
+    test_dataset_config = {
+        "multiple": [
+            {
+                "account_id": "accountA",
+                "name": "bucketA",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "AKIAA",
+                        "secret_access_key": "secretA",
+                    },
+                    "write": {
+                        "access_key_id": "AKIAA",
+                        "secret_access_key": "secretA",
+                    },
+                },
+            }
+        ]
+    }
+    BUCKET_SECRETS["dataset"] = test_dataset_config
+
+    # Reset the round robin counter and file system cache.
+    R2DatasetLoader._round_robin_index = 0
+    R2DatasetLoader._fs_cache = {}
+
+    # Monkey-patch s3fs.S3FileSystem with our DummyS3FileSystem.
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+
+    # Action: Call _get_fs() multiple times.
+    fs1 = R2DatasetLoader._get_fs()
+    fs2 = R2DatasetLoader._get_fs()
+    fs3 = R2DatasetLoader._get_fs()
+
+    # Expectations:
+    # Every call should return an S3FileSystem instance configured for endpoint A.
+    endpoint1 = fs1.kwargs["client_kwargs"]["endpoint_url"]
+    endpoint2 = fs2.kwargs["client_kwargs"]["endpoint_url"]
+    endpoint3 = fs3.kwargs["client_kwargs"]["endpoint_url"]
+
+    assert endpoint1 == "https://accountA.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountA, got {endpoint1}"
+    )
+    assert endpoint2 == "https://accountA.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountA, got {endpoint2}"
+    )
+    assert endpoint3 == "https://accountA.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountA, got {endpoint3}"
+    )
+
+    # The fs instances should be cached hence identical.
+    assert fs1 is fs2 and fs1 is fs3, (
+        "Expected the same cached S3FileSystem instance for accountA"
+    )
+
+    # The round robin counter should increment even if only one entry exists.
+    assert R2DatasetLoader._round_robin_index == 3, (
+        f"Expected round robin index to be 3, got {R2DatasetLoader._round_robin_index}"
+    )
+
+
+def test_configuration_without_multiple(monkeypatch):
+    # Setup: Configure BUCKET_SECRETS["dataset"] without the "multiple" key (using a single, default configuration).
+    test_dataset_config = {
+        "account_id": "accountDefault",
+        "name": "bucketDefault",
+        "credentials": {
+            "read": {
+                "access_key_id": "READ_ACCESS",
+                "secret_access_key": "READ_SECRET",
+            },
+            "write": {
+                "access_key_id": "WRITE_ACCESS",
+                "secret_access_key": "WRITE_SECRET",
+            },
+        },
+    }
+    from tplr.config import BUCKET_SECRETS
+    from tplr.r2_dataset import R2DatasetLoader
+    import s3fs
+
+    BUCKET_SECRETS["dataset"] = test_dataset_config
+
+    # Reset the round robin counter and fs cache.
+    R2DatasetLoader._round_robin_index = 0
+    R2DatasetLoader._fs_cache = {}
+
+    # Monkey-patch s3fs.S3FileSystem with a dummy implementation.
+    class DummyS3FileSystem:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+
+    # Action: Call _get_fs() and inspect the returned instance.
+    fs = R2DatasetLoader._get_fs()
+
+    # Expectations:
+    # The returned S3FileSystem should be configured based on the provided single endpoint configuration.
+    endpoint = fs.kwargs["client_kwargs"]["endpoint_url"]
+    expected_endpoint = "https://accountDefault.r2.cloudflarestorage.com"
+    assert endpoint == expected_endpoint, (
+        f"Expected endpoint {expected_endpoint}, got {endpoint}"
+    )
+
+
+def test_round_robin_caching(monkeypatch):
+    # Setup: With a given multiple-endpoint configuration, verify that caching behaves as expected.
+    test_dataset_config = {
+        "multiple": [
+            {
+                "account_id": "accountA",
+                "name": "bucketA",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "AKIAA",
+                        "secret_access_key": "secretA",
+                    },
+                    "write": {
+                        "access_key_id": "AKIAA",
+                        "secret_access_key": "secretA",
+                    },
+                },
+            },
+            {
+                "account_id": "accountB",
+                "name": "bucketB",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "AKIAB",
+                        "secret_access_key": "secretB",
+                    },
+                    "write": {
+                        "access_key_id": "AKIAB",
+                        "secret_access_key": "secretB",
+                    },
+                },
+            },
+        ]
+    }
+    from tplr.config import BUCKET_SECRETS
+    from tplr.r2_dataset import R2DatasetLoader
+    import s3fs
+
+    # Override dataset configuration.
+    BUCKET_SECRETS["dataset"] = test_dataset_config
+
+    # Reset round robin counter and fs cache.
+    R2DatasetLoader._round_robin_index = 0
+    R2DatasetLoader._fs_cache = {}
+
+    # Monkey-patch s3fs.S3FileSystem with DummyS3FileSystem.
+    class DummyS3FileSystem:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+
+    # Action: Call _get_fs() repeatedly (e.g., 6 times to cycle through endpoints).
+    fs_instances = [R2DatasetLoader._get_fs() for _ in range(6)]
+
+    # Determine expected endpoints for round robin:
+    # For a 2-endpoint configuration, indices 0,2,4 should correspond to accountA,
+    # and indices 1,3,5 should correspond to accountB.
+    endpoint_A = "https://accountA.r2.cloudflarestorage.com"
+    endpoint_B = "https://accountB.r2.cloudflarestorage.com"
+
+    # Check that instances returning the same endpoint are identical (cached)
+    assert fs_instances[0].kwargs["client_kwargs"]["endpoint_url"] == endpoint_A, (
+        "Expected accountA endpoint at index 0"
+    )
+    assert fs_instances[1].kwargs["client_kwargs"]["endpoint_url"] == endpoint_B, (
+        "Expected accountB endpoint at index 1"
+    )
+    assert fs_instances[2].kwargs["client_kwargs"]["endpoint_url"] == endpoint_A, (
+        "Expected accountA endpoint at index 2"
+    )
+    assert fs_instances[3].kwargs["client_kwargs"]["endpoint_url"] == endpoint_B, (
+        "Expected accountB endpoint at index 3"
+    )
+    assert fs_instances[4].kwargs["client_kwargs"]["endpoint_url"] == endpoint_A, (
+        "Expected accountA endpoint at index 4"
+    )
+    assert fs_instances[5].kwargs["client_kwargs"]["endpoint_url"] == endpoint_B, (
+        "Expected accountB endpoint at index 5"
+    )
+
+    # Verify caching: same instance for accountA calls at indices 0, 2, 4.
+    assert fs_instances[0] is fs_instances[2] is fs_instances[4], (
+        "Expected the same cached instance for accountA"
+    )
+    # Similarly, same instance for accountB calls at indices 1, 3, 5.
+    assert fs_instances[1] is fs_instances[3] is fs_instances[5], (
+        "Expected the same cached instance for accountB"
+    )
+
+    # Additionally, cache should have exactly 2 entries.
+    assert len(R2DatasetLoader._fs_cache) == 2, (
+        f"Expected fs cache to have 2 entries, got {len(R2DatasetLoader._fs_cache)}"
+    )
+
+
+def test_round_robin_thread_safety(monkeypatch):
+    # Setup: Configure BUCKET_SECRETS["dataset"] with two endpoints.
+    test_dataset_config = {
+        "multiple": [
+            {
+                "account_id": "accountA",
+                "name": "bucketA",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "AKIAA",
+                        "secret_access_key": "secretA",
+                    },
+                    "write": {
+                        "access_key_id": "AKIAA",
+                        "secret_access_key": "secretA",
+                    },
+                },
+            },
+            {
+                "account_id": "accountB",
+                "name": "bucketB",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "AKIAB",
+                        "secret_access_key": "secretB",
+                    },
+                    "write": {
+                        "access_key_id": "AKIAB",
+                        "secret_access_key": "secretB",
+                    },
+                },
+            },
+        ]
+    }
+    BUCKET_SECRETS["dataset"] = test_dataset_config
+
+    # Reset shared state.
+    R2DatasetLoader._round_robin_index = 0
+    R2DatasetLoader._fs_cache = {}
+
+    # Monkey-patch s3fs.S3FileSystem with DummyS3FileSystem that records instantiation params.
+    class DummyS3FileSystem:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+
+    num_threads = 10
+    calls_per_thread = 10
+    total_calls = num_threads * calls_per_thread
+    results = []  # Will store all fs instances.
+
+    # Worker function: call _get_fs() calls_per_thread times.
+    def worker():
+        for _ in range(calls_per_thread):
+            fs_instance = R2DatasetLoader._get_fs()
+            results.append(fs_instance)
+
+    threads = []
+    for _ in range(num_threads):
+        t = threading.Thread(target=worker)
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join()
+
+    # Expectation: The round_robin_index should equal total_calls.
+    assert R2DatasetLoader._round_robin_index == total_calls, (
+        f"Expected _round_robin_index to be {total_calls}, got {R2DatasetLoader._round_robin_index}"
+    )
+
+    # Valid endpoint URLs we expect.
+    valid_endpoints = {
+        "https://accountA.r2.cloudflarestorage.com",
+        "https://accountB.r2.cloudflarestorage.com",
+    }
+
+    # All returned instances must have a valid endpoint.
+    for instance in results:
+        endpoint_url = instance.kwargs["client_kwargs"]["endpoint_url"]
+        assert endpoint_url in valid_endpoints, (
+            f"Invalid endpoint {endpoint_url} found in instance"
+        )
+
+    # Check caching: For each endpoint, repeated calls should return the same instance.
+    # Build a mapping: endpoint_url -> instance (first encountered).
+    endpoint_to_instance = {}
+    for instance in results:
+        endpoint_url = instance.kwargs["client_kwargs"]["endpoint_url"]
+        if endpoint_url not in endpoint_to_instance:
+            endpoint_to_instance[endpoint_url] = instance
+        else:
+            # Ensure the cached instance is always returned.
+            assert instance is endpoint_to_instance[endpoint_url], (
+                f"Different instances returned for endpoint {endpoint_url}"
+            )
+
+
+# Test Case 6: Concurrency under high load
+# - Setup: Use a "multiple" endpoints configuration as above.
+# - Action: Fire a high number of concurrent calls (e.g., 100 calls in parallel using threads or async tasks).
+# - Expectations:
+#   * The round robin mechanism should still cycle through the endpoints appropriately.
+#   * The fs_cache should remain consistent, and no race conditions or exceptions should occur.
+def test_round_robin_high_concurrency(monkeypatch):
+    test_dataset_config = {
+        "multiple": [
+            {
+                "account_id": "accountA",
+                "name": "bucketA",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "AKIAA",
+                        "secret_access_key": "secretA",
+                    },
+                    "write": {
+                        "access_key_id": "AKIAA",
+                        "secret_access_key": "secretA",
+                    },
+                },
+            },
+            {
+                "account_id": "accountB",
+                "name": "bucketB",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "AKIAB",
+                        "secret_access_key": "secretB",
+                    },
+                    "write": {
+                        "access_key_id": "AKIAB",
+                        "secret_access_key": "secretB",
+                    },
+                },
+            },
+        ]
+    }
+    BUCKET_SECRETS["dataset"] = test_dataset_config
+
+    # Reset round robin counter and fs cache.
+    R2DatasetLoader._round_robin_index = 0
+    R2DatasetLoader._fs_cache = {}
+
+    # Use the DummyS3FileSystem to record instantiation parameters.
+    class DummyS3FileSystem:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+
+    total_calls = 200
+    results = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+        futures = [executor.submit(R2DatasetLoader._get_fs) for _ in range(total_calls)]
+        for future in concurrent.futures.as_completed(futures):
+            results.append(future.result())
+
+    # Check that the round robin index equals the total number of calls.
+    assert R2DatasetLoader._round_robin_index == total_calls, (
+        f"Expected round robin index {total_calls}, got {R2DatasetLoader._round_robin_index}"
+    )
+
+    valid_endpoints = {
+        "https://accountA.r2.cloudflarestorage.com",
+        "https://accountB.r2.cloudflarestorage.com",
+    }
+    for instance in results:
+        ep = instance.kwargs["client_kwargs"]["endpoint_url"]
+        assert ep in valid_endpoints, f"Unexpected endpoint encountered: {ep}"
+
+    # Verify caching: For instances of each endpoint, all calls should return the same object.
+    cache = {}
+    for instance in results:
+        ep = instance.kwargs["client_kwargs"]["endpoint_url"]
+        if ep not in cache:
+            cache[ep] = instance
+        else:
+            assert instance is cache[ep], f"Different instances found for endpoint {ep}"
+    # The cache size must match the number of endpoints.
+    assert len(R2DatasetLoader._fs_cache) == 2, (
+        f"Expected fs_cache size 2, got {len(R2DatasetLoader._fs_cache)}"
+    )
+
+
+# Test Case 7: Lock robustness with simulated delay
+# - Setup: Temporarily simulate a delay inside S3FileSystem creation in _get_fs().
+# - Action: While the creation is artificially delayed, trigger multiple concurrent calls.
+# - Expectations:
+#   * The lock should prevent race conditions.
+#   * After the delay, the round_robin_index and fs_cache should reflect correct, sequential, and non-corrupted increments.
+def test_lock_robustness_simulated_delay(monkeypatch):
+    test_dataset_config = {
+        "multiple": [
+            {
+                "account_id": "delayA",
+                "name": "bucketDelayA",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "DELAYA",
+                        "secret_access_key": "secretDelayA",
+                    },
+                    "write": {
+                        "access_key_id": "DELAYA",
+                        "secret_access_key": "secretDelayA",
+                    },
+                },
+            },
+            {
+                "account_id": "delayB",
+                "name": "bucketDelayB",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "DELAYB",
+                        "secret_access_key": "secretDelayB",
+                    },
+                    "write": {
+                        "access_key_id": "DELAYB",
+                        "secret_access_key": "secretDelayB",
+                    },
+                },
+            },
+        ]
+    }
+    BUCKET_SECRETS["dataset"] = test_dataset_config
+    R2DatasetLoader._round_robin_index = 0
+    R2DatasetLoader._fs_cache = {}
+
+    # Create a DummyS3FileSystem that delays initialization.
+    class DelayedDummyS3FileSystem:
+        def __init__(self, *args, **kwargs):
+            time.sleep(0.05)  # Simulated delay
+            self.args = args
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(s3fs, "S3FileSystem", DelayedDummyS3FileSystem)
+
+    total_calls = 50
+    results = []
+
+    def worker():
+        fs_inst = R2DatasetLoader._get_fs()
+        results.append(fs_inst)
+
+    threads = []
+    for _ in range(total_calls):
+        t = threading.Thread(target=worker)
+        threads.append(t)
+        t.start()
+
+    for t in threads:
+        t.join()
+
+    # Verify total round robin index.
+    assert R2DatasetLoader._round_robin_index == total_calls, (
+        f"Expected round robin index {total_calls}, got {R2DatasetLoader._round_robin_index}"
+    )
+
+    # Validate that each instance has the correct endpoint and caching works.
+    valid_endpoints = {
+        "https://delayA.r2.cloudflarestorage.com",
+        "https://delayB.r2.cloudflarestorage.com",
+    }
+    cache = {}
+    for inst in results:
+        ep = inst.kwargs["client_kwargs"]["endpoint_url"]
+        assert ep in valid_endpoints, f"Unexpected endpoint {ep}"
+        if ep in cache:
+            assert inst is cache[ep], (
+                f"Caching failure: Different instances for endpoint {ep}"
+            )
+        else:
+            cache[ep] = inst
+
+
+# Test Case 8: Validate configuration correctness in returned instances
+# - Setup: For each endpoint configuration in the "multiple" list, ensure that the expected endpoint_url (derived from the account_id)
+#   is known.
+# - Action: Call _get_fs() and inspect the 'endpoint_url' in the returned S3FileSystem instance.
+# - Expectations:
+#   * The instance's configuration should match the expected endpoint for the selected account_id.
+def test_validate_configuration_correctness(monkeypatch):
+    test_dataset_config = {
+        "multiple": [
+            {
+                "account_id": "confA",
+                "name": "bucketConfA",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "CONFA",
+                        "secret_access_key": "secretConfA",
+                    },
+                    "write": {
+                        "access_key_id": "CONFA",
+                        "secret_access_key": "secretConfA",
+                    },
+                },
+            },
+            {
+                "account_id": "confB",
+                "name": "bucketConfB",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "CONFB",
+                        "secret_access_key": "secretConfB",
+                    },
+                    "write": {
+                        "access_key_id": "CONFB",
+                        "secret_access_key": "secretConfB",
+                    },
+                },
+            },
+        ]
+    }
+    BUCKET_SECRETS["dataset"] = test_dataset_config
+
+    # Reset state.
+    R2DatasetLoader._round_robin_index = 0
+    R2DatasetLoader._fs_cache = {}
+
+    # Dummy S3FileSystem capturing instantiation parameters.
+    class DummyS3FileSystem:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+
+    # Call _get_fs() multiple times to get both endpoints.
+    instances = [R2DatasetLoader._get_fs() for _ in range(10)]
+    expected_endpoints = {
+        "confA": "https://confA.r2.cloudflarestorage.com",
+        "confB": "https://confB.r2.cloudflarestorage.com",
+    }
+    for inst in instances:
+        ep = inst.kwargs["client_kwargs"]["endpoint_url"]
+        # Determine which account id based on the endpoint.
+        if ep == expected_endpoints["confA"]:
+            account = "confA"
+        elif ep == expected_endpoints["confB"]:
+            account = "confB"
+        else:
+            account = None
+        assert account is not None, (
+            f"Endpoint {ep} does not match any expected configuration."
+        )
+        expected_region = R2DatasetLoader.CF_REGION_NAME
+        region = inst.kwargs["client_kwargs"].get("region_name")
+        assert region == expected_region, (
+            f"Expected region {expected_region}, got {region}"
+        )

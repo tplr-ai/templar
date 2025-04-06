@@ -25,22 +25,22 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 import bittensor as bt
 import numpy as np
-from typing import cast
+import torch
 
 # Third party
 from bittensor.core.subtensor import ScaleObj
-import torch
-from torch.optim import SGD
 from torch import autocast
-from transformers import LlamaForCausalLM
+from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
     LinearLR,
     SequentialLR,
 )
+from transformers import LlamaForCausalLM
 
 # Local
 import tplr
@@ -204,6 +204,10 @@ class Miner:
             job_type="mining",
         )
 
+        # Initialize peer related attributes
+        self.next_peers: tplr.comms.PeerArray | None = None
+        self.peers_update_window = -1
+
     # Main training loop.
     async def run(self):
         # Start background block listener
@@ -214,17 +218,12 @@ class Miner:
             daemon=True,
         )
         self.listener.start()  #
-        # Load Peers
-        if not self.config.peers:
-            self.peers = self.comms.peers
-            tplr.logger.info(f"Filtered gather peers with buckets: {self.peers}")
-        else:
-            self.peers = self.config.peers
-        if self.uid not in self.peers:
-            self.peers.append(self.uid)
+
+        # Use config peers if provided
+        if self.config.peers:
+            self.comms.peers = self.config.peers
 
         self.comms.commitments = await self.comms.get_commitments()
-        self.comms.set_gather_peers()
         tplr.logger.info("Loaded commitments")
 
         # Fetch start_window from highest stake validator
@@ -269,14 +268,19 @@ class Miner:
             else:
                 tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
         else:
-            tplr.logger.info("Starting from scratch")
+            tplr.logger.info("No checkpoint found, initializing model from scratch")
             self.momentum = {
                 n: torch.zeros_like(p) for n, p in self.model.named_parameters()
             }
             self.model.to(self.config.device)  # type: ignore
 
+            # Catch up with aggregation server from start window.
+            tplr.logger.info(
+                f"Starting catchup from start window {self.start_window} to current window {self.current_window})..."
+            )
+            await tplr.neurons.catchup_with_aggregation_server(self, self.start_window)
+
         self.comms.start_commitment_fetcher()
-        self.comms.start_background_tasks()
 
         while True:
             # 1. Initialize window and update peers
@@ -292,10 +296,8 @@ class Miner:
             )
 
             peer_start = tplr.T()
-            self.comms.set_gather_peers()
-            self.peers = self.comms.peers
-            tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - peer_start)} Updated peers - gather:{len(self.peers)}"
+            await tplr.neurons.update_peers(
+                instance=self, window=step_window, peer_start=peer_start
             )
 
             # 2. Load training data for this window
@@ -443,19 +445,15 @@ class Miner:
                 # In test mode, use all UIDs from metagraph except self
                 tplr.logger.info("Test mode active: Using all peers from metagraph.")
                 all_uids = list(range(len(self.metagraph.S)))
-                self.peers = [uid for uid in all_uids if uid != self.uid]
-            else:
-                # Normal operation - update and filter peers
-                self.comms.set_gather_peers()
-                self.peers = self.comms.peers
+                self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
-            tplr.logger.info(f"Final peers for gather: {self.peers}")
+            tplr.logger.info(f"Final peers for gather: {self.comms.peers}")
 
             # Create a task for gathering gradients asynchronously
             gather_task = asyncio.create_task(
                 self.comms.gather(
                     my_uid=self.uid,
-                    uids=self.peers,
+                    uids=self.comms.peers,
                     window=step_window,
                     key="gradient",
                     timeout=35,
@@ -499,8 +497,8 @@ class Miner:
                     "miner/gpu_memory_cached": torch.cuda.memory_reserved()
                     / 1024**2,  # MB
                     # Network metrics
-                    "miner/gather_peers": len(self.peers),
-                    "miner/effective_batch_size": len(self.peers)
+                    "miner/gather_peers": len(self.comms.peers),
+                    "miner/effective_batch_size": len(self.comms.peers)
                     * self.hparams.batch_size,
                     # Optimization metrics
                     "miner/learning_rate": self.scheduler.get_last_lr()[0],
@@ -601,7 +599,7 @@ class Miner:
             # Add successful peers information
             if gather_result is not None:
                 debug_dict["successful_peers"] = sorted(
-                    list(set(self.peers) - set(gather_result.skipped_uids))
+                    list(set(self.comms.peers) - set(gather_result.skipped_uids))
                 )
                 debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
 
@@ -663,8 +661,8 @@ class Miner:
                     "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
                     / 1024**2,
                     "miner/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,
-                    "miner/gather_peers": len(self.peers),
-                    "miner/effective_batch_size": len(self.peers)
+                    "miner/gather_peers": len(self.comms.peers),
+                    "miner/effective_batch_size": len(self.comms.peers)
                     * self.hparams.batch_size,
                     "miner/learning_rate": self.scheduler.get_last_lr()[0],
                     "miner/mean_grad_norm": mean_grad_norm,
@@ -694,18 +692,20 @@ class Miner:
                     "mean_momentum_norm": mean_momentum_norm,
                     "batch_duration": duration,
                     "total_tokens": int(self.total_tokens_processed),
-                    "active_peers": int(len(self.peers)),
+                    "active_peers": int(len(self.comms.peers)),
                     "effective_batch_size": int(
-                        len(self.peers) * self.hparams.batch_size
+                        len(self.comms.peers) * self.hparams.batch_size
                     ),
                     "learning_rate": self.scheduler.get_last_lr()[0],
                     "mean_grad_norm": mean_grad_norm,
                     "gather_success_rate": gather_success_rate,
                     "max_grad_norm": max(grad_norms) if grad_norms else 0,
                     "min_grad_norm": min(grad_norms) if grad_norms else 0,
-                    "gather_peers": json.dumps(self.peers),
+                    "gather_peers": json.dumps(self.comms.peers.tolist()),
                     "skipped_peers": json.dumps(
-                        gather_result.skipped_uids if gather_result else []
+                        np.array(gather_result.skipped_uids).tolist()
+                        if gather_result
+                        else []
                     ),
                     "window_total_time": window_total_time,
                     "peer_update_time": peer_update_time,

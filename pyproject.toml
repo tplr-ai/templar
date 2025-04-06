@@ -29,6 +29,8 @@ dependencies = [
     "lm-eval>=0.4.8",
     "psutil>=7.0.0",
     "influxdb-client>=1.48.0",
+    "multiprocessing-logging>=0.3.4",
+    "python-logging-loki>=0.3.1",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +39,7 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
     "pytest-asyncio",
+    "pytest-mock>=3.14.0",
     "ipykernel",
     "ipython",
     "pandas",

@@ -1,0 +1,141 @@
+# {{ ansible_managed }} - Managed by Ansible
+# Loki Configuration File
+
+auth_enabled: false  # Disable multi-tenant authentication
+
+# Server settings control the HTTP and GRPC server behavior
+server:
+  http_listen_port: {{ loki_http_listen_port }}
+  grpc_listen_port: {{ loki_grpc_listen_port }}
+  http_server_read_timeout: {{ loki_http_server_read_timeout }}
+  http_server_write_timeout: {{ loki_http_server_write_timeout }}
+  http_server_idle_timeout: {{ loki_http_server_idle_timeout }}
+
+# Common configuration for Loki components
+common:
+  # Path to store temporary files (e.g., during chunk decoding)
+  path_prefix: {{ loki_data_dir }}
+  storage:
+    # Storage backend for chunks
+    filesystem:
+      chunks_directory: {{ loki_filesystem_directory }}
+      rules_directory: {{ loki_data_dir }}/rules
+  # Replication factor for chunks
+  replication_factor: 1
+  # Ring configuration for distributed operations
+  ring:
+    kvstore:
+      store: inmemory
+
+# Compactor optimizes storage by compacting data
+compactor:
+  # Working directory for the compactor
+  working_directory: {{ loki_compactor_working_directory }}
+  # How often to run compaction
+  compaction_interval: 5m
+{% if loki_compactor_retention_enabled %}
+  # Retention configuration
+  retention_enabled: true
+  retention_delete_delay: {{ loki_compactor_retention_delete_delay }}
+  retention_delete_worker_count: {{ loki_compactor_retention_delete_worker_count }}
+{% endif %}
+
+# Schema configuration defines chunks and indexes schemas
+schema_config:
+  configs:
+{% for config in loki_schema_configs %}
+    - from: {{ config.from }}
+      store: {{ config.store }}
+      object_store: {{ config.object_store }}
+      schema: {{ config.schema }}
+      index:
+        prefix: {{ config.index.prefix }}
+        period: {{ config.index.period }}
+{% endfor %}
+
+# Storage configuration for various Loki components
+storage_config:
+  # BoltDB Shipper for index
+  boltdb_shipper:
+    active_index_directory: {{ loki_data_dir }}/index
+    shared_store: {{ loki_storage_type }}
+    cache_location: {{ loki_data_dir }}/index_cache
+
+{% if loki_storage_type == "filesystem" %}
+  # Filesystem storage configuration
+  filesystem:
+    directory: {{ loki_filesystem_directory }}
+{% elif loki_storage_type == "s3" and loki_s3_enabled %}
+  # S3 storage configuration
+  aws:
+    s3: {{ loki_s3_endpoint }}
+    bucketnames: {{ loki_s3_bucket_name }}
+    region: {{ loki_s3_region }}
+    access_key_id: {{ loki_s3_access_key_id }}
+    secret_access_key: {{ loki_s3_secret_access_key }}
+    s3forcepathstyle: true
+{% endif %}
+
+# Ingester configuration for handling incoming logs
+ingester:
+  lifecycler:
+    ring:
+      kvstore:
+        store: {{ loki_ingester_lifecycler_ring_kvstore }}
+      replication_factor: 1
+    final_sleep: {{ loki_ingester_lifecycler_final_sleep }}
+  chunk_idle_period: {{ loki_ingester_chunk_idle_period }}
+  chunk_retain_period: {{ loki_ingester_chunk_retain_period }}
+  chunk_target_size: {{ loki_ingester_chunk_target_size }}
+  max_chunk_age: {{ loki_ingester_max_chunk_age }}
+  chunk_encoding: {{ loki_ingester_chunk_encoding }}
+  # Configure WAL for crash recovery
+  wal:
+    enabled: true
+    dir: {{ loki_data_dir }}/wal
+
+# Limits configuration to prevent resource exhaustion
+limits_config:
+  # Rate limits for ingested logs
+  ingestion_rate_mb: {{ loki_limits_ingestion_rate_mb }}
+  ingestion_burst_size_mb: {{ loki_limits_ingestion_burst_size_mb }}
+  # Query parallelism for load distribution
+  max_query_parallelism: {{ loki_limits_max_query_parallelism }}
+  # Maximum allowed cardinality of a query
+  cardinality_limit: {{ loki_limits_cardinality_limit }}
+  # Maximum number of unique series for a query
+  max_query_series: {{ loki_limits_max_query_series }}
+  # Retention and query timeframe limits
+  max_query_lookback: {{ loki_limits_max_query_lookback }}
+
+# Table manager handles the creation and retention of tables in the index store
+table_manager:
+  # Retention configuration
+  retention_deletes_enabled: {{ loki_table_manager_retention_deletes_enabled }}
+  retention_period: {{ loki_table_manager_retention_period }}
+
+# Frontend configuration for query handling
+frontend:
+  compress_responses: true
+  # Configure max outstanding queries per tenant
+  max_outstanding_per_tenant: 100
+  # Log queries that take longer than this duration
+  log_queries_longer_than: 10s
+
+# Rules configuration and evaluation
+ruler:
+  storage:
+    type: local
+    local:
+      directory: {{ loki_data_dir }}/rules
+  rule_path: {{ loki_data_dir }}/rules
+  alertmanager_url: ""
+  ring:
+    kvstore:
+      store: inmemory
+
+# Metrics configuration
+{% if loki_metrics_enabled %}
+analytics:
+  reporting_enabled: false
+{% endif %}

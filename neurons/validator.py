@@ -283,6 +283,43 @@ class Validator:
             return True
         return False
 
+    def log_sync_score(
+        self, eval_uid: int, sync_result: dict[str, bool | float | int | str]
+    ) -> None:
+        l2_norm = float(sync_result.get("l2_norm", 99.0))
+        avg_l2_norm = float(sync_result.get("avg_l2_norm", 99.0))
+        avg_abs_diff = float(sync_result.get("avg_abs_diff", 99.0))
+        max_diff = float(sync_result.get("max_diff", 99.0))
+        avg_steps_behind = float(sync_result.get("avg_steps_behind", 99.0))
+        max_steps_behind = float(sync_result.get("max_steps_behind", 99.0))
+        self.wandb.log(
+            {
+                f"validator/sync/l2_norm/{eval_uid}": l2_norm,
+                f"validator/sync/avg_l2_norm/{eval_uid}": avg_l2_norm,
+                f"validator/sync/avg_abs_diff/{eval_uid}": avg_abs_diff,
+                f"validator/sync/sync_max_diff/{eval_uid}": max_diff,
+                f"validator/sync/avg_steps_behind/{eval_uid}": avg_steps_behind,
+                f"validator/sync/max_steps_behind/{eval_uid}": max_steps_behind,
+            },
+            step=self.global_step,
+        )
+        self.metrics_logger.log(
+            measurement="validator_sync_score",
+            tags={
+                "uid": str(eval_uid),
+                "window": int(self.sync_window),
+                "global_step": int(self.global_step),
+            },
+            fields={
+                "l2_norm": l2_norm,
+                "avg_l2_norm": avg_l2_norm,
+                "avg_abs_diff": avg_abs_diff,
+                "max_diff": max_diff,
+                "avg_steps_behind": avg_steps_behind,
+                "max_steps_behind": max_steps_behind,
+            },
+        )
+
     async def run(self):
         # Start background block listener
         self.loop = asyncio.get_running_loop()
@@ -1254,8 +1291,10 @@ class Validator:
                     sync_result = await self.evaluate_miner_sync(eval_uid)
                     sync_score = cast(
                         float,
-                        (sync_result["sync_score"] if sync_result["success"] else 0.0),
+                        sync_result.get("sync_score", 0.0),
                     )
+                    self.log_sync_score(eval_uid, sync_result)
+
                     # Store the sync score for this miner
                     self.sync_scores[eval_uid] = sync_score
 

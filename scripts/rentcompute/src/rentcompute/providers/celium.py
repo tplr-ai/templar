@@ -391,35 +391,35 @@ class CeliumProvider(BaseProvider):
                 # Extract basic pod information
                 pod_id = item.get("id", "")
                 pod_name = item.get("pod_name", f"unknown-{pod_id[:8]}")
-                
+
                 # Extract host and port information from ports_mapping
                 host = "unknown"
                 port = 22
                 user = "root"
-                
+
                 # Get executor information which contains IP address
                 executor_info = item.get("executor", {})
                 host = executor_info.get("executor_ip_address", "unknown")
-                
+
                 # Extract port mapping (SSH port 22 is mapped to an external port)
                 ports_mapping = item.get("ports_mapping", {})
                 for internal_port, external_port in ports_mapping.items():
                     if str(internal_port) == "22":
                         port = external_port
                         break
-                
+
                 # Extract GPU information
                 gpu_type = item.get("gpu_name", "unknown")
-                
+
                 # Try to convert GPU count to integer
                 gpu_count = 0
                 gpu_count_str = item.get("gpu_count", "0")
                 if gpu_count_str and str(gpu_count_str).isdigit():
                     gpu_count = int(gpu_count_str)
-                
+
                 # Extract status and normalize it
                 status = item.get("status", "unknown").lower()
-                
+
                 # Extract price information
                 hourly_rate = 0.0
                 if executor_info:
@@ -444,7 +444,7 @@ class CeliumProvider(BaseProvider):
                     gpu_count=gpu_count,
                     provider_name=self.name,
                 )
-                
+
                 pods.append(pod)
 
             return pods

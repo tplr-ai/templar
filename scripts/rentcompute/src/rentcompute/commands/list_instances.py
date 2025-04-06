@@ -54,10 +54,14 @@ def _print_pods_table(pods: List[Pod]) -> None:
 
         # Format hourly rate
         price_display = f"${pod.hourly_rate:.2f}"
-        
+
         # Create SSH command
         # For SSH connection, we need the private key (without .pub extension)
-        key_path = pod.key_path.replace(".pub", "") if pod.key_path.endswith(".pub") else pod.key_path
+        key_path = (
+            pod.key_path.replace(".pub", "")
+            if pod.key_path.endswith(".pub")
+            else pod.key_path
+        )
         ssh_command = f"ssh {pod.user}@{pod.host} -p {pod.port} -i {key_path}"
 
         # Truncate long values

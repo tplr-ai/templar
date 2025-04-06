@@ -174,23 +174,27 @@ def run(config: Config, instance_config: Dict[str, Any], name: str = None) -> No
     print(
         f"SSH connection: ssh {pod.user}@{pod.host} -p {pod.port} -i {private_key_path}"
     )
-    
+
     # If provisioning is enabled, provision the instance
     if instance_config.get("provision"):
-        print("\nProvisioning requested. Looking for .rentcompute.yml in current directory...")
+        print(
+            "\nProvisioning requested. Looking for .rentcompute.yml in current directory..."
+        )
         if provision_instance(pod):
             print("Provisioning completed successfully.")
-            
+
             # Reprint SSH connection details
             print("\nSSH Connection Details:")
             print(f"Host: {pod.host}")
             print(f"User: {pod.user}")
             print(f"Port: {pod.port}")
             print(f"SSH Key: {private_key_path}")
-            print(f"\nConnection command:")
+            print("\nConnection command:")
             print(f"ssh {pod.user}@{pod.host} -p {pod.port} -i {private_key_path}")
         else:
-            print("Provisioning failed. Instance is still running but may require manual setup.")
+            print(
+                "Provisioning failed. Instance is still running but may require manual setup."
+            )
 
 
 def _select_machine(machines: List[Machine]) -> Optional[Machine]:

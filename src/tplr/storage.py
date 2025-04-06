@@ -92,7 +92,9 @@ class StorageManager:
             logger.error(f"Error storing local data: {e}")
             return False
 
-    async def store_remote(self, state_dict, uid, window, key, bucket, global_step=None):
+    async def store_remote(
+        self, state_dict, uid, window, key, bucket, global_step=None
+    ):
         """Store data in remote bucket"""
         if bucket is None:
             logger.error("Cannot store remotely: no bucket provided")
@@ -106,7 +108,9 @@ class StorageManager:
             torch.save(state_dict, temp_path)
 
             # Upload to S3
-            success = await self.s3_put_object(key=filename, file_path=temp_path, bucket=bucket)
+            success = await self.s3_put_object(
+                key=filename, file_path=temp_path, bucket=bucket
+            )
 
             # Clean up temp file
             asyncio.create_task(self._cleanup_temp_file(temp_path))
@@ -170,7 +174,7 @@ class StorageManager:
         bucket,
         timeout=30,
         stale_retention=10,
-        time_min=None, 
+        time_min=None,
         time_max=None,
     ):
         """Get data from remote bucket"""
@@ -365,20 +369,6 @@ class StorageManager:
             return False
 
         try:
-            from botocore.client import Config
-
-            s3_config = Config(
-                region_name="auto",
-                signature_version="s3v4",
-                max_pool_connections=256,
-                retries={"max_attempts": 3, "mode": "standard"},
-            )
-            client_params = dict(
-                endpoint_url=f"https://{bucket.account_id}.r2.cloudflarestorage.com",
-                aws_access_key_id=bucket.access_key_id,
-                aws_secret_access_key=bucket.secret_access_key,
-                config=s3_config,
-            )
             s3_client = await self._get_s3_client(bucket)
             with open(file_path, "rb") as f:
                 data = f.read()
@@ -416,6 +406,7 @@ class StorageManager:
 
             # Check if the loaded data contains JSON status flags.
             import json
+
             json_data = None
             try:
                 if isinstance(loaded_data, bytes):
@@ -517,9 +508,13 @@ class StorageManager:
                                 )
                 gradient_files.sort(key=lambda x: x[0])
                 if len(gradient_files) > retention:
-                    for window, file_key in gradient_files[: len(gradient_files) - retention]:
+                    for window, file_key in gradient_files[
+                        : len(gradient_files) - retention
+                    ]:
                         try:
-                            await s3_client.delete_object(Bucket=bucket.name, Key=file_key)
+                            await s3_client.delete_object(
+                                Bucket=bucket.name, Key=file_key
+                            )
                             logger.info(
                                 f"Removed stale remote gradient file: {file_key}"
                             )
@@ -530,12 +525,18 @@ class StorageManager:
         except Exception as e:
             logger.error(f"Error during remote cleanup: {e}")
 
-def create_storage_manager(temp_dir, save_location, wallet=None, use_mock: bool = False):
+
+def create_storage_manager(
+    temp_dir, save_location, wallet=None, use_mock: bool = False
+):
     """
     Factory function to create a StorageManager or MockStorageManager instance.
     In testing, set use_mock=True to inject the mock version.
     """
     if use_mock:
         from tests.mocks.storage import MockStorageManager
-        return MockStorageManager(temp_dir=temp_dir, save_location=save_location, wallet=wallet)
+
+        return MockStorageManager(
+            temp_dir=temp_dir, save_location=save_location, wallet=wallet
+        )
     return StorageManager(temp_dir, save_location, wallet)

@@ -377,13 +377,14 @@ class Validator:
             # Peer selection and posting logic equivalent to validator_old.py
             initial_selection = False
             if (
-                self.last_peer_update_window is None or
-                (self.sync_window - self.last_peer_update_window) >= self.hparams.peer_replacement_frequency
+                self.last_peer_update_window is None
+                or (self.sync_window - self.last_peer_update_window)
+                >= self.hparams.peer_replacement_frequency
             ):
                 reason = (
                     f"{self.last_peer_update_window=}"
-                    if self.last_peer_update_window is None else
-                    f"{self.sync_window=}>={self.last_peer_update_window}+{self.hparams.peer_replacement_frequency}"
+                    if self.last_peer_update_window is None
+                    else f"{self.sync_window=}>={self.last_peer_update_window}+{self.hparams.peer_replacement_frequency}"
                 )
                 tplr.logger.info(
                     f"Time to create and post a new peer list because {reason}"
@@ -393,24 +394,27 @@ class Validator:
                     initial_selection = True
                 else:
                     selected_peers = self.comms.peer_manager.select_next_peers(
-                        current_peers = self.comms.peer_manager.peers,
-                        weights = self.weights
+                        current_peers=self.comms.peer_manager.peers,
+                        weights=self.weights,
                     )
                 if selected_peers is not None:
                     self.last_peer_update_window = self.sync_window
                     await self.comms.post_peer_list(
-                        peers = selected_peers,
-                        first_effective_window = self.current_window + self.hparams.peer_list_window_margin,
-                        sync_window = self.sync_window,
-                        weights = self.weights,
-                        initial_selection = initial_selection,
+                        peers=selected_peers,
+                        first_effective_window=self.current_window
+                        + self.hparams.peer_list_window_margin,
+                        sync_window=self.sync_window,
+                        weights=self.weights,
+                        initial_selection=initial_selection,
                     )
 
             # In test mode
             if self.config.test:
                 tplr.logger.info("Test mode active: Using all peers from metagraph.")
                 all_uids = list(range(len(self.metagraph.S)))
-                self.comms.peer_manager.peers = [uid for uid in all_uids if uid != self.uid]
+                self.comms.peer_manager.peers = [
+                    uid for uid in all_uids if uid != self.uid
+                ]
                 self.eval_peers = {uid: 1 for uid in self.comms.peer_manager.peers}
             else:
                 # Normal operation - assume eval_peers are updated elsewhere.
@@ -549,7 +553,9 @@ class Validator:
                 # In test mode, use all UIDs from metagraph except self
                 tplr.logger.info("Test mode active: Using all peers from metagraph.")
                 all_uids = list(range(len(self.metagraph.S)))
-                self.comms.peer_manager.peers = [uid for uid in all_uids if uid != self.uid]
+                self.comms.peer_manager.peers = [
+                    uid for uid in all_uids if uid != self.uid
+                ]
 
                 # For evaluation, also use all peers but track separately with equal initial weight
                 self.eval_peers = {uid: 1 for uid in self.comms.peer_manager.peers}
@@ -1546,7 +1552,10 @@ class Validator:
             # Add successful peers information
             if gather_result is not None:
                 debug_dict["successful_peers"] = sorted(
-                    list(set(self.comms.peer_manager.peers) - set(gather_result.skipped_uids))
+                    list(
+                        set(self.comms.peer_manager.peers)
+                        - set(gather_result.skipped_uids)
+                    )
                 )
                 debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
 
@@ -1738,7 +1747,9 @@ class Validator:
         # 1. Filter out inactive or zero-weight peers
         #    - Must be in comms.active_peers AND have non-zero weight
         # ----------------------------------------------------------------------
-        still_active = np.intersect1d(old_peers, list(self.comms.peer_manager.active_peers))
+        still_active = np.intersect1d(
+            old_peers, list(self.comms.peer_manager.active_peers)
+        )
         still_non_zero_weight = np.intersect1d(old_peers, non_zero_weight_uids)
         # "active_peers" means 'in old_peers, in active set, and have non-zero weight'
         active_gather_peers = np.intersect1d(still_active, still_non_zero_weight)

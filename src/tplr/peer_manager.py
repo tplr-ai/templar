@@ -112,20 +112,31 @@ class PeerManager:
         while True:
             try:
                 # Use the chain to get the highest stake validator bucket.
-                validator_bucket, validator_uid = await self.chain._get_highest_stake_validator_bucket()
+                (
+                    validator_bucket,
+                    validator_uid,
+                ) = await self.chain._get_highest_stake_validator_bucket()
                 if validator_bucket is None:
-                    logger.warning("No highest staked validator bucket found. Retrying in 10 seconds.")
+                    logger.warning(
+                        "No highest staked validator bucket found. Retrying in 10 seconds."
+                    )
                     await asyncio.sleep(10)
                     continue
 
-                logger.info(f"Attempting to fetch peer list from UID {validator_uid} bucket {validator_bucket.name}")
+                logger.info(
+                    f"Attempting to fetch peer list from UID {validator_uid} bucket {validator_bucket.name}"
+                )
 
                 s3_client = await self.chain._get_s3_client(validator_bucket)
                 list_args = {"Bucket": validator_bucket.name, "Prefix": "peers_"}
                 response = await s3_client.list_objects_v2(**list_args)
 
                 pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{__version__}\.json$"
-                keys = [obj["Key"] for obj in response.get("Contents", []) if re.match(pattern, obj["Key"])]
+                keys = [
+                    obj["Key"]
+                    for obj in response.get("Contents", [])
+                    if re.match(pattern, obj["Key"])
+                ]
                 if not keys:
                     logger.info("No peer list files found")
                     return None
@@ -141,15 +152,21 @@ class PeerManager:
                             selected_key = key
 
                 if selected_key is None:
-                    logger.error(f"Failed to select most recent peers file on bucket. First few: {keys[:5]}")
+                    logger.error(
+                        f"Failed to select most recent peers file on bucket. First few: {keys[:5]}"
+                    )
                     return None
 
-                peers_data = await self.chain.s3_get_object(key=selected_key, bucket=validator_bucket)
+                peers_data = await self.chain.s3_get_object(
+                    key=selected_key, bucket=validator_bucket
+                )
                 if isinstance(peers_data, dict):
                     peers_dict = peers_data
                 else:
                     peers_dict = json.loads(peers_data.decode("utf-8"))
-                return np.array(peers_dict["peers"]), peers_dict["first_effective_window"]
+                return np.array(peers_dict["peers"]), peers_dict[
+                    "first_effective_window"
+                ]
             except Exception as e:
                 logger.error(f"Error fetching peer list: {e}")
                 await asyncio.sleep(10)
@@ -184,7 +201,9 @@ class PeerManager:
                 )
                 return top_incentive_peers
 
-            remaining_active_peers = np.array(list(self.active_peers - set(top_incentive_peers)))
+            remaining_active_peers = np.array(
+                list(self.active_peers - set(top_incentive_peers))
+            )
             top_incentive_and_active_peers = np.concatenate(
                 [top_incentive_peers, remaining_active_peers]
             )[: self.hparams.max_topk_peers]
@@ -229,7 +248,9 @@ class PeerManager:
                     f"Dropping peers (inactive or zero-weight): {dropped_peers.tolist()}. Remaining: {active_gather_peers.tolist()}"
                 )
 
-            candidates = np.setdiff1d(np.array(list(self.active_peers)), active_gather_peers)
+            candidates = np.setdiff1d(
+                np.array(list(self.active_peers)), active_gather_peers
+            )
             current_len = len(active_gather_peers)
             selected_peers = active_gather_peers.copy()
 
@@ -244,11 +265,15 @@ class PeerManager:
                         f"Added {to_add.tolist()} to increase peers from {current_len} to {len(selected_peers)}."
                     )
                 else:
-                    logger.info("Fewer than max_topk_peers remain, but no new candidates available.")
+                    logger.info(
+                        "Fewer than max_topk_peers remain, but no new candidates available."
+                    )
             elif current_len == self.hparams.max_topk_peers:
                 if len(candidates) >= self.hparams.peers_to_replace:
                     outgoing = np.random.choice(
-                        selected_peers, size=self.hparams.peers_to_replace, replace=False
+                        selected_peers,
+                        size=self.hparams.peers_to_replace,
+                        replace=False,
                     )
                     ingoing = np.random.choice(
                         candidates, size=self.hparams.peers_to_replace, replace=False
@@ -259,7 +284,9 @@ class PeerManager:
                         f"Replaced {outgoing.tolist()} with {ingoing.tolist()} to maintain total of {self.hparams.max_topk_peers} peers."
                     )
                 else:
-                    logger.info("Max peers reached but insufficient candidates for replacement.")
+                    logger.info(
+                        "Max peers reached but insufficient candidates for replacement."
+                    )
 
             selected_peers = selected_peers.astype(np.int64)
             logger.info(f"Final peers after selection: {selected_peers.tolist()}")

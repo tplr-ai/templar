@@ -16,7 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 import time
-import asyncio
+
 
 class CatchUpManager:
     def __init__(self, comms, hparams):
@@ -61,8 +61,12 @@ class CatchUpManager:
         catch_up_start = time.time()
         self.logger.info(f"Initiating catch-up for {window_gap} windows.")
         try:
-            for start in range(sync_window + 1, current_window + 1, self.hparams.catch_up_batch_size):
-                batch_end = min(start + self.hparams.catch_up_batch_size, current_window + 1)
+            for start in range(
+                sync_window + 1, current_window + 1, self.hparams.catch_up_batch_size
+            ):
+                batch_end = min(
+                    start + self.hparams.catch_up_batch_size, current_window + 1
+                )
                 batch_windows = list(range(start, batch_end))
                 if time.time() - catch_up_start > self.hparams.catch_up_timeout:
                     self.logger.warning("Catch-up exceeded maximum time.")
@@ -77,7 +81,10 @@ class CatchUpManager:
                         global_step=global_step,
                     )
                     for w in sorted(gathered_data.keys()):
-                        success, new_global_step = await self.comms._apply_gathered_gradients(
+                        (
+                            success,
+                            new_global_step,
+                        ) = await self.comms._apply_gathered_gradients(
                             gather_result=gathered_data[w],
                             model=model,
                             optimizer=optimizer,
@@ -91,7 +98,9 @@ class CatchUpManager:
                         if success:
                             global_step = new_global_step
                 except Exception as e:
-                    self.logger.error(f"Catch-up failed during batch {batch_windows}: {str(e)}")
+                    self.logger.error(
+                        f"Catch-up failed during batch {batch_windows}: {str(e)}"
+                    )
                     return False, global_step, optimizer, scheduler
             return True, global_step, optimizer, scheduler
         except Exception as e:

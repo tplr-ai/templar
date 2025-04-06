@@ -14,11 +14,10 @@
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
-import json
 from .schemas import Bucket
 from . import config
-from tplr import logger
 from . import __version__
+
 
 class AggregationManager:
     def __init__(self, comms):
@@ -41,11 +40,15 @@ class AggregationManager:
         bucket = self._get_aggregator_bucket()
         filename = f"aggregator-{window}-v{__version__}.pt"
         self.logger.info(f"Attempting to download aggregation file: {filename}")
-        result = await self.comms.storage.s3_get_object(key=filename, bucket=bucket, timeout=20)
+        result = await self.comms.storage.s3_get_object(
+            key=filename, bucket=bucket, timeout=20
+        )
         if result is None:
             self.logger.warning(f"No aggregation file found for window {window}")
         else:
-            self.logger.info(f"Successfully loaded aggregation data for window {window}")
+            self.logger.info(
+                f"Successfully loaded aggregation data for window {window}"
+            )
         return result
 
     def _get_aggregator_bucket(self) -> Bucket:

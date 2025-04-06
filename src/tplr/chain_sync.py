@@ -291,13 +291,19 @@ class ChainSync:
                     name=self.commitments.get(uid)[:32].decode("utf-8").rstrip("\0")
                     if isinstance(self.commitments.get(uid), bytes)
                     else self.commitments.get(uid)[:32].rstrip("\0"),
-                    account_id=self.commitments.get(uid)[32:64].decode("utf-8").rstrip("\0")
+                    account_id=self.commitments.get(uid)[32:64]
+                    .decode("utf-8")
+                    .rstrip("\0")
                     if isinstance(self.commitments.get(uid), bytes)
                     else self.commitments.get(uid)[32:64].rstrip("\0"),
-                    access_key_id=self.commitments.get(uid)[64:96].decode("utf-8").rstrip("\0")
+                    access_key_id=self.commitments.get(uid)[64:96]
+                    .decode("utf-8")
+                    .rstrip("\0")
                     if isinstance(self.commitments.get(uid), bytes)
                     else self.commitments.get(uid)[64:96].rstrip("\0"),
-                    secret_access_key=self.commitments.get(uid)[96:].decode("utf-8").rstrip("\0")
+                    secret_access_key=self.commitments.get(uid)[96:]
+                    .decode("utf-8")
+                    .rstrip("\0")
                     if isinstance(self.commitments.get(uid), bytes)
                     else self.commitments.get(uid)[96:].rstrip("\0"),
                 )
@@ -307,7 +313,9 @@ class ChainSync:
                 logger.error(f"Failed to decode commitment for UID {uid}: {e}")
                 return None
 
-        logger.error(f"Unexpected commitment format for UID {uid}: {type(self.commitments.get(uid))}")
+        logger.error(
+            f"Unexpected commitment format for UID {uid}: {type(self.commitments.get(uid))}"
+        )
         return None
 
     def update_peers_with_buckets(self):

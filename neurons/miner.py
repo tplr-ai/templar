@@ -153,13 +153,10 @@ class Miner:
             milestones=[250],
         )
 
-        # Init comms
+        # Instantiate the Comms service
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
-            key_prefix="model",
             config=self.config,
-            netuid=self.config.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
@@ -217,7 +214,9 @@ class Miner:
             args=(self.loop,),
             daemon=True,
         )
-        self.listener.start()  #
+        self.listener.start()  #        
+        tplr.logger.info("Miner run started...")
+        self.comms.start_background_tasks()
 
         # Use config peers if provided
         if self.config.peers:
@@ -497,8 +496,8 @@ class Miner:
                     "miner/gpu_memory_cached": torch.cuda.memory_reserved()
                     / 1024**2,  # MB
                     # Network metrics
-                    "miner/gather_peers": len(self.comms.peers),
-                    "miner/effective_batch_size": len(self.comms.peers)
+                    "miner/gather_peers": len(self.comms.peer_manager.active_peers),
+                    "miner/effective_batch_size": len(self.comms.peer_manager.active_peers)
                     * self.hparams.batch_size,
                     # Optimization metrics
                     "miner/learning_rate": self.scheduler.get_last_lr()[0],
@@ -661,8 +660,8 @@ class Miner:
                     "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
                     / 1024**2,
                     "miner/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,
-                    "miner/gather_peers": len(self.comms.peers),
-                    "miner/effective_batch_size": len(self.comms.peers)
+                    "miner/gather_peers": len(self.comms.peer_manager.active_peers),
+                    "miner/effective_batch_size": len(self.comms.peer_manager.active_peers)
                     * self.hparams.batch_size,
                     "miner/learning_rate": self.scheduler.get_last_lr()[0],
                     "miner/mean_grad_norm": mean_grad_norm,
@@ -692,9 +691,9 @@ class Miner:
                     "mean_momentum_norm": mean_momentum_norm,
                     "batch_duration": duration,
                     "total_tokens": int(self.total_tokens_processed),
-                    "active_peers": int(len(self.comms.peers)),
+                    "active_peers": int(len(self.comms.peer_manager.active_peers)),
                     "effective_batch_size": int(
-                        len(self.comms.peers) * self.hparams.batch_size
+                        len(self.comms.peer_manager.active_peers) * self.hparams.batch_size
                     ),
                     "learning_rate": self.scheduler.get_last_lr()[0],
                     "mean_grad_norm": mean_grad_norm,

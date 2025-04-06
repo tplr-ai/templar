@@ -1,4 +1,0 @@
----
-- name: reload sysctl
-  command: sysctl -p
-  changed_when: false

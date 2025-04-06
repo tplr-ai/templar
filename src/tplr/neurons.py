@@ -352,3 +352,71 @@ def pack_binary_tensor(tensor: torch.Tensor, device: DeviceLikeType):
         packed_tensor |= tensor[i::8] << i  # Pack 8 values per byte
 
     return packed_tensor
+
+
+def check_compressed_indices(
+    param_name: str,
+    idxs,
+    totalk: int,
+    hparams,
+    allowed_topk: int | None = None,
+) -> None:
+    """
+    Validates that the compressed indices for a given parameter meet the conditions:
+      1. If indices are provided as a flat list or tensor, the length must equal min(hparams.topk_compression, totalk).
+      2. For multi-dimensional indices (e.g. compressed per row), the size of the last dimension must equal min(hparams.topk_compression, totalk).
+      3. Every index must be in the valid range [0, totalk-1].
+
+    This function handles both flat and nested (e.g. per-row) indices.
+    """
+    if allowed_topk is None:
+        allowed_topk = hparams.topk_compression
+    # Only allow up to the maximum available columns.
+    allowed_topk = min(allowed_topk, totalk)
+
+    def validate_list(indices):
+        # Expected flat list length must equal allowed_topk.
+        if len(indices) != allowed_topk:
+            raise ValueError(
+                f"[{param_name}] Invalid number of indices: got {len(indices)} but expected {allowed_topk}"
+            )
+        for idx in indices:
+            try:
+                idx_int = int(idx)
+            except Exception as e:
+                raise ValueError(
+                    f"[{param_name}] Failed to convert index {idx} to int: {e}"
+                )
+            if idx_int < 0 or idx_int >= totalk:
+                raise ValueError(
+                    f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
+                )
+
+    if torch.is_tensor(idxs):
+        if idxs.ndim == 1:
+            # Flat tensor: expect exactly allowed_topk elements.
+            if idxs.size(0) != allowed_topk:
+                raise ValueError(
+                    f"[{param_name}] Invalid number of indices: got {idxs.size(0)} but expected {allowed_topk}"
+                )
+            for idx in idxs.tolist():
+                if not (0 <= int(idx) < totalk):
+                    raise ValueError(
+                        f"[{param_name}] Index {int(idx)} out of bounds (totalk = {totalk})"
+                    )
+        else:
+            # Multi-dimensional: check that the last dimension equals allowed_topk.
+            if idxs.size(-1) != allowed_topk:
+                raise ValueError(
+                    f"[{param_name}] Last dimension size invalid: got {idxs.size(-1)} but expected {allowed_topk}"
+                )
+            # Check all indices in the tensor.
+            for idx in idxs.flatten().tolist():
+                if not (0 <= int(idx) < totalk):
+                    raise ValueError(
+                        f"[{param_name}] Index {int(idx)} out of bounds (totalk = {totalk})"
+                    )
+    elif isinstance(idxs, (list, tuple)):
+        validate_list(idxs)
+    else:
+        raise TypeError(f"[{param_name}] Invalid type for indices: {type(idxs)}")

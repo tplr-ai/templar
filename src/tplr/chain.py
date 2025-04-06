@@ -20,7 +20,7 @@
 import asyncio
 import time
 from collections import defaultdict
-from typing import Dict, Optional
+from typing import Optional
 
 import bittensor as bt
 import numpy as np
@@ -124,11 +124,11 @@ class ChainManager:
         """
         return self.commitments.get(uid)
 
-    def get_all_buckets(self) -> Dict[int, Optional[Bucket]]:
+    def get_all_buckets(self) -> dict[int, Optional[Bucket]]:
         """Helper function to get all buckets for all UIDs in the metagraph.
 
         Returns:
-            Dict[int, Optional[Bucket]]: Mapping of UIDs to their bucket configurations
+            dict[int, Optional[Bucket]]: Mapping of UIDs to their bucket configurations
         """
         return {uid: self.get_bucket(uid) for uid in self.metagraph.uids}
 
@@ -301,14 +301,14 @@ class ChainManager:
         bytes_tuple = commitment[next(iter(commitment.keys()))][0]
         return decoded_key, bytes(bytes_tuple).decode()
 
-    async def get_commitments(self, block: Optional[int] = None) -> Dict[int, Bucket]:
+    async def get_commitments(self, block: Optional[int] = None) -> dict[int, Bucket]:
         """Retrieves all bucket commitments from the chain.
 
         Args:
             block (int, optional): Block number to query at
 
         Returns:
-            Dict[int, Bucket]: Mapping of UIDs to their bucket configurations
+            dict[int, Bucket]: Mapping of UIDs to their bucket configurations
         """
         subtensor = bt.subtensor(config=self.config)
         substrate = subtensor.substrate
@@ -355,7 +355,7 @@ class ChainManager:
 
         return commitments
 
-    def get_commitments_sync(self, block: Optional[int] = None) -> Dict[int, Bucket]:
+    def get_commitments_sync(self, block: Optional[int] = None) -> dict[int, Bucket]:
         """
         Retrieves all bucket commitments from the chain.
 
@@ -363,7 +363,7 @@ class ChainManager:
             block (int, optional): Block number to query at
 
         Returns:
-            Dict[int, Bucket]: Mapping of UIDs to their bucket configurations
+            dict[int, Bucket]: Mapping of UIDs to their bucket configurations
         """
         subtensor = bt.subtensor(config=self.config)
         # Use the new API. It returns a dict mapping hotkeys to the decoded commitment string.

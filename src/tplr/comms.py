@@ -1431,6 +1431,7 @@ class Comms(ChainManager):
                     validator_bucket,
                     validator_uid,
                 ) = await self._get_highest_stake_validator_bucket()
+
                 if validator_bucket is None:
                     tplr.logger.warning(
                         "No highest staked validator bucket found. Retrying in 10 seconds."
@@ -1443,22 +1444,33 @@ class Comms(ChainManager):
                 )
 
                 s3_client = await self._get_s3_client(validator_bucket)
-                list_args = {
-                    "Bucket": validator_bucket.name,
-                    "Prefix": PEERS_FILE_PREFIX,
-                }
-                response = await s3_client.list_objects_v2(**list_args)
-
                 pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{__version__}\.json$"
-                # Filter keys that match the pattern
-                keys = [
-                    obj["Key"]
-                    for obj in response.get("Contents", [])
-                    if re.match(pattern, obj["Key"])
-                ]
+                keys = []
+                continuation_token = None
+
+                while True:
+                    list_args = {
+                        "Bucket": validator_bucket.name,
+                        "Prefix": PEERS_FILE_PREFIX,
+                    }
+                    if continuation_token:
+                        list_args["ContinuationToken"] = continuation_token
+
+                    response = await s3_client.list_objects_v2(**list_args)
+
+                    for obj in response.get("Contents", []):
+                        if re.match(pattern, obj["Key"]):
+                            keys.append(obj["Key"])
+
+                    if response.get("IsTruncated"):
+                        continuation_token = response.get("NextContinuationToken")
+                    else:
+                        break
+
                 if len(keys) == 0:
                     tplr.logger.info("No peer list files found")
                     return None
+
                 max_window = -1
                 selected_key = None
                 for key in keys:
@@ -1479,10 +1491,12 @@ class Comms(ChainManager):
                 peers_data = await self.s3_get_object(
                     key=selected_key, bucket=validator_bucket
                 )
+
                 if isinstance(peers_data, dict):
                     peers_dict = peers_data
                 else:
                     peers_dict = json.loads(peers_data.decode("utf-8"))
+
                 return np.array(peers_dict["peers"]), peers_dict[
                     "first_effective_window"
                 ]

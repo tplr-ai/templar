@@ -1769,7 +1769,7 @@ class Validator:
             top_incentive_peers = np.array(top_incentive_peers, dtype=np.int64)
 
             assert len(top_incentive_peers) <= self.hparams.max_topk_peers
-            if len(top_incentive_peers) >= self.hparams.minimum_peers:
+            if len(top_incentive_peers) == self.hparams.max_topk_peers:
                 tplr.logger.info(
                     f"Selected {len(top_incentive_peers)} initial peers purely based "
                     f"on incentive: {top_incentive_peers}"
@@ -1789,14 +1789,14 @@ class Validator:
                 tplr.logger.info(
                     f"Selected {len(top_incentive_and_active_peers)} initial peers. "
                     f"{len(top_incentive_peers)} with incentive: {top_incentive_peers} "
-                    f"and {len(remaining_active_peers)} without: "
-                    f"{remaining_active_peers}"
+                    f"and {len(top_incentive_and_active_peers) - len(top_incentive_peers)} without: "
+                    f"{remaining_active_peers[: len(top_incentive_and_active_peers) - len(top_incentive_peers)]}"
                 )
                 return top_incentive_and_active_peers
 
             # 3. Give up
             tplr.logger.info(
-                f"Failed to find at least {self.hparams.minimum_peers} initial gather "
+                f"Failed to select at least {self.hparams.minimum_peers} initial gather "
                 f"peers. Found only {len(top_incentive_and_active_peers)} active "
                 f"peers, of which {len(top_incentive_peers)} had incentive and "
                 f"{len(top_incentive_and_active_peers) - len(top_incentive_peers)} "
@@ -1808,105 +1808,224 @@ class Validator:
             tplr.logger.error(f"Failed to create new peer list: {e}")
             return None
 
+    @staticmethod
+    def _replace_peers(
+        old: tplr.comms.PeerArray,
+        ingoing: tplr.comms.PeerArray,
+        outgoing: tplr.comms.PeerArray,
+    ) -> tplr.comms.PeerArray:
+        """Removes `outgoing` and adds `ingoing` from `old`.
+
+        `ingoing` and `outgoing` don't need to be the same length.
+        """
+        old_without_outgoing = np.setdiff1d(old, outgoing)
+        return np.concatenate([old_without_outgoing, ingoing])
+
     def select_next_peers(self) -> tplr.comms.PeerArray | None:
         """
-        1) Drop peers who are either inactive or have zero weight.
-        2) If fewer than max_topk_peers remain, add new candidates up to max_topk_peers.
-        3) If exactly max_topk_peers and have enough new candidates, replace peers_to_replace peers.
-        4) Return the final list.
+        1) Drop inactive gather peers and fill up to max_topk_peers with active
+        ones. Use non-zero-weights if possible. Abort selection if there are
+        less than `minimum_peers` in total. Continue if there are still
+        candidates.
+        2) Replace peers with zero weight with ones with non-zero weight. Both
+        current gather peers and peers added in the previous step can be
+        dropped. Continue if there are still candidates.
+        3) Replace at least 1, at most peers_to_replace original gather peers.
+        Note that both the the outgoing and the ingoing peer(s) are guaranteed
+        to have non-zero weight due to the previous steps.
         """
 
         old_peers = self.comms.peers
 
         # ----------------------------------------------------------------------
-        # 0. Identify peers with non-zero weight
-        # ----------------------------------------------------------------------
-        non_zero_weight_uids = torch.nonzero(self.weights).flatten().numpy()
-
-        # ----------------------------------------------------------------------
-        # 1. Filter out inactive or zero-weight peers
-        #    - Must be in comms.active_peers AND have non-zero weight
-        # ----------------------------------------------------------------------
-        still_active = np.intersect1d(old_peers, list(self.comms.active_peers))
-        still_non_zero_weight = np.intersect1d(old_peers, non_zero_weight_uids)
-        # "active_peers" means 'in old_peers, in active set, and have non-zero weight'
-        active_gather_peers = np.intersect1d(still_active, still_non_zero_weight)
-
-        dropped_peers = np.setdiff1d(old_peers, active_gather_peers)
-        if dropped_peers.size > 0:
-            tplr.logger.info(
-                f"Dropping peers (inactive or zero-weight): {dropped_peers.tolist()}. "
-                f"Remaining peers: {active_gather_peers.tolist()}"
-            )
-
-        # ----------------------------------------------------------------------
-        # 2. Identify candidate peers:
+        # 0. Identify candidate peers:
         #    - active,
         #    - non-zero weight,
-        #    - not already in active_peers
+        #    - not already a gather peer
         # ----------------------------------------------------------------------
+        non_zero_weight_uids = torch.nonzero(self.weights).flatten().numpy()
         active_non_zero_weight_uids = np.intersect1d(
             list(self.comms.active_peers),
             non_zero_weight_uids,
         )
-        candidates = np.setdiff1d(active_non_zero_weight_uids, active_gather_peers)
-
-        current_len = len(active_gather_peers)
-
-        # We'll build selected_peers step by step
-        selected_peers = active_gather_peers.copy()
+        candidates = np.setdiff1d(active_non_zero_weight_uids, old_peers)
+        num_initial_candidates = len(candidates)
+        tplr.logger.info(
+            f"Starting off with {num_initial_candidates} initial candidates."
+        )
 
         # ----------------------------------------------------------------------
-        # 2. If fewer than max_topk_peers remain, add new peers up to max_topk_peers
+        # 1. Drop inactive gather peers, fill up with active peers
         # ----------------------------------------------------------------------
-        if current_len < self.hparams.max_topk_peers:
-            needed = self.hparams.max_topk_peers - current_len
-            if len(candidates) > 0:
-                to_add = np.random.choice(
-                    candidates,
-                    size=min(needed, len(candidates)),
-                    replace=False,
-                )
-                selected_peers = np.concatenate([selected_peers, to_add])
+        active_gather_peers = np.intersect1d(old_peers, list(self.comms.active_peers))
+        inactive_gather_peers = np.setdiff1d(old_peers, active_gather_peers)
+        selected_peers = old_peers
+        if (
+            len(inactive_gather_peers) == 0
+            and len(selected_peers) == self.hparams.max_topk_peers
+        ):
+            if len(candidates) == 0:
                 tplr.logger.info(
-                    f"Added {to_add.tolist()} to increase peers from {current_len} "
-                    f"to {len(selected_peers)} (<= {self.hparams.max_topk_peers})."
+                    "Step 1: Peer list already full of active peers but there are no "
+                    "candidates, aborting selection"
                 )
-            else:
-                tplr.logger.info(
-                    "Fewer than max_topk_peers remain, but no new candidates to add."
-                )
-
-        # ----------------------------------------------------------------------
-        # 3. If we exactly match max_topk_peers and have enough new candidates,
-        #    replace peers_to_replace peers
-        # ----------------------------------------------------------------------
-        elif current_len == self.hparams.max_topk_peers:
-            if len(candidates) >= self.hparams.peers_to_replace:
-                outgoing = np.random.choice(
-                    selected_peers,
-                    size=self.hparams.peers_to_replace,
-                    replace=False,
-                )
+                return None
+            tplr.logger.info(
+                "Step 1: Peer list already full of active peers, continuing"
+            )
+        else:
+            # use random subset of candidates
+            if len(candidates) > self.hparams.max_topk_peers - len(active_gather_peers):
                 ingoing = np.random.choice(
                     candidates,
-                    size=self.hparams.peers_to_replace,
+                    size=self.hparams.max_topk_peers - len(active_gather_peers),
                     replace=False,
                 )
-                selected_peers = np.setdiff1d(selected_peers, outgoing)
-                selected_peers = np.concatenate([selected_peers, ingoing])
-                tplr.logger.info(
-                    f"Replaced {outgoing.tolist()} with {ingoing.tolist()} to keep "
-                    f"total at {self.hparams.max_topk_peers}."
+            # use all candidates
+            elif (
+                len(active_gather_peers) + len(candidates)
+                >= self.hparams.max_topk_peers
+            ):
+                ingoing = candidates
+            # use all candidates plus some secondary candidates
+            # edge case: we need to use zero-weight peers to get max_topk_peers active peers
+            else:
+                secondary_candidates = np.setdiff1d(
+                    list(self.comms.active_peers), candidates
                 )
+                # even bigger edge case: we still can't reach minimum peers
+                if (
+                    len(active_gather_peers)
+                    + len(candidates)
+                    + len(secondary_candidates)
+                    < self.hparams.minimum_peers
+                ):
+                    tplr.logger.info(
+                        f"There are only {len(self.comms.active_peers)} active peers"
+                        f"in total, which is less than the minimum amount "
+                        f"{self.hparams.minimum_peers}, aborting selection"
+                    )
+                    return None
+                num_needed_secondary_candidates = (
+                    self.hparams.max_topk_peers
+                    - len(active_gather_peers)
+                    - len(candidates)
+                )
+                ingoing_secondary_candidates = (
+                    secondary_candidates
+                    if len(secondary_candidates) < num_needed_secondary_candidates
+                    else np.random.choice(
+                        secondary_candidates,
+                        size=num_needed_secondary_candidates,
+                        replace=False,
+                    )
+                )
+                ingoing = np.concatenate([candidates, ingoing_secondary_candidates])
+                tplr.logger.info(
+                    f"Using {len(candidates)} candidates and "
+                    f"{len(ingoing_secondary_candidates)} secondary candidates"
+                )
+            selected_peers = self._replace_peers(
+                old_peers, ingoing, inactive_gather_peers
+            )
+            # if we've used all candidates, we're done
+            if len(ingoing) >= len(candidates):
+                tplr.logger.info(
+                    f"Step 1: We've used all candidates, returning {len(selected_peers)} "
+                    "selected peers."
+                )
+                return selected_peers
+            # else, update the candidates
             else:
                 tplr.logger.info(
-                    "We already have max_topk_peers and do not have enough candidates "
-                    "to perform a replacement. No action taken."
+                    f"Finished step 1: Dropped {len(inactive_gather_peers)} inactive "
+                    f"peers and added {len(ingoing)} active ones. We now have "
+                    f"{len(selected_peers)} selected peers"
                 )
+                candidates = np.setdiff1d(candidates, ingoing)
 
-        selected_peers = selected_peers.astype(np.int64)
-        tplr.logger.info(f"Final peers after selection: {selected_peers.tolist()}")
+        # ----------------------------------------------------------------------
+        # 2. Drop zero-weight gather peers
+        # ----------------------------------------------------------------------
+        zero_weight_selected_peers = np.setdiff1d(selected_peers, non_zero_weight_uids)
+        original_peers_left = np.intersect1d(old_peers, selected_peers)
+        if len(zero_weight_selected_peers) == 0:
+            tplr.logger.info("Step 2: No zero-weight peers to drop, continuing")
+        else:
+            # if we have enough candidates to replace all zero-weight peers, do it
+            if len(candidates) >= len(zero_weight_selected_peers):
+                outgoing = zero_weight_selected_peers
+                ingoing = (
+                    candidates
+                    if len(candidates) == len(outgoing)
+                    else np.random.choice(
+                        candidates,
+                        size=len(outgoing),
+                        replace=False,
+                    )
+                )
+            # else replace as many as we have candidates
+            else:
+                ingoing = candidates
+                outgoing = np.random.choice(
+                    zero_weight_selected_peers,
+                    size=len(ingoing),
+                    replace=False,
+                )
+            selected_peers = self._replace_peers(selected_peers, ingoing, outgoing)
+            candidates = np.setdiff1d(candidates, ingoing)
+            original_peers_left = np.intersect1d(old_peers, selected_peers)
+            if (
+                # no more candidates
+                len(candidates) == 0
+                # all selected peers are new
+                or len(original_peers_left) == 0
+            ):
+                tplr.logger.info(
+                    f"Step 2: No more candidates, returning {len(selected_peers)} "
+                    "selected peers."
+                )
+                return selected_peers
+            tplr.logger.info(
+                "Finished step 2 (dropped zero-weight peers) and we now have "
+                f"{len(selected_peers)} selected peers"
+            )
+
+        # ----------------------------------------------------------------------
+        # 3. Replace at least 1, at most peers_to_replace original gather peers
+        # ----------------------------------------------------------------------
+        outgoing = (
+            original_peers_left
+            if len(original_peers_left) <= len(candidates)
+            and len(original_peers_left) <= self.hparams.peers_to_replace
+            else np.random.choice(
+                original_peers_left,
+                size=min(
+                    [
+                        len(candidates),
+                        self.hparams.peers_to_replace,
+                    ]
+                ),
+                replace=False,
+            )
+        )
+        ingoing = (
+            candidates
+            if len(candidates) == len(outgoing)
+            else np.random.choice(
+                candidates,
+                size=len(outgoing),
+                replace=False,
+            )
+        )
+        selected_peers = self._replace_peers(selected_peers, ingoing, outgoing)
+        tplr.logger.info(
+            f"Finished step 3 (replaced {len(outgoing)} peers with non-zero weight) "
+            f"and we now have {len(selected_peers)} selected peers"
+        )
+        tplr.logger.info(
+            f"Step 3: Done, returning {len(selected_peers)} selected peers."
+        )
         return selected_peers
 
     async def evaluate_miner_sync(

@@ -1507,8 +1507,9 @@ class Comms(ChainManager):
                 tplr.logger.error(f"Error fetching peer list: {e}")
                 await asyncio.sleep(10)
 
-    async def get_start_window(self) -> int:
-        while True:
+    async def get_start_window(self, retries: int = -1) -> int | None:
+        attempt = 0
+        while retries == -1 or attempt < retries:
             try:
                 (
                     validator_bucket,
@@ -1518,6 +1519,7 @@ class Comms(ChainManager):
                     tplr.logger.warning(
                         "No highest staked validator bucket found. Retrying in 10 seconds"
                     )
+                    attempt += 1
                     await asyncio.sleep(10)
                     continue
 
@@ -1525,16 +1527,14 @@ class Comms(ChainManager):
                     f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name}"
                 )
 
-                # Fetch 'start_window.json' using s3_get_object
                 start_window_data = await self.s3_get_object(
                     key=f"start_window_v{__version__}.json", bucket=validator_bucket
                 )
+
                 if start_window_data is not None:
-                    # Check if start_window_data is already a dict
                     if isinstance(start_window_data, dict):
                         start_window_json = start_window_data
                     else:
-                        # If it's bytes, decode and load JSON
                         start_window_json = json.loads(
                             start_window_data.decode("utf-8")
                         )
@@ -1543,26 +1543,19 @@ class Comms(ChainManager):
                     tplr.logger.info(f"Fetched start_window: {start_window}")
                     return start_window
 
-                # Here, if no data and we are the highest staked validator,
-                # break out immediately rather than sleeping.
-                if self.uid == validator_uid:
-                    tplr.logger.info(
-                        "I am the highest staked validator and no start_window has been posted; breaking out."
-                    )
-                    return
-
                 tplr.logger.warning(
                     "start_window.json not found or empty. Retrying in 10 seconds"
                 )
+                attempt += 1
                 await asyncio.sleep(10)
 
             except Exception as e:
                 tplr.logger.error(f"Error fetching start_window: {e}")
-                if self.uid == validator_uid:
-                    tplr.logger.info(
-                        "I am the highest staked validator; breaking out on exception."
-                    )
+                attempt += 1
                 await asyncio.sleep(10)
+
+        tplr.logger.warning("Max retries exceeded while trying to fetch start_window")
+        return None
 
     async def save_checkpoint(
         self,

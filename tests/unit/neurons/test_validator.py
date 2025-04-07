@@ -261,60 +261,124 @@ class TestPeerSelection:
         incentives = mock_validator.metagraph.I
         return np.argsort(incentives)[::-1][: mock_validator.hparams.max_topk_peers]
 
-    @pytest.fixture
-    def num_non_zero_incentive(self):
-        """Default fixture for number of non-zero incentive miners."""
-        return 100  # Default value if not parameterized
+
+class TestValidatorState:
+    """Tests for validator state saving and loading functionality."""
 
     @pytest.fixture
-    def num_active_miners(self, request):
-        """Fixture for number of active miners.
-        Returns parameterized value if available, otherwise returns default."""
+    def state_path(self, mock_validator, tmp_path):
+        """Fixture to handle state file creation and cleanup."""
+        # Setup temporary file path
+        state_path = tmp_path / f"validator-state-{tplr.__version__}.npz"
+        mock_validator.state_path = state_path
+        mock_validator.global_step = 0
+
+        yield state_path  # This is where the test runs
+
+        # Automatic cleanup after test
+        if state_path.exists():
+            state_path.unlink()
+
+    def test_save_state_success(self, mock_validator, state_path):
+        """Test successful state save"""
+        # Call save_state
+        mock_validator.save_state()
+
+        # Verify file was created
+        assert state_path.is_file()
+
+        # Verify file contains the correct data by loading it
+        saved_state = np.load(state_path)
+        assert "gradient_scores" in saved_state
+        assert "weights" in saved_state
+        assert np.array_equal(
+            saved_state["gradient_scores"], mock_validator.gradient_scores
+        )
+        assert np.array_equal(saved_state["weights"], mock_validator.weights)
+
+    def test_save_state_failure(self, mocker, mock_validator, state_path):
+        """Test state save failure"""
+        # Mock np.savez to raise error
+        mock_savez = mocker.patch("numpy.savez", side_effect=OSError("Mock error"))
+
+        # Call save_state and verify it handles the error gracefully
         try:
-            return request.param
-        except AttributeError:
-            return 250  # Default value if not parameterized
+            mock_validator.save_state()
+        except Exception as e:
+            pytest.fail(f"save_state should handle errors gracefully but raised: {e}")
+
+        # Verify the save was attempted
+        mock_savez.assert_called_once()
 
     @pytest.fixture
-    def mock_metagraph(self, mocker, num_non_zero_incentive, num_miners=250):
-        """Fixture that creates a mock metagraph with a specified number of miners and incentive distribution."""
-        metagraph = mocker.Mock()
+    def test_state_data(self):
+        """Fixture to generate consistent test state data."""
+        np.random.seed(42)  # For reproducibility
+        return {
+            "gradient_scores": np.random.rand(256),
+            "binary_indicator_scores": np.random.randint(0, 2, 256),
+            "gradient_moving_avg_scores": np.random.rand(256),
+            "final_moving_avg_scores": np.random.rand(256),
+            "binary_moving_averages": np.random.rand(256),
+            "weights": np.random.rand(256),
+        }
 
-        metagraph.uids = np.arange(num_miners)
+    def test_load_state_success(self, mock_validator, state_path, test_state_data):
+        """Test successful state load"""
+        # Save test data to file
+        np.savez(state_path, **test_state_data)
 
-        # Create incentive distribution
-        non_zero_incentives = np.random.rand(num_non_zero_incentive)
-        non_zero_incentives /= non_zero_incentives.sum()  # Normalize to sum to 1
-        zero_incentives = np.zeros(num_miners - num_non_zero_incentive)
+        # Call load_state
+        mock_validator.load_state()
 
-        # Combine and shuffle incentives
-        incentives = np.concatenate([non_zero_incentives, zero_incentives])
-        np.random.shuffle(incentives)
-        metagraph.I = incentives
+        # Verify all arrays were loaded correctly
+        assert np.array_equal(
+            mock_validator.gradient_scores, test_state_data["gradient_scores"]
+        )
+        assert np.array_equal(
+            mock_validator.binary_indicator_scores,
+            test_state_data["binary_indicator_scores"],
+        )
+        assert np.array_equal(
+            mock_validator.gradient_moving_avg_scores,
+            test_state_data["gradient_moving_avg_scores"],
+        )
+        assert np.array_equal(
+            mock_validator.final_moving_avg_scores,
+            test_state_data["final_moving_avg_scores"],
+        )
+        assert np.array_equal(
+            mock_validator.binary_moving_averages,
+            test_state_data["binary_moving_averages"],
+        )
+        assert np.array_equal(mock_validator.weights, test_state_data["weights"])
 
-        return metagraph
+    def test_load_state_missing_file(self, mocker, mock_validator):
+        """Test load state when file doesn't exist"""
+        # Mock np.load to raise FileNotFoundError
+        mocker.patch("numpy.load", side_effect=FileNotFoundError("File not found"))
 
-    @pytest.fixture
-    def mock_validator(self, mocker, mock_metagraph, num_active_miners):
-        # Initialize validator without calling the constructor
-        validator = object.__new__(Validator)
-
-        # Define necessary attributes
-        validator.metagraph = mock_metagraph
-        validator.hparams = hparams
-
-        validator.comms = mocker.Mock(spec=["peers", "active_peers"])
-        validator.comms.peers = None
-
-        # Use the num_active_miners parameter from the fixture
-        if num_active_miners > 0:
-            validator.comms.active_peers = np.random.choice(
-                a=validator.metagraph.uids,
-                size=num_active_miners,
-                replace=False,
+        # Call load_state and verify it doesn't raise
+        try:
+            mock_validator.load_state()
+        except Exception as e:
+            pytest.fail(
+                f"load_state should handle missing file gracefully but raised: {e}"
             )
-        else:
-            validator.comms.active_peers = np.array([])
-        tplr.logger.info(f"Created {len(validator.comms.active_peers)} active peers.")
 
-        return validator
+    def test_load_state_missing_keys(self, mock_validator, state_path):
+        """Test load state with incomplete state data"""
+        # Create state with missing keys
+        incomplete_state = {
+            "gradient_scores": np.ones(256)
+            # Missing other required keys
+        }
+        np.savez(state_path, **incomplete_state)
+
+        # Call load_state and verify it doesn't raise
+        try:
+            mock_validator.load_state()
+        except Exception as e:
+            pytest.fail(
+                f"load_state should handle missing keys gracefully but raised: {e}"
+            )

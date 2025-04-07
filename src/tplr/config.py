@@ -135,5 +135,5 @@ def load_bucket_secrets():
 
 
 # Initialize config after env vars are loaded
-client_config = botocore.config.Config(max_pool_connections=256)
+client_config = botocore.config.Config(max_pool_connections=256, tcp_keepalive=True)
 BUCKET_SECRETS = load_bucket_secrets()

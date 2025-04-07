@@ -29,14 +29,16 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
+from types import SimpleNamespace
+from typing import cast
+
 import bittensor as bt
 import numpy as np
-from rich.console import Console
-from rich.table import Table
-
 
 # Third party
 import torch
+from rich.console import Console
+from rich.table import Table
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
@@ -98,6 +100,16 @@ class Validator:
             action="store_true",
             help="Test mode - use all peers without filtering",
         )
+        parser.add_argument(
+            "--local",
+            action="store_true",
+            help="Local run - use toy model, small enough for a laptop.",
+        )
+        parser.add_argument(
+            "--log-to-private-wandb",
+            action="store_true",
+            help="Logs to the entity you are signed in to if true, else to the public 'tplr'.",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -114,7 +126,7 @@ class Validator:
 
         # Init config and load hparams
         self.config = Validator.config()
-        self.hparams = tplr.load_hparams()
+        self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
 
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)
@@ -126,6 +138,15 @@ class Validator:
             )
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+
+        try:
+            version = tplr.__version__
+            tplr.logger = tplr.setup_loki_logger(
+                service="validator", uid=str(self.uid), version=version
+            )
+            tplr.logger.info(f"Loki logging enabled for validator UID: {self.uid}")
+        except Exception as e:
+            tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
@@ -207,13 +228,22 @@ class Validator:
         self.relative_improvement_own = 0.0
         self.relative_improvement_random = 0.0
         self.valid_score_indices = []
-        self.gradient_scores = torch.zeros(256, dtype=torch.float32)
-        self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
-        self.gradient_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
-        self.final_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
-        self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
-        self.weights = torch.zeros(256, dtype=torch.float32)
-        self.normalised_binary_moving_averages = torch.zeros(256, dtype=torch.float32)
+
+        # Caching
+        self.state_path = f"validator-state-{tplr.__version__}.npz"
+        if os.path.isfile(self.state_path):
+            self.load_state()
+        else:
+            self.gradient_scores = torch.zeros(256, dtype=torch.float32)
+            self.sync_scores = torch.zeros(256, dtype=torch.float32)
+            self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
+            self.gradient_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
+            self.final_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
+            self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
+            self.weights = torch.zeros(256, dtype=torch.float32)
+            self.normalised_binary_moving_averages = torch.zeros(
+                256, dtype=torch.float32
+            )
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -245,6 +275,7 @@ class Validator:
         self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
         self.inactivity_slash_rate = 0.25  # 25% slash per window
         self.missing_gradient_slash_rate = 0.75
+        self.sync_score_slash_rate = 0.75
 
         # Initialize final score history (for sliding-window averaging)
         self.final_score_history = defaultdict(list)
@@ -263,12 +294,50 @@ class Validator:
             self.binary_moving_averages[uid] = 0.0
             self.binary_indicator_scores[uid] = 0.0
             self.normalised_binary_moving_averages[uid] = 0.0
+            self.sync_scores[uid] = 0.0
             if uid in self.eval_peers:
                 del self.eval_peers[uid]
             del self.inactive_scores[uid]
             tplr.logger.info(f"UID {uid} fully reset after extended inactivity")
             return True
         return False
+
+    def log_sync_score(
+        self, eval_uid: int, sync_result: dict[str, bool | float | int | str]
+    ) -> None:
+        l2_norm = float(sync_result.get("l2_norm", 99.0))
+        avg_l2_norm = float(sync_result.get("avg_l2_norm", 99.0))
+        avg_abs_diff = float(sync_result.get("avg_abs_diff", 99.0))
+        max_diff = float(sync_result.get("max_diff", 99.0))
+        avg_steps_behind = float(sync_result.get("avg_steps_behind", 99.0))
+        max_steps_behind = float(sync_result.get("max_steps_behind", 99.0))
+        self.wandb.log(
+            {
+                f"validator/sync/l2_norm/{eval_uid}": l2_norm,
+                f"validator/sync/avg_l2_norm/{eval_uid}": avg_l2_norm,
+                f"validator/sync/avg_abs_diff/{eval_uid}": avg_abs_diff,
+                f"validator/sync/sync_max_diff/{eval_uid}": max_diff,
+                f"validator/sync/avg_steps_behind/{eval_uid}": avg_steps_behind,
+                f"validator/sync/max_steps_behind/{eval_uid}": max_steps_behind,
+            },
+            step=self.global_step,
+        )
+        self.metrics_logger.log(
+            measurement="validator_sync_score",
+            tags={
+                "uid": str(eval_uid),
+                "window": int(self.sync_window),
+                "global_step": int(self.global_step),
+            },
+            fields={
+                "l2_norm": l2_norm,
+                "avg_l2_norm": avg_l2_norm,
+                "avg_abs_diff": avg_abs_diff,
+                "max_diff": max_diff,
+                "avg_steps_behind": avg_steps_behind,
+                "max_steps_behind": max_steps_behind,
+            },
+        )
 
     async def run(self):
         # Start background block listener
@@ -287,16 +356,28 @@ class Validator:
 
         # Only post start window if you are the highest stake validator
         if self.uid == self.metagraph.S.argmax().item():
-            # Post start_window to R2
-            await self.comms.post_start_window(self.start_window)
-            tplr.logger.info(
-                f"This validator is the highest staked. Posted start_window: {self.start_window}"
-            )
+            # Check if an existing start window already exists
+            try:
+                existing_start_window = await self.comms.get_start_window()
+            except Exception as e:
+                tplr.logger.warning(f"Error fetching existing start_window: {e}")
+                existing_start_window = None
+
+            if existing_start_window is not None:
+                self.start_window = existing_start_window
+                tplr.logger.info(
+                    f"Highest staked validator found existing start_window: {self.start_window}"
+                )
+            else:
+                # No existing start window, so post new start window to R2
+                await self.comms.post_start_window(self.start_window)
+                tplr.logger.info(
+                    f"This validator is the highest staked. Posted start_window: {self.start_window}"
+                )
         else:
             tplr.logger.info(
                 "This validator is not the highest staked. Waiting to fetch start_window."
             )
-            # Fetch start_window from highest stake validator
             self.start_window = await self.comms.get_start_window()
             self.global_step = self.current_window - self.start_window
             tplr.logger.info(
@@ -370,6 +451,9 @@ class Validator:
             tplr.logger.info(
                 f"Processing window: {self.sync_window} current: {self.current_window}"
             )
+
+            # Save state
+            self.save_state()
 
             # Create and post peers
             initial_selection = False
@@ -551,32 +635,66 @@ class Validator:
 
             tplr.logger.info(f"Validator gather peers: {self.comms.peers}")
 
-            gather_result = await self.comms.gather(
-                my_uid=self.uid,
-                uids=self.comms.peers,
-                window=self.sync_window,
-                key="gradient",
-                timeout=35,
-                device=self.config.device,
-                local=False,
-                totalks=self.totalks,
-                time_min=time_min,
-                time_max=time_max,
+            skipped_uids: list[int] = []
+            success_rate = 0.0
+            gather_result = None
+            aggregation_result = await self.comms.load_aggregation(self.sync_window)
+            if aggregation_result is None:
+                gather_result = await self.comms.gather(
+                    my_uid=self.uid,
+                    uids=self.comms.peers,
+                    window=self.sync_window,
+                    key="gradient",
+                    timeout=35,
+                    device=self.config.device,
+                    local=False,
+                    totalks=self.totalks,
+                    time_min=time_min,
+                    time_max=time_max,
+                )
+
+                if gather_result is None:
+                    tplr.logger.error(
+                        "Failed to gather gradients from peers. Waiting for next window."
+                    )
+                    self.global_step += 1
+                    continue
+                skipped_uids = gather_result.skipped_uids
+                success_rate = gather_result.success_rate
+            else:
+                state_dict = cast(dict, aggregation_result.get("state_dict"))
+                skipped_uids = cast(list[int], state_dict.get("skipped_uids", []))
+                success_rate = aggregation_result.get("success_rate", 0.0)
+
+            tplr.logger.info(f"Skipped UIDs: {skipped_uids}")
+
+            gather_sync_scores = await asyncio.gather(
+                *(self.evaluate_miner_sync(uid) for uid in self.comms.peers)
             )
 
-            if gather_result is None:
-                tplr.logger.error(
-                    "Failed to gather gradients from peers. Waiting for next window."
-                )
-                self.global_step += 1
-                continue
-
-            tplr.logger.info(f"Skipped UIDs: {gather_result.skipped_uids}")
+            for score_info, uid in zip(gather_sync_scores, self.comms.peers):
+                avg_steps_behind = score_info.get("avg_steps_behind", 99.0)
+                success = score_info.get("success", False)
+                if not success or avg_steps_behind > self.hparams.sync_max_steps_behind:
+                    tplr.logger.info(
+                        "Slashing %s: avg_steps_behind=%.2f > max=%d",
+                        uid,
+                        avg_steps_behind,
+                        self.hparams.sync_max_steps_behind,
+                    )
+                    if self.final_moving_avg_scores[uid] > 0:
+                        self.final_moving_avg_scores[uid] *= self.sync_score_slash_rate
+                        self.final_score_history[uid] = [
+                            final_score * self.sync_score_slash_rate
+                            if final_score > 0
+                            else final_score
+                            for final_score in self.final_score_history[uid]
+                        ]
 
             # Slash peers failing to submit gradients
-            for uid in gather_result.skipped_uids:
+            for uid in skipped_uids:
                 tplr.logger.info(
-                    f"No gradient gathered from UID {uid}. Slashing moving average score by {self.missing_gradient_slash_rate:.2%}."
+                    f"No gradient gathered from UID {uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}."
                 )
                 if 0 <= uid < self.final_moving_avg_scores.size(0):
                     old_score = self.final_moving_avg_scores[uid].item()
@@ -1214,10 +1332,24 @@ class Validator:
                     tplr.logger.debug(
                         f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[eval_uid]}"
                     )
-                    # Calculate final score incorporating both metrics
-                    final_score = sign_preserving_multiplication(
-                        self.gradient_moving_avg_scores[eval_uid],
-                        self.normalised_binary_moving_averages[eval_uid],
+
+                    sync_result = await self.evaluate_miner_sync(eval_uid)
+                    sync_score = cast(
+                        float,
+                        sync_result.get("sync_score", 0.0),
+                    )
+                    self.log_sync_score(eval_uid, sync_result)
+
+                    # Store the sync score for this miner
+                    self.sync_scores[eval_uid] = sync_score
+
+                    # Your existing final_score calculation with sync_score added
+                    final_score = (
+                        sign_preserving_multiplication(
+                            self.gradient_moving_avg_scores[eval_uid],
+                            self.normalised_binary_moving_averages[eval_uid],
+                        )
+                        * sync_score
                     )
                     tplr.logger.debug(
                         f"Computed Final Score for UID {eval_uid}: {final_score}"
@@ -1268,7 +1400,7 @@ class Validator:
 
                 else:
                     tplr.logger.info(
-                        f"No gradient received from UID {eval_uid}. Slashing moving average score by {self.missing_gradient_slash_rate:.2%}."
+                        f"No gradient received from UID {eval_uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}"
                     )
                     old_score = self.final_moving_avg_scores[eval_uid].item()
 
@@ -1361,6 +1493,7 @@ class Validator:
                 "Binary Moving Avg",
                 "Norm Binary Score",
                 "Final Moving Avg",
+                "Sync score",
                 "Weight",
             ]
             table = [headers]
@@ -1372,6 +1505,7 @@ class Validator:
                     f"{self.binary_moving_averages[uid]:.4f}",
                     f"{self.normalised_binary_moving_averages[uid]:.4f}",
                     f"{self.final_moving_avg_scores[uid]:.4f}",
+                    f"{self.sync_scores[uid]:.4f}",
                     f"{self.weights[uid]:.4f}",
                 ]
                 table.append(row)
@@ -1423,6 +1557,7 @@ class Validator:
                 normalised_binary = float(
                     self.normalised_binary_moving_averages[uid].item()
                 )
+                sync_score = float(self.sync_scores[uid].item())
                 final_moving_avg = float(self.final_moving_avg_scores[uid].item())
                 weight = float(self.weights[uid].item())
 
@@ -1433,6 +1568,7 @@ class Validator:
                         f"validator/binary_moving_averages/{uid}": binary_moving_avg,
                         f"validator/normalised_binary_scores/{uid}": normalised_binary,
                         f"validator/final_moving_avg_scores/{uid}": final_moving_avg,
+                        f"validator/sync_score/{uid}": sync_score,
                         f"validator/weights/{uid}": weight,
                     },
                     step=self.global_step,
@@ -1451,6 +1587,7 @@ class Validator:
                         "binary_indicator": binary_indicator,
                         "binary_moving_avg": binary_moving_avg,
                         "normalised_binary": normalised_binary,
+                        "sync_score": sync_score,
                         "final_moving_avg_score": final_moving_avg,
                         "weight": weight,
                     },
@@ -1483,44 +1620,18 @@ class Validator:
             for n, p in self.model.named_parameters():
                 p.data.mul_(1.0 - lr * self.hparams.weight_decay)
 
-            if gather_result is not None and gather_result.state_dict is not None:
-                for n, p in self.model.named_parameters():
-                    idxs_key = n + "idxs"
-                    vals_key = n + "vals"
-                    idxs = getattr(gather_result.state_dict, idxs_key, None)
-                    vals = getattr(gather_result.state_dict, vals_key, None)
-                    if idxs is not None and vals is not None:
-                        if not isinstance(idxs, (list, tuple)):
-                            idxs = [idxs]
-                        if not isinstance(vals, (list, tuple)):
-                            vals = [vals]
-                        new_grad = self.transformer.decode(
-                            self.compressor.batch_decompress(
-                                p.to(self.config.device),
-                                idxs,
-                                vals,
-                                self.xshapes[n],
-                                self.totalks[n],
-                            )
-                        )
-                        # Store pre-sign gradient in momentum
-                        self.momentum[n] = new_grad.clone()
-                        if p.grad is None:
-                            p.grad = new_grad
-                        else:
-                            p.grad.copy_(new_grad)
-                        p.grad.sign_()
-                    else:
-                        tplr.logger.info(
-                            f"Gradient data missing for parameter {n}, skipping."
-                        )
+            if aggregation_result is not None:
+                self.apply_aggregated_gradients(aggregation_result=aggregation_result)
+            elif gather_result is not None and gather_result.state_dict is not None:
+                self.apply_gathered_gradients(gather_result=gather_result)
+            else:
+                tplr.logger.warning("No gradients to apply.")
+                self.scheduler.step()
+                torch.cuda.empty_cache()
+
             tplr.logger.info(
                 f"{tplr.P(self.sync_window, tplr.T() - update_start)} Updated model"
             )
-
-            self.optimizer.step()
-            self.scheduler.step()
-            torch.cuda.empty_cache()
 
             # Add debug data including successfully gathered peers
             debug_dict = {}
@@ -1535,11 +1646,11 @@ class Validator:
                     )
 
             # Add successful peers information
-            if gather_result is not None:
+            if len(skipped_uids) > 0:
                 debug_dict["successful_peers"] = sorted(
-                    list(set(self.comms.peers) - set(gather_result.skipped_uids))
+                    list(set(self.comms.peers) - set(skipped_uids))
                 )
-                debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
+                debug_dict["skipped_peers"] = sorted(list(skipped_uids))
 
             # 15. Store debug values and model metadata
             asyncio.create_task(
@@ -1571,9 +1682,7 @@ class Validator:
                 "validator/network/evaluated_uids": len(self.evaluated_uids),
                 "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
                 "validator/network/active_miners": len(self.valid_score_indices),
-                "validator/gather/success_rate": gather_result.success_rate * 100
-                if gather_result
-                else 0,  # Success percentage
+                "validator/gather/success_rate": success_rate * 100,
                 "validator/timing/window_total": tplr.T() - window_start,
                 "validator/timing/peer_update": tplr.T() - peer_start,
                 "validator/timing/gather": tplr.T() - gather_start,
@@ -1583,10 +1692,8 @@ class Validator:
             self.wandb.log(evaluation_metrics, step=self.global_step)
 
             # Log metrics to InfluxDB in parallel using primitive types
-            gather_success_rate = (
-                float(gather_result.success_rate * 100) if gather_result else 0.0
-            )
-            total_skipped = len(gather_result.skipped_uids) if gather_result else 0
+            gather_success_rate = float(success_rate * 100)
+            total_skipped = len(skipped_uids)
 
             self.metrics_logger.log(
                 measurement="validator_window_v2",
@@ -1634,7 +1741,9 @@ class Validator:
                         for k, v in self.optimizer.state_dict().items()
                     },
                     "scheduler_state_dict": self.scheduler.state_dict(),
-                    "momentum": {k: v.cpu().clone() for k, v in self.momentum.items()},
+                    "momentum": {
+                        n: torch.zeros_like(p) for n, p in self.model.named_parameters()
+                    },
                     "start_window": self.start_window,
                     "current_window": self.current_window,
                     "sync_window": self.sync_window,
@@ -1672,12 +1781,14 @@ class Validator:
             top_incentive_peers = np.array(top_incentive_peers, dtype=np.int64)
 
             assert len(top_incentive_peers) <= self.hparams.max_topk_peers
-            if len(top_incentive_peers) >= self.hparams.minimum_peers:
+            if len(top_incentive_peers) == self.hparams.max_topk_peers:
                 tplr.logger.info(
                     f"Selected {len(top_incentive_peers)} initial peers purely based "
                     f"on incentive: {top_incentive_peers}"
                 )
-                return top_incentive_peers
+                selected_peers = np.array(top_incentive_peers, dtype=np.int64)
+                selected_peers = np.unique(selected_peers)
+                return selected_peers
 
             # 2. If needed, fill up with active peers
             remaining_active_peers = np.array(
@@ -1692,14 +1803,18 @@ class Validator:
                 tplr.logger.info(
                     f"Selected {len(top_incentive_and_active_peers)} initial peers. "
                     f"{len(top_incentive_peers)} with incentive: {top_incentive_peers} "
-                    f"and {len(remaining_active_peers)} without: "
-                    f"{remaining_active_peers}"
+                    f"and {len(top_incentive_and_active_peers) - len(top_incentive_peers)} without: "
+                    f"{remaining_active_peers[: len(top_incentive_and_active_peers) - len(top_incentive_peers)]}"
                 )
-                return top_incentive_and_active_peers
+                selected_peers = np.array(
+                    top_incentive_and_active_peers, dtype=np.int64
+                )
+                selected_peers = np.unique(selected_peers)
+                return selected_peers
 
             # 3. Give up
             tplr.logger.info(
-                f"Failed to find at least {self.hparams.minimum_peers} initial gather "
+                f"Failed to select at least {self.hparams.minimum_peers} initial gather "
                 f"peers. Found only {len(top_incentive_and_active_peers)} active "
                 f"peers, of which {len(top_incentive_peers)} had incentive and "
                 f"{len(top_incentive_and_active_peers) - len(top_incentive_peers)} "
@@ -1711,106 +1826,447 @@ class Validator:
             tplr.logger.error(f"Failed to create new peer list: {e}")
             return None
 
+    @staticmethod
+    def _replace_peers(
+        old: tplr.comms.PeerArray,
+        ingoing: tplr.comms.PeerArray,
+        outgoing: tplr.comms.PeerArray,
+    ) -> tplr.comms.PeerArray:
+        """Removes `outgoing` and adds `ingoing` from `old`.
+
+        `ingoing` and `outgoing` don't need to be the same length.
+        """
+        old_without_outgoing = np.setdiff1d(old, outgoing)
+        return np.concatenate([old_without_outgoing, ingoing])
+
     def select_next_peers(self) -> tplr.comms.PeerArray | None:
         """
-        1) Drop peers who are either inactive or have zero weight.
-        2) If fewer than max_topk_peers remain, add new candidates up to max_topk_peers.
-        3) If exactly max_topk_peers and have enough new candidates, replace peers_to_replace peers.
-        4) Return the final list.
+        1) Drop inactive gather peers and fill up to max_topk_peers with active
+        ones. Use non-zero-weights if possible. Abort selection if there are
+        less than `minimum_peers` in total. Continue if there are still
+        candidates.
+        2) Replace peers with zero weight with ones with non-zero weight. Both
+        current gather peers and peers added in the previous step can be
+        dropped. Continue if there are still candidates.
+        3) Replace at least 1, at most peers_to_replace original gather peers.
+        Note that both the the outgoing and the ingoing peer(s) are guaranteed
+        to have non-zero weight due to the previous steps.
         """
 
         old_peers = self.comms.peers
 
         # ----------------------------------------------------------------------
-        # 0. Identify peers with non-zero weight
-        # ----------------------------------------------------------------------
-        non_zero_weight_uids = torch.nonzero(self.weights).flatten().numpy()
-
-        # ----------------------------------------------------------------------
-        # 1. Filter out inactive or zero-weight peers
-        #    - Must be in comms.active_peers AND have non-zero weight
-        # ----------------------------------------------------------------------
-        still_active = np.intersect1d(old_peers, list(self.comms.active_peers))
-        still_non_zero_weight = np.intersect1d(old_peers, non_zero_weight_uids)
-        # "active_peers" means 'in old_peers, in active set, and have non-zero weight'
-        active_gather_peers = np.intersect1d(still_active, still_non_zero_weight)
-
-        dropped_peers = np.setdiff1d(old_peers, active_gather_peers)
-        if dropped_peers.size > 0:
-            tplr.logger.info(
-                f"Dropping peers (inactive or zero-weight): {dropped_peers.tolist()}. "
-                f"Remaining peers: {active_gather_peers.tolist()}"
-            )
-
-        # ----------------------------------------------------------------------
-        # 2. Identify candidate peers:
+        # 0. Identify candidate peers:
         #    - active,
         #    - non-zero weight,
-        #    - not already in active_peers
+        #    - not already a gather peer
         # ----------------------------------------------------------------------
+        non_zero_weight_uids = torch.nonzero(self.weights).flatten().numpy()
         active_non_zero_weight_uids = np.intersect1d(
             list(self.comms.active_peers),
             non_zero_weight_uids,
         )
-        candidates = np.setdiff1d(active_non_zero_weight_uids, active_gather_peers)
-
-        current_len = len(active_gather_peers)
-
-        # We'll build selected_peers step by step
-        selected_peers = active_gather_peers.copy()
+        candidates = np.setdiff1d(active_non_zero_weight_uids, old_peers)
+        num_initial_candidates = len(candidates)
+        tplr.logger.info(
+            f"Starting off with {num_initial_candidates} initial candidates."
+        )
 
         # ----------------------------------------------------------------------
-        # 2. If fewer than max_topk_peers remain, add new peers up to max_topk_peers
+        # 1. Drop inactive gather peers, fill up with active peers
         # ----------------------------------------------------------------------
-        if current_len < self.hparams.max_topk_peers:
-            needed = self.hparams.max_topk_peers - current_len
-            if len(candidates) > 0:
-                to_add = np.random.choice(
-                    candidates,
-                    size=min(needed, len(candidates)),
-                    replace=False,
-                )
-                selected_peers = np.concatenate([selected_peers, to_add])
+        active_gather_peers = np.intersect1d(old_peers, list(self.comms.active_peers))
+        inactive_gather_peers = np.setdiff1d(old_peers, active_gather_peers)
+        selected_peers = old_peers
+        if (
+            len(inactive_gather_peers) == 0
+            and len(selected_peers) == self.hparams.max_topk_peers
+        ):
+            if len(candidates) == 0:
                 tplr.logger.info(
-                    f"Added {to_add.tolist()} to increase peers from {current_len} "
-                    f"to {len(selected_peers)} (<= {self.hparams.max_topk_peers})."
+                    "Step 1: Peer list already full of active peers but there are no "
+                    "candidates, aborting selection"
                 )
-            else:
-                tplr.logger.info(
-                    "Fewer than max_topk_peers remain, but no new candidates to add."
-                )
-
-        # ----------------------------------------------------------------------
-        # 3. If we exactly match max_topk_peers and have enough new candidates,
-        #    replace peers_to_replace peers
-        # ----------------------------------------------------------------------
-        elif current_len == self.hparams.max_topk_peers:
-            if len(candidates) >= self.hparams.peers_to_replace:
-                outgoing = np.random.choice(
-                    selected_peers,
-                    size=self.hparams.peers_to_replace,
-                    replace=False,
-                )
+                return None
+            tplr.logger.info(
+                "Step 1: Peer list already full of active peers, continuing"
+            )
+        else:
+            # use random subset of candidates
+            if len(candidates) > self.hparams.max_topk_peers - len(active_gather_peers):
                 ingoing = np.random.choice(
                     candidates,
-                    size=self.hparams.peers_to_replace,
+                    size=self.hparams.max_topk_peers - len(active_gather_peers),
                     replace=False,
                 )
-                selected_peers = np.setdiff1d(selected_peers, outgoing)
-                selected_peers = np.concatenate([selected_peers, ingoing])
-                tplr.logger.info(
-                    f"Replaced {outgoing.tolist()} with {ingoing.tolist()} to keep "
-                    f"total at {self.hparams.max_topk_peers}."
+            # use all candidates
+            elif (
+                len(active_gather_peers) + len(candidates)
+                >= self.hparams.max_topk_peers
+            ):
+                ingoing = candidates
+            # use all candidates plus some secondary candidates
+            # edge case: we need to use zero-weight peers to get max_topk_peers active peers
+            else:
+                secondary_candidates = np.setdiff1d(
+                    list(self.comms.active_peers), candidates
                 )
+                # even bigger edge case: we still can't reach minimum peers
+                if (
+                    len(active_gather_peers)
+                    + len(candidates)
+                    + len(secondary_candidates)
+                    < self.hparams.minimum_peers
+                ):
+                    tplr.logger.info(
+                        f"There are only {len(self.comms.active_peers)} active peers"
+                        f"in total, which is less than the minimum amount "
+                        f"{self.hparams.minimum_peers}, aborting selection"
+                    )
+                    return None
+                num_needed_secondary_candidates = (
+                    self.hparams.max_topk_peers
+                    - len(active_gather_peers)
+                    - len(candidates)
+                )
+                ingoing_secondary_candidates = (
+                    secondary_candidates
+                    if len(secondary_candidates) < num_needed_secondary_candidates
+                    else np.random.choice(
+                        secondary_candidates,
+                        size=num_needed_secondary_candidates,
+                        replace=False,
+                    )
+                )
+                ingoing = np.concatenate([candidates, ingoing_secondary_candidates])
+                tplr.logger.info(
+                    f"Using {len(candidates)} candidates and "
+                    f"{len(ingoing_secondary_candidates)} secondary candidates"
+                )
+            selected_peers = self._replace_peers(
+                old_peers, ingoing, inactive_gather_peers
+            )
+            # if we've used all candidates, we're done
+            if len(ingoing) >= len(candidates):
+                tplr.logger.info(
+                    f"Step 1: We've used all candidates, returning {len(selected_peers)} "
+                    "selected peers."
+                )
+                selected_peers = np.array(selected_peers, dtype=np.int64)
+                selected_peers = np.unique(selected_peers)
+                return selected_peers
+            # else, update the candidates
             else:
                 tplr.logger.info(
-                    "We already have max_topk_peers and do not have enough candidates "
-                    "to perform a replacement. No action taken."
+                    f"Finished step 1: Dropped {len(inactive_gather_peers)} inactive "
+                    f"peers and added {len(ingoing)} active ones. We now have "
+                    f"{len(selected_peers)} selected peers"
+                )
+                candidates = np.setdiff1d(candidates, ingoing)
+
+        # ----------------------------------------------------------------------
+        # 2. Drop zero-weight gather peers
+        # ----------------------------------------------------------------------
+        zero_weight_selected_peers = np.setdiff1d(selected_peers, non_zero_weight_uids)
+        original_peers_left = np.intersect1d(old_peers, selected_peers)
+        if len(zero_weight_selected_peers) == 0:
+            tplr.logger.info("Step 2: No zero-weight peers to drop, continuing")
+        else:
+            # if we have enough candidates to replace all zero-weight peers, do it
+            if len(candidates) >= len(zero_weight_selected_peers):
+                outgoing = zero_weight_selected_peers
+                ingoing = (
+                    candidates
+                    if len(candidates) == len(outgoing)
+                    else np.random.choice(
+                        candidates,
+                        size=len(outgoing),
+                        replace=False,
+                    )
+                )
+            # else replace as many as we have candidates
+            else:
+                ingoing = candidates
+                outgoing = np.random.choice(
+                    zero_weight_selected_peers,
+                    size=len(ingoing),
+                    replace=False,
+                )
+            selected_peers = self._replace_peers(selected_peers, ingoing, outgoing)
+            candidates = np.setdiff1d(candidates, ingoing)
+            original_peers_left = np.intersect1d(old_peers, selected_peers)
+            if (
+                # no more candidates
+                len(candidates) == 0
+                # all selected peers are new
+                or len(original_peers_left) == 0
+            ):
+                tplr.logger.info(
+                    f"Step 2: No more candidates, returning {len(selected_peers)} "
+                    "selected peers."
+                )
+                selected_peers = np.array(selected_peers, dtype=np.int64)
+                selected_peers = np.unique(selected_peers)
+                return selected_peers
+            tplr.logger.info(
+                "Finished step 2 (dropped zero-weight peers) and we now have "
+                f"{len(selected_peers)} selected peers"
+            )
+
+        # ----------------------------------------------------------------------
+        # 3. Replace at least 1, at most peers_to_replace original gather peers
+        # ----------------------------------------------------------------------
+        outgoing = (
+            original_peers_left
+            if len(original_peers_left) <= len(candidates)
+            and len(original_peers_left) <= self.hparams.peers_to_replace
+            else np.random.choice(
+                original_peers_left,
+                size=min(
+                    [
+                        len(candidates),
+                        self.hparams.peers_to_replace,
+                    ]
+                ),
+                replace=False,
+            )
+        )
+        ingoing = (
+            candidates
+            if len(candidates) == len(outgoing)
+            else np.random.choice(
+                candidates,
+                size=len(outgoing),
+                replace=False,
+            )
+        )
+        selected_peers = self._replace_peers(selected_peers, ingoing, outgoing)
+        tplr.logger.info(
+            f"Finished step 3 (replaced {len(outgoing)} peers with non-zero weight) "
+            f"and we now have {len(selected_peers)} selected peers"
+        )
+        tplr.logger.info(
+            f"Step 3: Done, returning {len(selected_peers)} selected peers."
+        )
+        selected_peers = np.array(selected_peers, dtype=np.int64)
+        selected_peers = np.unique(selected_peers)
+        return selected_peers
+
+    async def evaluate_miner_sync(
+        self, eval_uid: int
+    ) -> dict[str, bool | float | int | str]:
+        """
+        Evaluates the synchronization of a specific miner with the validator's model.
+
+        Args:
+            validator: The validator instance
+            eval_uid: The UID of the miner to evaluate
+
+        Returns:
+            dict: Synchronization metrics and score
+        """
+        # Fetch the miner's debug dictionary
+        debug_result = await self.comms.get(
+            uid=str(eval_uid),
+            window=self.sync_window - 1,
+            key="debug",
+            local=False,
+            stale_retention=10,
+        )
+
+        # Check if we got a valid result
+        if debug_result is None:
+            return {
+                "success": False,
+                "error": "Failed to retrieve debug dictionary",
+                "sync_score": 0.0,
+            }
+
+        miner_debug_dict = cast(dict, debug_result[0])
+
+        # Validate debug dictionary format
+        if miner_debug_dict is None or not isinstance(miner_debug_dict, dict):
+            return {
+                "success": False,
+                "error": "Invalid debug dictionary format",
+                "sync_score": 0.0,
+            }
+
+        # Get current learning rate
+        current_lr = self.scheduler.get_last_lr()[0]
+
+        # Compare miner's debug dict with validator's model
+        comparison_metrics = await tplr.neurons.compare_model_with_debug_dict(
+            model=self.model,
+            debug_dict=miner_debug_dict,
+            learning_rate=current_lr,
+            index_range=(10, 12),
+        )
+
+        if not comparison_metrics["success"]:
+            return {
+                "success": False,
+                "error": "Failed to compare model with debug dictionary",
+                "sync_score": 0.0,
+            }
+
+        # Calculate sync score using the formula: score = (1-x/5)^2.5
+        # where x is the average steps behind, capped at 5
+        avg_steps_behind = comparison_metrics["avg_steps_behind"]
+        x = min(avg_steps_behind, 5.0)
+        sync_score = max(0.0, (1.0 - x / 5.0) ** 2.5)
+
+        # Add the sync score to the metrics
+        result = {**comparison_metrics, "sync_score": sync_score}
+
+        return result
+
+    def apply_aggregated_gradients(self, aggregation_result: dict):
+        """
+        Apply aggregated gradients from the aggregation server.
+        Args:
+            aggregation_result: Pre-loaded aggregation data from the aggregation server.
+        Returns:
+            bool: True if aggregation was successfully applied, False otherwise
+        """
+        try:
+            update_start = time.time()
+
+            state_dict = aggregation_result.get("state_dict")
+            if state_dict is None:
+                tplr.logger.warning("No state_dict found in aggregation result")
+                return False
+
+            tensors_applied = 0
+
+            for name, param in self.model.named_parameters():
+                if name in state_dict:
+                    packed_tensor = state_dict[name]
+                    if packed_tensor is None:
+                        continue
+
+                    # Unpack binary tensor
+                    unpacked_tensor = tplr.neurons.unpack_binary_tensor(
+                        packed_tensor, param.shape
+                    )
+
+                    # Move to appropriate device
+                    unpacked_tensor = unpacked_tensor.to(self.config.device)
+
+                    # Set as gradient for optimizer
+                    if param.grad is None:
+                        param.grad = unpacked_tensor
+                    else:
+                        param.grad.copy_(unpacked_tensor)
+
+                    tensors_applied += 1
+
+            if tensors_applied > 0:
+                tplr.logger.info(
+                    f"Set gradients for {tensors_applied} tensors in {time.time() - update_start:.2f}s"
                 )
 
-        selected_peers = selected_peers.astype(np.int64)
-        tplr.logger.info(f"Final peers after selection: {selected_peers.tolist()}")
-        return selected_peers
+                # Update parameters with optimizer
+                self.optimizer.step()
+                self.scheduler.step()
+                torch.cuda.empty_cache()
+
+                tplr.logger.info("Successfully applied aggregation")
+                return True
+            else:
+                tplr.logger.warning("No tensors were applied during aggregation")
+                return False
+
+        except Exception as e:
+            tplr.logger.error(f"Error applying aggregated gradients: {e}")
+            return False
+
+    def apply_gathered_gradients(self, gather_result: SimpleNamespace):
+        """
+        Apply gathered gradients from peers to the model.
+
+        This method:
+        1. Extracts the compressed gradients from the gather result
+        2. Decompresses them using the DCT transformer and compressor
+        3. Stores the gradients in momentum for checkpointing
+        4. Applies sign operation for SignSGD optimization
+        5. Updates the model using the optimizer and scheduler
+
+        Args:
+            gather_result: The result object from a gather operation containing
+                          compressed gradients from peers
+        """
+        for n, p in self.model.named_parameters():
+            idxs_key = n + "idxs"
+            vals_key = n + "vals"
+            idxs = getattr(gather_result.state_dict, idxs_key, None)
+            vals = getattr(gather_result.state_dict, vals_key, None)
+            if idxs is not None and vals is not None:
+                if not isinstance(idxs, (list, tuple)):
+                    idxs = [idxs]
+                if not isinstance(vals, (list, tuple)):
+                    vals = [vals]
+                new_grad = self.transformer.decode(
+                    self.compressor.batch_decompress(
+                        p.to(self.config.device),
+                        idxs,
+                        vals,
+                        self.xshapes[n],
+                        self.totalks[n],
+                    )
+                )
+                # Store pre-sign gradient in momentum
+                self.momentum[n] = new_grad.clone()
+                if p.grad is None:
+                    p.grad = new_grad
+                else:
+                    p.grad.copy_(new_grad)
+                p.grad.sign_()
+            else:
+                tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
+        self.optimizer.step()
+        self.scheduler.step()
+        torch.cuda.empty_cache()
+
+    def save_state(self):
+        """Saves the state of the validator to a file."""
+        try:
+            tplr.logger.info("Saving validator state.")
+
+            # Save the state of the validator to file.
+            np.savez(
+                self.state_path,
+                global_step=self.global_step,
+                gradient_scores=self.gradient_scores,
+                sync_scores=self.sync_scores,
+                binary_indicator_scores=self.binary_indicator_scores,
+                gradient_moving_avg_scores=self.gradient_moving_avg_scores,
+                final_moving_avg_scores=self.final_moving_avg_scores,
+                binary_moving_averages=self.binary_moving_averages,
+                weights=self.weights,
+            )
+        except Exception as e:
+            tplr.logger.warning(f"Failed to save validator state: {e}")
+
+    def load_state(self):
+        """Loads the state of the validator from a file."""
+        try:
+            tplr.logger.info("Loading validator state.")
+
+            # Load the state of the validator from file.
+            state = np.load(self.state_path)
+            self.gradient_scores = state["gradient_scores"]
+            self.sync_scores = state["sync_scores"]
+            self.binary_indicator_scores = state["binary_indicator_scores"]
+            self.gradient_moving_avg_scores = state["gradient_moving_avg_scores"]
+            self.final_moving_avg_scores = state["final_moving_avg_scores"]
+            self.binary_moving_averages = state["binary_moving_averages"]
+            self.weights = state["weights"]
+            tplr.logger.info(
+                f"Loaded state from global state {state.global_state}: {state}"
+            )
+        except Exception as e:
+            tplr.logger.warning(f"Failed to load validator state: {e}")
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

@@ -1,0 +1,20 @@
+[project]
+name = "rentcompute"
+version = "0.1.0"
+description = "Command line utility to rent compute instances"
+readme = "README.md"
+authors = [{ name = "tplr.ai", email = "info@tplr.ai" }]
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0",
+    "argparse>=1.4.0",
+    "typing-extensions>=4.7.0",
+    "requests>=2.28.0",
+]
+
+[project.scripts]
+rentcompute = "rentcompute.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

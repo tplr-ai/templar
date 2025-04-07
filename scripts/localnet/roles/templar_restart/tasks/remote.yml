@@ -1,0 +1,5 @@
+---
+- name: Set templar_path for remote deployment
+  set_fact:
+    templar_path: "{{ ansible_env.HOME }}/templar"
+  tags: templar_restart

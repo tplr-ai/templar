@@ -101,6 +101,15 @@
     mode: 0640
   notify: restart grafana
 
+- name: Configure Loki data source
+  template:
+    src: loki-datasource.yml.j2
+    dest: "{{ grafana_provisioning_dir }}/datasources/loki.yml"
+    owner: "{{ grafana_system_user }}"
+    group: "{{ grafana_system_group }}"
+    mode: 0640
+  notify: restart grafana
+
 - name: Configure dashboard provider
   template:
     src: dashboard-provider.yml.j2

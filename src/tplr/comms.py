@@ -1548,7 +1548,6 @@ class Comms(ChainManager):
                     tplr.logger.info(
                         "I am the highest staked validator; breaking out on exception."
                     )
-                    return 0  # TODO: adjust default value if needed
                 await asyncio.sleep(10)
 
     async def save_checkpoint(

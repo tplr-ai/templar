@@ -48,16 +48,37 @@ if [ "$NODE_TYPE" = "miner" ]; then
         --use_wandb \
         ${DEBUG_FLAG}
 elif [ "$NODE_TYPE" = "validator" ]; then
-    echo "Starting validator..."
-    exec python3 neurons/validator.py \
-        --wallet.name ${WALLET_NAME} \
-        --wallet.hotkey ${WALLET_HOTKEY} \
-        --netuid ${NETUID} \
-        --device ${CUDA_DEVICE} \
-        --subtensor.network ${NETWORK} \
-        --use_wandb \
-        # --store-gathers \
-        ${DEBUG_FLAG}
+    if [ "$RUN_AGGREGATOR" = "true" ] && [ "$RUN_EVALUATOR" = "true" ]; then
+        echo "Running aggregator and evaluator concurrently..."
+        echo "Starting aggregator on cuda:1..."
+        python3 neurons/aggregator.py \
+            --wallet.name ${WALLET_NAME} \
+            --wallet.hotkey ${WALLET_HOTKEY} \
+            --netuid ${NETUID} \
+            --device "cuda:1" \
+            --subtensor.network ${NETWORK} \
+            --use_wandb \
+            ${DEBUG_FLAG} &
+        aggregator_pid=$!
+        echo "Starting evaluator on cuda:2..."
+        python3 scripts/evaluator.py \
+            --netuid ${NETUID} \
+            --device "cuda:2" \
+            --use_wandb \
+            ${DEBUG_FLAG} &
+        evaluator_pid=$!
+        wait $aggregator_pid $evaluator_pid
+    else
+        echo "Starting validator..."
+        exec python3 neurons/validator.py \
+            --wallet.name ${WALLET_NAME} \
+            --wallet.hotkey ${WALLET_HOTKEY} \
+            --netuid ${NETUID} \
+            --device ${CUDA_DEVICE} \
+            --subtensor.network ${NETWORK} \
+            --use_wandb \
+            ${DEBUG_FLAG}
+    fi
 else
     echo "Error: NODE_TYPE must be either \"miner\" or \"validator\""
     exit 1

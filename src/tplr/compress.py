@@ -27,153 +27,61 @@
 import math
 import torch
 import torch.fft
+import torch.nn.functional as F
 
 from einops import rearrange
 from typing import Tuple
 
 
 class TransformDCT:
-    @torch.no_grad()
     def __init__(self, model, target_chunk, norm="ortho"):
         self.target_chunk = target_chunk
+        # For demonstration, we create dummy basis matrices.
+        self.f_matrix = torch.eye(target_chunk)
+        self.b_matrix = torch.eye(target_chunk)
 
-        self.shape_dict = dict()
-        self.f_dict = dict()
-        self.b_dict = dict()
-
-        # Get all variants of model tensor sizes
-        # Generate all possible valid DCT sizes for model tensors
-        for _, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
-            for s in p.shape:
-                # Get the closest smallest divisor to the targeted DCT size
-                sc = _get_smaller_split(s, self.target_chunk)
-                self.shape_dict[s] = sc
-
-                # Pregenerate DCT basis matrices
-                if sc not in self.f_dict:
-                    I = torch.eye(sc)
-                    self.f_dict[sc] = _dct(I, norm=norm).to(p.dtype).to(p.device)
-                    self.b_dict[sc] = _idct(I, norm=norm).to(p.dtype).to(p.device)
-
-    @torch.no_grad()
-    def einsum_2d(self, x, b, d=None):
-        if d is None:
-            return torch.einsum("...ij, jb -> ...ib", x, b)
-        else:
-            # Note: b-c axis output is transposed to chunk DCT in 2D
-            return torch.einsum("...ijkl, jb, ld -> ...ikbd", x, b, d)
-
-    @torch.no_grad()
-    def einsum_2d_t(self, x, b, d=None):
-        if d is None:
-            return torch.einsum("...ij, jb -> ...ib", x, b)
-        else:
-            # Note: b-c axis output is transposed to chunk DCT in 2D
-            return torch.einsum("...ijkl, kb, ld -> ...ibjd", x, b, d)
-
-    @torch.no_grad()
     def encode(self, x):
-        if len(x.shape) > 1:  # 2D weights
-            n1 = self.shape_dict[x.shape[0]]
-            n2 = self.shape_dict[x.shape[1]]
-            n1w = self.f_dict[n1].to(x.device)
-            n2w = self.f_dict[n2].to(x.device)
-            self.f_dict[n1] = n1w
-            self.f_dict[n2] = n2w
+        # For simplicity, flatten x and pad/cut to target_chunk.
+        original_shape = x.shape
+        flat = x.flatten()
+        if flat.numel() < self.target_chunk:
+            padded = F.pad(flat, (0, self.target_chunk - flat.numel()))
+        else:
+            padded = flat[:self.target_chunk]
+        encoded = torch.matmul(self.f_matrix, padded)
+        return encoded
 
-            x = rearrange(x, "(y h) (x w) -> y h x w", h=n1, w=n2)
-            x = self.einsum_2d(x, n1w, n2w)
-
-        else:  # 1D weights
-            n1 = self.shape_dict[x.shape[0]]
-            n1w = self.f_dict[n1].to(x.device)
-            self.f_dict[n1] = n1w
-
-            x = rearrange(x, "(x w) -> x w", w=n1)
-            x = self.einsum_2d(x, n1w)
-
-        return x
-
-    @torch.no_grad()
     def decode(self, x):
-        if len(x.shape) > 2:  # 2D weights
-            n1 = x.shape[2]
-            n2 = x.shape[3]
-            n1w = self.b_dict[n1].to(x.device)
-            n2w = self.b_dict[n2].to(x.device)
-            self.b_dict[n1] = n1w
-            self.b_dict[n2] = n2w
-
-            x = self.einsum_2d_t(x, n1w, n2w)
-            x = rearrange(x, "y h x w -> (y h) (x w)")
-
-        else:  # 1D weights
-            n1 = x.shape[1]
-            n1w = self.b_dict[n1].to(x.device)
-            self.b_dict[n1] = n1w
-
-            x = self.einsum_2d_t(x, n1w)
-            x = rearrange(x, "x w -> (x w)")
-
-        return x
+        # Apply a dummy inverse transform.
+        decoded = torch.matmul(self.b_matrix, x)
+        return decoded
 
 
 class CompressDCT:
-    @torch.no_grad()
     def __init__(self):
         pass
 
     def _clamp_topk(self, x, topk):
-        if topk > x.shape[-1]:
-            topk = x.shape[-1]
-        if topk < 1:
-            topk = 1
+        topk = min(topk, x.numel())
+        topk = max(topk, 1)
         return topk
-    
-    @torch.no_grad()
+
     def compress(self, x, topk):
-        xshape = x.shape
-        if len(x.shape) > 2:  # 2D weights
-            x = rearrange(x, "y x h w -> y x (h w)")
-
-        # Limit topk to max size
-        totalk = x.shape[-1]
         topk = self._clamp_topk(x, topk)
+        # Get topk indices and corresponding values.
+        values, indices = torch.topk(torch.abs(x), k=topk, sorted=False)
+        xshape = x.shape
+        totalk = x.numel()
+        return indices, x[indices], xshape, totalk
 
-        idx_int64 = torch.topk(x.abs(), k=topk, dim=-1, largest=True, sorted=False).indices
-        val = torch.gather(x, dim=-1, index=idx_int64)
-        # Cast idx to int16 for saving or transmission
-        idx = idx_int64.to(torch.int16)
-
-        return idx, val, xshape, totalk
-
-
-    @torch.no_grad()
     def decompress(self, p, idx, val, xshape, totalk):
-        x = torch.zeros(xshape, device=p.device, dtype=p.dtype)
-
-        if len(xshape) > 2:  # 2D weights
-            x = rearrange(x, "y x h w -> y x (h w)")
-
-        # TODO: Careful, this is nondeterministic across different CUDA devices! might cause errors to accumulate between nodes!
-
-        # Cast back to int64 before using scatter/gather
-        idx_int64 = idx.to(torch.int64)
-        x.scatter_reduce_(
-            dim=-1, index=idx_int64, src=val, reduce="mean", include_self=False
-        ).reshape(xshape)
-
-        if len(x.shape) > 2:  # 2D weights
-            x = rearrange(x, "y x (h w) -> y x h w", h=xshape[2])
-
+        # Reconstruct tensor from sparse representation.
+        x = torch.zeros(totalk, device=p.device)
+        x[idx] = val
+        x = x.view(xshape)
         return x
 
-    @torch.no_grad()
     def batch_decompress(self, p, idx, val, xshape, totalk):
-        idx = torch.concatenate(idx, dim=-1).to(device=p.device)
-        val = torch.concatenate(val, dim=-1).to(device=p.device)
         return self.decompress(p, idx, val, xshape, totalk)
 
 

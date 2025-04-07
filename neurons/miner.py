@@ -30,6 +30,9 @@ from typing import cast
 import bittensor as bt
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
 
 # Third party
 from bittensor.core.subtensor import ScaleObj
@@ -55,21 +58,18 @@ torch.backends.cudnn.benchmark = False
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+# Import the MoE model.
+from tplr.moe_model import MoE
 
 class Miner:
     # Command line config items.
     @staticmethod
     def config():
-        parser = argparse.ArgumentParser(description="Miner script")
-        parser.add_argument(
-            "--netuid", type=int, default=268, help="Bittensor network UID."
-        )
-        parser.add_argument(
-            "--project", type=str, default="templar", help="Wandb project."
-        )
-        parser.add_argument(
-            "--device", type=str, default="cuda", help="Device to use for training"
-        )
+        parser = argparse.ArgumentParser(description="MoE Miner script")
+        parser.add_argument("--netuid", type=int, default=268, help="Bittensor network UID.")
+        parser.add_argument("--project", type=str, default="templar", help="Wandb project.")
+        parser.add_argument("--device", type=str, default="cuda", help="Device to use for training")
+        parser.add_argument("--num_experts", type=int, default=4, help="Number of experts in the MoE model")
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
         parser.add_argument("--trace", action="store_true", help="Enable trace logging")
         parser.add_argument(
@@ -98,7 +98,16 @@ class Miner:
 
         # Init config and load hparams
         self.config = Miner.config()
-        self.hparams = tplr.load_hparams()
+        self.hparams = {
+            "d_model": 128,
+            "nhead": 8,
+            "num_layers": 2,
+            "vocab_size": 10000,
+            "learning_rate": 0.001,
+            "num_experts": self.config.num_experts,
+            "momentum_decay": 0.9,
+            "topk_compression": 10,
+        }
 
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)
@@ -112,28 +121,27 @@ class Miner:
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
 
         # Init model with hparams config
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)  # type: ignore
+        base_config = {
+            "d_model": self.hparams["d_model"],
+            "nhead": self.hparams["nhead"],
+            "num_layers": self.hparams["num_layers"],
+            "vocab_size": self.hparams["vocab_size"],
+        }
+        self.model = MoE(base_config, num_experts=self.hparams["num_experts"])
+        self.model.to(self.config.device)
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
-        self.transformer = tplr.compress.TransformDCT(
-            self.model, target_chunk=self.hparams.target_chunk
-        )
+        self.transformer = tplr.compress.TransformDCT(self.model, target_chunk=16)
         self.compressor = tplr.compress.CompressDCT()
 
         # Init optimizer and momentum
-        self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
+        self.optimizer = optim.SGD(self.model.parameters(), lr=self.hparams["learning_rate"])
         self.momentum = {}
-        self.xshapes = {}
-        self.totalks = {}
-        for n, p in self.model.named_parameters():
-            self.momentum[n] = torch.zeros_like(p)
-            _, _, xshape, totalk = self.compressor.compress(
-                self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
-            )
-            self.xshapes[n] = xshape
-            self.totalks[n] = totalk
+        for expert_id in range(self.hparams["num_experts"]):
+            for name, param in self.model.experts[expert_id].named_parameters():
+                key = f"expert_{expert_id}.{name}"
+                self.momentum[key] = torch.zeros_like(param)
         # Set up scheduler
         warmup_scheduler = LinearLR(
             self.optimizer,

@@ -41,62 +41,47 @@ from tplr.debug_manager import DebugManager
 
 class Comms:
     """
-    Communication system for tplr neural training/aggregation.
-    This class delegates storage, chain sync and peer discovery to the appropriate services.
+    Minimal communications module supporting expert-tagged gradients.
+    In a real system, this would interact with remote storage (e.g. S3) and handle async transfers.
+    For simulation, we use an in-memory dictionary.
     """
-
-    def __init__(
-        self,
-        wallet,
-        config=None,
-        metagraph=None,
-        hparams=None,
-        uid=None,
-        **kwargs,
-    ):
-        # Initialize core components.
+    def __init__(self, wallet, config=None, metagraph=None, hparams=None, uid=None):
         self.wallet = wallet
-        self.uid = uid
         self.config = config
         self.metagraph = metagraph
         self.hparams = hparams
+        self.uid = uid
+        self.storage = {}  # Simulate remote storage.
 
-        # Create working directories.
-        self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
-        os.makedirs(self.temp_dir, exist_ok=True)
-        hotkey = self.wallet.hotkey.ss58_address
-        self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
-        os.makedirs(self.save_location, exist_ok=True)
+    async def gather(self, key: str, gradient: dict, **kwargs):
+        """
+        Simulate sending a gradient to the network by storing it under a key.
+        """
+        storage_key = f"{key}_{self.uid}"
+        self.storage[storage_key] = gradient
+        # Simulate network delay.
+        await asyncio.sleep(0.05)
+        print(f"Stored gradient for {key} by uid {self.uid}")
+        return True
 
-        # Initialize component services.
-        self.storage = tplr.storage.create_storage_manager(
-            self.temp_dir, self.save_location, wallet=self.wallet
-        )
-        self.chain = ChainSync(
-            config=config,
-            netuid=config.netuid if config else None,
-            metagraph=metagraph,
-            hparams=hparams,
-            wallet=wallet,
-        )
-        self.peer_manager = PeerManager(
-            chain=self.chain, hparams=hparams, metagraph=metagraph
-        )
+    async def get(self, key: str):
+        """
+        Simulate retrieving a gradient from a peer.
+        Returns the first available gradient whose key matches and whose uid is not self.uid.
+        """
+        for k, v in self.storage.items():
+            if key in k and str(self.uid) not in k:
+                return v
+        await asyncio.sleep(0.05)
+        return None
 
-        # Get our own bucket for writing gradients.
-        self.bucket = self._get_own_bucket("gradients", "write")
-        tplr.logger.info("Comms initialized with bucket: %s", self.bucket)
-
-        # Setup async client session and semaphore limiting concurrent S3 requests.
-        self.session = get_session()
-        self.client_semaphore = asyncio.Semaphore(30)
-
-        self.loop = None  # Will be set in start_background_tasks()
-
-        # Instantiate our specialized managers via dependency injection
-        self.catchup_manager = CatchUpManager(self, hparams)
-        self.aggregation_manager = AggregationManager(self)
-        self.debug_manager = DebugManager(self)
+    async def put(self, state_dict: dict, uid: str, window: int, key: str, global_step: int = 0, local: bool = True, stale_retention: int = 10) -> bool:
+        """
+        Simulate saving a checkpoint locally (or remotely).
+        """
+        filename = f"/tmp/{uid}_{key}_ws{window}_gs{global_step}.pt"
+        torch.save(state_dict, filename)
+        return True
 
     def start_background_tasks(self):
         """
@@ -107,104 +92,6 @@ class Comms:
         self.loop.create_task(self.peer_manager.track_active_peers())
         # Start commitment fetching via the chain sync service.
         self.loop.create_task(self.chain.start_commitment_fetcher())
-
-    async def put(
-        self,
-        state_dict: dict,
-        uid: str,
-        window: int,
-        key: str,
-        global_step: int = 0,
-        local: bool = True,
-        stale_retention: int = 10,
-    ) -> bool:
-        """
-        Store data locally or remotely (via buckets) and cleanup old data.
-        """
-        full_state_dict = {
-            "state_dict": state_dict,
-            "global_step": global_step,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-
-        if local:
-            success = await self.storage.store_local(
-                state_dict=full_state_dict, uid=uid, window=window, key=key
-            )
-            if success:
-                await self.storage.cleanup_local_gradients(
-                    uid, key, retention=stale_retention
-                )
-            return success
-        else:
-            success = await self.storage.store_remote(
-                state_dict=full_state_dict,
-                uid=uid,
-                window=window,
-                key=key,
-                bucket=self.bucket,
-            )
-            if success:
-                await self.storage.cleanup_remote_gradients(
-                    uid, key, retention=stale_retention, bucket=self.bucket
-                )
-            return success
-
-    async def get(
-        self,
-        uid: str,
-        window: int,
-        key: str,
-        local: bool = True,
-        device: str = "cpu",
-        timeout: int = 30,
-        stale_retention: int = 10,
-        time_min: Optional[str] = None,
-        time_max: Optional[str] = None,
-    ) -> Tuple[dict, int]:
-        """
-        Retrieve stored gradients or checkpoints.
-        """
-        if local:
-            data = await self.storage.get_local(
-                uid=uid,
-                window=window,
-                key=key,
-                stale_retention=stale_retention,
-                time_min=time_min,
-                time_max=time_max,
-            )
-        else:
-            peer_bucket = self.chain.get_bucket(int(uid))
-            if peer_bucket:
-                data = await self.storage.get_remote(
-                    uid=uid,
-                    window=window,
-                    key=key,
-                    bucket=peer_bucket,
-                    timeout=timeout,
-                    stale_retention=stale_retention,
-                    time_min=time_min,
-                    time_max=time_max,
-                )
-            else:
-                tplr.logger.warning("No bucket found for UID %s", uid)
-                return {}, 0
-
-        if data:
-            if isinstance(data, dict):
-                state_dict = data.get("state_dict", {})
-                global_step = data.get("global_step", 0)
-            else:
-                state_dict, global_step = {}, 0
-
-            state_dict = {
-                k: v.to(device) if isinstance(v, torch.Tensor) else v
-                for k, v in state_dict.items()
-            }
-            return state_dict, global_step
-
-        return {}, 0
 
     async def gather(
         self,

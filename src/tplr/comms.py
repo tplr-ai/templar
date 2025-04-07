@@ -449,7 +449,9 @@ class Comms(ChainManager):
                     loaded_data = json.loads(data)
             else:
                 loaded_data = torch.load(
-                    temp_file_path, map_location=self.config.device
+                    temp_file_path,
+                    map_location=self.config.device,
+                    weights_only=False,
                 )
 
             return loaded_data
@@ -1431,6 +1433,7 @@ class Comms(ChainManager):
                     validator_bucket,
                     validator_uid,
                 ) = await self._get_highest_stake_validator_bucket()
+
                 if validator_bucket is None:
                     tplr.logger.warning(
                         "No highest staked validator bucket found. Retrying in 10 seconds."
@@ -1443,22 +1446,33 @@ class Comms(ChainManager):
                 )
 
                 s3_client = await self._get_s3_client(validator_bucket)
-                list_args = {
-                    "Bucket": validator_bucket.name,
-                    "Prefix": PEERS_FILE_PREFIX,
-                }
-                response = await s3_client.list_objects_v2(**list_args)
-
                 pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{__version__}\.json$"
-                # Filter keys that match the pattern
-                keys = [
-                    obj["Key"]
-                    for obj in response.get("Contents", [])
-                    if re.match(pattern, obj["Key"])
-                ]
+                keys = []
+                continuation_token = None
+
+                while True:
+                    list_args = {
+                        "Bucket": validator_bucket.name,
+                        "Prefix": PEERS_FILE_PREFIX,
+                    }
+                    if continuation_token:
+                        list_args["ContinuationToken"] = continuation_token
+
+                    response = await s3_client.list_objects_v2(**list_args)
+
+                    for obj in response.get("Contents", []):
+                        if re.match(pattern, obj["Key"]):
+                            keys.append(obj["Key"])
+
+                    if response.get("IsTruncated"):
+                        continuation_token = response.get("NextContinuationToken")
+                    else:
+                        break
+
                 if len(keys) == 0:
                     tplr.logger.info("No peer list files found")
                     return None
+
                 max_window = -1
                 selected_key = None
                 for key in keys:
@@ -1479,10 +1493,12 @@ class Comms(ChainManager):
                 peers_data = await self.s3_get_object(
                     key=selected_key, bucket=validator_bucket
                 )
+
                 if isinstance(peers_data, dict):
                     peers_dict = peers_data
                 else:
                     peers_dict = json.loads(peers_data.decode("utf-8"))
+
                 return np.array(peers_dict["peers"]), peers_dict[
                     "first_effective_window"
                 ]
@@ -1493,8 +1509,9 @@ class Comms(ChainManager):
                 tplr.logger.error(f"Error fetching peer list: {e}")
                 await asyncio.sleep(10)
 
-    async def get_start_window(self) -> int:
-        while True:
+    async def get_start_window(self, retries: int = -1) -> int | None:
+        attempt = 0
+        while retries == -1 or attempt < retries:
             try:
                 (
                     validator_bucket,
@@ -1504,6 +1521,7 @@ class Comms(ChainManager):
                     tplr.logger.warning(
                         "No highest staked validator bucket found. Retrying in 10 seconds"
                     )
+                    attempt += 1
                     await asyncio.sleep(10)
                     continue
 
@@ -1511,16 +1529,14 @@ class Comms(ChainManager):
                     f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name}"
                 )
 
-                # Fetch 'start_window.json' using s3_get_object
                 start_window_data = await self.s3_get_object(
                     key=f"start_window_v{__version__}.json", bucket=validator_bucket
                 )
+
                 if start_window_data is not None:
-                    # Check if start_window_data is already a dict
                     if isinstance(start_window_data, dict):
                         start_window_json = start_window_data
                     else:
-                        # If it's bytes, decode and load JSON
                         start_window_json = json.loads(
                             start_window_data.decode("utf-8")
                         )
@@ -1529,26 +1545,19 @@ class Comms(ChainManager):
                     tplr.logger.info(f"Fetched start_window: {start_window}")
                     return start_window
 
-                # Here, if no data and we are the highest staked validator,
-                # break out immediately rather than sleeping.
-                if self.uid == validator_uid:
-                    tplr.logger.info(
-                        "I am the highest staked validator and no start_window has been posted; breaking out."
-                    )
-                    return
-
                 tplr.logger.warning(
                     "start_window.json not found or empty. Retrying in 10 seconds"
                 )
+                attempt += 1
                 await asyncio.sleep(10)
 
             except Exception as e:
                 tplr.logger.error(f"Error fetching start_window: {e}")
-                if self.uid == validator_uid:
-                    tplr.logger.info(
-                        "I am the highest staked validator; breaking out on exception."
-                    )
+                attempt += 1
                 await asyncio.sleep(10)
+
+        tplr.logger.warning("Max retries exceeded while trying to fetch start_window")
+        return None
 
     async def save_checkpoint(
         self,

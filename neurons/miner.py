@@ -286,7 +286,6 @@ class Miner:
             # 1. Initialize window and update peers
             window_start = tplr.T()
             # Start the gather in the background:
-            gather_start = tplr.T()
             step_window = self.current_window
             self.global_step = (
                 self.current_window - self.start_window
@@ -389,6 +388,7 @@ class Miner:
                 local=False,
                 stale_retention=100,
             )
+            tplr.logger.info("Put task completed!")
 
             upload_size = sum(
                 tensor.element_size() * tensor.nelement()
@@ -449,25 +449,23 @@ class Miner:
 
             tplr.logger.info(f"Final peers for gather: {self.comms.peers}")
 
-            # Create a task for gathering gradients asynchronously
-            gather_task = asyncio.create_task(
-                self.comms.gather(
-                    my_uid=self.uid,
-                    uids=self.comms.peers,
-                    window=step_window,
-                    key="gradient",
-                    timeout=35,
-                    device="cpu",
-                    local=False,
-                    stale_retention=100,
-                    totalks=self.totalks,
-                    time_min=time_min,
-                    time_max=time_max,
-                )
+            gather_start = tplr.T()
+            tplr.logger.info("Waiting on gather task...")
+            gather_result = await self.comms.gather(
+                my_uid=self.uid,
+                uids=self.comms.peers,
+                window=step_window,
+                key="gradient",
+                timeout=35,
+                device="cpu",
+                local=False,
+                stale_retention=100,
+                totalks=self.totalks,
+                time_min=time_min,
+                time_max=time_max,
             )
-
-            # Await the task to get the result
-            gather_result = await gather_task
+            tplr.logger.info("Gather task completed!")
+            gather_time = tplr.T() - gather_start
 
             # 5. Calculate and log metrics
             duration = time.time() - train_start
@@ -521,12 +519,6 @@ class Miner:
             # ---------------------------------------------------------------------
             # 6. Await both gather
             # ---------------------------------------------------------------------
-
-            tplr.logger.info("Put task completed!")
-
-            tplr.logger.info("Waiting on gather task...")
-            gather_result = await gather_task
-            tplr.logger.info("Gather task completed!")
 
             # 8. Apply gathered gradients
             update_start = tplr.T()
@@ -627,7 +619,6 @@ class Miner:
             data_loading_time = tplr.T() - data_start
             training_time = tplr.T() - train_start
             compression_time = tplr.T() - compress_start
-            gather_time = tplr.T() - gather_start
             model_update_time = tplr.T() - update_start
             gather_success_rate = (
                 gather_result.success_rate * 100 if gather_result else 0.0
@@ -678,22 +669,8 @@ class Miner:
                 },
                 fields={
                     "loss": loss_value,
-                    "tokens_per_sec": tokens_per_sec,
-                    "batch_tokens": int(window_tokens),
-                    "grad_norm_std": grad_norm_std,
-                    "mean_weight_norm": mean_weight_norm,
-                    "mean_momentum_norm": mean_momentum_norm,
-                    "batch_duration": duration,
-                    "total_tokens": int(self.total_tokens_processed),
-                    "active_peers": int(len(self.comms.peers)),
-                    "effective_batch_size": int(
-                        len(self.comms.peers) * self.hparams.batch_size
-                    ),
-                    "learning_rate": self.scheduler.get_last_lr()[0],
-                    "mean_grad_norm": mean_grad_norm,
+                    "n_gather_peers": int(len(self.comms.peers)),
                     "gather_success_rate": gather_success_rate,
-                    "max_grad_norm": max(grad_norms) if grad_norms else 0,
-                    "min_grad_norm": min(grad_norms) if grad_norms else 0,
                     "gather_peers": json.dumps(self.comms.peers.tolist()),
                     "skipped_peers": json.dumps(
                         np.array(gather_result.skipped_uids).tolist()
@@ -702,10 +679,9 @@ class Miner:
                     ),
                     "window_total_time": window_total_time,
                     "peer_update_time": peer_update_time,
-                    "data_loading_time": data_loading_time,
-                    "training_time": training_time,
                     "compression_time": compression_time,
                     "gather_time": gather_time,
+                    "put_time": put_completion_time,
                     "model_update_time": model_update_time,
                 },
             )

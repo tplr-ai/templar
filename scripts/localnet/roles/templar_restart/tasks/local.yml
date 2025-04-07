@@ -1,0 +1,5 @@
+---
+- name: Set templar_path for local deployment
+  set_fact:
+    templar_path: "{{ playbook_dir }}/../.."
+  tags: templar_restart

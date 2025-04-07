@@ -1,0 +1,124 @@
+---
+- hosts: localnet
+  vars_files:
+    - group_vars/all/vault.yml
+  become: false
+
+  tasks:
+    - name: Set templar_path for remote deployment
+      set_fact:
+        templar_path: "{{ ansible_env.HOME }}/templar"
+      when: remote_mode | bool
+      tags: reload
+
+    - name: Set templar_path for local deployment
+      set_fact:
+        templar_path: "{{ playbook_dir }}/../.."
+      when: not remote_mode | bool
+      tags: reload
+
+    - name: Check PM2 status before restart
+      shell: pm2 list | grep -E "T[VMM]"
+      register: pm2_status_before
+      changed_when: false
+      failed_when: false
+      tags: reload
+
+    - name: Display current templar processes status
+      debug:
+        msg: "{{ pm2_status_before.stdout_lines }}"
+      tags: reload
+
+    - name: Stop all miner processes
+      shell: pm2 stop $(pm2 list | grep -E "TM" | awk '{print $2}')
+      args:
+        executable: /bin/bash
+      register: stop_miners
+      changed_when: stop_miners.rc == 0
+      failed_when: false
+      tags: reload
+
+    - name: Stop all validator processes
+      shell: pm2 stop $(pm2 list | grep -E "TV" | awk '{print $2}')
+      args:
+        executable: /bin/bash
+      register: stop_validators
+      changed_when: stop_validators.rc == 0
+      failed_when: false
+      tags: reload
+
+    - name: Stop all aggregator processes
+      shell: pm2 stop $(pm2 list | grep -E "TA" | awk '{print $2}')
+      args:
+        executable: /bin/bash
+      register: stop_aggregators
+      changed_when: stop_aggregators.rc == 0
+      failed_when: false
+      tags: reload
+
+    - name: Ensure environment file is properly configured
+      template:
+        src: roles/templar/templates/env.j2
+        dest: "{{ templar_path }}/.env"
+        mode: "0644"
+      tags: reload
+
+    - name: Ensure PM2 ecosystem file is up to date
+      template:
+        src: roles/templar/templates/ecosystem.config.js.j2
+        dest: "{{ templar_path }}/ecosystem.config.js"
+        mode: "0644"
+      tags: reload
+
+    - name: Start validator processes via PM2
+      shell: pm2 start ecosystem.config.js --only "TV{{ item }}"
+      args:
+        chdir: "{{ templar_path }}"
+      loop: "{{ range(1, validator_hotkeys|length + 1) | list }}"
+      when: validator_hotkeys|length > 0
+      tags: reload
+
+    - name: Start aggregator processes via PM2
+      shell: pm2 start ecosystem.config.js --only "TA{{ item }}"
+      args:
+        chdir: "{{ templar_path }}"
+      loop: "{{ range(1, (aggregator_hotkeys|default([]))|length + 1) | list }}"
+      when: (aggregator_hotkeys|default([]))|length > 0
+      tags: reload
+
+    - name: Start miner processes via PM2
+      shell: pm2 start ecosystem.config.js --only "TM{{ item }}"
+      args:
+        chdir: "{{ templar_path }}"
+      loop: "{{ range(1, miner_hotkeys|length + 1) | list }}"
+      when: miner_hotkeys|length > 0
+      tags: reload
+
+    - name: Wait for processes to stabilize
+      pause:
+        seconds: 5
+      tags: reload
+
+    - name: Check PM2 status after restart
+      shell: pm2 list | grep -E "T[VMM]"
+      register: pm2_status_after
+      changed_when: false
+      failed_when: false
+      tags: reload
+
+    - name: Display updated templar processes status
+      debug:
+        msg: "{{ pm2_status_after.stdout_lines }}"
+      tags: reload
+
+    - name: Check for any errored templar processes
+      shell: pm2 list | grep -E "T[VMM]" | grep -i "errored" | wc -l
+      register: error_count
+      changed_when: false
+      tags: reload
+
+    - name: Warning on errored processes
+      debug:
+        msg: "WARNING: {{ error_count.stdout }} templar processes are in error state!"
+      when: error_count.stdout|int > 0
+      tags: reload

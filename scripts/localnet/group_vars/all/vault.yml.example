@@ -1,0 +1,59 @@
+# Ansible Vault Example Configuration (do not store real secrets here)
+remote_mode: false
+
+# Wallet configuration
+cold_wallet_name: "default"
+bittensor_wallet_password: "your_wallet_password_here"  # Password for the coldkey
+owner_hotkey: "validator_1"            # Hotkey name to use for subnet creation (should belong to cold_wallet_name)
+validator_hotkeys: ["validator_1"]     # List of validator hotkeys (belonging to cold_wallet_name)
+miner_hotkeys: ["miner_1", "miner_2"]  # List of miner hotkeys (belonging to cold_wallet_name)
+aggregator_hotkeys: ["aggregator_1"]   # List of aggregator hotkeys (belonging to cold_wallet_name)
+local_bittensor_wallets_dir: "{{ lookup('env','HOME') }}/.bittensor/wallets"  # Local directory where wallets are stored
+
+# Network configuration
+network: "local"
+netuid: 2
+
+# Version override for development
+templar_version: "0.2.52dev"           # Version string to use (typically a non-production version for testing)
+
+# Staking amount (in TAO) to add to each validator
+stake_amount: 1000
+
+# Extra apt packages to install (if any)
+extra_packages: []
+
+# Secrets for telemetry/monitoring
+WANDB_API_KEY: "YOUR_WANDB_API_KEY_HERE"
+INFLUXDB_URL: "http://localhost:8086"
+INFLUXDB_ORG: "YOUR_INFLUX_ORG"
+INFLUXDB_BUCKET: "YOUR_INFLUX_BUCKET"
+INFLUXDB_TOKEN: "YOUR_INFLUXDB_TOKEN"
+
+# R2 Cloud Storage secrets
+R2_ACCOUNT_ID: "YOUR_R2_ACCOUNT_ID"
+R2_GRADIENTS_ACCOUNT_ID: "YOUR_R2_GRADIENTS_ACCOUNT_ID"
+R2_GRADIENTS_BUCKET_NAME: "YOUR_R2_GRADIENTS_BUCKET_NAME"
+R2_READ_ACCESS_KEY_ID: "YOUR_R2_READ_ACCESS_KEY_ID"
+R2_READ_SECRET_ACCESS_KEY: "YOUR_R2_READ_SECRET_ACCESS_KEY"
+R2_GRADIENTS_READ_ACCESS_KEY_ID: "YOUR_R2_GRADIENTS_READ_ACCESS_KEY_ID"
+R2_GRADIENTS_READ_SECRET_ACCESS_KEY: "YOUR_R2_GRADIENTS_READ_SECRET_ACCESS_KEY"
+R2_WRITE_ACCESS_KEY_ID: "YOUR_R2_WRITE_ACCESS_KEY_ID"
+R2_WRITE_SECRET_ACCESS_KEY: "YOUR_R2_WRITE_SECRET_ACCESS_KEY"
+R2_GRADIENTS_WRITE_ACCESS_KEY_ID: "YOUR_R2_GRADIENTS_WRITE_ACCESS_KEY_ID"
+R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY: "YOUR_R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"
+R2_DATASET_WRITE_ACCESS_KEY_ID: "YOUR_R2_DATASET_WRITE_ACCESS_KEY_ID"
+R2_DATASET_WRITE_SECRET_ACCESS_KEY: "YOUR_R2_DATASET_WRITE_SECRET_ACCESS_KEY"
+
+# R2 Dataset variables
+# R2_DATASET_ACCOUNT_ID: "YOUR_R2_DATASET_ACCOUNT_ID"
+# R2_DATASET_BUCKET_NAME: "YOUR_R2_DATASET_BUCKET_NAME"
+# R2_DATASET_READ_ACCESS_KEY_ID: "YOUR_R2_DATASET_READ_ACCESS_KEY_ID"
+# R2_DATASET_READ_SECRET_ACCESS_KEY: "YOUR_R2_DATASET_READ_SECRET_ACCESS_KEY"
+
+# R2_AGGREGATOR_ACCOUNT_ID: "YOUR_R2_AGGREGATOR_ACCOUNT_ID"
+# R2_AGGREGATOR_BUCKET_NAME: "YOUR_R2_AGGREGATOR_BUCKET_NAME" # make it "aggregator"
+# R2_AGGREGATOR_WRITE_ACCESS_KEY_ID: "YOUR_R2_AGGREGATOR_WRITE_ACCESS_KEY_ID"
+# R2_AGGREGATOR_WRITE_SECRET_ACCESS_KEY: "YOUR_R2_AGGREGATOR_WRITE_SECRET_ACCESS_KEY"
+# R2_AGGREGATOR_READ_ACCESS_KEY_ID: "YOUR_R2_AGGREGATOR_READ_ACCESS_KEY_ID"
+# R2_AGGREGATOR_READ_SECRET_ACCESS_KEY: "YOUR_R2_AGGREGATOR_READ_SECRET_ACCESS_KEY"

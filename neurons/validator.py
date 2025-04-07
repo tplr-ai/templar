@@ -358,7 +358,7 @@ class Validator:
         if self.uid == self.metagraph.S.argmax().item():
             # Check if an existing start window already exists
             try:
-                existing_start_window = await self.comms.get_start_window()
+                existing_start_window = await self.comms.get_start_window(retries=2)
             except Exception as e:
                 tplr.logger.warning(f"Error fetching existing start_window: {e}")
                 existing_start_window = None

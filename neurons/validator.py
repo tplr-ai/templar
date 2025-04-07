@@ -616,7 +616,6 @@ class Validator:
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
             tplr.logger.info(f"We are using peers {self.comms.peers}")
 
-            gather_start = tplr.T()
             # Refresh peers explicitly before starting gather to avoid missing updated active peers.
             tplr.logger.info("Refreshing eval peers before gather task in validator...")
 
@@ -635,6 +634,7 @@ class Validator:
 
             tplr.logger.info(f"Validator gather peers: {self.comms.peers}")
 
+            gather_start = tplr.T()
             skipped_uids: list[int] = []
             success_rate = 0.0
             gather_result = None
@@ -665,6 +665,7 @@ class Validator:
                 state_dict = cast(dict, aggregation_result.get("state_dict"))
                 skipped_uids = cast(list[int], state_dict.get("skipped_uids", []))
                 success_rate = aggregation_result.get("success_rate", 0.0)
+            gather_time = tplr.T() - gather_start
 
             tplr.logger.info(f"Skipped UIDs: {skipped_uids}")
 
@@ -1685,7 +1686,7 @@ class Validator:
                 "validator/gather/success_rate": success_rate * 100,
                 "validator/timing/window_total": tplr.T() - window_start,
                 "validator/timing/peer_update": tplr.T() - peer_start,
-                "validator/timing/gather": tplr.T() - gather_start,
+                "validator/timing/gather": gather_time,
                 "validator/timing/evaluation": tplr.T() - eval_start,
                 "validator/timing/model_update": tplr.T() - update_start,
             }
@@ -1715,7 +1716,7 @@ class Validator:
                     "gather_success_rate": gather_success_rate,
                     "window_total_time": float(tplr.T() - window_start),
                     "peer_update_time": float(tplr.T() - peer_start),
-                    "gather_time": float(tplr.T() - gather_start),
+                    "gather_time": float(gather_time),
                     "evaluation_time": float(tplr.T() - eval_start),
                     "model_update_time": float(tplr.T() - update_start),
                     "total_peers": int(len(self.comms.peers)),

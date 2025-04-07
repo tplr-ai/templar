@@ -1535,7 +1535,7 @@ class Comms(ChainManager):
                     tplr.logger.info(
                         "I am the highest staked validator and no start_window has been posted; breaking out."
                     )
-                    return 0  # TODO: adjust default value if needed
+                    return
 
                 tplr.logger.warning(
                     "start_window.json not found or empty. Retrying in 10 seconds"

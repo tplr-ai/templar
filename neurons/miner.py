@@ -528,14 +528,6 @@ class Miner:
             gather_result = await gather_task
             tplr.logger.info("Gather task completed!")
 
-            if gather_result is None:
-                tplr.logger.error(
-                    "Failed to gather gradients from peers. Waiting for next window."
-                )
-                while self.current_window == step_window:
-                    await asyncio.sleep(0.1)
-                continue
-
             # 8. Apply gathered gradients
             update_start = tplr.T()
             self.model.train()
@@ -571,18 +563,19 @@ class Miner:
                         tplr.logger.info(
                             f"Gradient data missing for parameter {n}, skipping."
                         )
-            tplr.logger.info(
-                f"{tplr.P(self.start_window, tplr.T() - update_start)} Updated model"
-            )
 
-            self.optimizer.step()
-            self.scheduler.step()
-            torch.cuda.empty_cache()
+                tplr.logger.info(
+                    f"{tplr.P(self.start_window, tplr.T() - update_start)} Updated model"
+                )
 
-            # Log total window time and add timing metrics to existing wandb logging
-            tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - window_start)} Completed window iteration"
-            )
+                self.optimizer.step()
+                self.scheduler.step()
+                torch.cuda.empty_cache()
+
+                # Log total window time and add timing metrics to existing wandb logging
+                tplr.logger.info(
+                    f"{tplr.P(step_window, tplr.T() - window_start)} Completed window iteration"
+                )
 
             # Add debug data including successfully gathered peers
             debug_dict = {}
@@ -593,7 +586,7 @@ class Miner:
                     param is not None and param.numel() >= 2
                 ):  # Check if tensor has at least 2 elements
                     debug_dict[name + "_debug"] = (
-                        param.flatten()[:2].detach().cpu().tolist()
+                        param.flatten()[10:12].detach().cpu().tolist()
                     )
 
             # Add successful peers information
@@ -637,7 +630,7 @@ class Miner:
             gather_time = tplr.T() - gather_start
             model_update_time = tplr.T() - update_start
             gather_success_rate = (
-                gather_result.success_rate * 100 if gather_result else 0
+                gather_result.success_rate * 100 if gather_result else 0.0
             )
 
             # Log metrics to WandB

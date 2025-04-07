@@ -27,7 +27,7 @@
     "warmup_steps": 250,
     "alpha_f": 0.1,
     "t_max": 5000,
-    "validator_offset": 1,
+    "validator_offset": 2,
     "checkpoint_frequency": 100,
     "topk_peers": 20,
     "max_topk_peers": 15,

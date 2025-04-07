@@ -611,12 +611,18 @@ class Validator:
 
             tplr.logger.info(f"Validator gather peers: {self.comms.peers}")
 
+            # Calculate remaining seconds until time_max plus a 5 second buffer.
+            time_remaining = (time_max - datetime.now()).total_seconds() + 5
+            tplr.logger.info(f'Using gather timeout : {time_remaining}')
+            # Ensure a minimum timeout value (e.g. 5 seconds)
+            gather_timeout = max(time_remaining, 5)
+
             gather_result = await self.comms.gather(
                 my_uid=self.uid,
                 uids=self.comms.peers,
                 window=self.sync_window,
                 key="gradient",
-                timeout=35,
+                timeout=gather_timeout,  # now using dynamic timeout
                 device=self.config.device,
                 local=False,
                 totalks=self.totalks,

@@ -1774,7 +1774,9 @@ class Validator:
                     f"Selected {len(top_incentive_peers)} initial peers purely based "
                     f"on incentive: {top_incentive_peers}"
                 )
-                return top_incentive_peers
+                selected_peers = np.array(top_incentive_peers, dtype=np.int64)
+                selected_peers = np.unique(selected_peers)
+                return selected_peers
 
             # 2. If needed, fill up with active peers
             remaining_active_peers = np.array(
@@ -1792,7 +1794,11 @@ class Validator:
                     f"and {len(top_incentive_and_active_peers) - len(top_incentive_peers)} without: "
                     f"{remaining_active_peers[: len(top_incentive_and_active_peers) - len(top_incentive_peers)]}"
                 )
-                return top_incentive_and_active_peers
+                selected_peers = np.array(
+                    top_incentive_and_active_peers, dtype=np.int64
+                )
+                selected_peers = np.unique(selected_peers)
+                return selected_peers
 
             # 3. Give up
             tplr.logger.info(
@@ -2026,6 +2032,8 @@ class Validator:
         tplr.logger.info(
             f"Step 3: Done, returning {len(selected_peers)} selected peers."
         )
+        selected_peers = np.array(selected_peers, dtype=np.int64)
+        selected_peers = np.unique(selected_peers)
         return selected_peers
 
     async def evaluate_miner_sync(

@@ -449,7 +449,9 @@ class Comms(ChainManager):
                     loaded_data = json.loads(data)
             else:
                 loaded_data = torch.load(
-                    temp_file_path, map_location=self.config.device
+                    temp_file_path,
+                    map_location=self.config.device,
+                    weights_only=False,
                 )
 
             return loaded_data

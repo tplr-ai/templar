@@ -1940,6 +1940,8 @@ class Validator:
                     f"Step 1: We've used all candidates, returning {len(selected_peers)} "
                     "selected peers."
                 )
+                selected_peers = np.array(selected_peers, dtype=np.int64)
+                selected_peers = np.unique(selected_peers)
                 return selected_peers
             # else, update the candidates
             else:
@@ -1991,6 +1993,8 @@ class Validator:
                     f"Step 2: No more candidates, returning {len(selected_peers)} "
                     "selected peers."
                 )
+                selected_peers = np.array(selected_peers, dtype=np.int64)
+                selected_peers = np.unique(selected_peers)
                 return selected_peers
             tplr.logger.info(
                 "Finished step 2 (dropped zero-weight peers) and we now have "

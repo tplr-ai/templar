@@ -1529,6 +1529,14 @@ class Comms(ChainManager):
                     tplr.logger.info(f"Fetched start_window: {start_window}")
                     return start_window
 
+                # Here, if no data and we are the highest staked validator,
+                # break out immediately rather than sleeping.
+                if self.uid == validator_uid:
+                    tplr.logger.info(
+                        "I am the highest staked validator and no start_window has been posted; breaking out."
+                    )
+                    return 0  # TODO: adjust default value if needed
+
                 tplr.logger.warning(
                     "start_window.json not found or empty. Retrying in 10 seconds"
                 )
@@ -1536,6 +1544,11 @@ class Comms(ChainManager):
 
             except Exception as e:
                 tplr.logger.error(f"Error fetching start_window: {e}")
+                if self.uid == validator_uid:
+                    tplr.logger.info(
+                        "I am the highest staked validator; breaking out on exception."
+                    )
+                    return 0  # TODO: adjust default value if needed
                 await asyncio.sleep(10)
 
     async def save_checkpoint(

@@ -365,16 +365,24 @@ class Validator:
 
             if existing_start_window is not None:
                 self.start_window = existing_start_window
-                tplr.logger.info(f"Highest staked validator found existing start_window: {self.start_window}")
+                tplr.logger.info(
+                    f"Highest staked validator found existing start_window: {self.start_window}"
+                )
             else:
                 # No existing start window, so post new start window to R2
                 await self.comms.post_start_window(self.start_window)
-                tplr.logger.info(f"This validator is the highest staked. Posted start_window: {self.start_window}")
+                tplr.logger.info(
+                    f"This validator is the highest staked. Posted start_window: {self.start_window}"
+                )
         else:
-            tplr.logger.info("This validator is not the highest staked. Waiting to fetch start_window.")
+            tplr.logger.info(
+                "This validator is not the highest staked. Waiting to fetch start_window."
+            )
             self.start_window = await self.comms.get_start_window()
             self.global_step = self.current_window - self.start_window
-            tplr.logger.info(f"Using start_window: {self.start_window}, global_step: {self.global_step}")
+            tplr.logger.info(
+                f"Using start_window: {self.start_window}, global_step: {self.global_step}"
+            )
 
         # Proceed to load checkpoint
         (

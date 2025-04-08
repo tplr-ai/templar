@@ -89,7 +89,7 @@ def config() -> bt.Config:
     parser.add_argument(
         "--tasks",
         type=str,
-        default="arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag",
+        default="arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu",
         help="Comma-separated list of tasks to evaluate",
     )
     parser.add_argument(

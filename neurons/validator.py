@@ -2263,7 +2263,9 @@ class Validator:
             self.final_moving_avg_scores = state["final_moving_avg_scores"]
             self.binary_moving_averages = state["binary_moving_averages"]
             self.weights = state["weights"]
-            self.normalised_binary_moving_averages = state["normalised_binary_moving_averages"]
+            self.normalised_binary_moving_averages = state[
+                "normalised_binary_moving_averages"
+            ]
             tplr.logger.info(
                 f"Loaded state from global state {state.global_state}: {state}"
             )

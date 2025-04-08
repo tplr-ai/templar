@@ -664,7 +664,7 @@ class Validator:
             else:
                 state_dict = cast(dict, aggregation_result.get("state_dict"))
                 skipped_uids = cast(list[int], state_dict.get("skipped_uids", []))
-                success_rate = aggregation_result.get("success_rate", 0.0)
+                success_rate = cast(float, state_dict.get("success_rate", 0.0))
             gather_time = tplr.T() - gather_start
 
             tplr.logger.info(f"Skipped UIDs: {skipped_uids}")

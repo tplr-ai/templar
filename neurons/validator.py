@@ -227,6 +227,9 @@ class Validator:
         self.loss_improvement_random = 0.0
         self.relative_improvement_own = 0.0
         self.relative_improvement_random = 0.0
+        self.total_tokens_processed = 0
+        self.total_tokens_time_tracking = 0
+        self.total_tokens_per_second = 0
         self.valid_score_indices = []
 
         # Caching
@@ -1040,6 +1043,7 @@ class Validator:
                     model_own_data_eval.zero_grad()
                     loss_after_own = 0.0
                     n_batches = 0
+                    accumulate_tokens = 0
                     with torch.no_grad():
                         model_own_data_eval.eval()
                         for i, batch in enumerate(batches_own):
@@ -1047,6 +1051,9 @@ class Validator:
                                 continue
                             input_ids = torch.tensor(batch, dtype=torch.long).to(
                                 model_own_data_eval.device
+                            )
+                            accumulate_tokens += (
+                                (input_ids != self.tokenizer.pad_token_id).sum().item()
                             )
                             labels = input_ids.clone()
                             labels = torch.where(
@@ -1088,6 +1095,14 @@ class Validator:
                     )
                     tplr.logger.debug(
                         f"Relative improvement (own data): {self.relative_improvement_own:.4f}"
+                    )
+
+                    self.total_tokens_processed += accumulate_tokens
+                    self.total_tokens_time_tracking += tplr.T() - data_start
+                    self.total_tokens_per_second = (
+                        self.total_tokens_processed / self.total_tokens_time_tracking
+                        if self.total_tokens_time_tracking > 0
+                        else 0.0
                     )
 
                     # 7. Load evaluation data from random page
@@ -1704,6 +1719,8 @@ class Validator:
                 "validator/timing/gather": gather_time,
                 "validator/timing/evaluation": tplr.T() - eval_start,
                 "validator/timing/model_update": tplr.T() - update_start,
+                "validator/tokens/per_second": float(self.total_tokens_per_second),
+                "validator/tokens/processed": int(self.total_tokens_processed),
             }
             self.wandb.log(evaluation_metrics, step=self.global_step)
 
@@ -1736,6 +1753,8 @@ class Validator:
                     "model_update_time": float(tplr.T() - update_start),
                     "total_peers": int(len(self.comms.peers)),
                     "total_skipped": int(total_skipped),
+                    "total_tokens_per_second": float(self.total_tokens_per_second),
+                    "total_tokens_processed": int(self.total_tokens_processed),
                 },
             )
             tplr.logger.info("Finished metrics logging call for validator")

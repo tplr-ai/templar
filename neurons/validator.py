@@ -26,11 +26,9 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
 from types import SimpleNamespace
-from typing import cast
 
 import bittensor as bt
 import numpy as np
@@ -515,7 +513,6 @@ class Validator:
                             outputs = model_own_data_eval(
                                 input_ids=input_ids, labels=labels
                             )
-                            tplr.logger.info(f"Loss {outputs.loss.item()} [Batch: {i}]")
                             loss_before_own += outputs.loss.item()
                             n_batches += 1
                             del input_ids, labels, outputs
@@ -628,7 +625,6 @@ class Validator:
                             outputs = model_own_data_eval(
                                 input_ids=input_ids, labels=labels
                             )
-                            tplr.logger.info(f"Loss {outputs.loss.item()} [Batch: {i}]")
                             loss_after_own += outputs.loss.item()
                             n_batches += 1
                             del input_ids, labels, outputs
@@ -748,7 +744,6 @@ class Validator:
                             outputs = model_random_data_eval(
                                 input_ids=input_ids, labels=labels
                             )
-                            tplr.logger.info(f"Loss {outputs.loss.item()} [Batch: {i}]")
                             loss_before_random += outputs.loss.item()
                             n_batches += 1
                             del input_ids, labels, outputs
@@ -817,7 +812,6 @@ class Validator:
                             outputs = model_random_data_eval(
                                 input_ids=input_ids, labels=labels
                             )
-                            tplr.logger.info(f"Loss {outputs.loss.item()} [Batch: {i}]")
                             loss_after_random += outputs.loss.item()
                             n_batches += 1
                             del input_ids, labels, outputs

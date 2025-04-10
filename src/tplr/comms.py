@@ -1037,7 +1037,7 @@ class Comms(ChainManager):
 
                 if not os.path.exists(base_dir):
                     tplr.logger.debug(f"No gradient directory found for UID {uid}")
-                    return None  # Don't retry if directory doesn't exist
+                    continue
 
                 # List all gradient files in the directory
                 all_files = os.listdir(base_dir)
@@ -1045,7 +1045,7 @@ class Comms(ChainManager):
 
                 if not gradient_files:
                     tplr.logger.debug(f"No gradient files found for UID {uid}")
-                    return None  # Don't retry if no files exist
+                    continue
 
                 # Sort by timestamp to get the most recent
                 gradient_files.sort(reverse=True)
@@ -1075,7 +1075,7 @@ class Comms(ChainManager):
                     tplr.logger.debug(
                         f"No gradient files within time window for UID {uid}"
                     )
-                    return None  # Don't retry if no valid files exist
+                    continue
 
                 # Use the most recent valid file
                 latest_file, _ = valid_files[0]

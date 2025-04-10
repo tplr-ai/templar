@@ -1,7 +1,7 @@
 require('dotenv').config(); // Loads environment variables from .env
 
 const NUM_MINERS = process.env.NUM_MINERS || 3;
-const PROJECT_NAME = `scoring-base`;
+const PROJECT_NAME = `test-scoring`;
 const LOCAL_FLAG = process.env.LOCAL === 'true' ? ' --local' : '';
 
 const minerConfigs = [...Array(Number(NUM_MINERS))].map((_, index) => ({

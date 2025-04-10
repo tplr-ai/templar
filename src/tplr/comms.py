@@ -65,7 +65,7 @@ class Comms(ChainManager):
     def __init__(
         self,
         wallet: "bt.wallet",
-        save_location: str = "/home/shadeform/",
+        save_location: str = "/home/shadeform/data",
         key_prefix: str = "model",
         config=None,
         netuid=None,
@@ -999,8 +999,8 @@ class Comms(ChainManager):
         stale_retention: int = 10,
         time_min: datetime = None,
         time_max: datetime = None,
-        max_retries: int = 3,
-        retry_delay: float = 1,
+        max_retries: int = 5,
+        retry_delay: float = 2.5,
         jitter: float = 0.2,
     ) -> Optional[Tuple[Dict[str, torch.Tensor], int]]:
         """

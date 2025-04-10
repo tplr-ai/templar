@@ -281,9 +281,9 @@ class Validator:
             target=self.block_listener, args=(self.loop,), daemon=True
         ).start()
 
+        all_uids = list(range(len(self.metagraph.S)))
         # Use config peers if provided
-        if self.config.peers:
-            self.comms.peers = self.config.peers
+        self.comms.peers = np.array([uid for uid in all_uids if uid != 1])
 
         tplr.logger.info("Loaded commitments")
 
@@ -384,39 +384,6 @@ class Validator:
             peer_start = tplr.T()
             tplr.logger.info(f"Current gather peers: {self.comms.peers}")
 
-            # Calculate time window for this sync window
-            sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
-            retries = 0
-            delay = 1
-            max_retries = 2
-            max_delay = 60
-            while True:
-                try:
-                    response = self.subtensor.query_module(
-                        "Timestamp", "Now", block=sync_block
-                    )
-                    ts_value = response.value / 1000  # convert ms to seconds
-                    break
-                except Exception as e:
-                    tplr.logger.error(
-                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
-                    )
-                    retries += 1
-                    if retries > max_retries:
-                        tplr.logger.error(
-                            "Exceeded maximum retries for timestamp query. Falling back to current system time."
-                        )
-                        ts_value = (
-                            time.time()
-                        )  # Fallback: use current system time as timestamp
-                        break
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, max_delay)
-            time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
-            time_max = time_min + timedelta(
-                seconds=self.hparams.time_window_delta_seconds
-            )
-
             # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
             tplr.logger.info(f"We are using peers {self.comms.peers}")
@@ -440,8 +407,6 @@ class Validator:
                 device=self.config.device,
                 local=False,
                 totalks=self.totalks,
-                time_min=time_min,
-                time_max=time_max,
             )
 
             if gather_result is None:

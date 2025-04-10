@@ -224,7 +224,9 @@ class Miner:
         )
         self.listener.start()  #
 
+        all_uids = list(range(len(self.metagraph.S)))
         # Use config peers if provided
+        self.comms.peers = np.array([uid for uid in all_uids if uid != 1])
         if self.config.peers:
             self.comms.peers = self.config.peers
 
@@ -284,8 +286,6 @@ class Miner:
                 f"Starting catchup from start window {self.start_window} to current window {self.current_window})..."
             )
             await tplr.neurons.catchup_with_aggregation_server(self, self.start_window)
-
-        self.comms.start_commitment_fetcher()
 
         while True:
             # 1. Initialize window and update peers
@@ -406,43 +406,6 @@ class Miner:
 
             tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
 
-            sync_block = self.current_window * self.hparams.blocks_per_window
-            retries = 0
-            delay = 1
-            max_retries = 5
-            max_delay = 60
-            while True:
-                try:
-                    response = self.subtensor.query_module(
-                        "Timestamp", "Now", block=sync_block
-                    )
-                    if response is None or not isinstance(response, ScaleObj):
-                        raise ValueError(f"Could not query timestamp for {sync_block}")
-                    ts_value = (
-                        cast(int, response.value) / 1000
-                    )  # convert milliseconds to seconds
-                    break
-                except Exception as e:
-                    tplr.logger.error(
-                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
-                    )
-                    retries += 1
-                    if retries > max_retries:
-                        tplr.logger.error(
-                            "Exceeded maximum retries for timestamp query."
-                        )
-                        raise e
-                    time.sleep(delay)
-                    delay = min(delay * 2, max_delay)
-
-            time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
-            time_max = time_min + timedelta(
-                seconds=self.hparams.time_window_delta_seconds
-            )
-
-            # Log the time window we're using
-            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
-
             # Refresh the peers list immediately before gathering
             tplr.logger.info("Refreshing peers before gather task...")
 
@@ -460,8 +423,6 @@ class Miner:
                 local=False,
                 stale_retention=100,
                 totalks=self.totalks,
-                time_min=time_min,
-                time_max=time_max,
             )
             tplr.logger.info("Gather task completed!")
             gather_time = tplr.T() - gather_start

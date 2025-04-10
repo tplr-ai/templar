@@ -283,7 +283,7 @@ class Validator:
 
         all_uids = list(range(len(self.metagraph.S)))
         # Use config peers if provided
-        self.comms.peers = np.array([uid for uid in all_uids if uid != 1 or uid != 0])
+        self.comms.peers = np.array([uid for uid in all_uids if uid not in [0, 1]])
 
         tplr.logger.info("Loaded commitments")
 

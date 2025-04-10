@@ -209,10 +209,6 @@ class Miner:
             job_type="mining",
         )
 
-        # Initialize peer related attributes
-        self.next_peers: tplr.comms.PeerArray | None = None
-        self.peers_update_window = -1
-
     # Main training loop.
     async def run(self):
         # Start background block listener
@@ -297,11 +293,6 @@ class Miner:
             )  # Update global_step
             tplr.logger.info(
                 f"\n{'-' * 40} Window: {step_window} (Global Step: {self.global_step}) {'-' * 40}"
-            )
-
-            peer_start = tplr.T()
-            await tplr.neurons.update_peers(
-                instance=self, window=step_window, peer_start=peer_start
             )
 
             # 2. Load training data for this window

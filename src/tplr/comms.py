@@ -65,7 +65,7 @@ class Comms(ChainManager):
     def __init__(
         self,
         wallet: "bt.wallet",
-        save_location: str = "/tmp",
+        save_location: str = "/home/shadeform/",
         key_prefix: str = "model",
         config=None,
         netuid=None,
@@ -76,6 +76,7 @@ class Comms(ChainManager):
     ):
         self.wallet = wallet
         self.uid = uid
+        self.storage_path = save_location
 
         # Create temp directory for this instance
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")

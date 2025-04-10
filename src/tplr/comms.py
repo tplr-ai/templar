@@ -2209,7 +2209,7 @@ class Comms(ChainManager):
         tplr.logger.debug(f"Final selected items: {selected}")
         return selected
 
-    async def load_local_checkpoint(self, checkpoint_path: str = None) -> bool:
+    async def load_local_checkpoint(self, instance, checkpoint_path: str) -> bool:
         """
         Load a local checkpoint file for the validator.
 
@@ -2219,68 +2219,53 @@ class Comms(ChainManager):
         Returns:
             bool: True if checkpoint was successfully loaded, False otherwise
         """
-        if checkpoint_path is None:
-            checkpoint_path = os.path.join(
-                self.comms.save_location, f"local_checkpoint-{tplr.__version__}.pt"
-            )
-
         try:
             if not os.path.exists(checkpoint_path):
                 tplr.logger.warning(f"Local checkpoint not found at {checkpoint_path}")
                 return False
 
             tplr.logger.info(f"Loading local checkpoint from {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=self.config.device)
+            checkpoint = torch.load(checkpoint_path, map_location=instance.config.device)
 
             # Load model weights
             if "model_state_dict" in checkpoint:
-                self.model.load_state_dict(checkpoint["model_state_dict"])
+                instance.model.load_state_dict(checkpoint["model_state_dict"])
                 tplr.logger.info("Loaded model state from local checkpoint")
             else:
                 tplr.logger.warning("No model state found in checkpoint")
 
             # Load momentum
             if "momentum" in checkpoint:
-                self.momentum = checkpoint["momentum"]
+                instance.momentum = checkpoint["momentum"]
                 tplr.logger.info("Loaded momentum from local checkpoint")
             else:
                 tplr.logger.warning("No momentum found in checkpoint")
-                self.momentum = {
-                    n: torch.zeros_like(p) for n, p in self.model.named_parameters()
+                instance.momentum = {
+                    n: torch.zeros_like(p) for n, p in instance.model.named_parameters()
                 }
 
             # Load optimizer state
             if "optimizer_state_dict" in checkpoint:
-                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                instance.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
                 tplr.logger.info("Loaded optimizer state from local checkpoint")
             else:
                 tplr.logger.warning("No optimizer state found in checkpoint")
 
             # Load scheduler state
             if "scheduler_state_dict" in checkpoint:
-                self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                instance.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
                 tplr.logger.info("Loaded scheduler state from local checkpoint")
             else:
                 tplr.logger.warning("No scheduler state found in checkpoint")
 
             # Load global step information
             if "global_step" in checkpoint:
-                self.global_step = checkpoint["global_step"]
-                tplr.logger.info(f"Loaded global_step: {self.global_step}")
+                instance.global_step = checkpoint["global_step"]
+                tplr.logger.info(f"Loaded global_step: {instance.global_step}")
             else:
                 tplr.logger.warning("No global_step found in checkpoint, using default")
 
-            # Load window information for alignment
-            if "window" in checkpoint:
-                checkpoint_window = checkpoint["window"]
-                tplr.logger.info(f"Checkpoint was saved at window: {checkpoint_window}")
-
-                # Calculate start window based on current window and global step
-                if checkpoint_window is not None and self.global_step is not None:
-                    self.start_window = self.current_window - self.global_step
-                    tplr.logger.info(f"Calculated start_window: {self.start_window}")
-
-            self.model.to(self.config.device)
+            instance.model.to(instance.config.device)
             tplr.logger.info(
                 f"Successfully loaded local checkpoint from {checkpoint_path}"
             )
@@ -2288,5 +2273,4 @@ class Comms(ChainManager):
 
         except Exception as e:
             tplr.logger.error(f"Failed to load local checkpoint: {str(e)}")
-            tplr.logger.debug(traceback.format_exc())
             return False

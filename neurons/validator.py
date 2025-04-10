@@ -286,7 +286,10 @@ class Validator:
         self.comms.peers = np.array([uid for uid in all_uids if uid not in [0, 1]])
 
         tplr.logger.info("Loaded commitments")
-        await self.comms.load_local_checkpoint("/home/shadeform/checkpoints/demo_checkpoint_window_1500_20250407_141745.pt")
+        await self.comms.load_local_checkpoint(
+            self,
+            "/home/shadeform/checkpoints/demo_checkpoint_window_1500_20250407_141745.pt",
+        )
 
         # Only post start window if you are the highest stake validator
         if self.uid == self.metagraph.S.argmax().item():

@@ -224,8 +224,11 @@ class Miner:
 
         self.comms.commitments = await self.comms.get_commitments()
         tplr.logger.info("Loaded commitments")
-        
-        await self.comms.load_local_checkpoint("/home/shadeform/checkpoints/demo_checkpoint_window_1500_20250407_141745.pt")
+
+        await self.comms.load_local_checkpoint(
+            self,
+            "/home/shadeform/checkpoints/demo_checkpoint_window_1500_20250407_141745.pt",
+        )
 
         # Fetch start_window from highest stake validator
         self.start_window = await self.comms.get_start_window()

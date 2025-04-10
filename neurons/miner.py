@@ -446,12 +446,6 @@ class Miner:
             # Refresh the peers list immediately before gathering
             tplr.logger.info("Refreshing peers before gather task...")
 
-            if self.config.test:
-                # In test mode, use all UIDs from metagraph except self
-                tplr.logger.info("Test mode active: Using all peers from metagraph.")
-                all_uids = list(range(len(self.metagraph.S)))
-                self.comms.peers = [uid for uid in all_uids if uid != self.uid]
-
             tplr.logger.info(f"Final peers for gather: {self.comms.peers}")
 
             gather_start = tplr.T()
@@ -574,37 +568,6 @@ class Miner:
                     f"{tplr.P(step_window, tplr.T() - window_start)} Completed window iteration"
                 )
 
-            # Add debug data including successfully gathered peers
-            debug_dict = {}
-
-            # Add model parameters debug info
-            for name, param in self.model.named_parameters():
-                if (
-                    param is not None and param.numel() >= 2
-                ):  # Check if tensor has at least 2 elements
-                    debug_dict[name + "_debug"] = (
-                        param.flatten()[10:12].detach().cpu().tolist()
-                    )
-
-            # Add successful peers information
-            if gather_result is not None:
-                debug_dict["successful_peers"] = sorted(
-                    list(set(self.comms.peers) - set(gather_result.skipped_uids))
-                )
-                debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
-
-            # Store the debug dictionary
-            asyncio.create_task(
-                self.comms.put(
-                    state_dict=debug_dict,
-                    uid=str(self.uid),
-                    window=step_window,
-                    key="debug",
-                    local=False,
-                )
-            )
-            tplr.logger.info(f"Stored debug values for window {self.current_window}")
-            # Log total window time and metrics
             tplr.logger.info(
                 f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"
             )
@@ -695,27 +658,6 @@ class Miner:
             self.global_step += 1
             self.window_step += 1
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
-
-            # Save checkpoint logic
-            if self.global_step % self.hparams.checkpoint_frequency == 0:
-                tplr.logger.info(
-                    f"Creating checkpoint at global_step {self.global_step}"
-                )
-
-                # asyncio checkpoint saving task
-                asyncio.create_task(
-                    self.comms.save_checkpoint(
-                        model=self.model,
-                        optimizer=self.optimizer,
-                        scheduler=self.scheduler,
-                        momentum=self.momentum,
-                        global_step=self.global_step,
-                        current_window=self.current_window,
-                        start_window=self.start_window,
-                    )
-                )
-            else:
-                tplr.logger.info("Skipping checkpoint save this round")
 
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")

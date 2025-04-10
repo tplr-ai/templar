@@ -24,7 +24,6 @@ import random
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
 from typing import cast
 
 import bittensor as bt
@@ -32,7 +31,6 @@ import numpy as np
 import torch
 
 # Third party
-from bittensor.core.subtensor import ScaleObj
 from torch import autocast
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
@@ -281,7 +279,6 @@ class Miner:
             tplr.logger.info(
                 f"Starting catchup from start window {self.start_window} to current window {self.current_window})..."
             )
-            await tplr.neurons.catchup_with_aggregation_server(self, self.start_window)
 
         while True:
             # 1. Initialize window and update peers
@@ -535,7 +532,6 @@ class Miner:
                 sum(momentum_norms) / len(momentum_norms) if momentum_norms else 0
             )
             window_total_time = tplr.T() - window_start
-            peer_update_time = tplr.T() - peer_start
             data_loading_time = tplr.T() - data_start
             training_time = tplr.T() - train_start
             compression_time = tplr.T() - compress_start
@@ -549,7 +545,6 @@ class Miner:
                 {
                     # Add timing metrics
                     "miner/timing/window_total": window_total_time,
-                    "miner/timing/peer_update": peer_update_time,
                     "miner/timing/data_loading": data_loading_time,
                     "miner/timing/training": training_time,
                     "miner/timing/compression": compression_time,
@@ -598,7 +593,6 @@ class Miner:
                         else []
                     ),
                     "window_total_time": window_total_time,
-                    "peer_update_time": peer_update_time,
                     "compression_time": compression_time,
                     "gather_time": gather_time,
                     "put_time": put_completion_time,

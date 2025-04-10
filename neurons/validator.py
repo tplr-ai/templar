@@ -346,7 +346,6 @@ class Validator:
             tplr.logger.info(f"Current gather peers: {self.comms.peers}")
 
             # Log the time window we're using
-            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
             tplr.logger.info(f"We are using peers {self.comms.peers}")
 
             # Refresh peers explicitly before starting gather to avoid missing updated active peers.
@@ -396,14 +395,12 @@ class Validator:
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
 
-                eval_result = await self.comms.get(
+                eval_result = await self.comms.get_from_disk(
                     uid=str(eval_uid),
                     window=self.sync_window,
                     key="gradient",
                     local=False,
                     stale_retention=10,
-                    time_max=time_max,
-                    time_min=time_min,
                 )
 
                 scoring_start = tplr.T()

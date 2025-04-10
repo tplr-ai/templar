@@ -994,7 +994,6 @@ class Comms(ChainManager):
         uid: int,
         window: int,
         key: str,
-        timeout: int,
         local: bool = True,
         stale_retention: int = 10,
         time_min: datetime = None,
@@ -1176,7 +1175,6 @@ class Comms(ChainManager):
                 uid=uid,
                 window=window,
                 key=key,
-                timeout=timeout,
                 local=local,
                 stale_retention=stale_retention,
                 time_min=time_min,
@@ -2225,7 +2223,9 @@ class Comms(ChainManager):
                 return False
 
             tplr.logger.info(f"Loading local checkpoint from {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=instance.config.device)
+            checkpoint = torch.load(
+                checkpoint_path, map_location=instance.config.device
+            )
 
             # Load model weights
             if "model_state_dict" in checkpoint:

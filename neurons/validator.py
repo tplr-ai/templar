@@ -230,19 +230,13 @@ class Validator:
         self.valid_score_indices = []
 
         # Caching
-        self.state_path = f"validator-state-{tplr.__version__}.npz"
-        if os.path.isfile(self.state_path):
-            self.load_state()
-        else:
-            self.gradient_scores = torch.zeros(256, dtype=torch.float32)
-            self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
-            self.gradient_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
-            self.final_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
-            self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
-            self.weights = torch.zeros(256, dtype=torch.float32)
-            self.normalised_binary_moving_averages = torch.zeros(
-                256, dtype=torch.float32
-            )
+        self.gradient_scores = torch.zeros(256, dtype=torch.float32)
+        self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
+        self.gradient_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
+        self.final_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
+        self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
+        self.weights = torch.zeros(256, dtype=torch.float32)
+        self.normalised_binary_moving_averages = torch.zeros(256, dtype=torch.float32)
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -521,6 +515,7 @@ class Validator:
                             outputs = model_own_data_eval(
                                 input_ids=input_ids, labels=labels
                             )
+                            tplr.logger.info(f"Loss {outputs.loss.item()} [Batch: {i}]")
                             loss_before_own += outputs.loss.item()
                             n_batches += 1
                             del input_ids, labels, outputs
@@ -633,6 +628,7 @@ class Validator:
                             outputs = model_own_data_eval(
                                 input_ids=input_ids, labels=labels
                             )
+                            tplr.logger.info(f"Loss {outputs.loss.item()} [Batch: {i}]")
                             loss_after_own += outputs.loss.item()
                             n_batches += 1
                             del input_ids, labels, outputs
@@ -752,6 +748,7 @@ class Validator:
                             outputs = model_random_data_eval(
                                 input_ids=input_ids, labels=labels
                             )
+                            tplr.logger.info(f"Loss {outputs.loss.item()} [Batch: {i}]")
                             loss_before_random += outputs.loss.item()
                             n_batches += 1
                             del input_ids, labels, outputs
@@ -820,6 +817,7 @@ class Validator:
                             outputs = model_random_data_eval(
                                 input_ids=input_ids, labels=labels
                             )
+                            tplr.logger.info(f"Loss {outputs.loss.item()} [Batch: {i}]")
                             loss_after_random += outputs.loss.item()
                             n_batches += 1
                             del input_ids, labels, outputs

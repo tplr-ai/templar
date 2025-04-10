@@ -999,82 +999,144 @@ class Comms(ChainManager):
         stale_retention: int = 10,
         time_min: datetime = None,
         time_max: datetime = None,
+        max_retries: int = 3,
+        retry_delay: float = 1,
+        jitter: float = 0.2,
     ) -> Optional[Tuple[Dict[str, torch.Tensor], int]]:
-        """Retrieve gradients from local disk storage."""
-        try:
-            # Construct the path to the user's gradient directory
-            base_dir = os.path.join(self.storage_path, str(uid), str(window), key)
+        """
+        Retrieve gradients from local disk storage with retry mechanism.
 
-            if not os.path.exists(base_dir):
-                tplr.logger.debug(f"No gradient directory found for UID {uid}")
-                return None
+        Args:
+            uid: User ID to fetch gradient from
+            window: Training window
+            key: Type of data to retrieve
+            timeout: Request timeout in seconds
+            local: Whether to use local storage
+            stale_retention: Number of windows to keep before cleanup
+            time_min: Minimum time for filtering gradients
+            time_max: Maximum time for filtering gradients
+            max_retries: Maximum number of retries
+            retry_delay: Base delay between retries in seconds
+            jitter: Random jitter factor to add to retry delay
 
-            # List all gradient files in the directory
-            all_files = os.listdir(base_dir)
-            gradient_files = [f for f in all_files if f.endswith(".pt")]
+        Returns:
+            Tuple of (state_dict, global_step) or None if not found after retries
+        """
+        retry_count = 0
+        last_error = None
 
-            if not gradient_files:
-                tplr.logger.debug(f"No gradient files found for UID {uid}")
-                return None
-
-            # Sort by timestamp to get the most recent
-            gradient_files.sort(reverse=True)
-
-            # Apply time filters if provided
-            valid_files = []
-            for file_name in gradient_files:
-                # Extract timestamp from filename (assuming format like "gradient_TIMESTAMP.pt")
-                try:
-                    timestamp_str = file_name.split("_")[1].split(".")[0]
-                    file_time = datetime.fromtimestamp(float(timestamp_str))
-
-                    # Check if the file is within the time window
-                    if time_min and file_time < time_min:
-                        continue
-                    if time_max and file_time > time_max:
-                        continue
-
-                    valid_files.append((file_name, file_time))
-                except (IndexError, ValueError):
-                    tplr.logger.warning(
-                        f"Could not parse timestamp from filename: {file_name}"
-                    )
-                    continue
-
-            if not valid_files:
-                tplr.logger.debug(f"No gradient files within time window for UID {uid}")
-                return None
-
-            # Use the most recent valid file
-            latest_file, _ = valid_files[0]
-            file_path = os.path.join(base_dir, latest_file)
-
-            # Load the state dict and metadata
+        while retry_count <= max_retries:
             try:
-                state_dict = torch.load(file_path)
+                # Log retry attempts (not for the first attempt)
+                if retry_count > 0:
+                    tplr.logger.debug(
+                        f"Retry {retry_count}/{max_retries} for get_from_disk UID {uid}"
+                    )
 
-                # Load metadata (assuming it's stored in a companion JSON file)
-                metadata_path = file_path.replace(".pt", ".json")
-                if os.path.exists(metadata_path):
-                    with open(metadata_path, "r") as f:
-                        metadata = json.load(f)
-                    global_step = metadata.get("global_step", 0)
-                else:
-                    # Default global step if metadata file doesn't exist
-                    global_step = 0
+                # Construct the path to the user's gradient directory
+                base_dir = os.path.join(self.storage_path, str(uid), str(window), key)
 
-                tplr.logger.debug(
-                    f"Successfully loaded gradient from {file_path} for UID {uid}"
-                )
-                return state_dict, global_step
+                if not os.path.exists(base_dir):
+                    tplr.logger.debug(f"No gradient directory found for UID {uid}")
+                    return None  # Don't retry if directory doesn't exist
+
+                # List all gradient files in the directory
+                all_files = os.listdir(base_dir)
+                gradient_files = [f for f in all_files if f.endswith(".pt")]
+
+                if not gradient_files:
+                    tplr.logger.debug(f"No gradient files found for UID {uid}")
+                    return None  # Don't retry if no files exist
+
+                # Sort by timestamp to get the most recent
+                gradient_files.sort(reverse=True)
+
+                # Apply time filters if provided
+                valid_files = []
+                for file_name in gradient_files:
+                    # Extract timestamp from filename (assuming format like "gradient_TIMESTAMP.pt")
+                    try:
+                        timestamp_str = file_name.split("_")[1].split(".")[0]
+                        file_time = datetime.fromtimestamp(float(timestamp_str))
+
+                        # Check if the file is within the time window
+                        if time_min and file_time < time_min:
+                            continue
+                        if time_max and file_time > time_max:
+                            continue
+
+                        valid_files.append((file_name, file_time))
+                    except (IndexError, ValueError):
+                        tplr.logger.warning(
+                            f"Could not parse timestamp from filename: {file_name}"
+                        )
+                        continue
+
+                if not valid_files:
+                    tplr.logger.debug(
+                        f"No gradient files within time window for UID {uid}"
+                    )
+                    return None  # Don't retry if no valid files exist
+
+                # Use the most recent valid file
+                latest_file, _ = valid_files[0]
+                file_path = os.path.join(base_dir, latest_file)
+
+                try:
+                    # This is where failures often happen (file I/O)
+                    state_dict = torch.load(file_path)
+
+                    # Load metadata (assuming it's stored in a companion JSON file)
+                    metadata_path = file_path.replace(".pt", ".json")
+                    if os.path.exists(metadata_path):
+                        with open(metadata_path, "r") as f:
+                            metadata = json.load(f)
+                        global_step = metadata.get("global_step", 0)
+                    else:
+                        # Default global step if metadata file doesn't exist
+                        global_step = 0
+
+                    tplr.logger.debug(
+                        f"Successfully loaded gradient from {file_path} for UID {uid}"
+                    )
+                    return state_dict, global_step
+
+                except Exception as e:
+                    # This is a retryable error - file exists but couldn't be loaded
+                    tplr.logger.warning(f"Error loading gradient for UID {uid}: {e}")
+                    last_error = e
+                    # Continue to retry logic
 
             except Exception as e:
-                tplr.logger.error(f"Error loading gradient for UID {uid}: {e}")
-                return None
+                # General error in the function
+                tplr.logger.warning(f"Error in get_from_disk for UID {uid}: {e}")
+                last_error = e
+                # Continue to retry logic
 
-        except Exception as e:
-            tplr.logger.error(f"Error in get_from_disk for UID {uid}: {e}")
-            return None
+            # If we get here, we need to retry
+            retry_count += 1
+
+            # Stop if we've reached max retries
+            if retry_count > max_retries:
+                break
+
+            # Calculate backoff with jitter
+            delay = retry_delay * (2 ** (retry_count - 1))
+            jitter_amount = random.uniform(0, jitter * delay)
+            total_delay = delay + jitter_amount
+
+            tplr.logger.debug(f"Waiting {total_delay:.2f}s before retry for UID {uid}")
+            await asyncio.sleep(total_delay)
+
+        # If we get here, all retries failed
+        if retry_count > 0:  # Only log this if we actually tried retries
+            tplr.logger.error(
+                f"All {max_retries + 1} attempts failed for get_from_disk UID {uid}"
+            )
+            if last_error:
+                tplr.logger.error(f"Last error: {str(last_error)}")
+
+        return None
 
     async def gather(
         self,

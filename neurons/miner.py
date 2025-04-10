@@ -220,7 +220,7 @@ class Miner:
 
         all_uids = list(range(len(self.metagraph.S)))
         # Use config peers if provided
-        self.comms.peers = np.array([uid for uid in all_uids if uid != 1])
+        self.comms.peers = np.array([uid for uid in all_uids if uid != 1 or uid != 0])
         if self.config.peers:
             self.comms.peers = self.config.peers
 

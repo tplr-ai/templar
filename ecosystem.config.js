@@ -26,7 +26,7 @@ module.exports = {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
-            args: `--wallet.name validator --wallet.hotkey default --device cpu --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}"`
+            args: `--wallet.name validator --wallet.hotkey default --device cuda:3 --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}"`
         }
     ]
 }

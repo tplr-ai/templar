@@ -286,6 +286,7 @@ class Validator:
         self.comms.peers = np.array([uid for uid in all_uids if uid not in [0, 1]])
 
         tplr.logger.info("Loaded commitments")
+        await self.comms.load_local_checkpoint("/home/shadeform/checkpoints/demo_checkpoint_window_1500_20250407_141745.pt")
 
         # Only post start window if you are the highest stake validator
         if self.uid == self.metagraph.S.argmax().item():
@@ -317,49 +318,6 @@ class Validator:
                 f"Using start_window: {self.start_window}, global_step: {self.global_step}"
             )
 
-        # Proceed to load checkpoint
-        (
-            success,
-            loaded_momentum,
-            loaded_checkpoint_window,
-            loaded_optimizer,
-            loaded_scheduler,
-        ) = await self.comms.load_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
-            current_window=self.current_window,
-            device=self.config.device,
-        )
-        if success:
-            self.momentum = loaded_momentum
-            self.global_step = loaded_checkpoint_window - self.start_window
-            self.optimizer = loaded_optimizer
-            self.scheduler = loaded_scheduler
-            tplr.logger.info(
-                f"Loaded checkpoint with global_step={self.global_step}, "
-                f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
-                f"scheduler_step={self.scheduler.last_epoch}"
-            )
-            # Only catch up if we're behind
-            if loaded_checkpoint_window < self.current_window:
-                tplr.logger.info(
-                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
-                )
-                await tplr.neurons.catchup_with_aggregation_server(
-                    self, loaded_checkpoint_window
-                )
-            else:
-                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
-
-        else:
-            tplr.logger.info("Starting from scratch")
-            self.momentum = {
-                n: torch.zeros_like(p) for n, p in self.model.named_parameters()
-            }
-            self.model.to(self.config.device)
-
-        time_min = None
         while True:
             # 1. Wait for the validator window offset
             while self.sync_window >= (

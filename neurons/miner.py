@@ -224,6 +224,8 @@ class Miner:
 
         self.comms.commitments = await self.comms.get_commitments()
         tplr.logger.info("Loaded commitments")
+        
+        await self.comms.load_local_checkpoint("/home/shadeform/checkpoints/demo_checkpoint_window_1500_20250407_141745.pt")
 
         # Fetch start_window from highest stake validator
         self.start_window = await self.comms.get_start_window()
@@ -231,52 +233,6 @@ class Miner:
 
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
-
-        # Proceed to load checkpoint
-        (
-            success,
-            loaded_momentum,
-            loaded_checkpoint_window,
-            loaded_optimizer,
-            loaded_scheduler,
-        ) = await self.comms.load_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
-            current_window=self.current_window,
-            device=cast(str, self.config.device),
-        )
-        if success:
-            self.momentum = loaded_momentum
-            self.global_step = loaded_checkpoint_window - self.start_window
-            self.optimizer = loaded_optimizer
-            self.scheduler = loaded_scheduler
-            tplr.logger.info(
-                f"Loaded checkpoint with global_step={self.global_step}, "
-                f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
-                f"scheduler_step={self.scheduler.last_epoch}"
-            )
-            # Only catch up if we're behind
-            if loaded_checkpoint_window < self.current_window:
-                tplr.logger.info(
-                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
-                )
-                await tplr.neurons.catchup_with_aggregation_server(
-                    self, loaded_checkpoint_window
-                )
-            else:
-                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
-        else:
-            tplr.logger.info("No checkpoint found, initializing model from scratch")
-            self.momentum = {
-                n: torch.zeros_like(p) for n, p in self.model.named_parameters()
-            }
-            self.model.to(self.config.device)  # type: ignore
-
-            # Catch up with aggregation server from start window.
-            tplr.logger.info(
-                f"Starting catchup from start window {self.start_window} to current window {self.current_window})..."
-            )
 
         while True:
             # 1. Initialize window and update peers

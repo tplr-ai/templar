@@ -359,7 +359,11 @@ class Evaluator:
             results = json.load(f)
 
         for task_name, task_results in results["results"].items():
-            metric_name = "acc_norm,none" if task_name != "winogrande" else "acc,none"
+            metric_name = (
+                "acc_norm,none"
+                if task_name not in ["winogrande", "mmlu"]
+                else "acc,none"
+            )
             if (metric_value := task_results.get(metric_name)) is not None:
                 tplr.logger.info(f"Benchmark for {task_name}: {metric_value}")
                 self.metrics_logger.log(

@@ -431,33 +431,27 @@ class Validator:
             success_rate = 0.0
             gather_result = None
             # TODO: make load from disc
-            aggregation_result = await self.comms.load_aggregation(self.sync_window)
-            if aggregation_result is None:
-                gather_result = await self.comms.gather(
-                    my_uid=self.uid,
-                    uids=self.comms.peers,
-                    window=self.sync_window,
-                    key="gradient",
-                    timeout=35,
-                    device=self.config.device,
-                    local=False,
-                    totalks=self.totalks,
-                    time_min=time_min,
-                    time_max=time_max,
-                )
+            gather_result = await self.comms.gather(
+                my_uid=self.uid,
+                uids=self.comms.peers,
+                window=self.sync_window,
+                key="gradient",
+                timeout=35,
+                device=self.config.device,
+                local=False,
+                totalks=self.totalks,
+                time_min=time_min,
+                time_max=time_max,
+            )
 
-                if gather_result is None:
-                    tplr.logger.error(
-                        "Failed to gather gradients from peers. Waiting for next window."
-                    )
-                    self.global_step += 1
-                    continue
-                skipped_uids = gather_result.skipped_uids
-                success_rate = gather_result.success_rate
-            else:
-                state_dict = cast(dict, aggregation_result.get("state_dict"))
-                skipped_uids = cast(list[int], state_dict.get("skipped_uids", []))
-                success_rate = cast(float, state_dict.get("success_rate", 0.0))
+            if gather_result is None:
+                tplr.logger.error(
+                    "Failed to gather gradients from peers. Waiting for next window."
+                )
+                self.global_step += 1
+                continue
+            skipped_uids = gather_result.skipped_uids
+            success_rate = gather_result.success_rate
             gather_time = tplr.T() - gather_start
 
             tplr.logger.info(f"Skipped UIDs: {skipped_uids}")
@@ -1174,9 +1168,7 @@ class Validator:
             for n, p in self.model.named_parameters():
                 p.data.mul_(1.0 - lr * self.hparams.weight_decay)
 
-            if aggregation_result is not None:
-                self.apply_aggregated_gradients(aggregation_result=aggregation_result)
-            elif gather_result is not None and gather_result.state_dict is not None:
+            if gather_result is not None and gather_result.state_dict is not None:
                 self.apply_gathered_gradients(gather_result=gather_result)
             else:
                 tplr.logger.warning("No gradients to apply.")
@@ -1255,66 +1247,6 @@ class Validator:
 
             # 18. Increment global step
             self.global_step += 1
-
-    def apply_aggregated_gradients(self, aggregation_result: dict):
-        """
-        Apply aggregated gradients from the aggregation server.
-        Args:
-            aggregation_result: Pre-loaded aggregation data from the aggregation server.
-        Returns:
-            bool: True if aggregation was successfully applied, False otherwise
-        """
-        try:
-            update_start = time.time()
-
-            state_dict = aggregation_result.get("state_dict")
-            if state_dict is None:
-                tplr.logger.warning("No state_dict found in aggregation result")
-                return False
-
-            tensors_applied = 0
-
-            for name, param in self.model.named_parameters():
-                if name in state_dict:
-                    packed_tensor = state_dict[name]
-                    if packed_tensor is None:
-                        continue
-
-                    # Unpack binary tensor
-                    unpacked_tensor = tplr.neurons.unpack_binary_tensor(
-                        packed_tensor, param.shape
-                    )
-
-                    # Move to appropriate device
-                    unpacked_tensor = unpacked_tensor.to(self.config.device)
-
-                    # Set as gradient for optimizer
-                    if param.grad is None:
-                        param.grad = unpacked_tensor
-                    else:
-                        param.grad.copy_(unpacked_tensor)
-
-                    tensors_applied += 1
-
-            if tensors_applied > 0:
-                tplr.logger.info(
-                    f"Set gradients for {tensors_applied} tensors in {time.time() - update_start:.2f}s"
-                )
-
-                # Update parameters with optimizer
-                self.optimizer.step()
-                self.scheduler.step()
-                torch.cuda.empty_cache()
-
-                tplr.logger.info("Successfully applied aggregation")
-                return True
-            else:
-                tplr.logger.warning("No tensors were applied during aggregation")
-                return False
-
-        except Exception as e:
-            tplr.logger.error(f"Error applying aggregated gradients: {e}")
-            return False
 
     def apply_gathered_gradients(self, gather_result: SimpleNamespace):
         """

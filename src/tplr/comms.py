@@ -20,6 +20,7 @@ import random
 import re
 import math
 import json
+import shutil
 import time
 from aiobotocore.client import AioBaseClient
 from botocore.exceptions import ClientError, ConnectionClosedError
@@ -689,6 +690,146 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error in download_large_file for {key}: {e}")
             return False
 
+    async def put_to_disk(
+        self,
+        state_dict: dict,
+        uid: str | None,
+        window: int,
+        key: Literal["checkpoint", "debug", "gradient", "aggregator"],
+        global_step: int = 0,
+        stale_retention: int = 10,
+    ) -> float:
+        """
+        Saves the data to local disk storage with organization by uid, window, and key.
+
+        Args:
+            state_dict (dict): Data to save.
+            uid (str): Target user/miner identifier.
+            window (int): Current training window.
+            key (str): Label for the data (e.g., "gradient").
+            global_step (int, optional): Global step counter. Defaults to 0.
+            stale_retention (int, optional): Number of windows to keep before cleanup. Defaults to 10.
+
+        Returns:
+            float: The elapsed time (in seconds) for the PUT operation.
+        """
+        start_time = time.time()
+        timestamp = datetime.now().timestamp()
+
+        # Create base filename
+        if key == "aggregator":
+            base_filename = f"{key}_{timestamp}"
+        else:
+            base_filename = f"{key}_{timestamp}"
+
+        # Create directory structure
+        base_dir = os.path.join(self.storage_path, str(uid), str(window), key)
+        os.makedirs(base_dir, exist_ok=True)
+
+        # Paths for PyTorch state dict and metadata
+        pt_path = os.path.join(base_dir, f"{base_filename}.pt")
+        json_path = os.path.join(base_dir, f"{base_filename}.json")
+
+        tplr.logger.debug(f"PUT {base_filename} to {base_dir} -->")
+
+        # Create temp directory
+        temp_dir = os.path.join("/tmp", str(self.uid))
+        os.makedirs(temp_dir, exist_ok=True)
+
+        temp_pt_path = os.path.join(temp_dir, f"temp_{base_filename}.pt")
+        temp_json_path = os.path.join(temp_dir, f"temp_{base_filename}.json")
+
+        try:
+            # Save the state dict to the temp file
+            torch.save(state_dict, temp_pt_path)
+
+            # Save metadata to JSON
+            metadata = {
+                "window": window,
+                "uid": uid,
+                "key": key,
+                "timestamp": timestamp,
+                "global_step": global_step,
+                "version": getattr(self, "version", "1.0.0"),
+            }
+
+            with open(temp_json_path, "w") as f:
+                json.dump(metadata, f)
+
+            # Move files to final location atomically
+            shutil.move(temp_pt_path, pt_path)
+            shutil.move(temp_json_path, json_path)
+
+            # Clean up stale data in the background
+            asyncio.create_task(
+                self.cleanup_disk_data(
+                    uid=uid, current_window=window, stale_retention=stale_retention
+                )
+            )
+
+        except Exception as e:
+            tplr.logger.error(f"Error in put_to_disk: {e}")
+            raise
+
+        finally:
+            # Clean up temp files if they still exist
+            if os.path.exists(temp_pt_path):
+                os.remove(temp_pt_path)
+            if os.path.exists(temp_json_path):
+                os.remove(temp_json_path)
+
+        end_time = time.time()
+        elapsed = end_time - start_time
+
+        tplr.logger.info(f"PUT {base_filename} completed in {elapsed:.4f}s <--")
+
+        return elapsed
+
+    async def cleanup_disk_data(
+        self, uid: str, current_window: int, stale_retention: int = 10
+    ) -> None:
+        """
+        Clean up old data from disk storage.
+
+        Args:
+            uid (str): User identifier.
+            current_window (int): Current training window.
+            stale_retention (int): Number of windows to retain.
+        """
+        try:
+            # Only clean up windows older than (current - retention)
+            retention_threshold = current_window - stale_retention
+
+            if retention_threshold <= 0:
+                return
+
+            user_dir = os.path.join(self.storage_path, str(uid))
+
+            # Skip if user directory doesn't exist
+            if not os.path.exists(user_dir):
+                return
+
+            # List all window directories
+            for window_dir in os.listdir(user_dir):
+                try:
+                    window_num = int(window_dir)
+
+                    # If window is older than retention threshold, remove it
+                    if window_num < retention_threshold:
+                        window_path = os.path.join(user_dir, window_dir)
+                        tplr.logger.debug(
+                            f"Cleaning up stale window {window_num} for UID {uid}"
+                        )
+                        shutil.rmtree(window_path)
+                except (ValueError, OSError) as e:
+                    tplr.logger.warning(
+                        f"Error cleaning up window {window_dir} for UID {uid}: {e}"
+                    )
+                    continue
+
+        except Exception as e:
+            tplr.logger.error(f"Error in cleanup_disk_data for UID {uid}: {e}")
+
     async def put(
         self,
         state_dict: dict,
@@ -701,7 +842,6 @@ class Comms(ChainManager):
     ) -> float:
         """
         Saves the data locally or uploads to S3, then cleans up stale files.
-
         Args:
             state_dict (dict): Data to save.
             uid (str): Target user/miner identifier.
@@ -710,61 +850,19 @@ class Comms(ChainManager):
             global_step (int, optional): Global step counter. Defaults to 0.
             local (bool, optional): If True, store locally; otherwise upload to S3. Defaults to True.
             stale_retention (int, optional): Number of windows to keep before cleanup. Defaults to 10.
-
         Returns:
             float: The elapsed time (in seconds) for the PUT operation.
         """
-        if key == "aggregator":
-            filename = f"{key}-{window}-v{__version__}.pt"
-        else:
-            filename = f"{key}-{window}-{uid}-v{__version__}.pt"
-        tplr.logger.debug(f"PUT {filename} -->")
-
-        put_start = tplr.T()
-
-        # Create per-uid temp directory
-        temp_dir = os.path.join("/tmp", str(self.uid))
-        os.makedirs(temp_dir, exist_ok=True)
-        temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
-
-        try:
-            # Prepare the data to be saved
-            if key == "checkpoint":
-                save_data = state_dict
-            else:
-                save_data = {
-                    "state_dict": state_dict,
-                    "global_step": global_step,
-                }
-
-            # Save to temp file
-            torch.save(save_data, temp_file_path)
-
-            if local:
-                # Local storage with per-uid directories
-                await self.cleanup_local_data(
-                    uid=uid, current_window=window, stale_retention=stale_retention
-                )
-                local_dir = os.path.join(LOCAL_TMP_DIR, str(uid), str(window))
-                os.makedirs(local_dir, exist_ok=True)
-                final_path = os.path.join(local_dir, filename)
-                os.replace(temp_file_path, final_path)
-            else:
-                await self.s3_put_object(filename, temp_file_path)
-                # Remote storage with automatic handling of large files
-                asyncio.create_task(
-                    self.cleanup_s3_data(
-                        uid=uid, current_window=window, stale_retention=stale_retention
-                    )
-                )
-
-        finally:
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-
-        put_end = tplr.T()
-        tplr.logger.info(f"{tplr.P(window, put_end - put_start)} PUT {filename} <--")
-        return put_end - put_start
+        # For this implementation, we'll always use the disk-based version
+        # Ignoring the 'local' parameter since we're fully local now
+        return await self.put_to_disk(
+            state_dict=state_dict,
+            uid=uid,
+            window=window,
+            key=key,
+            global_step=global_step,
+            stale_retention=stale_retention,
+        )
 
     async def get(
         self,
@@ -890,6 +988,93 @@ class Comms(ChainManager):
             # Retry after a short delay
             await asyncio.sleep(0.1)
 
+    async def get_from_disk(
+        self,
+        uid: int,
+        window: int,
+        key: str,
+        timeout: int,
+        local: bool = True,
+        stale_retention: int = 10,
+        time_min: datetime = None,
+        time_max: datetime = None,
+    ) -> Optional[Tuple[Dict[str, torch.Tensor], int]]:
+        """Retrieve gradients from local disk storage."""
+        try:
+            # Construct the path to the user's gradient directory
+            base_dir = os.path.join(self.storage_path, str(uid), str(window), key)
+
+            if not os.path.exists(base_dir):
+                tplr.logger.debug(f"No gradient directory found for UID {uid}")
+                return None
+
+            # List all gradient files in the directory
+            all_files = os.listdir(base_dir)
+            gradient_files = [f for f in all_files if f.endswith(".pt")]
+
+            if not gradient_files:
+                tplr.logger.debug(f"No gradient files found for UID {uid}")
+                return None
+
+            # Sort by timestamp to get the most recent
+            gradient_files.sort(reverse=True)
+
+            # Apply time filters if provided
+            valid_files = []
+            for file_name in gradient_files:
+                # Extract timestamp from filename (assuming format like "gradient_TIMESTAMP.pt")
+                try:
+                    timestamp_str = file_name.split("_")[1].split(".")[0]
+                    file_time = datetime.fromtimestamp(float(timestamp_str))
+
+                    # Check if the file is within the time window
+                    if time_min and file_time < time_min:
+                        continue
+                    if time_max and file_time > time_max:
+                        continue
+
+                    valid_files.append((file_name, file_time))
+                except (IndexError, ValueError):
+                    tplr.logger.warning(
+                        f"Could not parse timestamp from filename: {file_name}"
+                    )
+                    continue
+
+            if not valid_files:
+                tplr.logger.debug(f"No gradient files within time window for UID {uid}")
+                return None
+
+            # Use the most recent valid file
+            latest_file, _ = valid_files[0]
+            file_path = os.path.join(base_dir, latest_file)
+
+            # Load the state dict and metadata
+            try:
+                state_dict = torch.load(file_path)
+
+                # Load metadata (assuming it's stored in a companion JSON file)
+                metadata_path = file_path.replace(".pt", ".json")
+                if os.path.exists(metadata_path):
+                    with open(metadata_path, "r") as f:
+                        metadata = json.load(f)
+                    global_step = metadata.get("global_step", 0)
+                else:
+                    # Default global step if metadata file doesn't exist
+                    global_step = 0
+
+                tplr.logger.debug(
+                    f"Successfully loaded gradient from {file_path} for UID {uid}"
+                )
+                return state_dict, global_step
+
+            except Exception as e:
+                tplr.logger.error(f"Error loading gradient for UID {uid}: {e}")
+                return None
+
+        except Exception as e:
+            tplr.logger.error(f"Error in get_from_disk for UID {uid}: {e}")
+            return None
+
     async def gather(
         self,
         my_uid: int | None,
@@ -904,15 +1089,16 @@ class Comms(ChainManager):
         time_min: datetime = None,
         time_max: datetime = None,
     ) -> Optional[SimpleNamespace]:
-        """Gather operation with individual gradient normalization and connection management."""
+        """Gather operation with individual gradient normalization and connection management,
+        fetching gradients from local disk storage."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
         tplr.logger.debug(
-            f"Starting gather for window {window} with time window: {time_min} to {time_max}"
+            f"Starting local gather for window {window} with time window: {time_min} to {time_max}"
         )
         tplr.logger.debug(
-            f"Gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
+            f"Local gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
         )
         tplr.logger.debug(f"Target UIDs for gathering: {uids}")
 
@@ -921,121 +1107,118 @@ class Comms(ChainManager):
         skipped_uids = []  # Retain UIDs that are skipped.
         global_steps = []
 
-        async with self.client_semaphore:
-            batch_tasks = [
-                self.get_with_retry(
-                    uid=uid,
-                    window=window,
-                    key=key,
-                    timeout=timeout,
-                    local=local,
-                    stale_retention=stale_retention,
-                    time_min=time_min,
-                    time_max=time_max,
-                )
-                for uid in uids
-            ]
+        # For the local version, we don't need the client semaphore since we're accessing the disk
+        batch_tasks = [
+            self.get_from_disk(
+                uid=uid,
+                window=window,
+                key=key,
+                timeout=timeout,
+                local=local,
+                stale_retention=stale_retention,
+                time_min=time_min,
+                time_max=time_max,
+            )
+            for uid in uids
+        ]
 
-            try:
-                batch_responses = await asyncio.gather(
-                    *batch_tasks, return_exceptions=True
-                )
+        try:
+            batch_responses = await asyncio.gather(*batch_tasks, return_exceptions=True)
 
-                for uid, response in zip(uids, batch_responses):
-                    if isinstance(response, Exception):
-                        tplr.logger.debug(f"Error from UID {uid}: {str(response)}")
-                        skipped_uids.append(uid)
-                        continue
-                    if response is None:
-                        tplr.logger.info(f"Skipped UID {uid} - gradient not found.")
-                        skipped_uids.append(uid)
-                        continue
+            for uid, response in zip(uids, batch_responses):
+                if isinstance(response, Exception):
+                    tplr.logger.debug(f"Error from UID {uid}: {str(response)}")
+                    skipped_uids.append(uid)
+                    continue
+                if response is None:
+                    tplr.logger.info(f"Skipped UID {uid} - gradient not found.")
+                    skipped_uids.append(uid)
+                    continue
 
-                    try:
-                        state_dict_resp, global_step_resp = response
-                        tplr.logger.debug(
-                            f"Received state dict and global step {global_step_resp} from UID {uid}"
-                        )
-                    except (TypeError, ValueError) as e:
-                        tplr.logger.debug(f"Invalid response from UID {uid}: {e}")
-                        skipped_uids.append(uid)
-                        continue
+                try:
+                    state_dict_resp, global_step_resp = response
+                    tplr.logger.debug(
+                        f"Received state dict and global step {global_step_resp} from UID {uid}"
+                    )
+                except (TypeError, ValueError) as e:
+                    tplr.logger.debug(f"Invalid response from UID {uid}: {e}")
+                    skipped_uids.append(uid)
+                    continue
 
-                    if state_dict_resp is None:
-                        tplr.logger.debug(f"Empty state dict from UID {uid}")
-                        skipped_uids.append(uid)
-                        continue
+                if state_dict_resp is None:
+                    tplr.logger.debug(f"Empty state dict from UID {uid}")
+                    skipped_uids.append(uid)
+                    continue
 
-                    # ---------- Begin Compressed Indices and Values Check ----------
-                    valid_response = True
-                    for param_name, tensor in state_dict_resp.items():
-                        if param_name.endswith("idxs"):
-                            base_name = param_name[:-4]
-                            totalk = totalks.get(base_name)
-                            if totalk is None:
-                                tplr.logger.warning(
-                                    f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
-                                )
-                                valid_response = False
-                                break
-                            try:
-                                self.check_compressed_indices(
-                                    param_name,
-                                    tensor.to(device),
-                                    totalk,
-                                    allowed_topk=self.hparams.topk_compression,
-                                )
-                            except Exception as e:
-                                tplr.logger.warning(
-                                    f"Compressed indices check failed for parameter {param_name} from UID {uid}: {e}"
-                                )
-                                valid_response = False
-                                break
-                        # Check if values are valid (not NaN, not Inf)
-                        elif param_name.endswith("vals"):
-                            tensor_to_check = tensor.to(device)
-                            if (
-                                torch.isnan(tensor_to_check).any()
-                                or torch.isinf(tensor_to_check).any()
-                            ):
-                                tplr.logger.warning(
-                                    f"NaN/Inf in {param_name} from UID {uid}, skipping"
-                                )
-                                valid_response = False
-                                break
-
-                    # If any check failed, skip this UID entirely
-                    if not valid_response:
-                        tplr.logger.info(
-                            f"Skipping UID {uid} due to validation failures"
-                        )
-                        skipped_uids.append(uid)
-                        continue
-                    # ---------- End Compressed Indices and Values Check ----------
-
-                    # Process tensors (with normalization on 'vals' keys).
-                    for param_name, tensor in state_dict_resp.items():
-                        if isinstance(tensor, torch.Tensor):
-                            if param_name.endswith("vals"):
-                                tensor = tensor.to(device)
-                                norm = torch.norm(tensor)
-                                normalized = tensor / (norm + 1e-8)
-                                aggregated_state_dict.setdefault(param_name, []).append(
-                                    normalized
-                                )
-                            else:
-                                aggregated_state_dict.setdefault(param_name, []).append(
-                                    tensor.to(device)
-                                )
-                            metrics["download_bytes"] += (
-                                tensor.element_size() * tensor.nelement()
+                # ---------- Begin Compressed Indices and Values Check ----------
+                valid_response = True
+                for param_name, tensor in state_dict_resp.items():
+                    if param_name.endswith("idxs"):
+                        base_name = param_name[:-4]
+                        totalk = totalks.get(base_name)
+                        if totalk is None:
+                            tplr.logger.warning(
+                                f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
                             )
+                            valid_response = False
+                            break
+                        try:
+                            self.check_compressed_indices(
+                                param_name,
+                                tensor.to(device),
+                                totalk,
+                                allowed_topk=self.hparams.topk_compression,
+                            )
+                        except Exception as e:
+                            tplr.logger.warning(
+                                f"Compressed indices check failed for parameter {param_name} from UID {uid}: {e}"
+                            )
+                            valid_response = False
+                            break
+                    # Check if values are valid (not NaN, not Inf)
+                    elif param_name.endswith("vals"):
+                        tensor_to_check = tensor.to(device)
+                        if (
+                            torch.isnan(tensor_to_check).any()
+                            or torch.isinf(tensor_to_check).any()
+                        ):
+                            tplr.logger.warning(
+                                f"NaN/Inf in {param_name} from UID {uid}, skipping"
+                            )
+                            valid_response = False
+                            break
 
-                    valid_uids.append(uid)
-                    global_steps.append(global_step_resp)
+                # If any check failed, skip this UID entirely
+                if not valid_response:
+                    tplr.logger.info(f"Skipping UID {uid} due to validation failures")
+                    skipped_uids.append(uid)
+                    continue
+                # ---------- End Compressed Indices and Values Check ----------
 
-            except Exception as e:
-                tplr.logger.error(f"Error processing uid batch: {str(e)}")
+                # Process tensors (with normalization on 'vals' keys).
+                for param_name, tensor in state_dict_resp.items():
+                    if isinstance(tensor, torch.Tensor):
+                        if param_name.endswith("vals"):
+                            tensor = tensor.to(device)
+                            norm = torch.norm(tensor)
+                            normalized = tensor / (norm + 1e-8)
+                            aggregated_state_dict.setdefault(param_name, []).append(
+                                normalized
+                            )
+                        else:
+                            aggregated_state_dict.setdefault(param_name, []).append(
+                                tensor.to(device)
+                            )
+                        # Since we're loading from disk, we estimate the download bytes for metrics
+                        metrics["download_bytes"] += (
+                            tensor.element_size() * tensor.nelement()
+                        )
+
+                valid_uids.append(uid)
+                global_steps.append(global_step_resp)
+
+        except Exception as e:
+            tplr.logger.error(f"Error processing uid batch: {str(e)}")
 
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")
@@ -1043,7 +1226,7 @@ class Comms(ChainManager):
 
         total_time = time.time() - start_time
         tplr.logger.info(
-            f"Gather done in {total_time:.2f}s. Success rate: {len(valid_uids)}/{len(uids)}, "
+            f"Local gather done in {total_time:.2f}s. Success rate: {len(valid_uids)}/{len(uids)}, "
             f"Upload: {metrics['upload_bytes']} bytes, Download: {metrics['download_bytes']} bytes"
         )
 

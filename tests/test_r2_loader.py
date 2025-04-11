@@ -53,9 +53,12 @@ import threading
 import time
 import concurrent.futures
 
+
 # Update DummyFS to accept and store extra keyword arguments.
 class DummyFS:
-    def __init__(self, real_fs=None, fail_times=0, buffer_factory=None, *args, **kwargs):
+    def __init__(
+        self, real_fs=None, fail_times=0, buffer_factory=None, *args, **kwargs
+    ):
         self.real_fs = real_fs
         self.fail_times = fail_times
         self.call_count = 0
@@ -74,11 +77,13 @@ class DummyFS:
             return getattr(self.real_fs, attr)
         raise AttributeError(f"DummyFS has no attribute '{attr}'")
 
+
 # Alias DummyFS for compatibility.
 # DummyFS = DummyFS
 
 # Enable debug logging for tests
 debug()
+
 
 @pytest.mark.asyncio
 async def test_local_parquet_loader():
@@ -273,9 +278,16 @@ async def test_retry_mechanism_success(monkeypatch):
 
     async def dummy_load_r2_metadata():
         return (
-            {dummy_config: {"total_rows": 2, "split": "train", "shards": [dummy_shard]}},
+            {
+                dummy_config: {
+                    "total_rows": 2,
+                    "split": "train",
+                    "shards": [dummy_shard],
+                }
+            },
             {"configs": [{"config_name": dummy_config}]},
         )
+
     monkeypatch.setattr(R2DatasetLoader, "_load_r2_metadata", dummy_load_r2_metadata)
 
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
@@ -298,6 +310,7 @@ async def test_retry_mechanism_failure(monkeypatch):
     With our current implementation, if fs.open always fails,
     _process_page returns an empty list.
     """
+
     def buffer_factory():
         return io.BytesIO(b"")
 
@@ -311,9 +324,16 @@ async def test_retry_mechanism_failure(monkeypatch):
 
     async def dummy_load_r2_metadata():
         return (
-            {dummy_config: {"total_rows": 2, "split": "train", "shards": [dummy_shard]}},
+            {
+                dummy_config: {
+                    "total_rows": 2,
+                    "split": "train",
+                    "shards": [dummy_shard],
+                }
+            },
             {"configs": [{"config_name": dummy_config}]},
         )
+
     monkeypatch.setattr(R2DatasetLoader, "_load_r2_metadata", dummy_load_r2_metadata)
 
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
@@ -430,15 +450,20 @@ async def test_round_robin_sequential(monkeypatch):
     """
     # Override the BUCKET_SECRETS dataset configuration.
     from tplr.config import BUCKET_SECRETS
+
     dummy_bucket1 = {
         "name": "bucket1",
         "account_id": "account1",
-        "credentials": {"read": {"access_key_id": "dummy1", "secret_access_key": "dummy1secret"}},
+        "credentials": {
+            "read": {"access_key_id": "dummy1", "secret_access_key": "dummy1secret"}
+        },
     }
     dummy_bucket2 = {
         "name": "bucket2",
         "account_id": "account2",
-        "credentials": {"read": {"access_key_id": "dummy2", "secret_access_key": "dummy2secret"}},
+        "credentials": {
+            "read": {"access_key_id": "dummy2", "secret_access_key": "dummy2secret"}
+        },
     }
     new_dataset_config = {"multiple": [dummy_bucket1, dummy_bucket2]}
     BUCKET_SECRETS["dataset"] = new_dataset_config
@@ -452,15 +477,23 @@ async def test_round_robin_sequential(monkeypatch):
 
     def dummy_S3FileSystem(*args, **kwargs):
         call_count[0] += 1
-        return DummyFS(real_fs=None, fail_times=0, buffer_factory=lambda: io.BytesIO(b"dummy fs %d" % call_count[0]), **kwargs)
+        return DummyFS(
+            real_fs=None,
+            fail_times=0,
+            buffer_factory=lambda: io.BytesIO(b"dummy fs %d" % call_count[0]),
+            **kwargs,
+        )
 
     import s3fs
+
     monkeypatch.setattr(s3fs, "S3FileSystem", dummy_S3FileSystem)
 
     fs1 = R2DatasetLoader._get_fs()
     fs2 = R2DatasetLoader._get_fs()
     # Ensure that round-robin selected two different FS objects.
-    assert fs1 != fs2, "Round robin should select different filesystem instances when multiple buckets are configured"
+    assert fs1 != fs2, (
+        "Round robin should select different filesystem instances when multiple buckets are configured"
+    )
 
 
 def test_round_robin_single_entry(monkeypatch):
@@ -1033,19 +1066,27 @@ async def test_loader_shutdown(monkeypatch):
     dummy_shard = {"path": "dummy/path", "num_rows": 2}
 
     async def dummy_load_r2_metadata():
-         return (
-             {dummy_config: {"total_rows": 2, "split": "train", "shards": [dummy_shard]}},
-             {"configs": [{"config_name": dummy_config}]},
-         )
+        return (
+            {
+                dummy_config: {
+                    "total_rows": 2,
+                    "split": "train",
+                    "shards": [dummy_shard],
+                }
+            },
+            {"configs": [{"config_name": dummy_config}]},
+        )
+
     monkeypatch.setattr(R2DatasetLoader, "_load_r2_metadata", dummy_load_r2_metadata)
 
     from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained("gpt2")
     if tokenizer.pad_token is None:
-         tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token = tokenizer.eos_token
 
     loader = R2DatasetLoader(
-         batch_size=1, sequence_length=10, tokenizer=tokenizer, pack_samples=False
+        batch_size=1, sequence_length=10, tokenizer=tokenizer, pack_samples=False
     )
     loader.pages = [(dummy_config, 0, "train")]
 

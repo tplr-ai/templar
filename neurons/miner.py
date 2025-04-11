@@ -335,7 +335,9 @@ class Miner:
                 window_tokens = 0  # Initialize token count for this window
 
                 for i, batch in enumerate(loader):
-                    input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
+                    input_ids = torch.tensor(batch, dtype=torch.long).to(
+                        self.model.device
+                    )
                     tokens_this_batch = input_ids.numel()  # Tokens in current batch
                     window_tokens += tokens_this_batch  # Accumulate tokens
                     labels = input_ids.clone()
@@ -343,7 +345,9 @@ class Miner:
                         labels == self.tokenizer.pad_token_id, -100, labels
                     )
 
-                    with autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
+                    with autocast(
+                        device_type=self.model.device.type, dtype=torch.bfloat16
+                    ):
                         outputs = self.model(input_ids=input_ids, labels=labels)
 
                     total_loss += outputs.loss.item()
@@ -418,7 +422,9 @@ class Miner:
                             "Timestamp", "Now", block=sync_block
                         )
                         if response is None or not isinstance(response, ScaleObj):
-                            raise ValueError(f"Could not query timestamp for {sync_block}")
+                            raise ValueError(
+                                f"Could not query timestamp for {sync_block}"
+                            )
                         ts_value = (
                             cast(int, response.value) / 1000
                         )  # convert milliseconds to seconds
@@ -442,14 +448,18 @@ class Miner:
                 )
 
                 # Log the time window we're using
-                tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
+                tplr.logger.info(
+                    f"Using time window for gather: {time_min} to {time_max}"
+                )
 
                 # Refresh the peers list immediately before gathering
                 tplr.logger.info("Refreshing peers before gather task...")
 
                 if self.config.test:
                     # In test mode, use all UIDs from metagraph except self
-                    tplr.logger.info("Test mode active: Using all peers from metagraph.")
+                    tplr.logger.info(
+                        "Test mode active: Using all peers from metagraph."
+                    )
                     all_uids = list(range(len(self.metagraph.S)))
                     self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
@@ -592,7 +602,9 @@ class Miner:
                     debug_dict["successful_peers"] = sorted(
                         list(set(self.comms.peers) - set(gather_result.skipped_uids))
                     )
-                    debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
+                    debug_dict["skipped_peers"] = sorted(
+                        list(gather_result.skipped_uids)
+                    )
 
                 # Store the debug dictionary
                 asyncio.create_task(
@@ -604,7 +616,9 @@ class Miner:
                         local=False,
                     )
                 )
-                tplr.logger.info(f"Stored debug values for window {self.current_window}")
+                tplr.logger.info(
+                    f"Stored debug values for window {self.current_window}"
+                )
                 # Log total window time and metrics
                 tplr.logger.info(
                     f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"
@@ -613,7 +627,9 @@ class Miner:
                 # Calculate common metrics values
                 loss_value = total_loss / n_batches if n_batches > 0 else 0
                 mean_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0
-                grad_norm_std = torch.tensor(grad_norms).std().item() if grad_norms else 0
+                grad_norm_std = (
+                    torch.tensor(grad_norms).std().item() if grad_norms else 0
+                )
                 mean_weight_norm = (
                     sum(weight_norms) / len(weight_norms) if weight_norms else 0
                 )
@@ -650,7 +666,8 @@ class Miner:
                         "miner/global_step": self.global_step,
                         "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
                         / 1024**2,
-                        "miner/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,
+                        "miner/gpu_memory_cached": torch.cuda.memory_reserved()
+                        / 1024**2,
                         "miner/gather_peers": len(self.comms.peers),
                         "miner/effective_batch_size": len(self.comms.peers)
                         * self.hparams.batch_size,
@@ -724,7 +741,9 @@ class Miner:
                     await asyncio.sleep(0.1)
 
             finally:
-                tplr.logger.debug(f"Shutting down dataset loader for window {step_window}")
+                tplr.logger.debug(
+                    f"Shutting down dataset loader for window {step_window}"
+                )
                 await loader.shutdown()
 
     # Listens for new blocks and sets self.current_block and self.current_window

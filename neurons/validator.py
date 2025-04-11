@@ -845,7 +845,9 @@ class Validator:
                             f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}"
                         )
                     finally:
-                        tplr.logger.info(f"Shutting down evaluation dataset loader for UID {eval_uid}")
+                        tplr.logger.info(
+                            f"Shutting down evaluation dataset loader for UID {eval_uid}"
+                        )
                         await loader_own.shutdown()
 
                     state_dict, _ = eval_result
@@ -2338,6 +2340,7 @@ def min_power_normalization(logits, power=2.0, epsilon=1e-8):
         probabilities = torch.zeros_like(powered_logits)
 
     return probabilities
+
 
 def sign_preserving_multiplication(a, b):
     return -abs(a) * abs(b) if a < 0 or b < 0 else a * b

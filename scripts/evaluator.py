@@ -89,7 +89,7 @@ def config() -> bt.Config:
     parser.add_argument(
         "--tasks",
         type=str,
-        default="arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu",
+        default="arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu,mmlu_flan_n_shot_generative",
         help="Comma-separated list of tasks to evaluate",
     )
     parser.add_argument(
@@ -316,14 +316,25 @@ class Evaluator:
         os.makedirs(results_dir, exist_ok=True)
 
         start_time = time.time()
+
+        tasks = self.config.tasks
+        extra_args = ""
+
+        if "mmlu_flan_n_shot_generative" in tasks:  # type: ignore
+            extra_args = "--num_fewshot 5"
+            tplr.logger.info(
+                "Detected mmlu_flan_n_shot_generative task, enabling 5-shot evaluation"
+            )
+
         lm_eval_command = (
             f"lm-eval "
             f"--model hf "
             f"--model_args pretrained={MODEL_PATH},tokenizer={MODEL_PATH} "
-            f"--tasks {self.config.tasks} "
+            f"--tasks {tasks} "
             f"--device {self.config.device} "
             f"--batch_size {self.config.actual_batch_size} "
-            f"--output_path {results_dir}"
+            f"--output_path {results_dir} "
+            f"{extra_args}"
         )
 
         tplr.logger.info(f"Running benchmark command: {lm_eval_command}")
@@ -361,7 +372,8 @@ class Evaluator:
         for task_name, task_results in results["results"].items():
             metric_name = (
                 "acc_norm,none"
-                if task_name not in ["winogrande", "mmlu"]
+                if task_name
+                not in ["winogrande", "mmlu", "mmlu_flan_n_shot_generative"]
                 else "acc,none"
             )
             if (metric_value := task_results.get(metric_name)) is not None:

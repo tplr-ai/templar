@@ -1,0 +1,27 @@
+---
+# Default variables for log-collector role
+
+# User and group settings
+log_collector_user: "loki"
+log_collector_group: "loki"
+log_collector_create_user: false  # Default to false to use existing loki user
+
+# Loki connection settings
+log_collector_loki_url: "http://localhost:3100"
+log_collector_query: '{}'
+log_collector_delay_for: 0
+log_collector_limit: 1000
+
+# R2 storage settings
+log_collector_r2_bucket: "tplr-logs"
+log_collector_r2_endpoint: "https://account-id.r2.cloudflarestorage.com"
+log_collector_r2_region: "auto"
+log_collector_r2_access_key_id: "CHANGE_ME"  # Should be set in vault
+log_collector_r2_secret_access_key: "CHANGE_ME"  # Should be set in vault
+
+# Buffer settings
+log_collector_buffer_size: 100
+log_collector_buffer_timeout: 60
+
+# Debug mode
+log_collector_debug: true

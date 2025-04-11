@@ -86,8 +86,6 @@ storage_config:
     # R2-specific settings
     http_config:
       insecure_skip_verify: false
-    s3forcepathstyle: true
-    s3: {{ loki_r2_endpoint }}
 {% endif %}
 
 # Ingester configuration for handling incoming logs

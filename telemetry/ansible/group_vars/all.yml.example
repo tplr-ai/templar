@@ -81,7 +81,7 @@ nginx_proxy_buffers: "32 4k"
 nginx_use_custom_ssl_cert: false    # Set to true to use custom certificates
 nginx_auto_rotate_cert: true        # Set to true to enable automatic certificate rotation
 nginx_cert_country: "US"            # Country code for self-signed certificate
-nginx_cert_state: "State"           # State for self-signed certificate 
+nginx_cert_state: "State"           # State for self-signed certificate
 nginx_cert_locality: "City"         # Locality for self-signed certificate
 nginx_cert_organization: "Templar"  # Organization name for self-signed certificate
 
@@ -117,6 +117,31 @@ loki_r2_secret_access_key: "your_r2_secret_key"  # Store in vault
 # Add these values to your Python logging config
 loki_python_logging_url: "http{% if nginx_ssl_enabled %}s{% endif %}://{{ loki_domain }}/loki/api/v1/push"
 loki_python_labels: '{job="python-app", env="production"}'
+
+# Fluentd configuration for log archival to R2
+fluentd_enabled: true
+fluentd_http_port: 9880
+fluentd_r2_enabled: true
+fluentd_r2_bucket: "tplr-logs"
+fluentd_r2_endpoint: "https://<account_id>.r2.cloudflarestorage.com"
+fluentd_r2_region: "auto"
+fluentd_collect_loki_logs: true
+fluentd_s3_path_prefix: "logs/version=${version}/year=%Y/month=%m/day=%d/hour=%H/"
+
+# Log collector configuration
+log_collector_enabled: true
+log_collector_user: "{{ loki_user }}"
+log_collector_group: "{{ loki_group }}"
+log_collector_loki_url: "http://localhost:{{ loki_http_listen_port }}"
+log_collector_query: '{service=~"validator"}'
+log_collector_r2_bucket: "tplr-logs"
+log_collector_r2_endpoint: "https://<account_id>.r2.cloudflarestorage.com"
+log_collector_r2_region: "auto"
+log_collector_r2_access_key_id: "your_r2_access_key_id"  # Store in vault
+log_collector_r2_secret_access_key: "your_r2_secret_key"  # Store in vault
+log_collector_buffer_size: 100
+log_collector_buffer_timeout: 60
+log_collector_debug: false
 
 # Verification settings
 fail_on_verification_error: false          # Whether to fail the playbook if verification checks fail

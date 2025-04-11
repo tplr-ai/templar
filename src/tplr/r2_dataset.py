@@ -446,10 +446,11 @@ class R2DatasetLoader(DatasetLoader):
             # Signal completion
             self._processing = False
             try:
-                # Add None to signal end of queue
+                loop = asyncio.get_running_loop()
+                if loop.is_closed():
+                    raise RuntimeError("Event loop is closed")
                 await asyncio.wait_for(self._prefetch_queue.put(None), timeout=1.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception) as e:
-                # Ignore errors when putting to queue during shutdown
+            except (RuntimeError, asyncio.TimeoutError, asyncio.CancelledError, Exception) as e:
                 logger.debug(f"Error finalizing prefetch queue: {e}")
 
     async def _process_page(self, page):

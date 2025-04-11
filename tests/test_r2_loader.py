@@ -6,7 +6,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from pathlib import Path
 from dotenv import load_dotenv
 import io
-import asyncio
 import pyarrow as pa
 import pyarrow.parquet as pq
 import numpy as np
@@ -47,8 +46,6 @@ from transformers import AutoTokenizer
 from tplr.logging import logger, debug, T
 from tplr.r2_dataset import R2DatasetLoader
 from tplr.hparams import load_hparams
-import torch
-import random
 from tplr.r2_dataset import retry_call
 import s3fs
 from tplr.config import BUCKET_SECRETS
@@ -77,8 +74,8 @@ class DummyFS:
             return getattr(self.real_fs, attr)
         raise AttributeError(f"DummyFS has no attribute '{attr}'")
 
-# Alias DummyS3FileSystem for compatibility.
-DummyS3FileSystem = DummyFS
+# Alias DummyFS for compatibility.
+# DummyFS = DummyFS
 
 # Enable debug logging for tests
 debug()
@@ -492,8 +489,8 @@ def test_round_robin_single_entry(monkeypatch):
     R2DatasetLoader._round_robin_index = 0
     R2DatasetLoader._fs_cache = {}
 
-    # Monkey-patch s3fs.S3FileSystem with our DummyS3FileSystem.
-    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+    # Monkey-patch s3fs.S3FileSystem with our DummyFS.
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyFS)
 
     # Action: Call _get_fs() multiple times.
     fs1 = R2DatasetLoader._get_fs()
@@ -554,12 +551,12 @@ def test_configuration_without_multiple(monkeypatch):
     R2DatasetLoader._fs_cache = {}
 
     # Monkey-patch s3fs.S3FileSystem with a dummy implementation.
-    class DummyS3FileSystem:
+    class DummyFS:
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
 
-    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyFS)
 
     # Action: Call _get_fs() and inspect the returned instance.
     fs = R2DatasetLoader._get_fs()
@@ -618,13 +615,13 @@ def test_round_robin_caching(monkeypatch):
     R2DatasetLoader._round_robin_index = 0
     R2DatasetLoader._fs_cache = {}
 
-    # Monkey-patch s3fs.S3FileSystem with DummyS3FileSystem.
-    class DummyS3FileSystem:
+    # Monkey-patch s3fs.S3FileSystem with DummyFS.
+    class DummyFS:
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
 
-    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyFS)
 
     # Action: Call _get_fs() repeatedly (e.g., 6 times to cycle through endpoints).
     fs_instances = [R2DatasetLoader._get_fs() for _ in range(6)]
@@ -710,13 +707,13 @@ def test_round_robin_thread_safety(monkeypatch):
     R2DatasetLoader._round_robin_index = 0
     R2DatasetLoader._fs_cache = {}
 
-    # Monkey-patch s3fs.S3FileSystem with DummyS3FileSystem that records instantiation params.
-    class DummyS3FileSystem:
+    # Monkey-patch s3fs.S3FileSystem with DummyFS that records instantiation params.
+    class DummyFS:
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
 
-    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyFS)
 
     num_threads = 10
     calls_per_thread = 10
@@ -815,13 +812,13 @@ def test_round_robin_high_concurrency(monkeypatch):
     R2DatasetLoader._round_robin_index = 0
     R2DatasetLoader._fs_cache = {}
 
-    # Use the DummyS3FileSystem to record instantiation parameters.
-    class DummyS3FileSystem:
+    # Use the DummyFS to record instantiation parameters.
+    class DummyFS:
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
 
-    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyFS)
 
     total_calls = 200
     results = []
@@ -901,14 +898,14 @@ def test_lock_robustness_simulated_delay(monkeypatch):
     R2DatasetLoader._round_robin_index = 0
     R2DatasetLoader._fs_cache = {}
 
-    # Create a DummyS3FileSystem that delays initialization.
-    class DelayedDummyS3FileSystem:
+    # Create a DummyFS that delays initialization.
+    class DelayedDummyFS:
         def __init__(self, *args, **kwargs):
             time.sleep(0.05)  # Simulated delay
             self.args = args
             self.kwargs = kwargs
 
-    monkeypatch.setattr(s3fs, "S3FileSystem", DelayedDummyS3FileSystem)
+    monkeypatch.setattr(s3fs, "S3FileSystem", DelayedDummyFS)
 
     total_calls = 50
     results = []
@@ -994,12 +991,12 @@ def test_validate_configuration_correctness(monkeypatch):
     R2DatasetLoader._fs_cache = {}
 
     # Dummy S3FileSystem capturing instantiation parameters.
-    class DummyS3FileSystem:
+    class DummyFS:
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
 
-    monkeypatch.setattr(s3fs, "S3FileSystem", DummyS3FileSystem)
+    monkeypatch.setattr(s3fs, "S3FileSystem", DummyFS)
 
     # Call _get_fs() multiple times to get both endpoints.
     instances = [R2DatasetLoader._get_fs() for _ in range(10)]
@@ -1024,3 +1021,39 @@ def test_validate_configuration_correctness(monkeypatch):
         assert region == expected_region, (
             f"Expected region {expected_region}, got {region}"
         )
+
+
+@pytest.mark.asyncio
+async def test_loader_shutdown(monkeypatch):
+    """
+    Ensure that calling loader.shutdown() finalizes resources (like the prefetch queue)
+    while the event loop is still active.
+    """
+    dummy_config = "dummy_config"
+    dummy_shard = {"path": "dummy/path", "num_rows": 2}
+
+    async def dummy_load_r2_metadata():
+         return (
+             {dummy_config: {"total_rows": 2, "split": "train", "shards": [dummy_shard]}},
+             {"configs": [{"config_name": dummy_config}]},
+         )
+    monkeypatch.setattr(R2DatasetLoader, "_load_r2_metadata", dummy_load_r2_metadata)
+
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    if tokenizer.pad_token is None:
+         tokenizer.pad_token = tokenizer.eos_token
+
+    loader = R2DatasetLoader(
+         batch_size=1, sequence_length=10, tokenizer=tokenizer, pack_samples=False
+    )
+    loader.pages = [(dummy_config, 0, "train")]
+
+    # Start prefetching while the event loop is active.
+    await loader._start_prefetching()
+
+    # Now shut down the loader before the event loop is closed.
+    await loader.shutdown()
+
+    # Confirm that the shutdown flag is set.
+    assert not loader._processing, "Loader should be shut down"

@@ -616,7 +616,6 @@ class Validator:
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
             tplr.logger.info(f"We are using peers {self.comms.peers}")
 
-            gather_start = tplr.T()
             # Refresh peers explicitly before starting gather to avoid missing updated active peers.
             tplr.logger.info("Refreshing eval peers before gather task in validator...")
 
@@ -635,6 +634,7 @@ class Validator:
 
             tplr.logger.info(f"Validator gather peers: {self.comms.peers}")
 
+            gather_start = tplr.T()
             skipped_uids: list[int] = []
             success_rate = 0.0
             gather_result = None
@@ -664,7 +664,8 @@ class Validator:
             else:
                 state_dict = cast(dict, aggregation_result.get("state_dict"))
                 skipped_uids = cast(list[int], state_dict.get("skipped_uids", []))
-                success_rate = aggregation_result.get("success_rate", 0.0)
+                success_rate = cast(float, state_dict.get("success_rate", 0.0))
+            gather_time = tplr.T() - gather_start
 
             tplr.logger.info(f"Skipped UIDs: {skipped_uids}")
 
@@ -758,6 +759,10 @@ class Validator:
 
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
 
+            avg_loss_before_per_batch_own = 0.0
+            avg_loss_after_per_batch_own = 0.0
+            avg_loss_before_per_batch_random = 0.0
+            avg_loss_after_per_batch_random = 0.0
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
 
@@ -897,6 +902,7 @@ class Validator:
                     self.loss_before_per_batch_own = (
                         loss_before_own / n_batches if n_batches > 0 else 0
                     )
+                    avg_loss_before_per_batch_own += self.loss_before_per_batch_own
                     tplr.logger.debug(
                         f"Loss before (own data): {self.loss_before_per_batch_own}"
                     )
@@ -1061,6 +1067,7 @@ class Validator:
                     self.loss_after_per_batch_own = (
                         loss_after_own / n_batches if n_batches > 0 else 0
                     )
+                    avg_loss_after_per_batch_own += self.loss_after_per_batch_own
                     tplr.logger.debug(
                         f"Loss after (own data): {self.loss_after_per_batch_own}"
                     )
@@ -1175,6 +1182,9 @@ class Validator:
                     self.loss_before_per_batch_random = (
                         loss_before_random / n_batches if n_batches > 0 else 0
                     )
+                    avg_loss_before_per_batch_random += (
+                        self.loss_before_per_batch_random
+                    )
                     tplr.logger.debug(
                         f"Loss before (random data): {self.loss_before_per_batch_random}"
                     )
@@ -1249,6 +1259,7 @@ class Validator:
                     self.loss_after_per_batch_random = (
                         loss_after_random / n_batches if n_batches > 0 else 0
                     )
+                    avg_loss_after_per_batch_random += self.loss_after_per_batch_random
                     tplr.logger.info(
                         f"Loss after (random data): {self.loss_after_per_batch_random}"
                     )
@@ -1668,12 +1679,17 @@ class Validator:
                 f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
             )
 
+            avg_loss_before_per_batch_own /= len(evaluation_uids)
+            avg_loss_after_per_batch_own /= len(evaluation_uids)
+            avg_loss_before_per_batch_random /= len(evaluation_uids)
+            avg_loss_after_per_batch_random /= len(evaluation_uids)
+
             # 16. Log evaluation metrics once all evaluations are done
             evaluation_metrics = {
-                "validator/loss/own/before": self.loss_before_per_batch_own,
-                "validator/loss/own/after": self.loss_after_per_batch_own,
-                "validator/loss/random/before": self.loss_before_per_batch_random,
-                "validator/loss/random/after": self.loss_after_per_batch_random,
+                "validator/loss/own/before": avg_loss_before_per_batch_own,
+                "validator/loss/own/after": avg_loss_after_per_batch_own,
+                "validator/loss/random/before": avg_loss_before_per_batch_random,
+                "validator/loss/random/after": avg_loss_after_per_batch_random,
                 "validator/loss/own/improvement": self.relative_improvement_own,
                 "validator/loss/random/improvement": self.relative_improvement_random,
                 "validator/network/block": self.current_block,
@@ -1685,7 +1701,7 @@ class Validator:
                 "validator/gather/success_rate": success_rate * 100,
                 "validator/timing/window_total": tplr.T() - window_start,
                 "validator/timing/peer_update": tplr.T() - peer_start,
-                "validator/timing/gather": tplr.T() - gather_start,
+                "validator/timing/gather": gather_time,
                 "validator/timing/evaluation": tplr.T() - eval_start,
                 "validator/timing/model_update": tplr.T() - update_start,
             }
@@ -1702,10 +1718,10 @@ class Validator:
                     "global_step": int(self.global_step),
                 },
                 fields={
-                    "loss_own_before": float(self.loss_before_per_batch_own),
-                    "loss_own_after": float(self.loss_after_per_batch_own),
-                    "loss_random_before": float(self.loss_before_per_batch_random),
-                    "loss_random_after": float(self.loss_after_per_batch_random),
+                    "loss_own_before": float(avg_loss_before_per_batch_own),
+                    "loss_own_after": float(avg_loss_after_per_batch_own),
+                    "loss_random_before": float(avg_loss_before_per_batch_random),
+                    "loss_random_after": float(avg_loss_after_per_batch_random),
                     "loss_own_improvement": float(self.relative_improvement_own),
                     "loss_random_improvement": float(self.relative_improvement_random),
                     "current_block": int(self.current_block),
@@ -1715,7 +1731,7 @@ class Validator:
                     "gather_success_rate": gather_success_rate,
                     "window_total_time": float(tplr.T() - window_start),
                     "peer_update_time": float(tplr.T() - peer_start),
-                    "gather_time": float(tplr.T() - gather_start),
+                    "gather_time": float(gather_time),
                     "evaluation_time": float(tplr.T() - eval_start),
                     "model_update_time": float(tplr.T() - update_start),
                     "total_peers": int(len(self.comms.peers)),
@@ -2244,6 +2260,7 @@ class Validator:
                 final_moving_avg_scores=self.final_moving_avg_scores,
                 binary_moving_averages=self.binary_moving_averages,
                 weights=self.weights,
+                normalised_binary_moving_averages=self.normalised_binary_moving_averages,
             )
         except Exception as e:
             tplr.logger.warning(f"Failed to save validator state: {e}")
@@ -2262,6 +2279,9 @@ class Validator:
             self.final_moving_avg_scores = state["final_moving_avg_scores"]
             self.binary_moving_averages = state["binary_moving_averages"]
             self.weights = state["weights"]
+            self.normalised_binary_moving_averages = state[
+                "normalised_binary_moving_averages"
+            ]
             tplr.logger.info(
                 f"Loaded state from global state {state.global_state}: {state}"
             )

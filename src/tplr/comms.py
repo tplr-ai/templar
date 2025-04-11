@@ -1271,33 +1271,57 @@ class Comms(ChainManager):
 
             pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{__version__}\.pt$")
 
-            response = await s3_client.list_objects_v2(
-                Bucket=bucket.name, Prefix="checkpoint", MaxKeys=1000
-            )
-            if not response.get("Contents"):
-                return None
+            # We’ll track the largest checkpoint window and its key
+            latest_checkpoint = None
+            max_window = -1
 
-            valid_checkpoints = []
-            for obj in response.get("Contents", []):
-                key = obj.get("Key", "")
-                match = pattern.match(key)
-                if match:
-                    valid_checkpoints.append(
-                        {
-                            "key": key,
-                            "window": int(match.group(1)),
-                            "last_modified": obj["LastModified"],
-                        }
-                    )
+            # Continuation token for pagination
+            continuation_token = None
 
-            if valid_checkpoints:
-                latest = max(valid_checkpoints, key=lambda x: int(x["window"]))
-                loaded_data = await self.s3_get_object(key=latest["key"], bucket=bucket)
+            while True:
+                list_kwargs = {
+                    "Bucket": bucket.name,
+                    "Prefix": "checkpoint",
+                }
+                if continuation_token:
+                    list_kwargs["ContinuationToken"] = continuation_token
+
+                response = await s3_client.list_objects_v2(**list_kwargs)
+
+                # If no objects returned, stop checking
+                if not response.get("Contents"):
+                    break
+
+                # Iterate through returned objects to find valid checkpoints
+                for obj in response["Contents"]:
+                    key = obj.get("Key", "")
+                    match = pattern.match(key)
+                    if match:
+                        window_number = int(match.group(1))
+                        if window_number > max_window:
+                            max_window = window_number
+                            latest_checkpoint = key
+
+                # Continue pagination if needed
+                if response.get("IsTruncated"):
+                    continuation_token = response.get("NextContinuationToken")
+                else:
+                    # No more pages
+                    break
+
+            # If we found a valid checkpoint, fetch it
+            if latest_checkpoint:
+                loaded_data = await self.s3_get_object(
+                    key=latest_checkpoint, bucket=bucket
+                )
                 if loaded_data:
-                    return loaded_data, latest["window"]
+                    return loaded_data, max_window
+
             return None
+
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(bucket)
+            return None
 
     async def load_checkpoint(
         self,

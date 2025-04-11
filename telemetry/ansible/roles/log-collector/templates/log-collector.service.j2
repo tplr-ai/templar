@@ -1,0 +1,32 @@
+[Unit]
+Description=Loki to R2 Log Collector
+After=network.target loki.service
+Wants=loki.service
+
+[Service]
+Type=simple
+User={{ log_collector_user }}
+Group={{ log_collector_group }}
+WorkingDirectory=/opt/log-collector
+Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+ExecStart=/bin/bash -c '/usr/bin/uv run /opt/log-collector/log_collector.py \
+  --loki-url={{ log_collector_loki_url }} \
+  --query={{ log_collector_query | default('"{job=~\\".+\\"}"') }} \
+  --r2-bucket={{ log_collector_r2_bucket }} \
+  --r2-endpoint={{ log_collector_r2_endpoint }} \
+  --r2-region={{ log_collector_r2_region | default('auto') }} \
+  --buffer-size={{ log_collector_buffer_size | default(100) }} \
+  --buffer-timeout={{ log_collector_buffer_timeout | default(60) }} \
+  {% if log_collector_debug %}--debug{% endif %}'
+
+Environment="R2_ACCESS_KEY_ID={{ log_collector_r2_access_key_id }}"
+Environment="R2_SECRET_ACCESS_KEY={{ log_collector_r2_secret_access_key }}"
+
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=log-collector
+
+[Install]
+WantedBy=multi-user.target

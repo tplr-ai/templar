@@ -12,3 +12,15 @@ grafana_influxdb_token: "CHANGE_ME_WITH_YOUR_INFLUXDB_TOKEN"
 # Other secrets
 # api_token: "CHANGE_ME"
 # ssl_private_key_passphrase: "CHANGE_ME"
+
+# Cloudflare R2 storage credentials (for Loki logs)
+loki_r2_access_key_id: "CHANGE_ME_WITH_YOUR_R2_ACCESS_KEY_ID"
+loki_r2_secret_access_key: "CHANGE_ME_WITH_YOUR_R2_SECRET_ACCESS_KEY"
+
+# Fluentd R2 archival
+fluentd_r2_access_key_id: "CHANGE_ME_WITH_YOUR_R2_ACCESS_KEY_ID"
+fluentd_r2_secret_access_key: "CHANGE_ME_WITH_YOUR_R2_SECRET_ACCESS_KEY"
+
+# Log collector R2 storage
+log_collector_r2_access_key_id: "CHANGE_ME_WITH_YOUR_R2_ACCESS_KEY_ID"
+log_collector_r2_secret_access_key: "CHANGE_ME_WITH_YOUR_R2_SECRET_ACCESS_KEY"

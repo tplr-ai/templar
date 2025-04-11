@@ -27,9 +27,17 @@
     - role: loki
       tags: [logs, loki]
 
+    - role: fluentd
+      tags: [logs, fluentd, archival]
+      when: fluentd_enabled | default(true)
+
+    - role: log-collector
+      tags: [logs, archival, log-collector]
+      when: log_collector_enabled | default(true)
+
     - role: nginx
       tags: [nginx, proxy]
-      
+
     - role: grafana-checks
       tags: [checks, verification]
 
@@ -104,16 +112,21 @@
     - name: Output success message
       debug:
         msg: |
-          Telemetry stack deployment complete! 
-          
+          Telemetry stack deployment complete!
+
           Grafana:
           - Running on http://{{ ansible_host }}:80 (via NGINX) and http://{{ ansible_host }}:{{ grafana_http_port }} (direct)
           - Configured for anonymous access without login
           - Connected to InfluxDB at {{ grafana_influxdb_host }}
           - Displaying your dashboards from the configured location
-          
+
           Loki:
           - Running on http://{{ loki_domain }}/loki/api/ (via NGINX) and http://{{ ansible_host }}:{{ loki_http_listen_port }} (direct)
           - Ready to collect and query logs
           - Integrated with Grafana as a data source
           - Python services can send logs to: http://{{ ansible_host }}:{{ loki_http_listen_port }}/loki/api/v1/push
+
+          Log Collector:
+          - Streaming logs from Loki to R2 bucket: {{ log_collector_r2_bucket }}
+          - Storing logs in time-partitioned folders by service, version, and time
+          - Structured log format for easier analysis

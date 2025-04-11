@@ -18,7 +18,12 @@ from .logging import logger
 
 
 def initialize_wandb(
-    run_prefix: str, uid: str, config: any, group: str, job_type: str
+    run_prefix: str,
+    uid: str,
+    config: any,
+    group: str,
+    job_type: str,
+    name_prefix: str = "baseline",
 ) -> Run:
     """Initialize WandB run with version tracking for unified workspace management."""
     wandb_dir = os.path.join(os.getcwd(), "wandb")
@@ -42,13 +47,14 @@ def initialize_wandb(
             run_id = None
             os.remove(run_id_file)
 
+    run_name = f"{name_prefix}-{run_prefix}{uid}"
     # Initialize WandB with version as a tag
     run = wandb.init(
         project=config.project,
         entity=None if config.log_to_private_wandb else "tplr",
         id=run_id,
         resume="must" if run_id else "never",
-        name=f"baseline-{run_prefix}{uid}",
+        name=run_name,
         config=config,
         group=group,
         job_type=job_type,

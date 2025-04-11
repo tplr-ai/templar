@@ -1,19 +1,30 @@
-require('dotenv').config(); // Loads environment variables from .env
-
+require('dotenv').config();
 const NUM_MINERS = process.env.NUM_MINERS || 3;
 const PROJECT_NAME = `test-scoring`;
-const LOCAL_FLAG = process.env.LOCAL === 'true' ? ' --local' : '';
 
-const minerConfigs = [...Array(Number(NUM_MINERS))].map((_, index) => ({
-    name: `TM${index}`,
-    script: "neurons/miner.py",
-    interpreter: "python3",
-    env: {
-        ...process.env,
-        PROJECT_NAME: PROJECT_NAME
-    },
-        args: `--wallet.name miner${index + 1} --wallet.hotkey default --device cuda:${index} --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}"`
-}));
+// Special miner configuration (the one that will use more pages)
+const SPECIAL_MINER_INDEX = process.env.SPECIAL_MINER_INDEX || 1;
+const SPECIAL_MINER_PAGES = process.env.SPECIAL_MINER_PAGES || 12;
+const SPECIAL_MINER_PREFIX = process.env.SPECIAL_MINER_PREFIX || '12pages';
+
+const minerConfigs = [...Array(Number(NUM_MINERS))].map((_, index) => {
+    const isSpecialMiner = (index + 1) === Number(SPECIAL_MINER_INDEX);
+
+    // Set special flags only for the special miner
+    const pagesArg = isSpecialMiner ? ` --pages ${SPECIAL_MINER_PAGES}` : '';
+    const prefixArg = isSpecialMiner ? ` --name_prefix ${SPECIAL_MINER_PREFIX}` : '';
+
+    return {
+        name: `TM${index}`,
+        script: "neurons/miner.py",
+        interpreter: "python3",
+        env: {
+            ...process.env,
+            PROJECT_NAME: PROJECT_NAME
+        },
+        args: `--wallet.name miner${index + 1} --wallet.hotkey default --device cuda:${index} --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}"${pagesArg}${prefixArg}`
+    };
+});
 
 module.exports = {
     apps: [

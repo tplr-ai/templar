@@ -68,6 +68,18 @@ class Miner:
         parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
         )
+        parser.add_argument(
+            "--pages",
+            type=int,
+            default=None,
+            help="Override the default number of pages per window",
+        )
+        parser.add_argument(
+            "--name_prefix",
+            type=str,
+            default="baseline",
+            help="Custom prefix for the run name in WandB",
+        )
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
         parser.add_argument("--trace", action="store_true", help="Enable trace logging")
         parser.add_argument(
@@ -102,6 +114,12 @@ class Miner:
         # Init config and load hparams
         self.config = Miner.config()
         self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
+
+        if self.config.pages is not None:
+            self.hparams.pages_per_window = self.config.pages
+            tplr.logger.info(
+                f"Overriding default pages_per_window to {self.config.pages}"
+            )
 
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)
@@ -195,6 +213,7 @@ class Miner:
             config=self.config,
             group="miner",
             job_type="mining",
+            name_prefix=self.config.name_prefix,
         )
 
         # Initialize metrics logger for InfluxDB
@@ -251,6 +270,12 @@ class Miner:
 
             # 2. Load training data for this window
             data_start = tplr.T()
+
+            # Log the number of pages being used
+            tplr.logger.info(
+                f"Using {self.hparams.pages_per_window} pages for training"
+            )
+
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
                 offset=step_window,
                 n_pages=self.hparams.pages_per_window,

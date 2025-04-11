@@ -1,4 +1,5 @@
 require('dotenv').config();
+const child_process = require('child_process'); // Correctly import child_process
 const NUM_MINERS = process.env.NUM_MINERS || 3;
 const PROJECT_NAME = `test-scoring`;
 
@@ -52,7 +53,7 @@ module.exports = {
                 PROJECT_NAME: PROJECT_NAME,
                 COMMIT_HASH: commitHash
             },
-            args: `--wallet.name validator --wallet.hotkey default --device cuda:3 --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}" --name_prefix "commit-${commitHash}-validator"`
+            args: `--wallet.name validator --wallet.hotkey default --device cuda:3 --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}" --name_prefix "${commitHash}-baseline"`
         }
     ]
 }

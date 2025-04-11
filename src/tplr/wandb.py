@@ -52,7 +52,7 @@ def initialize_wandb(
     run = wandb.init(
         project=config.project,
         entity=None if config.log_to_private_wandb else "tplr",
-        id=run_id,
+        id=None,
         resume="must" if run_id else "never",
         name=run_name,
         config=config,

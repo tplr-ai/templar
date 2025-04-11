@@ -11,7 +11,7 @@ const SPECIAL_MINER_PREFIX = process.env.SPECIAL_MINER_PREFIX || '12pages';
 // Get the latest commit hash (first 7 characters)
 let commitHash = 'unknown';
 try {
-    commitHash = execSync('git rev-parse --short HEAD').toString().trim();
+    commitHash = child_process.execSync('git rev-parse --short HEAD').toString().trim();
     console.log(`Using commit hash: ${commitHash}`);
 } catch (error) {
     console.error('Failed to get git commit hash:', error.message);

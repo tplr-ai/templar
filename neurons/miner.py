@@ -277,7 +277,7 @@ class Miner:
             )
 
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset=step_window,
+                offset=step_window * self.hparams.pages_per_window,
                 n_pages=self.hparams.pages_per_window,
                 seed=self.uid,  # type: ignore
             )

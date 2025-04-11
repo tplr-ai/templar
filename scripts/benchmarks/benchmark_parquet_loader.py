@@ -75,33 +75,41 @@ class ParquetLoaderBenchmark:
 
                 # Create loader
                 loader_start = T()
-                loader = await R2DatasetLoader.create(
-                    batch_size=batch_size,
-                    sequence_length=sequence_length,
-                    pages_info=pages,
-                    tokenizer=self.tokenizer,
-                    pack_samples=True,
-                )
-                loader_duration = T() - loader_start
+                loader = None
+                try:
+                    loader = await R2DatasetLoader.create(
+                        batch_size=batch_size,
+                        sequence_length=sequence_length,
+                        pages_info=pages,
+                        tokenizer=self.tokenizer,
+                        pack_samples=True,
+                    )
+                    loader_duration = T() - loader_start
 
-                # Process batches
-                process_start = T()
-                total_tokens = 0
-                batch_times = []
-                n_batches = 0
+                    # Process batches
+                    process_start = T()
+                    total_tokens = 0
+                    batch_times = []
+                    n_batches = 0
 
-                for batch in loader:
-                    batch_start = T()
-                    # Convert numpy array to torch tensor if needed
-                    if isinstance(batch, np.ndarray):
-                        batch = torch.from_numpy(batch)
-                    total_tokens += batch.numel()
-                    batch_times.append(T() - batch_start)
-                    n_batches += 1
-                    if n_batches >= 5:  # Limit to 5 batches per iteration
-                        break
+                    for batch in loader:
+                        batch_start = T()
+                        # Convert numpy array to torch tensor if needed
+                        if isinstance(batch, np.ndarray):
+                            batch = torch.from_numpy(batch)
+                        total_tokens += batch.numel()
+                        batch_times.append(T() - batch_start)
+                        n_batches += 1
+                        if n_batches >= 5:  # Limit to 5 batches per iteration
+                            break
 
-                process_duration = T() - process_start
+                    process_duration = T() - process_start
+
+                finally:
+                    # Ensure the loader is shutdown to clean up background tasks
+                    if loader is not None:
+                        await loader.shutdown()
+                        tplr.logger.debug(f"Loader shutdown completed successfully")
 
                 # Calculate memory usage
                 memory_after = psutil.Process().memory_info().rss / 1024 / 1024
@@ -179,13 +187,14 @@ async def main():
     # Test configurations
     configs = [
         # n_pages, batch_size, sequence_length
-        (1, 4, 512),
-        (1, 8, 512),
-        (2, 4, 512),
-        (2, 8, 512),
-        (4, 4, 512),
-        (5, 6, 2048),
-        (24, 16, 2048),
+        (1, 6, 2048),
+        (2, 6, 2048),
+        (4, 6, 2048),
+        (6, 6, 2048),
+        (8, 6, 2048),
+        (10, 6, 2048),
+        (12, 6, 2048),
+        (24, 6, 2048),
     ]
 
     for n_pages, batch_size, sequence_length in configs:

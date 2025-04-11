@@ -800,7 +800,7 @@ class Validator:
                         )
 
                     # Load local pages exactly once from the dataset loader with retry handling.
-                    local_pages = await retry_call(
+                    local_pages = await tplr.r2_dataset.tplr.r2_dataset.retry_call(
                         tplr.r2_dataset.R2DatasetLoader.next_pages,
                         offset=self.sync_window,
                         n_pages=self.hparams.pages_per_window,
@@ -830,25 +830,30 @@ class Validator:
                         )
                     data_start = tplr.T()
                     # Create the evaluation loader using the locally loaded pages.
-                    loader_own = await retry_call(
-                        tplr.r2_dataset.R2DatasetLoader.create,
-                        batch_size=self.hparams.batch_size,
-                        sequence_length=self.hparams.sequence_length,
-                        pages_info=local_pages,
-                        tokenizer=self.tokenizer,
-                        attempts=3,
-                        delay=1,
-                        context=f"own loader for UID {eval_uid}",
-                        **{},
-                    )
-                    if loader_own is None:
-                        tplr.logger.error(
-                            f"Failed to create loader for own data for UID {eval_uid}. Skipping evaluation."
+                    try:
+                        loader_own = await tplr.r2_dataset.retry_call(
+                            tplr.r2_dataset.R2DatasetLoader.create,
+                            batch_size=self.hparams.batch_size,
+                            sequence_length=self.hparams.sequence_length,
+                            pages_info=local_pages,
+                            tokenizer=self.tokenizer,
+                            attempts=3,
+                            delay=1,
+                            context=f"loader creation for UID {eval_uid}",
                         )
-                        continue
-                    tplr.logger.info(
-                        f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}"
-                    )
+                        if loader_own is None:
+                            tplr.logger.error(
+                                f"Failed to create loader for own data for UID {eval_uid}. Skipping evaluation."
+                            )
+                            continue
+                        tplr.logger.info(
+                            f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}"
+                        )
+                    finally:
+                        tplr.logger.info(
+                            f"Shutting down evaluation dataset loader for UID {eval_uid}"
+                        )
+                        await loader_own.shutdown()
 
                     state_dict, _ = eval_result
                     model_own_data_eval = copy.deepcopy(self.model)
@@ -1093,7 +1098,7 @@ class Validator:
                     # 7. Load evaluation data from random page
                     model_random_data_eval = copy.deepcopy(self.model)
                     data_start = tplr.T()
-                    pages_random = await retry_call(
+                    pages_random = await tplr.r2_dataset.retry_call(
                         tplr.r2_dataset.R2DatasetLoader.next_pages,
                         offset=self.sync_window,
                         n_pages=self.hparams.pages_per_window,
@@ -1109,7 +1114,7 @@ class Validator:
                         )
                         continue
 
-                    loader_random = await retry_call(
+                    loader_random = await tplr.r2_dataset.retry_call(
                         tplr.r2_dataset.R2DatasetLoader.create,
                         batch_size=self.hparams.batch_size,
                         sequence_length=self.hparams.sequence_length,
@@ -2355,33 +2360,6 @@ def min_power_normalization(logits, power=2.0, epsilon=1e-8):
         probabilities = torch.zeros_like(powered_logits)
 
     return probabilities
-
-
-async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
-    """
-    Calls an async function with retries.
-
-    Args:
-        func (Callable): An async function.
-        *args: Positional arguments to pass to func.
-        attempts (int): Number of retries.
-        delay (int): Delay between attempts in seconds.
-        context (str): Context description for logging.
-        **kwargs: Keyword arguments to pass to func.
-
-    Returns:
-        The result of func(*args, **kwargs) or None if all attempts fail.
-    """
-    for attempt in range(attempts):
-        try:
-            return await func(*args, **kwargs)
-        except Exception as e:
-            tplr.logger.error(
-                f"Attempt {attempt + 1}/{attempts} failed for {context}: {e}"
-            )
-            await asyncio.sleep(delay)
-    tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
-    return None
 
 
 def sign_preserving_multiplication(a, b):

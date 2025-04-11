@@ -229,7 +229,6 @@ class Comms(ChainManager):
                 os.rmdir(os.path.join(root, name))
         os.rmdir(path)
 
-    # Convert all the existing functions to methods
     async def cleanup_local_data(
         self, uid: str, current_window: int, stale_retention: int
     ):

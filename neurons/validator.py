@@ -226,6 +226,10 @@ class Validator:
         self.relative_improvement_own = 0.0
         self.relative_improvement_random = 0.0
         self.valid_score_indices = []
+        self.loss_improvements_own = {}
+        self.loss_improvements_random = {}
+        self.relative_improvements_own = {}
+        self.relative_improvements_random = {}
 
         # Caching
         self.gradient_scores = torch.zeros(256, dtype=torch.float32)
@@ -656,8 +660,27 @@ class Validator:
                         if self.loss_before_per_batch_own > 0
                         else 0.0
                     )
-                    tplr.logger.debug(
-                        f"Relative improvement (own data): {self.relative_improvement_own:.4f}"
+                    self.loss_improvements_own[eval_uid] = self.loss_improvement_own
+                    self.loss_improvements_random[eval_uid] = (
+                        self.loss_improvement_random
+                    )
+                    self.relative_improvements_own[eval_uid] = (
+                        self.relative_improvement_own
+                    )
+                    self.relative_improvements_random[eval_uid] = (
+                        self.relative_improvement_random
+                    )
+                    tplr.logger.info(
+                        f"Loss improvement own (UID {eval_uid}): {self.loss_improvements_own[eval_uid]:.4f}"
+                    )
+                    tplr.logger.info(
+                        f"Loss improvement random (UID {eval_uid}): {self.loss_improvements_random[eval_uid]:.4f}"
+                    )
+                    tplr.logger.info(
+                        f"Relative improvement own (UID {eval_uid}): {self.relative_improvements_own[eval_uid]:.4f}"
+                    )
+                    tplr.logger.info(
+                        f"Relative improvement random (UID {eval_uid}): {self.relative_improvements_random[eval_uid]:.4f}"
                     )
 
                     # 7. Load evaluation data from random page
@@ -1042,6 +1065,16 @@ class Validator:
                 )
                 final_moving_avg = float(self.final_moving_avg_scores[uid].item())
                 weight = float(self.weights[uid].item())
+                loss_improvement_own = float(self.loss_improvements_own.get(uid, 0.0))
+                loss_improvement_random = float(
+                    self.loss_improvements_random.get(uid, 0.0)
+                )
+                relative_improvement_own = float(
+                    self.relative_improvements_own.get(uid, 0.0)
+                )
+                relative_improvement_random = float(
+                    self.relative_improvements_random.get(uid, 0.0)
+                )
 
                 self.wandb.log(
                     {
@@ -1051,6 +1084,10 @@ class Validator:
                         f"validator/normalised_binary_scores/{uid}": normalised_binary,
                         f"validator/final_moving_avg_scores/{uid}": final_moving_avg,
                         f"validator/weights/{uid}": weight,
+                        f"validator/loss_improvements_own/{uid}": loss_improvement_own,
+                        f"validator/loss_improvements_random/{uid}": loss_improvement_random,
+                        f"validator/relative_improvements_own/{uid}": relative_improvement_own,
+                        f"validator/relative_improvements_random/{uid}": relative_improvement_random,
                     },
                     step=self.global_step,
                 )
@@ -1070,6 +1107,10 @@ class Validator:
                         "normalised_binary": normalised_binary,
                         "final_moving_avg_score": final_moving_avg,
                         "weight": weight,
+                        "loss_improvement_own": loss_improvement_own,
+                        "loss_improvement_random": loss_improvement_random,
+                        "relative_improvement_own": relative_improvement_own,
+                        "relative_improvement_random": relative_improvement_random,
                     },
                 )
 

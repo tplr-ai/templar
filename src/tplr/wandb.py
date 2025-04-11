@@ -47,12 +47,13 @@ def initialize_wandb(
             run_id = None
             os.remove(run_id_file)
 
+    run_id = None
     run_name = f"{name_prefix}-{run_prefix}{uid}"
     # Initialize WandB with version as a tag
     run = wandb.init(
         project=config.project,
         entity=None if config.log_to_private_wandb else "tplr",
-        id=None,
+        id=run_id,
         resume="must" if run_id else "never",
         name=run_name,
         config=config,

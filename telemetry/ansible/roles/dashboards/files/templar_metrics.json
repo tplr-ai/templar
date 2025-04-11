@@ -1267,7 +1267,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r[\"_field\"] == \"weight\")\n  |> filter(fn: (r) => r[\"uid\"] == \"1\")\n  |> filter(fn: (r) => r[\"eval_uid\"] =~ /^${uid:regex}$/)\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"_field\", \"eval_uid\"])\n  |> aggregateWindow(every: 30m, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r[\"_field\"] == \"weight\")\n  |> filter(fn: (r) => r[\"uid\"] == \"1\")\n  |> filter(fn: (r) => r[\"eval_uid\"] =~ /^${uid:regex}$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"_field\", \"eval_uid\"])\n  |> aggregateWindow(every: 30m, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1362,7 +1362,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r._field == \"gradient_score\")\n  |> filter(fn: (r) => r[\"uid\"] == \"1\")  \n  |> filter(fn: (r) => r[\"eval_uid\"] =~ /^${uid:regex}$/)\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"_field\", \"eval_uid\"])\n  |> aggregateWindow(every: 30m, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")\n",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r._field == \"gradient_score\")\n  |> filter(fn: (r) => r[\"uid\"] == \"1\")  \n  |> filter(fn: (r) => r[\"eval_uid\"] =~ /^${uid:regex}$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"_field\", \"eval_uid\"])\n  |> aggregateWindow(every: 30m, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")\n",
           "refId": "A"
         }
       ],
@@ -1540,8 +1540,8 @@
       {
         "current": {
           "selected": false,
-          "text": "0.2.60",
-          "value": "0.2.60"
+          "text": "0.2.69",
+          "value": "0.2.69"
         },
         "datasource": {
           "type": "marcusolsson-json-datasource",
@@ -1591,6 +1591,6 @@
   "timezone": "",
   "title": "Templar Metrics",
   "uid": "templar_metrics",
-  "version": 24,
+  "version": 47,
   "weekStart": ""
 }

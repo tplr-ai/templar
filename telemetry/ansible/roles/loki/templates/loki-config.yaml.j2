@@ -74,6 +74,20 @@ storage_config:
     access_key_id: {{ loki_s3_access_key_id }}
     secret_access_key: {{ loki_s3_secret_access_key }}
     s3forcepathstyle: true
+{% elif loki_storage_type == "s3" and loki_r2_enabled %}
+  # Cloudflare R2 storage configuration (S3-compatible)
+  aws:
+    s3: {{ loki_r2_endpoint }}
+    bucketnames: {{ loki_r2_bucket_name }}
+    region: {{ loki_r2_region }}
+    access_key_id: {{ loki_r2_access_key_id }}
+    secret_access_key: {{ loki_r2_secret_access_key }}
+    s3forcepathstyle: true
+    # R2-specific settings
+    http_config:
+      insecure_skip_verify: false
+    s3forcepathstyle: true
+    s3: {{ loki_r2_endpoint }}
 {% endif %}
 
 # Ingester configuration for handling incoming logs

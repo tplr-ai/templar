@@ -19,7 +19,7 @@
 - name: Report Loki readiness status
   debug:
     msg: >-
-      {{ 'Loki is ready and running!' 
+      {{ 'Loki is ready and running!'
          if not ansible_check_mode and loki_ready is succeeded and loki_ready.status is defined and loki_ready.status == 200
          else 'WARNING: Loki readiness check failed or skipped in check mode.' }}
 
@@ -39,7 +39,7 @@
 - name: Report Loki health status
   debug:
     msg: >-
-      {{ 'Loki is healthy!' 
+      {{ 'Loki is healthy!'
          if not ansible_check_mode and loki_health is succeeded and loki_health.status is defined and loki_health.status == 200
          else 'WARNING: Loki health check failed or skipped in check mode.' }}
 

@@ -102,6 +102,17 @@ loki_retention_period: "720h"  # 30 days
 loki_limits_ingestion_rate_mb: 10
 loki_limits_ingestion_burst_size_mb: 20
 
+# Loki storage configuration
+loki_storage_type: "filesystem"  # Options: filesystem (default), s3 (for S3 or R2)
+
+# For Cloudflare R2 storage (S3-compatible)
+loki_r2_enabled: false
+loki_r2_bucket_name: "loki-logs"
+loki_r2_endpoint: "https://<account_id>.r2.cloudflarestorage.com"
+loki_r2_region: "auto"
+loki_r2_access_key_id: "your_r2_access_key_id"  # Store in vault
+loki_r2_secret_access_key: "your_r2_secret_key"  # Store in vault
+
 # Python logging access configuration
 # Add these values to your Python logging config
 loki_python_logging_url: "http{% if nginx_ssl_enabled %}s{% endif %}://{{ loki_domain }}/loki/api/v1/push"

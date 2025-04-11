@@ -1,21 +1,3 @@
-# The MIT License (MIT)
-# © 2025 tplr.ai
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
-# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
-# the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
-# and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in all copies or substantial portions of
-# the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
-# THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
-# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-# DEALINGS IN THE SOFTWARE.
-
-
 import json
 import yaml
 import s3fs
@@ -24,17 +6,29 @@ import numpy as np
 from pathlib import Path
 import pyarrow.parquet as pq
 from functools import lru_cache
+from collections import OrderedDict
 import threading
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
+from tplr.logging import T, P  # Use timing utilities
+
+import tplr
 
 
 class R2DatasetLoader(DatasetLoader):
     """
     A drop-in replacement for DatasetLoader that reads Parquet files from Cloudflare R2 storage.
-
+    
+    Optimized for constant-time page loading regardless of dataset size through:
+    - Lazy loading with background prefetching
+    - Efficient caching with LRU policies
+    - Connection pooling and resource management
+    - Batch processing of pages
+    
     This loader handles:
     - Reading and caching metadata from R2 storage
     - Loading data from Parquet files in parallel
@@ -42,56 +36,30 @@ class R2DatasetLoader(DatasetLoader):
     - Managing sequence padding and packing
 
     The loader uses the same credentials logic as comms.py/config.py for R2 access.
-
-    Attributes:
-        rows_base_url (str): Base URL for row data (unused)
-        size_base_url (str): Base URL for size data (unused)
-        _configs_data_cache (dict): Cache for dataset configuration data
-        DATASET_SUBFOLDER (str): Subfolder name in R2 bucket containing dataset
-        CF_REGION_NAME (str): Cloudflare region name
-        _shard_sizes (dict): Cache for shard size metadata
-        _metadata_config (dict): Cache for dataset metadata configuration
-        _local_cache_dir (Path): Local directory for caching metadata files
     """
 
-    rows_base_url = None
-    size_base_url = None
-    _configs_data_cache = None
+    # Static configuration
     DATASET_SUBFOLDER = "HuggingFaceFW_fineweb-edu-score-2"
     CF_REGION_NAME = "enam"
-
-    # Cache for metadata
-    _shard_sizes = None
-    _metadata_config = None
-    _local_cache_dir = Path(".cache/tplr")
-
-    # Add class-level caching for filesystem and tokenizer results
-    _fs_instance = None
-    _tokenized_cache = {}
-    _buffer_size = 1024 * 1024  # 1MB buffer for reading
+    PREFETCH_SIZE = 10  # Number of pages to prefetch ahead
+    MAX_CONCURRENT_REQUESTS = 20  # Maximum concurrent R2 requests
+    READ_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB read buffer
+    BATCH_SIZE = 128  # Batch size for tokenization
+    MAX_CACHE_SIZE = 100  # Maximum number of cached pages
+    MAX_PARQUET_CACHE = 20  # Maximum number of cached parquet file objects
+    LOCAL_CACHE_DIR = Path(".cache/tplr")
 
     # Class-level caches
-    _metadata_cache = {}  # Cache for metadata by config
-    _parquet_cache = {}  # Cache ParquetFile objects
     _fs = None  # Single filesystem instance
-
-    # Static configuration
-    PREFETCH_SIZE = 3  # Number of pages to prefetch
-    MAX_CONCURRENT_REQUESTS = 8  # Increased from 4
-    BATCH_SIZE = 128  # Increased batch size for tokenization
-    READ_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB read buffer
-
-    # Class-level caches with size limits
-    _metadata_cache = {}
-    _parquet_cache = {}  # Cache for ParquetFile objects
-    _token_cache = {}  # Cache for tokenized results
-    _fs = None
-    _prefetch_queue = None
+    _executor = None  # Thread pool executor
+    _configs_data_cache = None  # Dataset config cache
+    _shard_sizes = None  # Cache for shard size metadata
+    _metadata_config = None  # Cache for dataset metadata configuration
 
     _round_robin_index = 0  # global counter for dataset round-robin selection
     _fs_cache = {}  # maps account_id to a cached s3fs.S3FileSystem
     _fs_lock = threading.Lock()  # lock for fs cache and round robin
-
+    
     def __init__(
         self,
         batch_size=None,
@@ -99,6 +67,7 @@ class R2DatasetLoader(DatasetLoader):
         num_pages=None,
         tokenizer=None,
         pack_samples=True,
+        num_rows_per_page=100
     ):
         """
         Initialize the dataset loader.
@@ -109,6 +78,7 @@ class R2DatasetLoader(DatasetLoader):
             num_pages (int, optional): Number of pages to load
             tokenizer: Tokenizer instance to use
             pack_samples (bool): Whether to pack samples without padding
+            num_rows_per_page (int): Number of rows to read per page
         """
         super().__init__(
             batch_size=batch_size,
@@ -119,14 +89,26 @@ class R2DatasetLoader(DatasetLoader):
         )
 
         # Additional buffers from parent class
+        self.buffer = []
         self.used_buffer = []
         self.padded_buffer = []
-
-        # Prefetch setup
-        self._prefetch_task = None
-        self._current_batch = None
-        self._next_batch = None
+        self.pages = []
+        self.num_rows_per_page = num_rows_per_page
+        
+        # Instance-specific caches
+        self._token_cache = OrderedDict()  # LRU cache for tokenized pages
+        self._metadata_cache = {}  # Cache for metadata by config
+        
+        # Prefetch mechanism
         self._prefetch_queue = asyncio.Queue(maxsize=self.PREFETCH_SIZE)
+        self._prefetch_task = None
+        self._prefetch_semaphore = asyncio.Semaphore(self.MAX_CONCURRENT_REQUESTS)
+        self._processing = False
+        self._shutdown_event = asyncio.Event()  # New event to signal shutdown
+        
+        # Ensure thread pool executor is initialized
+        if R2DatasetLoader._executor is None:
+            R2DatasetLoader._executor = ThreadPoolExecutor(max_workers=self.MAX_CONCURRENT_REQUESTS)
 
     def _get_pad_size(self, input_ids):
         """
@@ -147,7 +129,10 @@ class R2DatasetLoader(DatasetLoader):
         return pad_size % self.sequence_length
 
     def _refill_padded_buffer(self):
-        """Match DatasetLoader's buffer refill logic exactly"""
+        """
+        Refill the padded buffer from the main buffer.
+        Matches DatasetLoader's buffer refill logic exactly.
+        """
         while (
             self.buffer
             and len(self.padded_buffer) < self.sequence_length * self.batch_size
@@ -177,9 +162,120 @@ class R2DatasetLoader(DatasetLoader):
                     self.buffer = []
 
     @staticmethod
+    def _get_fs():
+        """
+        Get or create a shared S3 filesystem instance for R2 access using round-robin selection.
+        Uses connection pooling for efficiency and distributes load across multiple buckets.
+        
+        Returns:
+            s3fs.S3FileSystem: Configured filesystem instance
+        """
+        dataset_config = BUCKET_SECRETS["dataset"]
+        logger.debug(f"Dataset config loaded: {dataset_config}")
+
+        with R2DatasetLoader._fs_lock:
+            # Use round robin selection if multiple buckets are configured
+            if "multiple" in dataset_config:
+                configs = dataset_config["multiple"]
+                idx = R2DatasetLoader._round_robin_index % len(configs)
+                selected_config = configs[idx]
+                R2DatasetLoader._round_robin_index += 1
+                logger.debug(f"Round-robin selected bucket {idx}: {selected_config.get('name', 'default')}")
+            else:
+                selected_config = dataset_config
+                logger.debug(f"Using single bucket: {selected_config.get('name', 'default')}")
+
+            # Use account_id as cache key
+            fs_cache_key = selected_config["account_id"]
+            
+            # Create new filesystem instance if not in cache
+            if fs_cache_key not in R2DatasetLoader._fs_cache:
+                read_credentials = selected_config["credentials"]["read"]
+                fs = s3fs.S3FileSystem(
+                    key=read_credentials["access_key_id"],
+                    secret=read_credentials["secret_access_key"],
+                    client_kwargs={
+                        "endpoint_url": f"https://{selected_config['account_id']}.r2.cloudflarestorage.com",
+                        "region_name": R2DatasetLoader.CF_REGION_NAME,
+                    },
+                    config_kwargs={
+                        "tcp_keepalive": True,
+                        "max_pool_connections": 50,
+                        "connect_timeout": 5,
+                        "read_timeout": 10,
+                        "retries": {"max_attempts": 3},
+                    },
+                    use_listings_cache=True,
+                    skip_instance_cache=False,
+                    default_block_size=R2DatasetLoader.READ_BUFFER_SIZE,
+                    default_cache_type="readahead",
+                )
+                R2DatasetLoader._fs_cache[fs_cache_key] = fs
+                
+            return R2DatasetLoader._fs_cache[fs_cache_key]
+
+    @staticmethod
+    async def _load_r2_metadata():
+        """
+        Loads and caches metadata from R2 storage.
+        Downloads shard sizes and metadata config files if not cached locally.
+
+        Returns:
+            tuple: (shard_sizes dict, metadata_config dict)
+        """
+        if R2DatasetLoader._shard_sizes is not None:
+            return (R2DatasetLoader._shard_sizes, R2DatasetLoader._metadata_config)
+
+        fs = R2DatasetLoader._get_fs()
+        cache_dir = R2DatasetLoader.LOCAL_CACHE_DIR
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Define R2 and local paths - handle both single and multiple bucket configurations
+        dataset_config = BUCKET_SECRETS["dataset"]
+        if "multiple" in dataset_config:
+            # Use the first bucket for metadata (consistent location)
+            bucket_name = dataset_config["multiple"][0]["name"]
+        else:
+            bucket_name = dataset_config["name"]
+            
+        r2_base = f"{bucket_name}/{R2DatasetLoader.DATASET_SUBFOLDER}"
+        r2_paths = {
+            "shard_sizes": f"{r2_base}/_shard_sizes.json",
+            "metadata": f"{r2_base}/_metadata.yaml",
+        }
+        local_paths = {
+            "shard_sizes": cache_dir / "shard_sizes.json",
+            "metadata": cache_dir / "metadata.yaml",
+        }
+
+        try:
+            # Download and load shard sizes
+            if not local_paths["shard_sizes"].exists():
+                logger.info("Downloading shard sizes from R2...")
+                fs.get(r2_paths["shard_sizes"], str(local_paths["shard_sizes"]))
+            with open(local_paths["shard_sizes"]) as f:
+                R2DatasetLoader._shard_sizes = json.load(f)
+
+            # Download and load metadata config
+            if not local_paths["metadata"].exists():
+                logger.info("Downloading metadata config from R2...")
+                fs.get(r2_paths["metadata"], str(local_paths["metadata"]))
+            with open(local_paths["metadata"]) as f:
+                R2DatasetLoader._metadata_config = yaml.safe_load(f)
+
+            return (R2DatasetLoader._shard_sizes, R2DatasetLoader._metadata_config)
+
+        except Exception as e:
+            logger.error(f"Failed to load R2 metadata: {e}")
+            raise
+
+    @staticmethod
     async def fetch_dataset_configs() -> dict:
         """
         Load dataset configurations from cached metadata and shard sizes.
+        
+        Returns:
+            dict: Dataset configurations
         """
         if R2DatasetLoader._configs_data_cache is not None:
             return R2DatasetLoader._configs_data_cache
@@ -217,7 +313,18 @@ class R2DatasetLoader(DatasetLoader):
     async def next_pages(
         offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
     ) -> list:
-        """Get next n_pages random pages starting from offset."""
+        """
+        Get next n_pages random pages starting from offset.
+        
+        Args:
+            offset (int): Starting offset
+            n_pages (int): Number of pages to retrieve
+            seed (str): Seed for random number generator
+            num_rows_per_page (int): Number of rows per page
+            
+        Returns:
+            list: List of (config_name, page_number, split) tuples
+        """
         configs_data = await R2DatasetLoader.fetch_dataset_configs()
 
         # Create RNG with same method as DatasetLoader
@@ -237,190 +344,159 @@ class R2DatasetLoader(DatasetLoader):
 
         return result
 
-    @staticmethod
-    async def create(
-        batch_size, sequence_length, pages_info, tokenizer, pack_samples=True
-    ):
-        """Create loader with proper initialization"""
-        loader = R2DatasetLoader(
-            batch_size=batch_size,
-            sequence_length=sequence_length,
-            tokenizer=tokenizer,
-            pack_samples=pack_samples,
-        )
-
-        # Initialize buffers
-        loader.buffer = []
-        loader.pages = pages_info.copy()
-
-        # Process all pages first
-        sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
-        tasks = [
-            asyncio.create_task(loader._process_page(page, sem)) for page in pages_info
-        ]
-
-        # Gather all tokens
-        results = await asyncio.gather(*tasks)
-        for tokens in results:
-            if tokens:
-                loader.buffer.extend(tokens)
-
-        return loader
-
-    @staticmethod
-    async def _load_r2_metadata():
+    async def _start_prefetching(self):
         """
-        Loads and caches metadata from R2 storage.
-
-        Downloads shard sizes and metadata config files if not cached locally.
-
-        Returns:
-            tuple: (shard_sizes dict, metadata_config dict)
-
-        Raises:
-            Exception: If metadata loading fails
+        Start the background prefetching task to load pages asynchronously.
+        This is key to achieving constant-time page loading regardless of total pages.
         """
-        if R2DatasetLoader._shard_sizes is not None:
-            return (
-                R2DatasetLoader._shard_sizes,
-                R2DatasetLoader._metadata_config,
-            )
+        if self._prefetch_task is not None and not self._prefetch_task.done():
+            return  # Already running
 
-        fs = R2DatasetLoader._get_fs()
-        cache_dir = R2DatasetLoader._local_cache_dir
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        # Define R2 and local paths
-        bucket_name = (
-            BUCKET_SECRETS["dataset"].get("name")
-            if "name" in BUCKET_SECRETS["dataset"]
-            else BUCKET_SECRETS["dataset"]["multiple"][0]["name"]
-        )
-        bucket_path = f"{bucket_name}/{R2DatasetLoader.DATASET_SUBFOLDER}"
-        r2_paths = {
-            "shard_sizes": f"{bucket_path}/_shard_sizes.json",
-            "metadata": f"{bucket_path}/_metadata.yaml",
-        }
-        local_paths = {
-            "shard_sizes": cache_dir / "shard_sizes.json",
-            "metadata": cache_dir / "metadata.yaml",
-        }
-
+        self._processing = True
+        self._shutdown_event.clear()  # Clear shutdown event
+        
+        # Get the current event loop safely
         try:
-            # Download and load shard sizes
-            if not local_paths["shard_sizes"].exists():
-                logger.info("Downloading shard sizes from R2...")
-                fs.get(r2_paths["shard_sizes"], str(local_paths["shard_sizes"]))
-            with open(local_paths["shard_sizes"]) as f:
-                R2DatasetLoader._shard_sizes = json.load(f)
-
-            # Download and load metadata config
-            if not local_paths["metadata"].exists():
-                logger.info("Downloading metadata config from R2...")
-                fs.get(r2_paths["metadata"], str(local_paths["metadata"]))
-            with open(local_paths["metadata"]) as f:
-                R2DatasetLoader._metadata_config = yaml.safe_load(f)
-
-            return (
-                R2DatasetLoader._shard_sizes,
-                R2DatasetLoader._metadata_config,
-            )
-
-        except Exception as e:
-            logger.error(f"Failed to load R2 metadata: {e}")
-            raise
-
-    @staticmethod
-    def _get_fs():
-        dataset_config = BUCKET_SECRETS["dataset"]
-        # For debugging: log the full dataset configuration to check if 'multiple' is present
-        logger.debug(f"Dataset config loaded: {dataset_config}")
-
-        with R2DatasetLoader._fs_lock:
-            # Pick config in round robin if multiple endpoints are supplied
-            if "multiple" in dataset_config:
-                configs = dataset_config["multiple"]
-                idx = R2DatasetLoader._round_robin_index % len(configs)
-                selected_config = configs[idx]
-                R2DatasetLoader._round_robin_index += 1
-            else:
-                selected_config = dataset_config
-
-            # Log the selected bucket name for round robin tracing (should show e.g. "dataset-bucket-1" then "dataset-bucket-2")
-            logger.debug(
-                f"Using dataset bucket: {selected_config.get('name', 'default')}"
-            )
-
-            fs_cache_key = selected_config["account_id"]
-
-            if fs_cache_key not in R2DatasetLoader._fs_cache:
-                read_credentials = selected_config["credentials"]["read"]
-                fs = s3fs.S3FileSystem(
-                    key=read_credentials["access_key_id"],
-                    secret=read_credentials["secret_access_key"],
-                    client_kwargs={
-                        "endpoint_url": f"https://{selected_config['account_id']}.r2.cloudflarestorage.com",
-                        "region_name": R2DatasetLoader.CF_REGION_NAME,
-                    },
-                    config_kwargs={
-                        "tcp_keepalive": True,
-                        "max_pool_connections": 50,
-                        "connect_timeout": 5,
-                        "read_timeout": 10,
-                        "retries": {"max_attempts": 3},
-                    },
-                    use_listings_cache=True,
-                    skip_instance_cache=False,
-                    default_block_size=R2DatasetLoader.READ_BUFFER_SIZE,
-                    default_cache_type="readahead",
-                )
-                R2DatasetLoader._fs_cache[fs_cache_key] = fs
-            return R2DatasetLoader._fs_cache[fs_cache_key]
-
-    async def _get_next_page(self):
-        """Get next page from the queue"""
-        if not self.pages:
-            return None
-        return self.pages.pop(0)
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                # If we're in a context where the loop is closed, don't start prefetching
+                logger.warning("Cannot start prefetching: event loop is closed")
+                return
+            self._prefetch_task = asyncio.create_task(self._prefetch_pages())
+        except RuntimeError:
+            # Handle the case where there is no current event loop
+            logger.warning("Cannot start prefetching: no event loop available")
+            self._processing = False
 
     async def _prefetch_pages(self):
-        """Background task to prefetch pages"""
+        """
+        Background task to prefetch pages and process them in parallel.
+        Maintains a constant-sized queue of processed pages regardless of total pages.
+        """
         try:
-            while True:
-                page = await self._get_next_page()
-                if page is None:
-                    break
-                await self._prefetch_queue.put(page)
+            tasks = set()
+            pages_to_process = self.pages.copy() if self.pages else []
+            
+            # Process initial batch of pages up to prefetch limit
+            initial_batch = pages_to_process[:self.PREFETCH_SIZE]
+            for page in initial_batch:
+                task = asyncio.create_task(self._process_page(page))
+                tasks.add(task)
+                task.add_done_callback(tasks.remove)
+            
+            pages_to_process = pages_to_process[self.PREFETCH_SIZE:]
+            
+            # Process remaining pages as queue space becomes available
+            while pages_to_process and self._processing and not self._shutdown_event.is_set():
+                # Wait for queue space or completion
+                if self._prefetch_queue.qsize() < self.PREFETCH_SIZE and len(tasks) < self.MAX_CONCURRENT_REQUESTS:
+                    page = pages_to_process.pop(0)
+                    task = asyncio.create_task(self._process_page(page))
+                    tasks.add(task)
+                    task.add_done_callback(tasks.remove)
+                else:
+                    # Use a short sleep to avoid busy-waiting
+                    await asyncio.sleep(0.01)
+                    
+                    # Check for shutdown signal
+                    if self._shutdown_event.is_set():
+                        break
+            
+            # Wait for remaining tasks to complete if not shutting down
+            if tasks and not self._shutdown_event.is_set():
+                # Use wait with a timeout to avoid hanging
+                done, pending = await asyncio.wait(
+                    tasks, 
+                    timeout=10.0,
+                    return_when=asyncio.ALL_COMPLETED
+                )
+                
+                # Cancel any pending tasks
+                for task in pending:
+                    task.cancel()
+                
+        except asyncio.CancelledError:
+            # Handle cancellation gracefully
+            logger.debug("Prefetch task was cancelled")
+            # Clean up any pending tasks
+            for task in tasks:
+                task.cancel()
+            self._processing = False
+            raise
         except Exception as e:
             logger.error(f"Prefetch error: {e}")
         finally:
-            await self._prefetch_queue.put(None)  # Signal completion
+            # Signal completion
+            self._processing = False
+            try:
+                # Add None to signal end of queue
+                await asyncio.wait_for(self._prefetch_queue.put(None), timeout=1.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception) as e:
+                # Ignore errors when putting to queue during shutdown
+                logger.debug(f"Error finalizing prefetch queue: {e}")
 
-    async def _process_page(self, page, sem):
-        """Process page with deterministic shard selection"""
-        async with sem:
+    async def _process_page(self, page):
+        """
+        Process a single page by loading and tokenizing its content.
+        Implements efficient caching and resource management.
+        
+        Args:
+            page: Tuple of (config_name, page_number, split)
+            
+        Returns:
+            list: Tokenized content
+        """
+        # Early check for shutdown
+        if self._shutdown_event.is_set():
+            return []
+            
+        async with self._prefetch_semaphore:
+            # Check again after acquiring semaphore
+            if self._shutdown_event.is_set():
+                return []
+                
             config_name, page_number, split = page
             cache_key = f"{config_name}:{page_number}"
 
             try:
+                # Check token cache first (O(1) operation)
                 if cache_key in self._token_cache:
-                    return self._token_cache[cache_key]
+                    tokens = self._token_cache[cache_key]
+                    # Move to end of OrderedDict to mark as recently used
+                    self._token_cache.pop(cache_key)
+                    self._token_cache[cache_key] = tokens
+                    
+                    # Check for shutdown before putting to queue
+                    if not self._shutdown_event.is_set():
+                        try:
+                            await asyncio.wait_for(
+                                self._prefetch_queue.put(tokens), 
+                                timeout=1.0
+                            )
+                        except (asyncio.TimeoutError, asyncio.CancelledError):
+                            # If we can't put to queue, just return
+                            pass
+                    return tokens
 
-                metadata = self._metadata_cache.get(config_name)
-                if not metadata:
-                    shard_sizes, _ = await self._load_r2_metadata()
-                    metadata = shard_sizes[config_name]
-                    self._metadata_cache[config_name] = metadata
+                # Exit early if shutting down
+                if self._shutdown_event.is_set():
+                    return []
 
-                # Find exact shard based on page_number
+                # Load metadata if not already cached
+                if config_name not in self._metadata_cache:
+                    shard_sizes, _ = await R2DatasetLoader._load_r2_metadata()
+                    if config_name in shard_sizes:
+                        self._metadata_cache[config_name] = shard_sizes[config_name]
+                    else:
+                        raise ValueError(f"Config {config_name} not found in metadata")
+
+                metadata = self._metadata_cache[config_name]
+                
+                # Find the exact shard containing this page
                 cumulative_rows = 0
                 chosen_shard = None
                 for shard in metadata["shards"]:
-                    if (
-                        cumulative_rows
-                        <= page_number
-                        < cumulative_rows + shard["num_rows"]
-                    ):
+                    if cumulative_rows <= page_number < cumulative_rows + shard["num_rows"]:
                         chosen_shard = shard
                         break
                     cumulative_rows += shard["num_rows"]
@@ -428,159 +504,322 @@ class R2DatasetLoader(DatasetLoader):
                 if not chosen_shard:
                     raise ValueError(f"Could not find shard for page {page_number}")
 
+                # Exit early if shutting down
+                if self._shutdown_event.is_set():
+                    return []
+
                 # Calculate offset within shard
                 shard_offset = page_number - cumulative_rows
 
-                # Read data from exact position
-                pf_data = self._parquet_cache.get(chosen_shard["path"])
-                if not pf_data:
-                    fs = self._get_fs()
-                    max_retries = 3
-                    for attempt in range(max_retries):
-                        try:
-                            f = fs.open(
-                                chosen_shard["path"],
-                                "rb",
-                                buffer_size=self.READ_BUFFER_SIZE,
-                            )
-                            pf = pq.ParquetFile(
-                                f, memory_map=False
-                            )  # Disable memory mapping
-                            pf_data = {"file": f, "parquet": pf}
-                            self._parquet_cache[chosen_shard["path"]] = pf_data
-                            break
-                        except Exception as e:
-                            if attempt < max_retries - 1:
-                                logger.warning(
-                                    f"Attempt {attempt + 1} failed to open parquet file {chosen_shard['path']} with error: {e}. Retrying..."
-                                )
-                                await asyncio.sleep(2**attempt)  # Exponential backoff
-                            else:
-                                logger.error(
-                                    f"Failed to open parquet file {chosen_shard['path']} after {max_retries} attempts: {e}"
-                                )
-                                raise
-
-                # Fix: Ensure row group index is within bounds
-                num_row_groups = pf_data["parquet"].num_row_groups
-                rows_per_group = chosen_shard["num_rows"] // num_row_groups
-                group_index = min(shard_offset // rows_per_group, num_row_groups - 1)
-
-                # Read the row group
-                table = await asyncio.to_thread(
-                    pf_data["parquet"].read_row_group,
-                    group_index,
-                    columns=["text"],
-                    use_threads=True,
-                )
-
-                # Adjust start_idx based on actual rows in the group
-                start_idx = shard_offset % rows_per_group
-                group_rows = len(table)  # Get actual rows in this group
-                start_idx = min(start_idx, max(0, group_rows - self.num_rows_per_page))
-
-                texts = table["text"].to_pylist()[
-                    start_idx : start_idx + self.num_rows_per_page
-                ]  # type: ignore
-
-                # Process texts deterministically
+                # Read data from the exact shard position using thread pool
+                def read_from_shard():
+                    fs = R2DatasetLoader._get_fs()
+                    shard_path = chosen_shard["path"]
+                    
+                    # Open file with appropriate buffer size
+                    with fs.open(shard_path, "rb", buffer_size=R2DatasetLoader.READ_BUFFER_SIZE) as f:
+                        pf = pq.ParquetFile(f)
+                        
+                        # Calculate exact row group and offset
+                        num_row_groups = pf.num_row_groups
+                        rows_per_group = chosen_shard["num_rows"] // num_row_groups
+                        group_index = min(shard_offset // rows_per_group, num_row_groups - 1)
+                        
+                        # Read specific row group
+                        table = pf.read_row_group(group_index, columns=["text"])
+                        
+                        # Calculate start index within group
+                        start_idx = shard_offset % rows_per_group
+                        group_rows = len(table)
+                        start_idx = min(start_idx, max(0, group_rows - self.num_rows_per_page))
+                        
+                        # Extract texts
+                        texts = table["text"].to_pylist()[start_idx:start_idx + self.num_rows_per_page]
+                        return texts
+                
+                # Use thread pool to avoid blocking the event loop
+                texts = await asyncio.to_thread(read_from_shard)
+                
+                # Exit early if shutting down
+                if self._shutdown_event.is_set():
+                    return []
+                
+                # Process texts in parallel
                 all_tokens = []
-                for text in texts:
-                    tokens = await asyncio.to_thread(
-                        self.tokenizer,
+                
+                # Tokenize texts using thread pool to avoid blocking
+                def tokenize_text(text):
+                    return self.tokenizer(
                         text,
                         padding=False,
                         truncation=True,
                         max_length=self.sequence_length,
                         return_tensors=None,
-                    )
-
-                    input_ids = tokens["input_ids"]  # type: ignore
+                    )["input_ids"]
+                
+                # Process texts in parallel batches
+                tokenized_results = []
+                for text in texts:
+                    # Check for shutdown signal
+                    if self._shutdown_event.is_set():
+                        return []
+                    result = await asyncio.to_thread(tokenize_text, text)
+                    tokenized_results.append(result)
+                
+                # Combine tokenized results and add EOS tokens
+                for input_ids in tokenized_results:
                     if input_ids:
                         all_tokens.extend(input_ids)
                         if input_ids[-1] != self.tokenizer.eos_token_id:
                             all_tokens.append(self.tokenizer.eos_token_id)
-
+                
+                # Final shutdown check before caching/adding to queue
+                if self._shutdown_event.is_set():
+                    return []
+                
+                # Update LRU cache
+                if len(self._token_cache) >= self.MAX_CACHE_SIZE:
+                    # Remove least recently used item
+                    self._token_cache.popitem(last=False)
                 self._token_cache[cache_key] = all_tokens
+                
+                # Add to prefetch queue
+                try:
+                    await asyncio.wait_for(
+                        self._prefetch_queue.put(all_tokens), 
+                        timeout=1.0
+                    )
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    # If we can't put to the queue (e.g., during shutdown), just return
+                    pass
+                
                 return all_tokens
 
             except Exception as e:
                 logger.error(f"Error processing page {page}: {e}")
-                raise
+                # Add empty result to queue to maintain progress, if not shutting down
+                if not self._shutdown_event.is_set():
+                    try:
+                        await asyncio.wait_for(self._prefetch_queue.put([]), timeout=0.5)
+                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                        # Ignore errors when putting to queue during shutdown
+                        pass
+                return []
 
-    def __iter__(self):
-        """Reset buffers and prepare for iteration"""
-        self.buffer = self.used_buffer + self.buffer  # Combine buffers
-        self.used_buffer = []  # Reset used buffer
-        self.padded_buffer = []  # Reset padded buffer
-        self._refill_padded_buffer()  # Initial fill
-        return self
-
-    def __next__(self):
-        """Get next batch, exactly matching DatasetLoader's logic"""
-        batch = []
-
-        while len(self.padded_buffer) >= self.sequence_length:
-            # Extract sequence_length tokens
-            sequence = self.padded_buffer[: self.sequence_length]
-            self.padded_buffer = self.padded_buffer[self.sequence_length :]
-
-            batch.append(sequence)
-
-            # Return batch when we have batch_size sequences
-            if len(batch) == self.batch_size:
-                self._refill_padded_buffer()  # Refill after creating batch
-                return np.stack(batch)
-
-            # Refill if needed
-            if len(self.padded_buffer) < self.sequence_length:
-                self._refill_padded_buffer()
-
-        # No more complete batches
-        if batch:  # Partial batch - should not happen with current logic
-            raise StopIteration
-        raise StopIteration
-
-    def _read_parquet_table(self, fs, path):
+    async def _get_next_tokens(self):
         """
-        Helper method to read parquet data.
-
-        Args:
-            fs: Filesystem instance
-            path (str): Path to parquet file
-
+        Get the next batch of tokens from the prefetch queue.
+        Ensures constant-time access to the next page of tokens.
+        
         Returns:
-            pyarrow.Table: Table containing text data
+            list: Next batch of tokenized content
         """
-        with fs.open(path, "rb") as f:
-            pf = pq.ParquetFile(f)
-            table = pf.read(columns=["text"])
-        return table
+        # Start prefetching if not already started
+        if not self._prefetch_task or self._prefetch_task.done():
+            await self._start_prefetching()
+        
+        if not self._processing or self._shutdown_event.is_set():
+            return []
+            
+        try:
+            # Get next tokens from queue with timeout to avoid blocking forever
+            tokens = await asyncio.wait_for(self._prefetch_queue.get(), timeout=5.0)
+            
+            # None signals end of data
+            if tokens is None:
+                self._processing = False
+                return []
+                
+            return tokens
+        except asyncio.TimeoutError:
+            logger.warning("Timeout waiting for tokens from prefetch queue")
+            return []
+        except asyncio.CancelledError:
+            self._processing = False
+            raise
+        except Exception as e:
+            logger.error(f"Error getting next tokens: {e}")
+            return []
 
-    def __del__(self):
-        """Cleanup resources"""
-        if self._prefetch_task:
-            self._prefetch_task.cancel()
+    @staticmethod
+    async def create(
+        batch_size, sequence_length, pages_info, tokenizer, pack_samples=True, num_rows_per_page=100
+    ):
+        """
+        Create loader with proper initialization.
+        Implements lazy loading for constant-time initialization.
+        
+        Args:
+            batch_size (int): Batch size
+            sequence_length (int): Sequence length
+            pages_info (list): List of page information
+            tokenizer: Tokenizer instance
+            pack_samples (bool): Whether to pack samples
+            num_rows_per_page (int): Number of rows per page
+            
+        Returns:
+            R2DatasetLoader: Initialized loader
+        """
+        loader = R2DatasetLoader(
+            batch_size=batch_size,
+            sequence_length=sequence_length,
+            tokenizer=tokenizer,
+            pack_samples=pack_samples,
+            num_rows_per_page=num_rows_per_page
+        )
 
-        for pf_data in self._parquet_cache.values():
+        # Store pages for later processing
+        loader.pages = pages_info.copy()
+        
+        # Register finalizer to handle cleanup when the object is garbage collected
+        weakref.finalize(loader, R2DatasetLoader._cleanup_resources, loader)
+        
+        # Start prefetching in background
+        await loader._start_prefetching()
+        
+        # Process first batch immediately for faster response
+        try:
+            # Wait with a timeout to avoid blocking indefinitely
+            first_batch = await asyncio.wait_for(loader._get_next_tokens(), timeout=5.0)
+            if first_batch:
+                loader.buffer.extend(first_batch)
+                loader._refill_padded_buffer()
+        except asyncio.TimeoutError:
+            logger.warning("Timeout waiting for initial tokens, continuing with empty buffer")
+        except Exception as e:
+            logger.error(f"Error loading initial tokens: {e}")
+        
+        return loader
+
+    def _flush_prefetch_queue_sync(self):
+        """
+        Synchronously drain the asyncio prefetch queue (if any tokens are available)
+        and add them to self.buffer. Safe to call from __next__ which must be synchronous.
+        """
+        # Check if we're shutting down
+        if self._shutdown_event.is_set():
+            return
+            
+        # Use get_nowait() to flush the queue without blocking
+        while True:
             try:
-                pf_data["file"].close()  # type: ignore
+                if not hasattr(self, '_prefetch_queue') or self._prefetch_queue is None:
+                    return
+                    
+                tokens = self._prefetch_queue.get_nowait()
+                if tokens is None:  # end signal
+                    self._processing = False
+                    break
+                self.buffer.extend(tokens)
+                # Mark task as done
+                self._prefetch_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
             except Exception as e:
-                logger.debug(f"Error closing parquet file: {e}")
+                # Any other errors should be ignored to maintain sync behavior
+                logger.debug(f"Error in _flush_prefetch_queue_sync: {e}")
+                break
+        
+    @staticmethod
+    def _cleanup_resources(loader):
+        """
+        Static method for cleaning up resources safely, used by the finalizer.
+        
+        Args:
+            loader: The loader instance to be cleaned up
+        """
+        # Signal shutdown
+        if hasattr(loader, '_shutdown_event'):
+            loader._shutdown_event.set()
+            
+        # Cancel the prefetch task
+        if hasattr(loader, '_prefetch_task') and loader._prefetch_task and not loader._prefetch_task.done():
+            try:
+                # Check if we can safely cancel the task
+                loop = asyncio.get_event_loop() if hasattr(loader._prefetch_task, '_loop') else None
+                if loop and loop.is_running() and not loop.is_closed():
+                    loader._prefetch_task.cancel()
+            except Exception:
+                # Ignore any errors during cleanup
+                pass
+        
+        # Clear any references to help garbage collection
+        if hasattr(loader, '_token_cache'):
+            loader._token_cache.clear()
+        if hasattr(loader, '_metadata_cache'):
+            loader._metadata_cache.clear()
+        if hasattr(loader, 'buffer'):
+            loader.buffer = []
+        if hasattr(loader, 'used_buffer'):
+            loader.used_buffer = []
+        if hasattr(loader, 'padded_buffer'):
+            loader.padded_buffer = []
 
-        self._parquet_cache.clear()
+    async def shutdown(self):
+        """
+        Properly shut down the prefetch mechanism and clean up resources.
+        This should be called explicitly when done with the loader.
+        """
+        # Signal processing to stop
+        self._processing = False
+        self._shutdown_event.set()
+        
+        # Cancel the prefetch task if it exists and is running
+        if hasattr(self, '_prefetch_task') and self._prefetch_task:
+            if not self._prefetch_task.done():
+                try:
+                    # Try to cancel the task
+                    self._prefetch_task.cancel()
+                    # Wait for cancellation to complete with timeout
+                    try:
+                        await asyncio.wait_for(self._prefetch_task, timeout=1.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        # Ignore timeout or cancellation exceptions
+                        pass
+                except Exception as e:
+                    logger.debug(f"Error cancelling prefetch task: {e}")
+        
+        # Clear the prefetch queue
+        if hasattr(self, '_prefetch_queue') and self._prefetch_queue:
+            try:
+                # Empty the queue
+                while not self._prefetch_queue.empty():
+                    try:
+                        self._prefetch_queue.get_nowait()
+                        self._prefetch_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
+                    except Exception:
+                        # Ignore errors when emptying queue
+                        pass
+            except Exception as e:
+                logger.debug(f"Error clearing prefetch queue: {e}")
+        
+        # Clear caches to free memory
         self._token_cache.clear()
 
-    @staticmethod
-    @lru_cache(maxsize=32)
-    def _get_parquet_file(shard_path: str):
-        """Cached parquet file access"""
-        fs = R2DatasetLoader._get_fs()
-        f = fs.open(shard_path, "rb", buffer_size=R2DatasetLoader.READ_BUFFER_SIZE)
-        return {"file": f, "parquet": pq.ParquetFile(f, memory_map=True)}
-
-    @staticmethod
-    @lru_cache(maxsize=1024)
-    def _get_tokenized_cache(cache_key: str):
-        """Cached tokenization results"""
-        return R2DatasetLoader._token_cache.get(cache_key)
+async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
+    """
+    Calls an async function with retries.
+    
+    Args:
+        func (Callable): An async function.
+        *args: Positional arguments to pass to func.
+        attempts (int): Number of retries.
+        delay (int): Delay between attempts in seconds.
+        context (str): Context description for logging.
+        **kwargs: Keyword arguments to pass to func.
+        
+    Returns:
+        The result of func(*args, **kwargs) or None if all attempts fail.
+    """
+    for attempt in range(attempts):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            tplr.logger.error(
+                f"Attempt {attempt + 1}/{attempts} failed for {context}: {e}"
+            )
+            await asyncio.sleep(delay)
+    tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
+    return None

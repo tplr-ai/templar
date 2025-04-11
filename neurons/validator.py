@@ -86,6 +86,12 @@ class Validator:
         parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
         )
+        parser.add_argument(
+            "--name_prefix",
+            type=str,
+            default="baseline",
+            help="Custom prefix for the run name in WandB",
+        )
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
         parser.add_argument("--trace", action="store_true", help="Enable trace logging")
         parser.add_argument(
@@ -252,6 +258,7 @@ class Validator:
             config=self.config,
             group="validator",
             job_type="validation",
+            name_prefix=self.config.name_prefix,
         )
 
         # Initialize metrics logger for InfluxDB

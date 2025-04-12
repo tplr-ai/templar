@@ -115,6 +115,7 @@ class Miner:
         self.config = Miner.config()
         self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
 
+        self.default_pages = self.hparams.pages_per_window
         if self.config.pages is not None:
             self.hparams.pages_per_window = self.config.pages
             tplr.logger.info(
@@ -276,11 +277,21 @@ class Miner:
                 f"Using {self.hparams.pages_per_window} pages for training"
             )
 
-            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset=step_window * self.hparams.pages_per_window,
-                n_pages=self.hparams.pages_per_window,
+            pages_own = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                offset=step_window * self.default_pages,
+                n_pages=self.default_pages
+                if self.default_pages <= self.hparams.pages_per_window
+                else self.hparams.pages_per_window,
                 seed=self.uid,  # type: ignore
             )
+            pages_random = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                offset=step_window * self.default_pages,
+                n_pages=(self.hparams.pages_per_window - self.default_pages)
+                if self.default_pages <= self.hparams.pages_per_window
+                else 0,
+                seed=np.random.randint(1000, 10000),  # type: ignore
+            )
+            pages = pages_own + pages_random
             loader = await tplr.r2_dataset.R2DatasetLoader.create(
                 batch_size=self.hparams.batch_size,
                 sequence_length=self.hparams.sequence_length,

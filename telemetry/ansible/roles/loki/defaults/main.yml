@@ -41,6 +41,14 @@ loki_s3_region: ""
 loki_s3_access_key_id: ""
 loki_s3_secret_access_key: ""
 
+# R2 storage configuration (Cloudflare R2 is S3-compatible)
+loki_r2_enabled: false
+loki_r2_bucket_name: ""
+loki_r2_endpoint: "https://<account_id>.r2.cloudflarestorage.com"
+loki_r2_region: "auto"
+loki_r2_access_key_id: ""
+loki_r2_secret_access_key: ""
+
 # Schema configuration
 loki_schema_configs:
   - from: "2020-07-01"

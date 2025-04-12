@@ -1,0 +1,128 @@
+# Fluentd main configuration file
+# {{ ansible_managed }} - Managed by Ansible
+
+<system>
+  log_level {{ fluentd_log_level }}
+  workers 1
+  log_worker_id true
+  root_dir {{ fluentd_buffer_dir }}
+</system>
+
+{% for source in fluentd_sources %}
+{% if source.enabled | default(true) %}
+<source>
+  @type {{ source.type }}
+  {% if source.type == 'http' %}
+  port {{ source.port }}
+  bind {{ source.bind }}
+  {% elif source.type == 'forward' %}
+  port {{ source.port }}
+  bind {{ source.bind }}
+  {% elif source.type == 'tail' %}
+  path {{ source.path }}
+  pos_file {{ source.pos_file }}
+  tag {{ source.tag }}
+  refresh_interval 5s
+  <format>
+    @type json
+  </format>
+  <parse>
+    @type {{ source.format }}
+  </parse>
+  {% endif %}
+</source>
+{% endif %}
+{% endfor %}
+
+
+<filter loki>
+  @type record_transformer
+  enable_ruby true
+  <format>
+    @type json
+  </format>
+  <record>
+    version ${record["version"]}
+    service ${record["service"]}
+    uid ${record["uid"]}
+    timestamp ${record["timestamp"]}
+  </record>
+</filter>
+
+<filter **>
+  @type record_transformer
+  enable_ruby true
+  <format>
+    @type json
+  </format>
+  <record>
+    timestamp ${time}
+    formatted_time ${time.strftime('%Y-%m-%dT%H:%M:%S%z')}
+    hostname ${hostname}
+    original_tag ${tag}
+  </record>
+</filter>
+
+{% if fluentd_r2_enabled %}
+<match loki>
+  @type s3
+
+  s3_endpoint {{ fluentd_r2_endpoint }}
+  s3_region {{ fluentd_r2_region }}
+  s3_bucket {{ fluentd_r2_bucket }}
+  aws_key_id {{ fluentd_r2_access_key_id }}
+  aws_sec_key {{ fluentd_r2_secret_access_key }}
+  force_path_style true
+
+  path logs/version=${version}/year=%Y/month=%m/day=%d/hour=%H/minute=%M/
+  s3_object_key_format %{path}${service}_${uid}_%{hex_random}.json.gz
+
+  store_as json
+  compress gzip
+
+  <format>
+    @type json
+  </format>
+
+  <buffer version,service,uid,time>
+    @type file
+    path {{ fluentd_buffer_dir }}/s3
+    timekey 300 # 5 minutes
+    timekey_wait 30
+    timekey_use_utc true
+    chunk_limit_size {{ fluentd_buffer_chunk_limit }}
+    queue_limit_length {{ fluentd_buffer_queue_limit }}
+    flush_mode interval
+    flush_interval 30s
+    retry_forever true
+    flush_thread_count 4
+    retry_max_interval {{ fluentd_retry_max_interval }}
+    overflow_action block
+    total_limit_size 20GB
+    flush_at_shutdown true
+  </buffer>
+
+  <secondary>
+    @type file
+    path {{ fluentd_buffer_dir }}/error/${tag}/%Y/%m/%d/%H/%M
+    append true
+    <format>
+      @type json
+    </format>
+  </secondary>
+</match>
+{% else %}
+<match **>
+  @type file
+  path {{ fluentd_buffer_dir }}/backup
+  <buffer tag,time>
+    @type file
+    path {{ fluentd_buffer_dir }}/file_buffer
+    timekey 3600
+    timekey_wait 10m
+    flush_at_shutdown true
+  </buffer>
+  format json
+</match>
+{% endif %}
+

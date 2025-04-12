@@ -1,0 +1,159 @@
+---
+- name: Install required packages
+  become: true
+  apt:
+    name: "{{ fluentd_packages }}"
+    state: present
+    update_cache: yes
+  register: apt_result
+  until: apt_result is success
+  retries: 3
+  delay: 5
+
+- name: Create Fluentd system group
+  become: true
+  group:
+    name: "{{ fluentd_group }}"
+    system: "{{ fluentd_system_user }}"
+    state: present
+
+- name: Create Fluentd system user
+  become: true
+  user:
+    name: "{{ fluentd_user }}"
+    group: "{{ fluentd_group }}"
+    system: "{{ fluentd_system_user }}"
+    shell: /usr/sbin/nologin
+    home: "{{ fluentd_user_home }}"
+    createhome: true
+    state: present
+
+- name: Create Fluentd directories with proper permissions
+  become: true
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ fluentd_user }}"
+    group: "{{ fluentd_group }}"
+    mode: "0755"
+    recurse: yes
+  loop:
+    - "{{ fluentd_config_dir }}"
+    - "{{ fluentd_log_dir }}"
+    - "{{ fluentd_buffer_dir }}"
+    - "{{ fluentd_user_home }}"
+    - "{{ fluentd_buffer_dir }}/s3"
+    - "{{ fluentd_buffer_dir }}/error"
+    - "{{ fluentd_buffer_dir }}/file_buffer"
+    - "{{ fluentd_buffer_dir }}/error_records"
+
+- name: Ensure log file exists with proper permissions
+  become: true
+  file:
+    path: "{{ fluentd_log_dir }}/fluentd.log"
+    state: touch
+    owner: "{{ fluentd_user }}"
+    group: "{{ fluentd_group }}"
+    mode: "0644"
+    modification_time: preserve
+    access_time: preserve
+
+- name: Install Fluentd with gem
+  become: true
+  gem:
+    name: fluentd
+    version: "{{ fluentd_version }}"
+    state: present
+    user_install: false
+  register: fluentd_installed
+
+- name: Install Fluentd plugins
+  become: true
+  gem:
+    name: "{{ item }}"
+    state: present
+    user_install: false
+  loop: "{{ fluentd_plugins }}"
+  register: plugins_installed
+
+- name: Make sure gem binaries are executable by fluentd user
+  become: true
+  file:
+    path: "/usr/local/bin"
+    state: directory
+    mode: "0755"
+    recurse: no
+
+- name: Ensure fluentd user has access to Ruby gems
+  become: true
+  file:
+    path: "/var/lib/gems"
+    state: directory
+    owner: "{{ fluentd_user }}"
+    group: "{{ fluentd_group }}"
+    mode: "0755"
+    recurse: yes
+
+- name: Deploy Fluentd configuration
+  become: true
+  template:
+    src: fluent.conf.j2
+    dest: "{{ fluentd_config_file }}"
+    owner: "{{ fluentd_user }}"
+    group: "{{ fluentd_group }}"
+    mode: "0640"
+  notify: Restart fluentd service
+
+- name: Create Fluentd systemd service file
+  become: true
+  template:
+    src: fluentd.service.j2
+    dest: "{{ fluentd_systemd_service_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd daemon
+    - Restart fluentd service
+
+- name: Reset any failed status for Fluentd service
+  become: true
+  command: systemctl reset-failed fluentd.service
+  changed_when: true
+  failed_when: false
+
+- name: Enable and start Fluentd service
+  become: true
+  systemd:
+    name: fluentd
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  register: service_start
+  retries: 5
+  delay: 10
+  until: service_start is success
+
+- name: Verify Fluentd is running
+  become: true
+  command: "ps aux | grep fluentd | grep -v grep"
+  register: fluentd_running
+  changed_when: false
+  failed_when: false
+
+- name: Report Fluentd status
+  debug:
+    msg: >-
+      {{ 'Fluentd is running!' if fluentd_running.rc == 0 else 'WARNING: Fluentd may not be running correctly!' }}
+
+- name: Check HTTP port is listening
+  become: true
+  command: "netstat -tulpn | grep {{ fluentd_http_port }}"
+  register: fluentd_http_port_check
+  changed_when: false
+  failed_when: false
+
+- name: Report HTTP port status
+  debug:
+    msg: >-
+      {{ 'Fluentd HTTP port is listening!' if fluentd_http_port_check.rc == 0 else 'WARNING: Fluentd HTTP port may not be listening!' }}

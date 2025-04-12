@@ -1,0 +1,79 @@
+---
+# Log collector deployment tasks
+
+- name: Install required packages
+  apt:
+    name:
+      - python3
+      - python3-venv
+      - curl
+      - ca-certificates
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Create log collector user
+  user:
+    name: "{{ log_collector_user }}"
+    system: yes
+    create_home: no
+    shell: /usr/sbin/nologin
+  when: log_collector_create_user | default(true)
+
+- name: Create log collector directory
+  file:
+    path: /opt/log-collector
+    state: directory
+    owner: "{{ log_collector_user }}"
+    group: "{{ log_collector_group }}"
+    mode: 0755
+
+- name: Install pipx for Python application management
+  apt:
+    name:
+      - pipx
+      - python3-venv
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Ensure pipx is configured
+  shell: pipx ensurepath
+  changed_when: false
+
+- name: Install uv with pipx
+  shell: pipx install uv
+  args:
+    creates: /root/.local/pipx/venvs/uv
+  register: uv_install
+
+- name: Copy uv to /usr/bin
+  copy:
+    src: "/root/.local/bin/uv"
+    dest: "/usr/bin/uv"
+    mode: '0755'
+    remote_src: yes
+
+- name: Copy log collector script
+  copy:
+    src: log_collector.py
+    dest: /opt/log-collector/log_collector.py
+    owner: "{{ log_collector_user }}"
+    group: "{{ log_collector_group }}"
+    mode: 0755
+  notify: restart log-collector
+
+- name: Create systemd service file
+  template:
+    src: log-collector.service.j2
+    dest: /etc/systemd/system/log-collector.service
+    owner: root
+    group: root
+    mode: 0644
+  notify: reload systemd
+
+- name: Ensure log collector service is enabled and running
+  systemd:
+    name: log-collector
+    state: started
+    enabled: yes
+    daemon_reload: yes

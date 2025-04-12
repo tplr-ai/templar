@@ -768,7 +768,7 @@ class Validator:
             data_start_random = tplr.T()
             pages_random = await retry_call(
                 tplr.r2_dataset.R2DatasetLoader.next_pages,
-                offset=self.sync_window,
+                offset=self.sync_window * self.hparams.pages_per_window,
                 n_pages=self.hparams.pages_per_window,
                 seed=random.randint(1000, 10000000),
                 attempts=3,
@@ -836,7 +836,7 @@ class Validator:
                     # Load local pages exactly once from the dataset loader with retry handling.
                     local_pages = await retry_call(
                         tplr.r2_dataset.R2DatasetLoader.next_pages,
-                        offset=self.sync_window,
+                        offset=self.sync_window * self.hparams.pages_per_window,
                         n_pages=self.hparams.pages_per_window,
                         seed=eval_uid,
                         attempts=3,

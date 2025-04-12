@@ -763,6 +763,7 @@ class Validator:
             avg_loss_after_per_batch_own = 0.0
             avg_loss_before_per_batch_random = 0.0
             avg_loss_after_per_batch_random = 0.0
+            evaluated_peers = 0
 
             # Pre-load common random loader for all evaluated UIDs in this window.
             data_start_random = tplr.T()
@@ -1401,6 +1402,7 @@ class Validator:
                             "No positive scores found, all weights set to 0"
                         )
 
+                    evaluated_peers += 1
                     tplr.logger.info(
                         f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
                     )
@@ -1675,10 +1677,18 @@ class Validator:
                 f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
             )
 
-            avg_loss_before_per_batch_own /= len(evaluation_uids)
-            avg_loss_after_per_batch_own /= len(evaluation_uids)
-            avg_loss_before_per_batch_random /= len(evaluation_uids)
-            avg_loss_after_per_batch_random /= len(evaluation_uids)
+            avg_loss_before_per_batch_own /= (
+                evaluated_peers if evaluated_peers != 0 else 1
+            )
+            avg_loss_after_per_batch_own /= (
+                evaluated_peers if evaluated_peers != 0 else 1
+            )
+            avg_loss_before_per_batch_random /= (
+                evaluated_peers if evaluated_peers != 0 else 1
+            )
+            avg_loss_after_per_batch_random /= (
+                evaluated_peers if evaluated_peers != 0 else 1
+            )
 
             # 16. Log evaluation metrics once all evaluations are done
             evaluation_metrics = {

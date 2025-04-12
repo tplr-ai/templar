@@ -1,47 +1,60 @@
 ## Description
 <!--
   Please provide a brief description of the changes introduced by this pull request.
+  Focus on the "what" and "why" rather than the "how".
 -->
 
-
 ## Related Issue(s)
-
+<!-- Link any related issues using the syntax: -->
 - Closes #[issue number]
 
 ## Type of Change
+<!-- Check the relevant option(s): -->
+- [ ] Feature (adding new functionality)
+- [ ] Fix (resolving a bug or issue)
+- [ ] Docs (documentation updates)
+- [ ] Refactor (code changes that don't affect functionality)
+- [ ] Maintenance (dependency updates or other maintenance)
+- [ ] Tests (adding or improving tests)
+- [ ] Breaking change (fix or feature with incompatible API changes)
+- [ ] Other: _____
+
+## Branch Naming
+<!-- Confirm your branch follows the naming convention: <kind>/<description> -->
+- [ ] My branch follows the project's naming convention (e.g., feature/add-new-capability)
+
+## Commit Messages
+<!-- Ensure your commits follow the project guidelines -->
+- [ ] My commits are small, atomic, and have proper commit messages
+- [ ] Commit messages are in imperative mood with a capitalized summary under 50 chars
+
+## Code Quality
+<!-- Check all that apply: -->
+- [ ] I've performed a self-review of my code
+- [ ] I've added appropriate docstrings following the project's conventions
+- [ ] I've added proper logging where necessary (without trailing periods)
+- [ ] I've applied linting and formatting with Ruff
+- [ ] My code generates no new warnings
+
+## Testing
+<!-- Check all that apply: -->
+- [ ] I've added tests for new functionality or bug fixes
+- [ ] All tests pass locally with my changes
+- [ ] Test coverage has not decreased
+
+## Documentation
+<!-- Check if relevant: -->
+- [ ] I've updated documentation to reflect my changes
+- [ ] I've updated comments in hard-to-understand areas
+
+## If this is a breaking change
 <!--
-Please check the relevant options:
+  If applicable, describe the impact and migration path for existing applications.
+  Otherwise, you can remove this section.
 -->
 
-- [ ] Bug fix (non-breaking change which fixes an issue)
-- [ ] New feature (non-breaking change which adds functionality)
-- [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [ ] Documentation update
-- [ ] Other (please describe):
-
-## Breaking Change
-
-If this PR introduces a breaking change, please provide a detailed description of the impact and the migration path for existing applications.
-
-## Checklist
-
-<!--
-Please ensure the following tasks are completed before requesting a review:
--->
-
-- [ ] I have performed a self-review of my own code
-- [ ] I have commented my code, particularly in hard-to-understand areas
-- [ ] I have run `cargo fmt` and `cargo clippy` to ensure my code is formatted and linted correctly
-- [ ] I have made corresponding changes to the documentation
-- [ ] My changes generate no new warnings
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing unit tests pass locally with my changes
-- [ ] Any dependent changes have been merged and published in downstream modules
-
-## Screenshots (if applicable)
-
-Please include any relevant screenshots or GIFs that demonstrate the changes made.
+## Screenshots/Examples
+<!-- If applicable, add screenshots or examples to help explain your changes. -->
 
 ## Additional Notes
-
-Please provide any additional information or context that may be helpful for reviewers.
+<!-- Add any other context about the PR here. -->

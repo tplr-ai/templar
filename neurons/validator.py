@@ -763,6 +763,40 @@ class Validator:
             avg_loss_after_per_batch_own = 0.0
             avg_loss_before_per_batch_random = 0.0
             avg_loss_after_per_batch_random = 0.0
+
+            # Pre-load common random loader for all evaluated UIDs in this window.
+            data_start_random = tplr.T()
+            pages_random = await retry_call(
+                tplr.r2_dataset.R2DatasetLoader.next_pages,
+                offset=self.sync_window,
+                n_pages=self.hparams.pages_per_window,
+                seed=random.randint(1000, 10000000),
+                attempts=3,
+                delay=1,
+                context="random pages - common loader",
+                **{},
+            )
+            if pages_random is None:
+                tplr.logger.error(
+                    f"Failed to load common random pages for window {self.sync_window}. Skipping evaluation for this window."
+                )
+                continue
+
+            common_loader_random = await retry_call(
+                tplr.r2_dataset.R2DatasetLoader.create,
+                batch_size=self.hparams.batch_size,
+                sequence_length=self.hparams.sequence_length,
+                pages_info=pages_random,
+                tokenizer=self.tokenizer,
+                attempts=3,
+                delay=1,
+                context="random loader - common",
+                **{},
+            )
+            tplr.logger.info(
+                f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation."
+            )
+
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
 
@@ -1090,45 +1124,9 @@ class Validator:
                         f"Relative improvement (own data): {self.relative_improvement_own:.4f}"
                     )
 
-                    # 7. Load evaluation data from random page
+                    # 7. Use common random loader for evaluation
                     model_random_data_eval = copy.deepcopy(self.model)
-                    data_start = tplr.T()
-                    pages_random = await retry_call(
-                        tplr.r2_dataset.R2DatasetLoader.next_pages,
-                        offset=self.sync_window,
-                        n_pages=self.hparams.pages_per_window,
-                        seed=random.randint(0, 10000),
-                        attempts=3,
-                        delay=1,
-                        context="random pages",
-                        **{},
-                    )
-                    if pages_random is None:
-                        tplr.logger.error(
-                            "Failed to load random pages. Skipping evaluation."
-                        )
-                        continue
-
-                    loader_random = await retry_call(
-                        tplr.r2_dataset.R2DatasetLoader.create,
-                        batch_size=self.hparams.batch_size,
-                        sequence_length=self.hparams.sequence_length,
-                        pages_info=pages_random,
-                        tokenizer=self.tokenizer,
-                        attempts=3,
-                        delay=1,
-                        context="random loader",
-                        **{},
-                    )
-                    if loader_random is None:
-                        tplr.logger.error(
-                            "Failed to create random loader. Skipping evaluation."
-                        )
-                        continue
-                    tplr.logger.info(
-                        f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded random evaluation data"
-                    )
-                    state_dict, _ = eval_result
+                    loader_random = common_loader_random
 
                     # 8. Compute initial loss
                     self.optimizer.zero_grad()
@@ -1250,8 +1248,6 @@ class Validator:
                     # Clean up stored batches, loader & pages
                     del (
                         batches_random,
-                        pages_random,
-                        loader_random,
                         model_random_data_eval,
                     )
                     torch.cuda.empty_cache()
@@ -1777,6 +1773,10 @@ class Validator:
 
             # 18. Increment global step
             self.global_step += 1
+
+            # Clean up common random loader after evaluations for this window.
+            del common_loader_random, pages_random
+            torch.cuda.empty_cache()
 
     def select_initial_peers(self) -> tplr.comms.PeerArray | None:
         try:

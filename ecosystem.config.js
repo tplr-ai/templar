@@ -5,8 +5,8 @@ const PROJECT_NAME = `test-scoring`;
 
 // Special miner configuration (the one that will use more pages)
 const SPECIAL_MINER_INDEX = process.env.SPECIAL_MINER_INDEX || 1;
-const SPECIAL_MINER_PAGES = process.env.SPECIAL_MINER_PAGES || 1;
-const SPECIAL_MINER_PREFIX = process.env.SPECIAL_MINER_PREFIX || '1page';
+const SPECIAL_MINER_PAGES = process.env.SPECIAL_MINER_PAGES || 12;
+const SPECIAL_MINER_PREFIX = process.env.SPECIAL_MINER_PREFIX || '12page';
 
 // Get the latest commit hash (first 7 characters)
 let commitHash = 'unknown';

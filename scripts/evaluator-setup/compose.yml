@@ -1,0 +1,32 @@
+services:
+  evaluator:
+    image: ghcr.io/tplr-ai/templar:latest
+    container_name: templar-evaluator
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "-c", "sleep 5; uv run scripts/evaluator.py --device=cuda:0"]
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets
+    env_file: .env
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "0"
+      CUDA_VISIBLE_DEVICES: "0"
+    logging:
+      driver: journald
+      options:
+        tag: evaluator
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 30 --cleanup --label-enable
+    restart: unless-stopped
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+      - REPO_USER=${GITHUB_USER}
+      - REPO_PASSWORD=${GITHUB_TOKEN}

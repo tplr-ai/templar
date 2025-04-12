@@ -1,0 +1,95 @@
+---
+# Fluentd version and installation
+fluentd_version: "1.16.3"
+fluentd_packages:
+  - ruby
+  - ruby-dev
+  - build-essential
+  - libcurl4-openssl-dev
+  - libssl-dev
+  - zlib1g-dev
+  - libxml2-dev
+  - libxslt-dev
+  - pkg-config
+
+# System user and group
+fluentd_user: "fluentd"
+fluentd_group: "fluentd"
+fluentd_system_user: true
+fluentd_user_home: "/var/lib/fluentd"
+
+# Directory and file paths
+fluentd_config_dir: "/etc/fluentd"
+fluentd_config_file: "{{ fluentd_config_dir }}/fluent.conf"
+fluentd_log_dir: "/var/log/fluentd"
+fluentd_buffer_dir: "/var/lib/fluentd/buffer"
+fluentd_systemd_service_file: "/etc/systemd/system/fluentd.service"
+
+# Server configuration
+fluentd_port: 24224
+fluentd_http_port: 9880
+
+# Fluentd plugins to install
+fluentd_plugins:
+  - fluent-plugin-s3
+  - fluent-plugin-record-reformer
+  - fluent-plugin-rewrite-tag-filter
+  - fluent-plugin-multi-format-parser
+  - fluent-plugin-parser
+  - fluent-plugin-grafana-loki
+  - oj
+  - webrick
+  - nokogiri
+  - rexml
+
+# Log levels: trace, debug, info, warn, error, fatal
+fluentd_log_level: "info"
+
+# Buffer configuration
+fluentd_buffer_type: "file"
+fluentd_buffer_chunk_limit: "8m"
+fluentd_buffer_queue_limit: "256"
+fluentd_flush_interval: "60s"
+fluentd_retry_wait: "1s"
+fluentd_retry_max_interval: "60s"
+fluentd_retry_forever: "true"
+fluentd_retry_max_times: 17  # About 24h with exponential backoff
+
+# R2 (S3-compatible) configuration
+fluentd_r2_enabled: true
+fluentd_r2_bucket: "logs"
+fluentd_r2_endpoint: "https://<account_id>.r2.cloudflarestorage.com"
+fluentd_r2_region: "auto"
+fluentd_r2_access_key_id: ""
+fluentd_r2_secret_access_key: ""
+
+# Time-based partitioning format
+fluentd_s3_path_prefix: "logs/version=${version}/year=%Y/month=%m/day=%d/hour=%H/"
+
+# Loki integration
+fluentd_loki_url: "http://localhost:{{ loki_http_listen_port }}"
+fluentd_collect_loki_logs: true
+fluentd_loki_log_path: "{{ loki_data_dir }}/loki.log"
+
+# Source configuration
+fluentd_sources:
+  - type: "http"
+    port: "{{ fluentd_http_port }}"
+    bind: "0.0.0.0"
+    tag: "http"
+  - type: "forward"
+    port: "{{ fluentd_port }}"
+    bind: "0.0.0.0"
+    tag: "forward"
+  - type: "http"
+    path: "{{ fluentd_loki_log_path }}"
+    pos_file: "{{ fluentd_buffer_dir }}/loki.log.pos"
+    tag: "loki"
+    format: "json"
+    enabled: "{{ fluentd_collect_loki_logs }}"
+  # - type: "tail"
+  #   path: "{{ fluentd_loki_log_path }}"
+  #   pos_file: "{{ fluentd_buffer_dir }}/loki.log.pos"
+  #   tag: "loki"
+  #   format: "json"
+  #   enabled: "{{ fluentd_collect_loki_logs }}"

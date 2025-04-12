@@ -71,7 +71,7 @@ class AggregationServer:
         # Initialize bittensor objects
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
-        self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+        self.uid = 45
 
         try:
             version = tplr.__version__

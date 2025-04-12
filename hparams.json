@@ -26,7 +26,7 @@
     "weight_decay": 0.0,
     "warmup_steps": 250,
     "alpha_f": 0.1,
-    "t_max": 5000,
+    "t_max": 20000,
     "validator_offset": 2,
     "checkpoint_frequency": 100,
     "topk_peers": 20,
@@ -43,7 +43,7 @@
     "catch_up_batch_size": 5,
     "catch_up_timeout": 300,
     "uids_per_window": 2,
-    "time_window_delta_seconds": 25,
+    "time_window_delta_seconds": 10,
     "reset_inactivity_windows": 25,
     "max_gradient_score": 0.05,
     "sync_max_steps_behind": 3

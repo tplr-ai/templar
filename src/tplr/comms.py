@@ -30,6 +30,8 @@ import aiofiles
 import botocore
 from datetime import datetime, timezone
 import bittensor as bt
+import uuid
+
 
 from tqdm import tqdm as std_tqdm
 from typing import List, Dict, Literal, Optional
@@ -468,6 +470,159 @@ class Comms(ChainManager):
 
     #  Large File Operations
 
+    async def s3_get_object_chunked(
+        self,
+        key: str,
+        bucket: Bucket,
+        time_min: datetime = None,
+        time_max: datetime = None,
+        timeout: int = 10,
+        chunk_size: int = 5 * 1024 * 1024,  # 5MB chunks
+    ):
+        """
+        Download object from S3 using concurrent chunked downloads.
+        This improves performance for large files by downloading multiple chunks in parallel.
+        """
+        temp_file_path = os.path.join(
+            self.temp_dir, f"temp_chunked_{key}_{uuid.uuid4().hex}.pt"
+        )
+
+        s3_client = await self._get_s3_client(bucket)
+        try:
+            # Normalize timezone info
+            if time_min is not None and not time_min.tzinfo:
+                time_min = time_min.replace(tzinfo=timezone.utc)
+            if time_max is not None and not time_max.tzinfo:
+                time_max = time_max.replace(tzinfo=timezone.utc)
+
+            # HEAD the object to get metadata
+            try:
+                response = await asyncio.wait_for(
+                    s3_client.head_object(Bucket=bucket.name, Key=key),
+                    timeout=timeout,
+                )
+                last_modified = response.get("LastModified")
+
+                # Check time constraints
+                if last_modified is None:
+                    tplr.logger.info(f"Object does not exist: {key}")
+                    return None
+
+                if time_min is not None and last_modified < time_min:
+                    time_diff = (time_min - last_modified).total_seconds()
+                    tplr.logger.info(
+                        f"Object {key} was uploaded {time_diff:.2f}s before time_min."
+                    )
+                    return {"__status": "TOO_EARLY"}
+
+                if time_max is not None and last_modified > time_max:
+                    time_diff = (last_modified - time_max).total_seconds()
+                    tplr.logger.info(
+                        f"Object {key} was uploaded {time_diff:.2f}s after time_max."
+                    )
+                    return {"__status": "TOO_LATE"}
+
+                file_size = response["ContentLength"]
+
+            except asyncio.TimeoutError:
+                tplr.logger.debug(f"Timeout checking for {key}")
+                return None
+            except (ConnectionClosedError, ClientError) as e:
+                await self._purge_s3_client(bucket)
+                if "404" in str(e):
+                    tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
+                    return None
+                raise
+
+            # For small files, just download directly
+            if file_size <= chunk_size:
+                response = await asyncio.wait_for(
+                    s3_client.get_object(Bucket=bucket.name, Key=key),
+                    timeout=timeout,
+                )
+                async with aiofiles.open(temp_file_path, "wb") as f:
+                    async with response["Body"] as stream:
+                        data = await asyncio.wait_for(stream.read(), timeout=timeout)
+                        await f.write(data)
+            else:
+                # For larger files, download in chunks concurrently
+                # Create the file with the correct size
+                async with aiofiles.open(temp_file_path, "wb") as f:
+                    await f.truncate(file_size)
+
+                # Calculate chunk boundaries
+                total_chunks = math.ceil(file_size / chunk_size)
+
+                # Determine optimal number of concurrent downloads
+                # Based on available CPU cores or a reasonable default
+                max_concurrent = min(os.cpu_count() or 4, 8)
+                semaphore = asyncio.Semaphore(max_concurrent)
+
+                # Progress tracking
+                downloaded_chunks = {}
+
+                async def download_chunk(chunk_number):
+                    async with semaphore:
+                        start = chunk_number * chunk_size
+                        end = min(start + chunk_size, file_size) - 1
+                        range_str = f"bytes={start}-{end}"
+
+                        try:
+                            response = await s3_client.get_object(
+                                Bucket=bucket.name,
+                                Key=key,
+                                Range=range_str,
+                            )
+
+                            async with response["Body"] as stream:
+                                chunk_data = await stream.read()
+
+                            # Write chunk directly to file
+                            async with aiofiles.open(temp_file_path, "r+b") as f2:
+                                await f2.seek(start)
+                                await f2.write(chunk_data)
+
+                            downloaded_chunks[chunk_number] = True
+                            return True
+                        except Exception as e:
+                            tplr.logger.error(
+                                f"Error downloading chunk {chunk_number}: {e}"
+                            )
+                            return False
+
+                # Launch download tasks for all chunks
+                tasks = [download_chunk(i) for i in range(total_chunks)]
+                results = await asyncio.gather(*tasks)
+
+                # Verify all chunks were downloaded successfully
+                if not all(results) or len(downloaded_chunks) != total_chunks:
+                    tplr.logger.error(f"Failed to download all chunks for {key}")
+                    return None
+
+            # Now load the data
+            if key.endswith(".json") or "start_window" in key:
+                async with aiofiles.open(temp_file_path, "r") as f:
+                    data = await f.read()
+                    loaded_data = json.loads(data)
+            else:
+                loaded_data = torch.load(
+                    temp_file_path,
+                    map_location="cpu",
+                    weights_only=False,
+                )
+
+            return loaded_data
+
+        except asyncio.TimeoutError:
+            tplr.logger.debug(f"Timeout downloading {key}")
+            return None
+        except Exception as e:
+            tplr.logger.error(f"Error in s3_get_object_chunked for {key}: {e}")
+            return None
+        finally:
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+
     async def upload_large_file(self, file_path: str, key: str, s3_client):
         """Uploads a large file to S3 using asynchronous multipart upload with 5MB chunks."""
         upload_id = None
@@ -886,6 +1041,12 @@ class Comms(ChainManager):
 
             if state_dict is not None:
                 return state_dict
+
+            if time_max and datetime.now() > time_max:
+                tplr.logger.info(
+                    f"Gradient for UID {uid}, window {window} was not found after time_max. Skipping"
+                )
+                return None
 
             # Retry after a short delay
             await asyncio.sleep(0.1)

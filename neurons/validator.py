@@ -770,7 +770,7 @@ class Validator:
                 tplr.r2_dataset.R2DatasetLoader.next_pages,
                 offset=self.sync_window,
                 n_pages=self.hparams.pages_per_window,
-                seed=random.randint(0, 10000),
+                seed=random.randint(1000, 10000000),
                 attempts=3,
                 delay=1,
                 context="random pages - common loader",

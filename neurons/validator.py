@@ -611,7 +611,8 @@ class Validator:
                                     )
 
                                 p.data.sub_(
-                                    grad.sign(), alpha=self.scheduler.get_last_lr()[0]
+                                    grad.sign(),
+                                    alpha=self.scheduler.get_last_lr()[0] * 0.2,
                                 )
                     except Exception:
                         continue
@@ -814,7 +815,8 @@ class Validator:
                                 ).to(self.config.device)
 
                                 p.data.sub_(
-                                    grad.sign(), alpha=self.scheduler.get_last_lr()[0]
+                                    grad.sign(),
+                                    alpha=self.scheduler.get_last_lr()[0] * 0.2,
                                 )
                     except Exception as e:
                         tplr.logger.error(

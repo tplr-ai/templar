@@ -1,5 +1,5 @@
 require('dotenv').config();
-const child_process = require('child_process'); // Correctly import child_process
+const child_process = require('child_process');
 const NUM_MINERS = process.env.NUM_MINERS || 3;
 const PROJECT_NAME = `test-scoring`;
 

@@ -15,9 +15,10 @@
       }
     ]
   },
-  "editable": false,
+  "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
+  "id": 6,
   "links": [
     {
       "asDropdown": false,
@@ -381,7 +382,7 @@
         "x": 12,
         "y": 8
       },
-      "id": 2,
+      "id": 8,
       "options": {
         "legend": {
           "calcs": [],
@@ -401,11 +402,11 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"arc_challenge\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"mmlu_flan_n_shot_generative\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
-      "title": "Eval - arc_challenge",
+      "title": "Eval - mmlu_flan_n_shot_generative - 5-shot",
       "type": "timeseries"
     },
     {
@@ -567,7 +568,7 @@
         "x": 12,
         "y": 16
       },
-      "id": 3,
+      "id": 2,
       "options": {
         "legend": {
           "calcs": [],
@@ -587,11 +588,11 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"openbookqa\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"arc_challenge\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
-      "title": "Eval - openbookqa",
+      "title": "Eval - arc_challenge",
       "type": "timeseries"
     },
     {
@@ -686,6 +687,99 @@
       ],
       "title": "Eval - winogrande",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influx"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisGridShow": true,
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influx"
+          },
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"openbookqa\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Eval - openbookqa",
+      "type": "timeseries"
     }
   ],
   "schemaVersion": 39,
@@ -710,6 +804,7 @@
   },
   "timezone": "browser",
   "title": "Eval - Metrics",
-  "version": 0,
+  "uid": "ceia6bwlwn8qof",
+  "version": 2,
   "weekStart": ""
 }

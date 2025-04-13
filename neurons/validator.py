@@ -18,7 +18,6 @@
 # Standard library
 import argparse
 import asyncio
-import copy
 import os
 import random
 import sys
@@ -758,10 +757,9 @@ class Validator:
             self.comms.eval_peers = self.eval_peers
 
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
-            # Compute offset for all data loading using the current sync_window and hparams
-            offset = self.sync_window * self.hparams.pages_per_window
 
             from tplr import evaluation
+
             eval_results, aggregated_metrics = await evaluation.evaluate_peers_parallel(
                 evaluation_uids,
                 self.comms,
@@ -779,7 +777,7 @@ class Validator:
                 self.optimizer,
                 self.scheduler,
                 time_min,
-                time_max
+                time_max,
             )
             # Process evaluation results and update scores (old evaluation logic)
             for uid in evaluation_uids:
@@ -788,13 +786,18 @@ class Validator:
                     try:
                         tplr.logger.info(f"Evaluation result for UID {uid}: {result}")
                         self.gradient_scores[uid] = result.get("gradient_score", 0.0)
-                        self.binary_indicator_scores[uid] = result.get("binary_indicator", 0.0)
+                        self.binary_indicator_scores[uid] = result.get(
+                            "binary_indicator", 0.0
+                        )
 
                         # Update exponential moving average of gradient scores with alpha
                         self.gradient_moving_avg_scores[uid] = (
-                            (1 - self.hparams.gradient_score_ma_alpha) * self.gradient_moving_avg_scores[uid]
-                            + self.hparams.gradient_score_ma_alpha * self.gradient_scores[uid]
-                        )
+                            1 - self.hparams.gradient_score_ma_alpha
+                        ) * self.gradient_moving_avg_scores[
+                            uid
+                        ] + self.hparams.gradient_score_ma_alpha * self.gradient_scores[
+                            uid
+                        ]
                         tplr.logger.debug(
                             f"Gradient moving average : {self.gradient_moving_avg_scores[uid]}"
                         )
@@ -802,28 +805,47 @@ class Validator:
                         # Retrieve loss metrics from the evaluation result.
                         loss_before_own = result.get("loss_before_per_batch_own", 0.0)
                         loss_after_own = result.get("loss_after_per_batch_own", 0.0)
-                        loss_before_random = result.get("loss_before_per_batch_random", 0.0)
-                        loss_after_random = result.get("loss_after_per_batch_random", 0.0)
+                        loss_before_random = result.get(
+                            "loss_before_per_batch_random", 0.0
+                        )
+                        loss_after_random = result.get(
+                            "loss_after_per_batch_random", 0.0
+                        )
 
                         # Calculate binary indicator for overfitting detection.
-                        improvement_own = ( (loss_before_own - loss_after_own) / loss_before_own if loss_before_own > 0 else 0 )
-                        improvement_random = ( (loss_before_random - loss_after_random) / loss_before_random if loss_before_random > 0 else 0 )
-                        self.binary_indicator_scores[uid] = 1 if improvement_own > improvement_random else -1
+                        improvement_own = (
+                            (loss_before_own - loss_after_own) / loss_before_own
+                            if loss_before_own > 0
+                            else 0
+                        )
+                        improvement_random = (
+                            (loss_before_random - loss_after_random)
+                            / loss_before_random
+                            if loss_before_random > 0
+                            else 0
+                        )
+                        self.binary_indicator_scores[uid] = (
+                            1 if improvement_own > improvement_random else -1
+                        )
                         tplr.logger.info(
                             f"Binary Indicator Score : {self.binary_indicator_scores[uid]}"
                         )
 
                         # Update binary moving average using exponential moving average formula.
                         self.binary_moving_averages[uid] = (
-                            (1 - self.hparams.binary_score_ma_alpha) * self.binary_moving_averages[uid]
-                            + self.hparams.binary_score_ma_alpha * self.binary_indicator_scores[uid]
+                            (1 - self.hparams.binary_score_ma_alpha)
+                            * self.binary_moving_averages[uid]
+                            + self.hparams.binary_score_ma_alpha
+                            * self.binary_indicator_scores[uid]
                         )
                         tplr.logger.debug(
                             f"Binary Moving Average Score : {self.binary_moving_averages[uid]}"
                         )
 
                         # Normalize binary moving average to [0,1] range.
-                        self.normalised_binary_moving_averages[uid] = self.binary_moving_averages[uid] / 2
+                        self.normalised_binary_moving_averages[uid] = (
+                            self.binary_moving_averages[uid] / 2
+                        )
                         tplr.logger.debug(
                             f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[uid]}"
                         )
@@ -838,18 +860,27 @@ class Validator:
                         final_score = (
                             sign_preserving_multiplication(
                                 self.gradient_moving_avg_scores[uid],
-                                self.normalised_binary_moving_averages[uid]
+                                self.normalised_binary_moving_averages[uid],
                             )
                             * sync_score
                         )
-                        tplr.logger.debug(f"Computed Final Score for UID {uid}: {final_score}")
+                        tplr.logger.debug(
+                            f"Computed Final Score for UID {uid}: {final_score}"
+                        )
 
                         # Sliding window update for the final moving average score.
                         self.final_score_history[uid].append(final_score)
-                        if len(self.final_score_history[uid]) > self.hparams.moving_average_window:
+                        if (
+                            len(self.final_score_history[uid])
+                            > self.hparams.moving_average_window
+                        ):
                             self.final_score_history[uid].pop(0)
-                        self.final_moving_avg_scores[uid] = sum(self.final_score_history[uid]) / len(self.final_score_history[uid])
-                        tplr.logger.debug(f"Updated Final Moving Average Score for UID {uid}: {self.final_moving_avg_scores[uid]}")
+                        self.final_moving_avg_scores[uid] = sum(
+                            self.final_score_history[uid]
+                        ) / len(self.final_score_history[uid])
+                        tplr.logger.debug(
+                            f"Updated Final Moving Average Score for UID {uid}: {self.final_moving_avg_scores[uid]}"
+                        )
 
                         self.evaluated_uids.add(uid)
                     except Exception as e:
@@ -870,7 +901,9 @@ class Validator:
                         self.wandb.log(
                             {
                                 f"validator/slash/{uid}/score_before": old_score,
-                                f"validator/slash/{uid}/score_after": self.final_moving_avg_scores[uid].item(),
+                                f"validator/slash/{uid}/score_after": self.final_moving_avg_scores[
+                                    uid
+                                ].item(),
                                 f"validator/slash/{uid}/reason": str(e),
                             },
                             step=self.global_step,
@@ -885,7 +918,9 @@ class Validator:
                             },
                             fields={
                                 "score_before": float(old_score),
-                                "score_after": float(self.final_moving_avg_scores[uid].item()),
+                                "score_after": float(
+                                    self.final_moving_avg_scores[uid].item()
+                                ),
                                 "reason": str(e)[:255],
                             },
                         )
@@ -907,7 +942,9 @@ class Validator:
                     self.wandb.log(
                         {
                             f"validator/slash/{uid}/score_before": old_score,
-                            f"validator/slash/{uid}/score_after": self.final_moving_avg_scores[uid].item(),
+                            f"validator/slash/{uid}/score_after": self.final_moving_avg_scores[
+                                uid
+                            ].item(),
                             f"validator/slash/{uid}/reason": "No evaluation result",
                         },
                         step=self.global_step,
@@ -922,13 +959,17 @@ class Validator:
                         },
                         fields={
                             "score_before": float(old_score),
-                            "score_after": float(self.final_moving_avg_scores[uid].item()),
+                            "score_after": float(
+                                self.final_moving_avg_scores[uid].item()
+                            ),
                             "reason": "No evaluation result"[:255],
                         },
                     )
                     continue
 
-            tplr.logger.info(f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation")
+            tplr.logger.info(
+                f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
+            )
 
             # Log scores and metrics for evaluated UIDs as a table
             headers = [
@@ -1113,12 +1154,13 @@ class Validator:
                 f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
             )
 
-
             # 16. Log evaluation metrics once all evaluations are done
             evaluation_metrics = {
                 "validator/loss/own/before": aggregated_metrics["loss_before_own"],
                 "validator/loss/own/after": aggregated_metrics["loss_after_own"],
-                "validator/loss/random/before": aggregated_metrics["loss_before_random"],
+                "validator/loss/random/before": aggregated_metrics[
+                    "loss_before_random"
+                ],
                 "validator/loss/random/after": aggregated_metrics["loss_after_random"],
                 "validator/loss/own/improvement": self.relative_improvement_own,
                 "validator/loss/random/improvement": self.relative_improvement_random,
@@ -1150,7 +1192,9 @@ class Validator:
                 fields={
                     "loss_own_before": float(aggregated_metrics["loss_before_own"]),
                     "loss_own_after": float(aggregated_metrics["loss_after_own"]),
-                    "loss_random_before": float(aggregated_metrics["loss_before_random"]),
+                    "loss_random_before": float(
+                        aggregated_metrics["loss_before_random"]
+                    ),
                     "loss_random_after": float(aggregated_metrics["loss_after_random"]),
                     "loss_own_improvement": float(self.relative_improvement_own),
                     "loss_random_improvement": float(self.relative_improvement_random),

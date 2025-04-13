@@ -585,9 +585,16 @@ class R2DatasetLoader(DatasetLoader):
         """Cached tokenization results"""
         return R2DatasetLoader._token_cache.get(cache_key)
 
-
     @classmethod
-    async def get_loader(cls, offset: int, hparams, tokenizer, seed: int = None, data_type: str = "training", pack_samples: bool = True):
+    async def get_loader(
+        cls,
+        offset: int,
+        hparams,
+        tokenizer,
+        seed: int = None,
+        data_type: str = "training",
+        pack_samples: bool = True,
+    ):
         """
         Loads data for a given window using the R2DatasetLoader.
 
@@ -605,17 +612,17 @@ class R2DatasetLoader(DatasetLoader):
         seed_val = seed if seed is not None else np.random.randint(1000, 1000000)
         start_time = T()
         pages = await cls.next_pages(
-            offset=offset,
-            n_pages=hparams.pages_per_window,
-            seed=seed_val
+            offset=offset, n_pages=hparams.pages_per_window, seed=seed_val
         )
         loader = await cls.create(
             batch_size=hparams.batch_size,
             sequence_length=hparams.sequence_length,
             pages_info=pages,
             tokenizer=tokenizer,
-            pack_samples=pack_samples
+            pack_samples=pack_samples,
         )
         elapsed = T() - start_time
-        logger.info(f"Loaded {data_type} data for window {window} with seed: {seed_val}, pages: {[p[1] for p in pages]} " + P(window, elapsed))
+        logger.info(
+            f"Loaded {data_type} data in {elapsed:.2f}s with seed: {seed_val}, pages: {len(pages)}"
+        )
         return loader, pages

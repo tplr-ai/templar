@@ -688,6 +688,7 @@ class Miner:
                     "gather_time": gather_time,
                     "put_time": put_completion_time,
                     "model_update_time": model_update_time,
+                    "tokens_per_sec": tokens_per_sec,
                 },
             )
             tplr.logger.info("Finished metrics logging call for miner")

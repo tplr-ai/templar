@@ -16,6 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 
+import asyncio
 import math
 import time
 from typing import TYPE_CHECKING, TypeVar, cast
@@ -171,7 +172,8 @@ async def catchup_with_aggregation_server(
 ):
     """
     Catch up the model by applying aggregated gradients from the aggregation server
-    and verifying against the validator's debug dict.
+    and verifying against the validator's debug dict. Uses retry logic for the most
+    recent window if needed.
     """
     logger.info("Starting catchup with aggregation server...")
 
@@ -186,25 +188,48 @@ async def catchup_with_aggregation_server(
     # Apply aggregation for each step, checking for current window changes
     current_step = checkpoint_window
     while current_step < target_window:
-        # Check if current_window has changed during processing
-        if instance.current_window > target_window:
-            target_window = instance.current_window
-            logger.info(
-                f"Current window advanced during catchup, new target: {target_window}"
-            )
-
         logger.info(
             f"\nProcessing catchup for window {current_step} (Target: {target_window})"
         )
 
-        # Load aggregation for current window - pass version explicitly
+        # Load aggregation for current window
         agg_data = await instance.comms.load_aggregation(window=current_step)
+
+        # For the last window in catchup, we might need to retry a few times
+        if agg_data is None and current_step == target_window - 1:
+            max_retries = 7
+            retry_count = 0
+            retry_delay = 10
+
+            logger.info(
+                f"No aggregation for latest window {current_step}, will retry up to {max_retries} times"
+            )
+
+            while retry_count < max_retries and agg_data is None:
+                retry_count += 1
+                logger.info(
+                    f"Retry {retry_count}/{max_retries} for window {current_step}"
+                )
+                await asyncio.sleep(retry_delay)
+
+                # Try to load aggregation again
+                agg_data = await instance.comms.load_aggregation(window=current_step)
+
+                if agg_data is not None:
+                    logger.info(
+                        f"Successfully loaded aggregation on retry {retry_count}"
+                    )
+
+            if agg_data is None:
+                logger.warning(
+                    f"Failed to load aggregation after {max_retries} retries"
+                )
 
         # Process the aggregation data if available
         if agg_data:
             update_start = time.time()
 
-            # Process the loaded data (assuming this returns the processed gradient data)
+            # Process the loaded data
             processed_agg_data = process_loaded_data(instance.model, agg_data)
 
             if processed_agg_data is not None:
@@ -212,7 +237,7 @@ async def catchup_with_aggregation_server(
                 lr = instance.scheduler.get_last_lr()[0]
                 weight_decay = instance.hparams.weight_decay
 
-                # Apply the gradients to the model parameters (instead of updating parameters directly)
+                # Apply the gradients to the model parameters
                 for name, param in instance.model.named_parameters():
                     if name in processed_agg_data["tensors"]:
                         # Apply weight decay to the parameter manually if needed
@@ -301,6 +326,13 @@ async def catchup_with_aggregation_server(
         # Update global step and move to next window
         instance.global_step = current_step - instance.start_window
         current_step += 1
+
+        # Check if current_window has changed during processing
+        if instance.current_window > target_window:
+            target_window = instance.current_window
+            logger.info(
+                f"Current window advanced during catchup, new target: {target_window}"
+            )
 
     # Update global step after catchup
     instance.global_step = target_window - instance.start_window

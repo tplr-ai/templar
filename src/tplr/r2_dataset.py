@@ -26,7 +26,7 @@ import pyarrow.parquet as pq
 from functools import lru_cache
 import threading
 
-from tplr import logger
+from tplr import logger, T
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
 
@@ -584,3 +584,38 @@ class R2DatasetLoader(DatasetLoader):
     def _get_tokenized_cache(cache_key: str):
         """Cached tokenization results"""
         return R2DatasetLoader._token_cache.get(cache_key)
+
+
+    @classmethod
+    async def get_loader(cls, offset: int, hparams, tokenizer, seed: int = None, data_type: str = "training", pack_samples: bool = True):
+        """
+        Loads data for a given window using the R2DatasetLoader.
+
+        Args:
+            window (int): The window offset (e.g. step_window or sync_window).
+            hparams: Hyperparameters including pages_per_window, batch_size, sequence_length, etc.
+            tokenizer: Tokenizer instance to use.
+            seed (int, optional): Seed for deterministic page selection; if None, a random seed is used.
+            data_type (str, optional): For logging, e.g. "training" or "evaluation".
+            pack_samples (bool, optional): Whether to pack samples without padding.
+
+        Returns:
+            tuple: (loader, pages_info)
+        """
+        seed_val = seed if seed is not None else np.random.randint(1000, 1000000)
+        start_time = T()
+        pages = await cls.next_pages(
+            offset=offset,
+            n_pages=hparams.pages_per_window,
+            seed=seed_val
+        )
+        loader = await cls.create(
+            batch_size=hparams.batch_size,
+            sequence_length=hparams.sequence_length,
+            pages_info=pages,
+            tokenizer=tokenizer,
+            pack_samples=pack_samples
+        )
+        elapsed = T() - start_time
+        logger.info(f"Loaded {data_type} data for window {window} with seed: {seed_val}, pages: {[p[1] for p in pages]} " + P(window, elapsed))
+        return loader, pages

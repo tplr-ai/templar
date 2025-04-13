@@ -758,9 +758,7 @@ class Validator:
 
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
 
-            from tplr import evaluation
-
-            eval_results, aggregated_metrics = await evaluation.evaluate_peers_parallel(
+            eval_results, aggregated_metrics = await tplr.evaluation.evaluate_peers_parallel(
                 evaluation_uids,
                 self.comms,
                 self.sync_window,

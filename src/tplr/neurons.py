@@ -97,6 +97,25 @@ def prepare_gradient_dict(miner, pages, step_window):
 async def update_peers(
     instance: NeuronT | "AggregationServer", window: int, peer_start: float
 ) -> None:
+    # Check if peers list is empty and fetch previous list if needed
+    if len(instance.comms.peers) == 0:
+        logger.info(
+            "Current peers list is empty, attempting to fetch previous peer list"
+        )
+        result = await instance.comms.get_peer_list(fetch_previous=True)
+        if result is not None:
+            prev_peers, prev_update_window = result
+            logger.info(
+                f"Got previous peer list with {len(prev_peers)} peers "
+                f"and update window {prev_update_window}"
+            )
+            instance.comms.peers = prev_peers
+            # Don't set next_peers here, as we want the normal update process to continue
+        else:
+            logger.warning(
+                "Failed to fetch previous peer list, continuing with empty peers"
+            )
+
     # Get next peers
     if (
         instance.next_peers is None  # next peers are not fetched yet

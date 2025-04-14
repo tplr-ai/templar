@@ -30,6 +30,7 @@ from typing import cast
 import bittensor as bt
 import numpy as np
 import torch
+import uvloop
 
 # Third party
 from bittensor.core.subtensor import ScaleObj
@@ -766,4 +767,5 @@ class Miner:
 
 # Start miner.
 if __name__ == "__main__":
+    uvloop.install()
     asyncio.run(Miner().run())

@@ -7,27 +7,6 @@ import tplr
 from .r2_dataset import R2DatasetLoader
 
 
-def evaluate_model_loss(model, loader, tokenizer, device):
-    """
-    Evaluates a model over a provided data loader and returns the average loss.
-    """
-    total_loss = 0.0
-    num_batches = 0
-    model.eval()
-    with torch.no_grad():
-        for batch in loader:
-            input_ids = torch.tensor(batch, dtype=torch.long).to(device)
-            labels = input_ids.clone()
-            labels = torch.where(labels == tokenizer.pad_token_id, -100, labels)
-            outputs = model(input_ids=input_ids, labels=labels)
-            total_loss += outputs.loss.item()
-            num_batches += 1
-            del input_ids, labels, outputs
-            torch.cuda.empty_cache()
-    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
-    return avg_loss, num_batches
-
-
 def apply_compressed_gradient(
     model, state_dict, transformer, compressor, xshapes, totalks, device, lr
 ):
@@ -77,33 +56,6 @@ async def load_and_compare_pages(uid, sync_window, hparams, tokenizer, state_dic
     else:
         logger.info(f"Using local pages for UID {uid} as miner metadata is missing.")
     return miner_pages, local_pages
-
-
-async def create_loader_from_pages(pages, hparams, tokenizer, sync_window):
-    """
-    Creates a data loader given pages info.
-    """
-    data_start = tplr.T()
-    loader = await R2DatasetLoader.create(
-        batch_size=hparams.batch_size,
-        sequence_length=hparams.sequence_length,
-        pages_info=pages,
-        tokenizer=tokenizer,
-    )
-    logger.info(
-        f"{tplr.P(sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in pages]}"
-    )
-    return loader
-
-
-def collect_batches(loader):
-    """
-    Collects all batches from a loader.
-    """
-    batches = []
-    for batch in loader:
-        batches.append(batch)
-    return batches
 
 
 def compute_average_loss(model, batches, tokenizer, device, sample_rate):
@@ -382,7 +334,7 @@ async def evaluate_peers_parallel(
     # Limit concurrent evaluations.
     sem = asyncio.Semaphore(hparams.parallel_eval_uids)
 
-    async def evaluate_uid(uid, random_batches):
+    async def evaluate_uid(uid):
         async with sem:
             logger.info(f"Evaluating uid: {uid}")
             eval_result = await comms.get(
@@ -412,7 +364,7 @@ async def evaluate_peers_parallel(
                     lr,
                     optimizer,
                     scheduler,
-                    random_batches,
+                    random_batches,  # noqa
                     random_pages,
                 )
                 return uid, eval_payload
@@ -429,11 +381,13 @@ async def evaluate_peers_parallel(
     eval_dict = {}
     for res in results:
         if isinstance(res, Exception):
-            # TODO: Log detailed error per UID if needed.
+            # TODO: Log detailed error per UID if necessary.
             continue
         uid, result = res
         eval_dict[uid] = result
-    return eval_dict
+
+    aggregated_metrics = aggregate_evaluation_metrics(eval_dict)
+    return eval_dict, aggregated_metrics
 
 
 def compute_avg_loss(model, batches, sampled_indices, tokenizer, device):
@@ -556,115 +510,6 @@ async def parallel_evaluate_peer(
         loss_after_random,
         binary_indicator,
     )
-
-
-async def evaluate_all_peers(
-    peer_gradients: dict,
-    data_own_batches: list,
-    data_random_batches: list,
-    base_model,
-    tokenizer,
-    device: str,
-    transformer,
-    compressor,
-    xshapes: dict,
-    totalks: dict,
-    hparams,
-    lr: float,
-) -> dict:
-    """
-    Schedules parallel evaluations for all peers.
-    Returns a dictionary mapping uid -> evaluation metrics.
-    """
-    tasks = []
-    for eval_uid, state_dict in peer_gradients.items():
-        tasks.append(
-            parallel_evaluate_peer(
-                eval_uid,
-                state_dict,
-                data_own_batches,
-                data_random_batches,
-                base_model,
-                tokenizer,
-                device,
-                transformer,
-                compressor,
-                xshapes,
-                totalks,
-                hparams,
-                lr,
-            )
-        )
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    eval_results = {}
-    for res in results:
-        if isinstance(res, Exception):
-            # TODO: Log each exception as needed.
-            continue
-        (
-            uid,
-            loss_before_own,
-            loss_after_own,
-            loss_before_random,
-            loss_after_random,
-            binary_indicator,
-        ) = res
-        eval_results[uid] = {
-            "loss_before_own": loss_before_own,
-            "loss_after_own": loss_after_own,
-            "loss_before_random": loss_before_random,
-            "loss_after_random": loss_after_random,
-            "binary_indicator": binary_indicator,
-        }
-    aggregated_metrics = aggregate_evaluation_metrics(eval_results)
-    return eval_results, aggregated_metrics
-
-
-def weighted_random_sample_no_replacement(
-    candidates: list[str], weights: list[int], k: int
-) -> list[str]:
-    logger.debug("Starting weighted random sampling.")
-    logger.debug(f"Candidates: {candidates}")
-    logger.debug(f"Weights: {weights}")
-    logger.debug(f"Sample size (k): {k}")
-
-    if not candidates or not weights or k <= 0:
-        logger.warning("Invalid input detected. Returning empty list.")
-        return []
-
-    if len(candidates) <= k:
-        logger.info("Candidate count is within limit. Returning all candidates.")
-        return candidates
-
-    pool = list(zip(candidates, weights))
-    total_w = float(sum(weights))
-    if total_w <= 0:
-        logger.warning("Total weight is zero, selecting random sample instead.")
-        return random.sample(candidates, k)
-
-    logger.debug(f"Initial total weight: {total_w}")
-    selected = []
-
-    for _ in range(k):
-        if total_w <= 0 or len(pool) == 0:
-            logger.info("No more items to sample. Stopping early.")
-            break
-
-        r = random.uniform(0.0, total_w)
-        logger.debug(f"Random threshold: {r}")
-        cumulative = 0.0
-        for idx, (uid, w) in enumerate(pool):
-            cumulative += w
-            if cumulative >= r:
-                selected.append(uid)
-                logger.info(f"Selected candidate: {uid} with weight: {w}")
-                total_w -= w
-                pool.pop(idx)
-                logger.debug(f"Updated total weight: {total_w}")
-                break
-
-    logger.debug(f"Final selected candidates: {selected}")
-    return selected
 
 
 def safe_last(metric_list):

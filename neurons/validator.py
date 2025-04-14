@@ -758,7 +758,10 @@ class Validator:
 
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
 
-            eval_results, aggregated_metrics = await tplr.evaluation.evaluate_peers_parallel(
+            (
+                eval_results,
+                aggregated_metrics,
+            ) = await tplr.evaluation.evaluate_peers_parallel(
                 evaluation_uids,
                 self.comms,
                 self.sync_window,
@@ -777,9 +780,9 @@ class Validator:
                 time_min,
                 time_max,
             )
-            # Process evaluation results and update scores (old evaluation logic)
-            for uid in evaluation_uids:
-                result = eval_results.get(uid)
+            # Process evaluation results and update scores
+            for eval_uid in evaluation_uids:
+                result = eval_results.get(eval_uid)
                 if result is not None:
                     try:
                         tplr.logger.info(f"Evaluation result for UID {uid}: {result}")

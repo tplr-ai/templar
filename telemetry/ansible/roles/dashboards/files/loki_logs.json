@@ -77,8 +77,8 @@
       "options": {
         "dedupStrategy": "none",
         "enableLogDetails": true,
-        "prettifyLogMessage": false,
-        "showCommonLabels": false,
+        "prettifyLogMessage": true,
+        "showCommonLabels": true,
         "showLabels": true,
         "showTime": true,
         "sortOrder": "Descending",
@@ -91,7 +91,7 @@
             "uid": "loki"
           },
           "editorMode": "builder",
-          "expr": "{service=~\"$service\"} |~ `$Search` | json | uid =~ `$uid` | version = `$templar_version` | severity =~ `$log_level`",
+          "expr": "{service=~\"$service\"} |~ `$Search` | json | uid =~ `$uid` | version = `$templar_version` | severity =~ `$log_level` | line_format `{{.message}}`",
           "queryType": "range",
           "refId": "A"
         }
@@ -111,7 +111,7 @@
     "list": [
       {
         "current": {
-          "selected": false,
+          "selected": true,
           "text": [
             "All"
           ],
@@ -144,8 +144,8 @@
       {
         "current": {
           "selected": false,
-          "text": "0.2.62",
-          "value": "0.2.62"
+          "text": "0.2.71",
+          "value": "0.2.71"
         },
         "datasource": {
           "type": "marcusolsson-json-datasource",
@@ -177,12 +177,12 @@
       },
       {
         "current": {
-          "selected": false,
+          "selected": true,
           "text": [
-            "All"
+            "1"
           ],
           "value": [
-            "$__all"
+            "1"
           ]
         },
         "datasource": {
@@ -301,6 +301,6 @@
   "timezone": "",
   "title": "Service Logs",
   "uid": "service_logs",
-  "version": 3,
+  "version": 5,
   "weekStart": ""
 }

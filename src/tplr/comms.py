@@ -15,41 +15,39 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 # type: ignore
+import asyncio
+import json
+import math
 import os
 import random
 import re
-import math
-import json
 import time
-from aiobotocore.client import AioBaseClient
-from botocore.exceptions import ClientError, ConnectionClosedError
+from datetime import datetime, timezone
+
+# from .hparams import HParams
+from types import SimpleNamespace
+from typing import Any, Dict, List, Literal, Optional, Tuple
+
+import aiofiles
+import bittensor as bt
+import botocore
 import numpy as np
 import torch
-import asyncio
-import aiofiles
-import botocore
-from datetime import datetime, timezone
-import bittensor as bt
-
-from tqdm import tqdm as std_tqdm
-from typing import List, Dict, Literal, Optional
+from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
-
-from . import __version__
-from .config import client_config, BUCKET_SECRETS
-from .chain import ChainManager
-from .schemas import Bucket
-
-import tplr as tplr
-# from .hparams import HParams
-
-from types import SimpleNamespace
-from typing import Any, Tuple
-from transformers import LlamaForCausalLM
+from botocore.exceptions import ClientError, ConnectionClosedError
 from torch.optim import SGD
 from torch.optim.lr_scheduler import SequentialLR
-from .compress import TransformDCT, CompressDCT
+from tqdm import tqdm as std_tqdm
+from transformers import LlamaForCausalLM
 
+import tplr as tplr
+
+from . import __version__
+from .chain import ChainManager
+from .compress import CompressDCT, TransformDCT
+from .config import BUCKET_SECRETS, client_config
+from .schemas import Bucket
 
 # Constants
 CF_REGION_NAME: str = "enam"
@@ -890,6 +888,296 @@ class Comms(ChainManager):
             # Retry after a short delay
             await asyncio.sleep(0.1)
 
+    def _validate_response(
+        self, uid: int, response: Any, device: str, totalks: dict
+    ) -> tuple[bool, Optional[tuple[dict, int]], Optional[str]]:
+        """
+        Validates a response from a single peer.
+
+        Args:
+            uid: The UID of the peer
+            response: The response to validate
+            device: The device to use for validation
+            totalks: Dictionary of total k values for each parameter
+
+        Returns:
+            tuple: (is_valid, processed_response, error_message)
+                - is_valid: Whether the response is valid
+                - processed_response: Tuple of (state_dict, global_step) if valid, None otherwise
+                - error_message: Error message if invalid, None otherwise
+        """
+        # Handle exceptions and None responses
+        if isinstance(response, Exception):
+            return False, None, f"Error from UID {uid}: {str(response)}"
+
+        if response is None:
+            return False, None, f"Gradient not found for UID {uid}"
+
+        # Unpack state_dict and global_step
+        try:
+            state_dict_resp, global_step_resp = response
+        except (TypeError, ValueError) as e:
+            return False, None, f"Invalid response format from UID {uid}: {e}"
+
+        if state_dict_resp is None:
+            return False, None, f"Empty state dict from UID {uid}"
+
+        # Validate tensor contents without moving to device yet
+        # We'll check for required keys and basic structure first
+        for param_name, tensor in state_dict_resp.items():
+            if param_name.endswith("idxs"):
+                base_name = param_name[:-4]
+                totalk = totalks.get(base_name)
+                if totalk is None:
+                    return (
+                        False,
+                        None,
+                        f"Missing totalk for parameter {base_name} from UID {uid}",
+                    )
+
+        return True, (state_dict_resp, global_step_resp), None
+
+    def _batch_validate_tensors(
+        self,
+        param_name: str,
+        tensors: list[torch.Tensor],
+        uids: list[int],
+        device: str,
+        totalks: dict,
+    ) -> tuple[list[torch.Tensor], list[int]]:
+        """
+        Validates a batch of tensors for a single parameter across multiple peers.
+
+        Args:
+            param_name: The parameter name
+            tensors: List of tensors to validate
+            uids: List of UIDs corresponding to each tensor
+            device: Device to use for validation
+            totalks: Dictionary of total k values for each parameter
+
+        Returns:
+            tuple: (valid_tensors, valid_uids)
+                - valid_tensors: List of validated tensors
+                - valid_uids: List of UIDs corresponding to valid tensors
+        """
+        valid_tensors = []
+        valid_indices = []
+        target_device = torch.device(device)
+
+        # For 'idxs' parameters, check compressed indices
+        if param_name.endswith("idxs"):
+            base_name = param_name[:-4]
+            totalk = totalks.get(base_name)
+            if totalk is None:
+                tplr.logger.warning(
+                    f"Missing totalk for parameter {base_name}, skipping validation"
+                )
+                return [], []
+
+            for i, (tensor, uid) in enumerate(zip(tensors, uids)):
+                try:
+                    # Validate without moving to device yet
+                    allowed_topk = self.hparams.topk_compression
+                    allowed_topk = min(allowed_topk, totalk)
+
+                    # Basic size check before moving to device
+                    if tensor.ndim == 1 and tensor.size(0) != allowed_topk:
+                        tplr.logger.warning(
+                            f"Invalid number of indices for {param_name} from UID {uid}: "
+                            f"got {tensor.size(0)} but expected {allowed_topk}"
+                        )
+                        continue
+                    elif tensor.ndim > 1 and tensor.size(-1) != allowed_topk:
+                        tplr.logger.warning(
+                            f"Last dimension size invalid for {param_name} from UID {uid}: "
+                            f"got {tensor.size(-1)} but expected {allowed_topk}"
+                        )
+                        continue
+
+                    # Move to device only if needed
+                    if tensor.device != target_device:
+                        tensor = tensor.to(target_device)
+
+                    # Full validation
+                    self.check_compressed_indices(
+                        param_name,
+                        tensor,
+                        totalk,
+                        allowed_topk=self.hparams.topk_compression,
+                    )
+
+                    # If validation passed, add to valid tensors
+                    valid_tensors.append(tensor)
+                    valid_indices.append(i)
+                except Exception as e:
+                    tplr.logger.warning(
+                        f"Compressed indices check failed for {param_name} from UID {uid}: {e}"
+                    )
+
+        # For 'vals' parameters, check for NaN/Inf
+        elif param_name.endswith("vals"):
+            # Check if we can batch process tensors with same shape
+            same_shape = len(tensors) > 0 and all(
+                t.shape == tensors[0].shape for t in tensors
+            )
+
+            try:
+                # Stack tensors for batch processing if possible
+                if same_shape:
+                    # Prepare tensors for stacking - move to target device if needed
+                    device_tensors = []
+                    for t in tensors:
+                        device_tensors.append(
+                            t if t.device == target_device else t.to(target_device)
+                        )
+
+                    # Stack on target device
+                    batch = torch.stack(device_tensors)
+
+                    # Check for NaN/Inf in batch
+                    nan_mask = torch.isnan(batch)
+                    inf_mask = torch.isinf(batch)
+
+                    # Find which tensors have NaN/Inf
+                    has_nan = torch.any(nan_mask, dim=tuple(range(1, batch.ndim)))
+                    has_inf = torch.any(inf_mask, dim=tuple(range(1, batch.ndim)))
+
+                    # Get indices of valid tensors
+                    valid_mask = ~(has_nan | has_inf)
+                    valid_indices = torch.nonzero(valid_mask).squeeze(-1).tolist()
+
+                    # Log warnings for invalid tensors
+                    for i, (nan, inf, uid) in enumerate(zip(has_nan, has_inf, uids)):
+                        if nan or inf:
+                            issue = "NaN" if nan else "Inf"
+                            tplr.logger.warning(
+                                f"{issue} values in {param_name} from UID {uid}, skipping"
+                            )
+
+                    # Get valid tensors
+                    valid_tensors = [batch[i] for i in valid_indices]
+                else:
+                    # Process individually if shapes differ
+                    for i, (tensor, uid) in enumerate(zip(tensors, uids)):
+                        # Move to target device if needed
+                        if tensor.device != target_device:
+                            tensor = tensor.to(target_device)
+
+                        if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                            tplr.logger.warning(
+                                f"NaN/Inf in {param_name} from UID {uid}, skipping"
+                            )
+                        else:
+                            valid_tensors.append(tensor)
+                            valid_indices.append(i)
+            except Exception as e:
+                tplr.logger.error(f"Error batch validating {param_name}: {e}")
+                # Fallback to individual processing
+                for i, (tensor, uid) in enumerate(zip(tensors, uids)):
+                    try:
+                        # Move to target device if needed
+                        if tensor.device != target_device:
+                            tensor = tensor.to(target_device)
+
+                        if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                            tplr.logger.warning(
+                                f"NaN/Inf in {param_name} from UID {uid}, skipping"
+                            )
+                        else:
+                            valid_tensors.append(tensor)
+                            valid_indices.append(i)
+                    except Exception as e2:
+                        tplr.logger.warning(
+                            f"Error validating tensor for UID {uid}: {e2}"
+                        )
+
+        # For other parameters, just move to device if needed
+        else:
+            for i, (tensor, uid) in enumerate(zip(tensors, uids)):
+                try:
+                    # Move to target device only if needed
+                    if tensor.device != target_device:
+                        tensor = tensor.to(target_device)
+                    valid_tensors.append(tensor)
+                    valid_indices.append(i)
+                except Exception as e:
+                    tplr.logger.warning(f"Error processing tensor for UID {uid}: {e}")
+
+        valid_uids = [uids[i] for i in valid_indices]
+        return valid_tensors, valid_uids
+
+    def _batch_normalize_tensors(
+        self, tensors: list[torch.Tensor], device: str
+    ) -> list[torch.Tensor]:
+        """
+        Batch normalize tensors on device.
+
+        Args:
+            tensors: List of tensors to normalize
+            device: Device to perform normalization on
+
+        Returns:
+            list: Normalized tensors
+        """
+        if not tensors:
+            return []
+
+        target_device = torch.device(device)
+
+        try:
+            # Try to batch process if all tensors have the same shape
+            if all(t.shape == tensors[0].shape for t in tensors):
+                # All tensors should already be on target device from validation step
+                # but check anyway to be safe
+                device_tensors = []
+                for t in tensors:
+                    device_tensors.append(
+                        t if t.device == target_device else t.to(target_device)
+                    )
+
+                # Stack tensors for batch processing
+                batch = torch.stack(device_tensors)
+
+                # Calculate norms for all tensors at once
+                norms = torch.norm(batch, dim=tuple(range(1, batch.ndim)), keepdim=True)
+
+                # Normalize batch
+                normalized_batch = batch / (norms + 1e-8)
+
+                # Split back into list
+                normalized_tensors = [normalized_batch[i] for i in range(batch.size(0))]
+                return normalized_tensors
+            else:
+                # Process individually if shapes differ
+                normalized_tensors = []
+                for tensor in tensors:
+                    # Ensure tensor is on target device
+                    if tensor.device != target_device:
+                        tensor = tensor.to(target_device)
+
+                    norm = torch.norm(tensor)
+                    normalized = tensor / (norm + 1e-8)
+                    normalized_tensors.append(normalized)
+                return normalized_tensors
+        except Exception as e:
+            tplr.logger.error(f"Error in batch normalization: {e}")
+            # Fallback to individual processing
+            normalized_tensors = []
+            for tensor in tensors:
+                try:
+                    # Ensure tensor is on target device
+                    if tensor.device != target_device:
+                        tensor = tensor.to(target_device)
+
+                    norm = torch.norm(tensor)
+                    normalized = tensor / (norm + 1e-8)
+                    normalized_tensors.append(normalized)
+                except Exception as e2:
+                    tplr.logger.warning(f"Error normalizing tensor: {e2}")
+                    # If normalization fails, just append the original tensor
+                    normalized_tensors.append(tensor)
+            return normalized_tensors
+
     async def gather(
         self,
         my_uid: int | None,
@@ -904,7 +1192,25 @@ class Comms(ChainManager):
         time_min: datetime = None,
         time_max: datetime = None,
     ) -> Optional[SimpleNamespace]:
-        """Gather operation with individual gradient normalization and connection management."""
+        """
+        Optimized gather operation with batch tensor processing.
+
+        Args:
+            my_uid: The UID of this node
+            uids: List of UIDs to gather from
+            window: The window number
+            key: The key to gather
+            timeout: Timeout for each gather operation
+            device: Device to use for processing
+            totalks: Dictionary of total k values for each parameter
+            local: Whether to use local storage
+            stale_retention: Number of windows to retain stale data
+            time_min: Minimum time for valid responses
+            time_max: Maximum time for valid responses
+
+        Returns:
+            SimpleNamespace: The gathered result or None if no valid responses
+        """
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
@@ -916,11 +1222,7 @@ class Comms(ChainManager):
         )
         tplr.logger.debug(f"Target UIDs for gathering: {uids}")
 
-        aggregated_state_dict = {}
-        valid_uids = []
-        skipped_uids = []  # Retain UIDs that are skipped.
-        global_steps = []
-
+        # 1. Fetch all responses in parallel
         async with self.client_semaphore:
             batch_tasks = [
                 self.get_with_retry(
@@ -941,123 +1243,176 @@ class Comms(ChainManager):
                     *batch_tasks, return_exceptions=True
                 )
 
+                # 2. Perform initial validation separately from tensor processing
+                valid_responses = []
+                skipped_uids = []
+
                 for uid, response in zip(uids, batch_responses):
-                    if isinstance(response, Exception):
-                        tplr.logger.debug(f"Error from UID {uid}: {str(response)}")
-                        skipped_uids.append(uid)
-                        continue
-                    if response is None:
-                        tplr.logger.info(f"Skipped UID {uid} - gradient not found.")
-                        skipped_uids.append(uid)
-                        continue
+                    is_valid, processed_response, error_message = (
+                        self._validate_response(uid, response, device, totalks)
+                    )
 
-                    try:
-                        state_dict_resp, global_step_resp = response
-                        tplr.logger.debug(
-                            f"Received state dict and global step {global_step_resp} from UID {uid}"
-                        )
-                    except (TypeError, ValueError) as e:
-                        tplr.logger.debug(f"Invalid response from UID {uid}: {e}")
+                    if not is_valid:
+                        tplr.logger.debug(error_message)
                         skipped_uids.append(uid)
-                        continue
+                    else:
+                        valid_responses.append((uid, *processed_response))
 
-                    if state_dict_resp is None:
-                        tplr.logger.debug(f"Empty state dict from UID {uid}")
-                        skipped_uids.append(uid)
-                        continue
+                # Early return if no valid responses
+                if not valid_responses:
+                    tplr.logger.info("No valid gradient responses received")
+                    return None
 
-                    # ---------- Begin Compressed Indices and Values Check ----------
-                    valid_response = True
-                    for param_name, tensor in state_dict_resp.items():
-                        if param_name.endswith("idxs"):
-                            base_name = param_name[:-4]
-                            totalk = totalks.get(base_name)
-                            if totalk is None:
-                                tplr.logger.warning(
-                                    f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
-                                )
-                                valid_response = False
-                                break
-                            try:
-                                self.check_compressed_indices(
-                                    param_name,
-                                    tensor.to(device),
-                                    totalk,
-                                    allowed_topk=self.hparams.topk_compression,
-                                )
-                            except Exception as e:
-                                tplr.logger.warning(
-                                    f"Compressed indices check failed for parameter {param_name} from UID {uid}: {e}"
-                                )
-                                valid_response = False
-                                break
-                        # Check if values are valid (not NaN, not Inf)
-                        elif param_name.endswith("vals"):
-                            tensor_to_check = tensor.to(device)
-                            if (
-                                torch.isnan(tensor_to_check).any()
-                                or torch.isinf(tensor_to_check).any()
-                            ):
-                                tplr.logger.warning(
-                                    f"NaN/Inf in {param_name} from UID {uid}, skipping"
-                                )
-                                valid_response = False
-                                break
+                # 3. Group tensors by parameter name for batch processing
+                param_groups = {}
+                valid_uids = []
+                global_steps = []
 
-                    # If any check failed, skip this UID entirely
-                    if not valid_response:
-                        tplr.logger.info(
-                            f"Skipping UID {uid} due to validation failures"
-                        )
-                        skipped_uids.append(uid)
-                        continue
-                    # ---------- End Compressed Indices and Values Check ----------
+                for uid, state_dict, global_step in valid_responses:
+                    valid_uids.append(uid)
+                    global_steps.append(global_step)
 
-                    # Process tensors (with normalization on 'vals' keys).
-                    for param_name, tensor in state_dict_resp.items():
+                    for param_name, tensor in state_dict.items():
                         if isinstance(tensor, torch.Tensor):
-                            if param_name.endswith("vals"):
-                                tensor = tensor.to(device)
-                                norm = torch.norm(tensor)
-                                normalized = tensor / (norm + 1e-8)
-                                aggregated_state_dict.setdefault(param_name, []).append(
-                                    normalized
-                                )
-                            else:
-                                aggregated_state_dict.setdefault(param_name, []).append(
-                                    tensor.to(device)
-                                )
+                            if param_name not in param_groups:
+                                param_groups[param_name] = {"tensors": [], "uids": []}
+                            param_groups[param_name]["tensors"].append(tensor)
+                            param_groups[param_name]["uids"].append(uid)
+
+                            # Track download bytes
                             metrics["download_bytes"] += (
                                 tensor.element_size() * tensor.nelement()
                             )
 
-                    valid_uids.append(uid)
-                    global_steps.append(global_step_resp)
+                # 4. Process each parameter group with batch validation
+                aggregated_state_dict = {}
+                param_to_valid_uids = {}
+
+                # Track which UIDs have all parameters valid
+                all_valid_uids = set(valid_uids)
+
+                # First process all the indices tensors
+                idx_groups = {
+                    name: group
+                    for name, group in param_groups.items()
+                    if name.endswith("idxs")
+                }
+
+                for param_name, group in idx_groups.items():
+                    valid_tensors, param_valid_uids = self._batch_validate_tensors(
+                        param_name, group["tensors"], group["uids"], device, totalks
+                    )
+
+                    # Store valid tensors in aggregated_state_dict
+                    if valid_tensors:
+                        aggregated_state_dict[param_name] = valid_tensors
+                        param_to_valid_uids[param_name] = param_valid_uids
+
+                    # Update all_valid_uids to intersection
+                    invalid_uids = set(group["uids"]) - set(param_valid_uids)
+                    all_valid_uids -= invalid_uids
+
+                # Then process all the values tensors
+                val_groups = {
+                    name: group
+                    for name, group in param_groups.items()
+                    if name.endswith("vals")
+                }
+
+                for param_name, group in val_groups.items():
+                    # Get only the tensors for UIDs that are still valid
+                    filtered_tensors = []
+                    filtered_uids = []
+
+                    for tensor, uid in zip(group["tensors"], group["uids"]):
+                        if uid in all_valid_uids:
+                            filtered_tensors.append(tensor)
+                            filtered_uids.append(uid)
+
+                    # Validate and normalize in batches
+                    valid_tensors, param_valid_uids = self._batch_validate_tensors(
+                        param_name, filtered_tensors, filtered_uids, device, totalks
+                    )
+
+                    if valid_tensors:
+                        # Batch normalize the values
+                        normalized_tensors = self._batch_normalize_tensors(
+                            valid_tensors, device
+                        )
+
+                        # Store in aggregated_state_dict
+                        aggregated_state_dict[param_name] = normalized_tensors
+                        param_to_valid_uids[param_name] = param_valid_uids
+
+                    # Update all_valid_uids to intersection
+                    invalid_uids = set(filtered_uids) - set(param_valid_uids)
+                    all_valid_uids -= invalid_uids
+
+                # Finally, process other tensors
+                other_groups = {
+                    name: group
+                    for name, group in param_groups.items()
+                    if not (name.endswith("idxs") or name.endswith("vals"))
+                }
+
+                for param_name, group in other_groups.items():
+                    # Get only the tensors for UIDs that are still valid
+                    filtered_tensors = []
+                    filtered_uids = []
+
+                    for tensor, uid in zip(group["tensors"], group["uids"]):
+                        if uid in all_valid_uids:
+                            filtered_tensors.append(tensor)
+                            filtered_uids.append(uid)
+
+                    # Just move to device without special validation
+                    device_tensors = [t.to(device) for t in filtered_tensors]
+
+                    if device_tensors:
+                        aggregated_state_dict[param_name] = device_tensors
+                        param_to_valid_uids[param_name] = filtered_uids
+
+                # Update valid_uids and global_steps to only include fully valid UIDs
+                final_valid_uids = []
+                final_global_steps = []
+                final_skipped_uids = list(skipped_uids)
+
+                for i, uid in enumerate(valid_uids):
+                    if uid in all_valid_uids:
+                        final_valid_uids.append(uid)
+                        final_global_steps.append(global_steps[i])
+                    else:
+                        final_skipped_uids.append(uid)
+
+                # If no valid UIDs remain after validation, return None
+                if not final_valid_uids:
+                    tplr.logger.info("No valid gradients after tensor validation")
+                    return None
+
+                total_time = time.time() - start_time
+                tplr.logger.info(
+                    f"Gather done in {total_time:.2f}s. Success rate: {len(final_valid_uids)}/{len(uids)}, "
+                    f"Upload: {metrics['upload_bytes']} bytes, Download: {metrics['download_bytes']} bytes"
+                )
+
+                result = SimpleNamespace(
+                    time=total_time,
+                    upload_bytes=metrics["upload_bytes"],
+                    download_bytes=metrics["download_bytes"],
+                    success_rate=len(final_valid_uids) / len(uids),
+                    state_dict=SimpleNamespace(**aggregated_state_dict),
+                    uids=final_valid_uids,
+                    global_steps=final_global_steps,
+                    skipped_uids=final_skipped_uids,
+                )
+                return result
 
             except Exception as e:
-                tplr.logger.error(f"Error processing uid batch: {str(e)}")
+                tplr.logger.error(f"Error in gather operation: {str(e)}")
+                import traceback
 
-        if not valid_uids:
-            tplr.logger.info("No valid gradients received from any UID")
-            return None
-
-        total_time = time.time() - start_time
-        tplr.logger.info(
-            f"Gather done in {total_time:.2f}s. Success rate: {len(valid_uids)}/{len(uids)}, "
-            f"Upload: {metrics['upload_bytes']} bytes, Download: {metrics['download_bytes']} bytes"
-        )
-
-        result = SimpleNamespace(
-            time=total_time,
-            upload_bytes=metrics["upload_bytes"],
-            download_bytes=metrics["download_bytes"],
-            success_rate=len(valid_uids) / len(uids),
-            state_dict=SimpleNamespace(**aggregated_state_dict),
-            uids=valid_uids,
-            global_steps=global_steps,
-            skipped_uids=skipped_uids,
-        )
-        return result
+                tplr.logger.error(traceback.format_exc())
+                return None
 
     async def cleanup_old_checkpoints(self, keep_last: int = 3):
         """

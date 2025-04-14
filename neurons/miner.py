@@ -97,6 +97,20 @@ class Miner:
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        # Add desync flag to artifically wait a certain number of windows
+        parser.add_argument(
+            "--desync",
+            type=int,
+            default=0,
+            help="Number of windows to artificially desync the miner",
+        )
+        # Add warmup flag to gather momentum before desyncing
+        parser.add_argument(
+            "--warmup",
+            type=int,
+            default=0,
+            help="Number of windows to run before applying desync",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -207,6 +221,22 @@ class Miner:
         self.total_tokens_processed = 0
         self.batch_times = []  # For tracking processing speed
 
+        # Initialize desync counter based on flags
+        self.desync_steps = self.config.desync
+        self.warmup_steps = self.config.warmup
+        self.warmup_counter = 0
+        self.desync_active = False
+
+        # Log desync and warmup configuration
+        if self.desync_steps > 0:
+            tplr.logger.info(f"Desync configured: Will desync by {self.desync_steps} windows")
+            if self.warmup_steps > 0:
+                tplr.logger.info(f"Warmup configured: Will run {self.warmup_steps} windows before desyncing")
+            else:
+                tplr.logger.info("No warmup configured: Will desync immediately")
+        else:
+            tplr.logger.info("No desync configured: Miner will run normally")
+
         # Initialize WandB
         self.wandb = tplr.initialize_wandb(
             run_prefix="M",
@@ -268,6 +298,28 @@ class Miner:
             tplr.logger.info(
                 f"\n{'-' * 40} Window: {step_window} (Global Step: {self.global_step}) {'-' * 40}"
             )
+
+            # Handle warmup and desync logic
+            if self.desync_steps > 0:
+                if self.warmup_steps > 0 and self.warmup_counter < self.warmup_steps:
+                    # In warmup phase, run normally
+                    tplr.logger.info(f"Warmup window {self.warmup_counter + 1}/{self.warmup_steps}")
+                    self.warmup_counter += 1
+                elif not self.desync_active:
+                    # Start desync phase
+                    self.desync_active = True
+                    tplr.logger.info(f"Starting desync by {self.desync_steps} windows")
+                    # Wait for the specified number of windows before continuing
+                    target_window = step_window + self.desync_steps
+                    tplr.logger.info(f"Waiting until window {target_window}")
+                    
+                    while self.current_window < target_window:
+                        await asyncio.sleep(1)
+                        tplr.logger.info(f"Desync: Current window {self.current_window}, waiting for {target_window}")
+                    
+                    tplr.logger.info(f"Desync complete! Resuming at window {self.current_window}")
+                    # Update step_window to the current window after desync
+                    step_window = self.current_window
 
             # 2. Load training data for this window
             data_start = tplr.T()

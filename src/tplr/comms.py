@@ -114,7 +114,6 @@ class Comms(ChainManager):
         )  # Number of recent windows to check
 
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
-        self.retry_config = {"max_attempts": 3, "backoff_base": 1.5}
 
     async def _get_s3_client(self, bucket: Bucket):
         """

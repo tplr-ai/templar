@@ -37,6 +37,7 @@ import numpy as np
 
 # Third party
 import torch
+import uvloop
 from rich.console import Console
 from rich.table import Table
 from torch.optim import SGD
@@ -2448,4 +2449,5 @@ def sign_preserving_multiplication(a, b):
 
 
 if __name__ == "__main__":
+    uvloop.install()
     asyncio.run(Validator().run())

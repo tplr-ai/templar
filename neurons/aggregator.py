@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from typing import cast
 
 import bittensor as bt
+import uvloop
 from bittensor.core.subtensor import ScaleObj
 from transformers import LlamaConfig, LlamaForCausalLM
 
@@ -542,4 +543,5 @@ class AggregationServer:
 
 # Start the aggregation server
 if __name__ == "__main__":
+    uvloop.install()
     asyncio.run(AggregationServer().run())

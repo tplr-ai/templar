@@ -110,6 +110,12 @@ def config() -> bt.Config:
         default=None,
         help="Override the wallet's UID",
     )
+    parser.add_argument(
+        "--skip-gaps",
+        type=bool,
+        default=False,
+        help="Skip gaps in the evaluation process",
+    )
 
     bt.subtensor.add_args(parser)
     parser.parse_args()
@@ -482,7 +488,9 @@ class Evaluator:
 
         task_list: list[str] = self.config.tasks.split(",")  # type: ignore
         has_mmlu_task = "mmlu_flan_n_shot_generative" in task_list
-        should_run_mmlu_n_shot = has_mmlu_task and self.eval_counter % 4 == 0
+        should_run_mmlu_n_shot = has_mmlu_task and (
+            self.config.skip_gaps or self.eval_counter % 4 == 0
+        )
         regular_tasks = [t for t in task_list if t != "mmlu_flan_n_shot_generative"]
         tasks = ",".join(regular_tasks)
 

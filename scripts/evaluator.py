@@ -541,7 +541,7 @@ class Evaluator:
             torch.cuda.empty_cache()
         elif has_mmlu_task:
             tplr.logger.info(
-                f"Skipping mmlu_flan_n_shot_generative (run #{self.eval_counter}, next at run #{(self.eval_counter//4 + 1)*4})"
+                f"Skipping mmlu_flan_n_shot_generative (run #{self.eval_counter}, next at run #{(self.eval_counter // 4 + 1) * 4})"
             )
 
         shutil.rmtree(MODEL_PATH)

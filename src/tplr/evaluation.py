@@ -44,7 +44,9 @@ async def load_and_compare_pages(uid, sync_window, hparams, tokenizer, state_dic
     """
     miner_pages = state_dict.get("metadata", {}).get("pages_info", None)
     local_pages = await R2DatasetLoader.next_pages(
-        offset=sync_window, n_pages=hparams.pages_per_window, seed=uid
+        offset=sync_window * hparams.pages_per_window,
+        n_pages=hparams.pages_per_window,
+        seed=uid,
     )
     if miner_pages is not None:
         if local_pages != miner_pages:
@@ -174,8 +176,6 @@ async def evaluate_peer(
     xshapes,
     totalks,
     device,
-    lr,
-    optimizer,
     scheduler,
     random_batches,
     random_pages,
@@ -312,8 +312,6 @@ async def evaluate_peers_parallel(
     xshapes,
     totalks,
     device,
-    lr,
-    optimizer,
     scheduler,
     time_min,
     time_max,
@@ -361,11 +359,9 @@ async def evaluate_peers_parallel(
                     xshapes,
                     totalks,
                     device,
-                    lr,
-                    optimizer,
                     scheduler,
                     random_batches,  # noqa
-                    random_pages,
+                    random_pages,  # noqa
                 )
                 return uid, eval_payload
             else:
@@ -526,22 +522,27 @@ def aggregate_evaluation_metrics(eval_results: dict) -> dict:
     """
     Aggregates evaluation metrics from individual peer evaluations.
     Returns a dictionary containing averaged metrics for logging purposes,
-    while still preserving the per UID evaluation reports.
+    while still preserving the per-UID evaluation reports.
+
+    Only includes valid (non-None) evaluation results.
     """
+    # Keys as returned by evaluate_peer.
     keys = [
-        "loss_before_own",
-        "loss_after_own",
-        "loss_before_random",
-        "loss_after_random",
+        "loss_before_per_batch_own",
+        "loss_after_per_batch_own",
+        "loss_before_per_batch_random",
+        "loss_after_per_batch_random",
         "binary_indicator",
     ]
     totals = {key: 0.0 for key in keys}
-    count = len(eval_results)
-    for uid, res in eval_results.items():
+    # Filter out None results.
+    valid_results = [res for res in eval_results.values() if res is not None]
+    count = len(valid_results)
+    for res in valid_results:
         for key in keys:
             totals[key] += res.get(key, 0.0)
     if count == 0:
-        count = 1
+        count = 1  # Avoid division by zero.
     aggregated = {key: totals[key] / count for key in keys}
-    aggregated["evaluated_count"] = len(eval_results)
+    aggregated["evaluated_count"] = len(valid_results)
     return aggregated

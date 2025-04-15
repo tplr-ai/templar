@@ -51,7 +51,6 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisGridShow": true,
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
@@ -93,7 +92,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "none"
         },
         "overrides": []
       },
@@ -114,7 +114,8 @@
         "tooltip": {
           "mode": "single",
           "sort": "none"
-        }
+        },
+        "xField": "step_int"
       },
       "pluginVersion": "10.4.0",
       "targets": [
@@ -123,12 +124,12 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"hellaswag\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"hellaswag\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
       "title": "Eval - hellaswag",
-      "type": "timeseries"
+      "type": "trend"
     },
     {
       "datasource": {
@@ -144,7 +145,6 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisGridShow": true,
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
@@ -207,7 +207,8 @@
         "tooltip": {
           "mode": "single",
           "sort": "none"
-        }
+        },
+        "xField": "step_int"
       },
       "pluginVersion": "10.4.0",
       "targets": [
@@ -216,12 +217,12 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"mmlu\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"mmlu\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
       "title": "Eval - mmlu",
-      "type": "timeseries"
+      "type": "trend"
     },
     {
       "datasource": {
@@ -237,7 +238,6 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisGridShow": true,
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
@@ -300,7 +300,8 @@
         "tooltip": {
           "mode": "single",
           "sort": "none"
-        }
+        },
+        "xField": "step_int"
       },
       "pluginVersion": "10.4.0",
       "targets": [
@@ -309,12 +310,12 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"piqa\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"piqa\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
       "title": "Eval - piqa",
-      "type": "timeseries"
+      "type": "trend"
     },
     {
       "datasource": {
@@ -330,7 +331,6 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisGridShow": true,
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
@@ -402,12 +402,12 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"mmlu_flan_n_shot_generative\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"mmlu_flan_n_shot_generative\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
       "title": "Eval - mmlu_flan_n_shot_generative - 5-shot",
-      "type": "timeseries"
+      "type": "trend"
     },
     {
       "datasource": {
@@ -423,7 +423,6 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisGridShow": true,
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
@@ -486,7 +485,8 @@
         "tooltip": {
           "mode": "single",
           "sort": "none"
-        }
+        },
+        "xField": "step_int"
       },
       "pluginVersion": "10.4.0",
       "targets": [
@@ -495,12 +495,12 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"arc_easy\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"arc_easy\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
       "title": "Eval - arc_easy",
-      "type": "timeseries"
+      "type": "trend"
     },
     {
       "datasource": {
@@ -516,7 +516,6 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisGridShow": true,
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
@@ -588,12 +587,12 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"arc_challenge\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"arc_challenge\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
       "title": "Eval - arc_challenge",
-      "type": "timeseries"
+      "type": "trend"
     },
     {
       "datasource": {
@@ -609,7 +608,6 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisGridShow": true,
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
@@ -672,7 +670,8 @@
         "tooltip": {
           "mode": "single",
           "sort": "none"
-        }
+        },
+        "xField": "step_int"
       },
       "pluginVersion": "10.4.0",
       "targets": [
@@ -681,12 +680,12 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"winogrande\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"winogrande\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
       "title": "Eval - winogrande",
-      "type": "timeseries"
+      "type": "trend"
     },
     {
       "datasource": {
@@ -702,7 +701,6 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisGridShow": true,
             "axisLabel": "",
             "axisPlacement": "auto",
             "barAlignment": 0,
@@ -774,12 +772,12 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"openbookqa\")\r\n  |> group(columns: [\"version\", \"uid\", \"task\"], mode:\"by\")\r\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\r\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"openbookqa\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
       "title": "Eval - openbookqa",
-      "type": "timeseries"
+      "type": "trend"
     }
   ],
   "schemaVersion": 39,
@@ -790,7 +788,7 @@
     "list": []
   },
   "time": {
-    "from": "now-7d",
+    "from": "now-30d",
     "to": "now"
   },
   "timepicker": {
@@ -805,6 +803,6 @@
   "timezone": "browser",
   "title": "Eval - Metrics",
   "uid": "ceia6bwlwn8qof",
-  "version": 2,
+  "version": 4,
   "weekStart": ""
 }

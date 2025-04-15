@@ -221,7 +221,7 @@ class Validator:
         self.start_window = self.current_window  # Record the start window
         self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window
-        self.sync_window = self.current_window
+        self.sync_window = self.current_window - 1
 
         # Init score tracking variables
         self.loss_before_per_batch_own = 0.0

@@ -9,7 +9,7 @@ const SPECIAL_MINER_PAGES = process.env.SPECIAL_MINER_PAGES || 12;
 const SPECIAL_MINER_PREFIX = process.env.SPECIAL_MINER_PREFIX || '12page';
 
 // Desync miner configuration
-const DESYNC_MINER_INDEX = process.env.DESYNC_MINER_INDEX || 61;
+const DESYNC_MINER_INDEX = process.env.DESYNC_MINER_INDEX || 2;
 const DESYNC_WINDOWS = process.env.DESYNC_WINDOWS || 3;
 const WARMUP_WINDOWS = process.env.WARMUP_WINDOWS || 10;
 const DESYNC_MINER_PREFIX = process.env.DESYNC_MINER_PREFIX || 'desync';

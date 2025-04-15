@@ -26,7 +26,8 @@ import pyarrow.parquet as pq
 from functools import lru_cache
 import threading
 
-from tplr import logger, T
+import tplr
+from tplr import logger
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
 
@@ -610,7 +611,7 @@ class R2DatasetLoader(DatasetLoader):
             tuple: (loader, pages_info)
         """
         seed_val = seed if seed is not None else np.random.randint(1000, 1000000)
-        start_time = T()
+        start_time = tplr.T()
         pages = await cls.next_pages(
             offset=offset, n_pages=hparams.pages_per_window, seed=seed_val
         )
@@ -621,7 +622,7 @@ class R2DatasetLoader(DatasetLoader):
             tokenizer=tokenizer,
             pack_samples=pack_samples,
         )
-        elapsed = T() - start_time
+        elapsed = tplr.T() - start_time
         logger.info(
             f"Loaded {data_type} data in {elapsed:.2f}s with seed: {seed_val}, pages: {len(pages)}"
         )

@@ -1449,8 +1449,12 @@ class Comms(ChainManager):
             if os.path.exists(temp_file):
                 os.remove(temp_file)
 
-    async def get_peer_list(self) -> tuple[PeerArray, int] | None:
-        tplr.logger.info("Starting to look for a peer list on a validator bucket")
+    async def get_peer_list(
+        self, fetch_previous: bool = False
+    ) -> tuple[PeerArray, int] | None:
+        tplr.logger.info(
+            f"Looking for a {'previous' if fetch_previous else 'current'} peer list on a validator bucket"
+        )
         while True:
             try:
                 (
@@ -1497,22 +1501,38 @@ class Comms(ChainManager):
                     tplr.logger.info("No peer list files found")
                     return None
 
-                max_window = -1
-                selected_key = None
+                # Parse windows from all keys
+                window_to_key = {}
                 for key in keys:
                     match = re.match(pattern, key)
                     if match:
                         window = int(match.group("window"))
-                        if window > max_window:
-                            max_window = window
-                            selected_key = key
+                        window_to_key[window] = key
 
-                if selected_key is None:
+                if not window_to_key:
                     tplr.logger.error(
-                        f"Failed to select most recent peers file on bucket. First "
+                        f"Failed to parse windows from peer list files. First "
                         f"{len(keys[:5])} peer list files are {keys[:5]}"
                     )
                     return None
+
+                # Sort windows to find the most recent or the previous one
+                window_to_keys = window_to_key.keys()
+
+                if len(window_to_keys) == 0:
+                    return None
+
+                # If fetching previous, get the second most recent (if available)
+                selected_window = None
+                if fetch_previous and len(window_to_keys) > 1:
+                    sorted_windows = sorted(window_to_keys, reverse=True)
+                    selected_window = sorted_windows[1]  # Second most recent
+                    tplr.logger.info(f"Selected previous window {selected_window}")
+                else:
+                    selected_window = max(window_to_keys)  # Most recent
+                    tplr.logger.info(f"Selected most recent window {selected_window}")
+
+                selected_key = window_to_key[selected_window]
 
                 peers_data = await self.s3_get_object(
                     key=selected_key, bucket=validator_bucket

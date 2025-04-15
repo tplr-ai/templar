@@ -227,6 +227,12 @@ class Validator:
         self.loss_improvement_random = 0.0
         self.relative_improvement_own = 0.0
         self.relative_improvement_random = 0.0
+
+        # For better looking graphs if no eval peers could be evaluated
+        self.previous_avg_loss_before_own = 0.0
+        self.previous_avg_loss_after_own = 0.0
+        self.previous_avg_loss_before_random = 0.0
+        self.previous_avg_loss_after_random = 0.0
         self.valid_score_indices = []
 
         # Caching
@@ -1677,18 +1683,24 @@ class Validator:
                 f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
             )
 
-            avg_loss_before_per_batch_own /= (
-                evaluated_peers if evaluated_peers != 0 else 1
-            )
-            avg_loss_after_per_batch_own /= (
-                evaluated_peers if evaluated_peers != 0 else 1
-            )
-            avg_loss_before_per_batch_random /= (
-                evaluated_peers if evaluated_peers != 0 else 1
-            )
-            avg_loss_after_per_batch_random /= (
-                evaluated_peers if evaluated_peers != 0 else 1
-            )
+            if evaluated_peers == 0:
+                # Use the values from the previous step
+                avg_loss_before_per_batch_own = self.previous_avg_loss_before_own
+                avg_loss_after_per_batch_own = self.previous_avg_loss_after_own
+                avg_loss_before_per_batch_random = self.previous_avg_loss_before_random
+                avg_loss_after_per_batch_random = self.previous_avg_loss_after_random
+            else:
+                # Calculate averages normally
+                avg_loss_before_per_batch_own /= evaluated_peers
+                avg_loss_after_per_batch_own /= evaluated_peers
+                avg_loss_before_per_batch_random /= evaluated_peers
+                avg_loss_after_per_batch_random /= evaluated_peers
+
+                # Store current values for future use when evaluated_peers might be 0
+                self.previous_avg_loss_before_own = avg_loss_before_per_batch_own
+                self.previous_avg_loss_after_own = avg_loss_after_per_batch_own
+                self.previous_avg_loss_before_random = avg_loss_before_per_batch_random
+                self.previous_avg_loss_after_random = avg_loss_after_per_batch_random
 
             # 16. Log evaluation metrics once all evaluations are done
             evaluation_metrics = {

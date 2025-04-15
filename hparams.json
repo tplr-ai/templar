@@ -5,7 +5,7 @@
     "pages_per_window": 6,
     "batch_size": 6,
     "learning_rate": 4e-4,
-    "blocks_per_window": 10,
+    "blocks_per_window": 6,
     "windows_per_sync": 100,
     "windows_per_weights": 50,
     "momentum_decay": 0.999,

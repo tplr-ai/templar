@@ -1,15 +1,15 @@
 require('dotenv').config();
 const child_process = require('child_process');
 const NUM_MINERS = process.env.NUM_MINERS || 3;
-const PROJECT_NAME = `test-scoring`;
+const PROJECT_NAME = `test-trueskill`;
 
 // Special miner configuration (the one that will use more pages)
 const SPECIAL_MINER_INDEX = process.env.SPECIAL_MINER_INDEX || 1;
-const SPECIAL_MINER_PAGES = process.env.SPECIAL_MINER_PAGES || 24;
-const SPECIAL_MINER_PREFIX = process.env.SPECIAL_MINER_PREFIX || '24page';
+const SPECIAL_MINER_PAGES = process.env.SPECIAL_MINER_PAGES || 12;
+const SPECIAL_MINER_PREFIX = process.env.SPECIAL_MINER_PREFIX || '12page';
 
 // Desync miner configuration
-const DESYNC_MINER_INDEX = process.env.DESYNC_MINER_INDEX || 2;
+const DESYNC_MINER_INDEX = process.env.DESYNC_MINER_INDEX || 61;
 const DESYNC_WINDOWS = process.env.DESYNC_WINDOWS || 3;
 const WARMUP_WINDOWS = process.env.WARMUP_WINDOWS || 10;
 const DESYNC_MINER_PREFIX = process.env.DESYNC_MINER_PREFIX || 'desync';

@@ -188,6 +188,7 @@ class Evaluator:
         self.last_eval_window = 0
         self.stop_event = asyncio.Event()
         self.last_block_number = 0
+        self.eval_counter = 0
 
         # Initialize metrics logger with consistent patterns
         self.metrics_logger = tplr.metrics.MetricsLogger(
@@ -222,7 +223,7 @@ class Evaluator:
             - checkpoint_window (int): Window number of checkpoint
             - global_step (int): Global training step
         """
-        result = await self.comms.get_latest_checkpoint()
+        result = await self.comms.get_latest_checkpoint()  # type: ignore
         if not result:
             tplr.logger.error(
                 f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket_name', 'unknown')}, "
@@ -236,18 +237,18 @@ class Evaluator:
         tplr.logger.info(f"[DEBUG] Checkpoint data: {checkpoint_data}")
 
         checkpoint_start_window = checkpoint_data.get("start_window")
-        checkpoint_current_window = checkpoint_data.get("current_window")
+        checkpoint_current_window = checkpoint_data.get("current_window", None)
 
         if checkpoint_start_window is None or checkpoint_current_window is None:
             tplr.logger.error("Checkpoint missing start_window or current_window info")
             return (False, checkpoint_data, 0, 0)
 
-        if checkpoint_current_window <= self.last_eval_window:
+        if int(checkpoint_current_window) <= self.last_eval_window:
             tplr.logger.info(
                 f"Checkpoint already evaluated (checkpoint window: {checkpoint_current_window}, "
                 f"last evaluated: {self.last_eval_window})."
             )
-            return (False, checkpoint_data, checkpoint_current_window, 0)
+            return (False, checkpoint_data, int(checkpoint_current_window), 0)
 
         tplr.logger.info(
             f"Loading model from checkpoint (window: {checkpoint_current_window})"
@@ -256,21 +257,183 @@ class Evaluator:
         self.model.load_state_dict(
             {
                 k: v.to(self.config.device)
-                for k, v in checkpoint_data["model_state_dict"].items()
+                for k, v in checkpoint_data["model_state_dict"].items()  # type: ignore
             }
         )
         self.model.to(self.config.device)  # type: ignore
 
         self.momentum = checkpoint_data["momentum"]
 
-        global_step = checkpoint_current_window - checkpoint_start_window
+        global_step = int(checkpoint_current_window) - int(checkpoint_start_window)
 
         tplr.logger.info(
             f"Loaded checkpoint (start_window={checkpoint_start_window}, "
             f"current_window={checkpoint_current_window}, global_step={global_step})"
         )
 
-        return (True, checkpoint_data, checkpoint_current_window, global_step)
+        return (True, checkpoint_data, int(checkpoint_current_window), global_step)
+
+    def _run_lm_eval(
+        self,
+        tasks: str,
+        output_dir: str,
+        model_args: str | None = None,
+        batch_size: str | None = None,
+        limit: str | None = None,
+        num_fewshot: int | None = None,
+    ) -> tuple[int, float]:
+        """Run lm-eval benchmark for specified tasks with custom configuration.
+
+        Args:
+            tasks: Comma-separated task list
+            output_dir: Directory to save results
+            global_step: Current global step for logging
+            checkpoint_window: Current window for logging
+            block_number: Current block for logging
+            model_args: Optional model arguments
+            batch_size: Optional batch size
+            limit: Optional dataset limit
+            num_fewshot: Optional few-shot examples
+
+        Returns:
+            Tuple containing (exit_code, runtime)
+        """
+        if model_args is None:
+            model_args = f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}"
+        if batch_size is None:
+            batch_size = str(self.config.actual_batch_size)
+
+        cmd_parts = [
+            "lm-eval",
+            "--model hf",
+            f"--model_args {model_args}",
+            f"--tasks {tasks}",
+            f"--device {self.config.device}",
+            f"--batch_size {batch_size}",
+            f"--output_path {output_dir}",
+        ]
+
+        if limit:
+            cmd_parts.append(f"--limit {limit}")
+        if num_fewshot:
+            cmd_parts.append(f"--num_fewshot {num_fewshot}")
+
+        command = " ".join(cmd_parts)
+
+        start_time = time.time()
+        tplr.logger.info(f"Running benchmark command: {command}")
+        exit_code = os.system(command)
+        benchmark_runtime = time.time() - start_time
+
+        return exit_code, benchmark_runtime
+
+    def _process_results(
+        self,
+        task_name: str,
+        results_dir: str,
+        global_step: int,
+        checkpoint_window: int,
+        block_number: int,
+        benchmark_runtime: float,
+        exit_code: int,
+    ) -> None:
+        """Process results from the lm-eval benchmark.
+
+        Args:
+            task_name: Name of the benchmark task
+            results_dir: Directory containing results
+            global_step: Current global step for logging
+            checkpoint_window: Current window for logging
+            block_number: Current block for logging
+            benchmark_runtime: Runtime of the benchmark
+            exit_code: Exit code of the benchmark command
+        """
+        if exit_code != 0:
+            tplr.logger.error("Benchmarking command failed")
+            return
+
+        eval_results_dir = os.path.join(results_dir, "models__eval")
+        if not os.path.exists(eval_results_dir):
+            tplr.logger.error(f"Results directory not found: {eval_results_dir}")
+            return
+
+        self.metrics_logger.log(
+            measurement="benchmark_metrics",
+            tags={
+                "global_step": global_step,
+                "window": checkpoint_window,
+                "block": block_number,
+                "tasks": task_name,
+            },
+            fields={
+                "lm_eval_exit_code": float(exit_code),
+                "benchmark_runtime_s": float(benchmark_runtime),
+            },
+        )
+        tplr.logger.info(
+            f"Reported metrics for global step {global_step} (block: {block_number}, window: {checkpoint_window})"
+        )
+
+        try:
+            latest_file = max(
+                [
+                    os.path.join(eval_results_dir, f)
+                    for f in os.listdir(eval_results_dir)
+                ],
+                key=os.path.getctime,
+            )
+            with open(latest_file, "r") as f:
+                results = json.load(f)
+        except (ValueError, FileNotFoundError) as e:
+            tplr.logger.error(f"Error processing results: {e}")
+            return
+
+        for task_name, task_results in results["results"].items():
+            # We need to try each metric in order until we find one that exists
+            # Alo we need to prioritise metrics in order of preference
+            # see: https://github.com/EleutherAI/lm-evaluation-harness/blob/758c5ed891b1ca48acd8d3a0d309a827215796b7/scripts/regression.py#L115
+            metric_names = ["acc_norm,none", "acc,none"]
+            metric_value = None
+            used_metric = None
+
+            for metric_name in metric_names:
+                if (value := task_results.get(metric_name)) is not None:
+                    metric_value = value
+                    used_metric = metric_name
+                    break
+
+            if metric_value is not None:
+                tplr.logger.info(
+                    f"Benchmark for {task_name} ({used_metric}): {metric_value}"
+                )
+                self.metrics_logger.log(
+                    measurement="benchmark_task",
+                    tags={
+                        "task": task_name,
+                        "metric": used_metric,
+                        "global_step": global_step,
+                        "block": block_number,
+                        "window": checkpoint_window,
+                    },
+                    fields={"score": float(metric_value)},
+                )
+
+        self.metrics_logger.log(
+            measurement="benchmark_summary",
+            tags={
+                "global_step": global_step,
+                "window": checkpoint_window,
+                "block": block_number,
+            },
+            fields={
+                "num_tasks": len(results["results"]),
+                "global_step": global_step,
+                "block_number": block_number,
+            },
+        )
+        tplr.logger.info(
+            f"Reported summary for global step {global_step} (block: {block_number}, window: {checkpoint_window})"
+        )
 
     async def _evaluate(self) -> Optional[int]:
         """Execute benchmark evaluation on the current model.
@@ -315,93 +478,63 @@ class Evaluator:
         results_dir = os.path.join(MODEL_PATH, "results")
         os.makedirs(results_dir, exist_ok=True)
 
-        start_time = time.time()
+        self.eval_counter += 1
 
-        tasks = self.config.tasks
-        extra_args = ""
+        task_list: list[str] = self.config.tasks.split(",")  # type: ignore
+        has_mmlu_task = "mmlu_flan_n_shot_generative" in task_list
+        should_run_mmlu_n_shot = has_mmlu_task and self.eval_counter % 4 == 0
+        regular_tasks = [t for t in task_list if t != "mmlu_flan_n_shot_generative"]
+        tasks = ",".join(regular_tasks)
 
-        if "mmlu_flan_n_shot_generative" in tasks:  # type: ignore
-            extra_args = "--num_fewshot 5"
+        if tasks:
+            exit_code, benchmark_runtime = self._run_lm_eval(
+                tasks=tasks,
+                output_dir=results_dir,
+            )
+
+            self._process_results(
+                task_name=tasks,
+                results_dir=results_dir,
+                global_step=global_step,
+                checkpoint_window=checkpoint_window,
+                block_number=block_number,
+                benchmark_runtime=benchmark_runtime,
+                exit_code=exit_code,
+            )
+            shutil.rmtree(results_dir)
+            torch.cuda.empty_cache()
+        else:
+            tplr.logger.info("No regular tasks to run")
+
+        if should_run_mmlu_n_shot:
             tplr.logger.info(
-                "Detected mmlu_flan_n_shot_generative task, enabling 5-shot evaluation"
+                f"Run #{self.eval_counter}: Running mmlu_flan_n_shot_generative"
             )
 
-        lm_eval_command = (
-            f"lm-eval "
-            f"--model hf "
-            f"--model_args pretrained={MODEL_PATH},tokenizer={MODEL_PATH} "
-            f"--tasks {tasks} "
-            f"--device {self.config.device} "
-            f"--batch_size {self.config.actual_batch_size} "
-            f"--output_path {results_dir} "
-            f"{extra_args}"
-        )
-
-        tplr.logger.info(f"Running benchmark command: {lm_eval_command}")
-        exit_code = os.system(lm_eval_command)
-        runtime = time.time() - start_time
-
-        self.metrics_logger.log(
-            measurement="benchmark_metrics",
-            tags={
-                "global_step": global_step,
-                "window": checkpoint_window,
-                "block": block_number,
-            },
-            fields={
-                "lm_eval_exit_code": float(exit_code),
-                "benchmark_runtime_s": runtime,
-            },
-        )
-        if exit_code != 0:
-            tplr.logger.error("Benchmarking command failed")
-            return global_step
-
-        eval_results_dir = os.path.join(results_dir, "models__eval")
-        if not os.path.exists(eval_results_dir):
-            tplr.logger.error(f"Results directory not found: {eval_results_dir}")
-            return global_step
-
-        latest_file = max(
-            [os.path.join(eval_results_dir, f) for f in os.listdir(eval_results_dir)],
-            key=os.path.getctime,
-        )
-        with open(latest_file, "r") as f:
-            results = json.load(f)
-
-        for task_name, task_results in results["results"].items():
-            metric_name = (
-                "acc_norm,none"
-                if task_name
-                not in ["winogrande", "mmlu", "mmlu_flan_n_shot_generative"]
-                else "acc,none"
+            exit_code, benchmark_runtime = self._run_lm_eval(
+                tasks="mmlu_flan_n_shot_generative",
+                output_dir=results_dir,
+                model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH},dtype=bfloat16",
+                batch_size="auto",
+                limit="0.15",
+                num_fewshot=5,
             )
-            if (metric_value := task_results.get(metric_name)) is not None:
-                tplr.logger.info(f"Benchmark for {task_name}: {metric_value}")
-                self.metrics_logger.log(
-                    measurement="benchmark_task",
-                    tags={
-                        "task": task_name,
-                        "global_step": global_step,
-                        "block": block_number,
-                        "window": checkpoint_window,
-                    },
-                    fields={"score": float(metric_value)},
-                )
 
-        self.metrics_logger.log(
-            measurement="benchmark_summary",
-            tags={
-                "global_step": global_step,
-                "window": checkpoint_window,
-                "block": block_number,
-            },
-            fields={
-                "num_tasks": len(results["results"]),
-                "global_step": global_step,
-                "block_number": block_number,
-            },
-        )
+            self._process_results(
+                task_name="mmlu_flan_n_shot_generative",
+                results_dir=results_dir,
+                global_step=global_step,
+                checkpoint_window=checkpoint_window,
+                block_number=block_number,
+                benchmark_runtime=benchmark_runtime,
+                exit_code=exit_code,
+            )
+            shutil.rmtree(results_dir)
+            torch.cuda.empty_cache()
+        elif has_mmlu_task:
+            tplr.logger.info(
+                f"Skipping mmlu_flan_n_shot_generative (run #{self.eval_counter}, next at run #{(self.eval_counter//4 + 1)*4})"
+            )
 
         shutil.rmtree(MODEL_PATH)
         torch.cuda.empty_cache()
@@ -434,7 +567,7 @@ class Evaluator:
                 latest_block = self.subtensor.get_current_block()
                 start_window = await self.comms.get_start_window()
 
-                if (
+                if start_window is not None and (
                     latest_block > self.last_block_number
                     or start_window > self.last_eval_window
                 ):

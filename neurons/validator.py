@@ -2292,21 +2292,48 @@ class Validator:
         try:
             tplr.logger.info("Loading validator state.")
 
-            # Load the state of the validator from file.
-            state = np.load(self.state_path)
-            self.gradient_scores = state["gradient_scores"]
-            self.sync_scores = state["sync_scores"]
-            self.binary_indicator_scores = state["binary_indicator_scores"]
-            self.gradient_moving_avg_scores = state["gradient_moving_avg_scores"]
-            self.final_moving_avg_scores = state["final_moving_avg_scores"]
-            self.binary_moving_averages = state["binary_moving_averages"]
-            self.weights = state["weights"]
-            self.normalised_binary_moving_averages = state[
-                "normalised_binary_moving_averages"
-            ]
-            tplr.logger.info(
-                f"Loaded state from global state {state.global_state}: {state}"
+            # Load the state from file with pickle support.
+            state = np.load(self.state_path, allow_pickle=True)
+
+            # Convert NumPy arrays to PyTorch tensors and move to the correct device.
+            self.gradient_scores = (
+                torch.from_numpy(state["gradient_scores"])
+                .float()
+                .to(self.config.device)
             )
+            self.sync_scores = (
+                torch.from_numpy(state["sync_scores"]).float().to(self.config.device)
+            )
+            self.binary_indicator_scores = (
+                torch.from_numpy(state["binary_indicator_scores"])
+                .float()
+                .to(self.config.device)
+            )
+            self.gradient_moving_avg_scores = (
+                torch.from_numpy(state["gradient_moving_avg_scores"])
+                .float()
+                .to(self.config.device)
+            )
+            self.final_moving_avg_scores = (
+                torch.from_numpy(state["final_moving_avg_scores"])
+                .float()
+                .to(self.config.device)
+            )
+            self.binary_moving_averages = (
+                torch.from_numpy(state["binary_moving_averages"])
+                .float()
+                .to(self.config.device)
+            )
+            self.weights = (
+                torch.from_numpy(state["weights"]).float().to(self.config.device)
+            )
+            self.normalised_binary_moving_averages = (
+                torch.from_numpy(state["normalised_binary_moving_averages"])
+                .float()
+                .to(self.config.device)
+            )
+
+            tplr.logger.info(f"Loaded state: {state}")
         except Exception as e:
             tplr.logger.warning(f"Failed to load validator state: {e}")
 

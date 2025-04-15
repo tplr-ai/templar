@@ -1036,7 +1036,8 @@ class Comms(ChainManager):
 
                 if not os.path.exists(base_dir):
                     tplr.logger.debug(f"No gradient directory found for UID {uid}")
-                    continue
+                    # Skip to retry logic
+                    raise FileNotFoundError(f"Directory not found: {base_dir}")
 
                 # List all gradient files in the directory
                 all_files = os.listdir(base_dir)
@@ -1044,7 +1045,10 @@ class Comms(ChainManager):
 
                 if not gradient_files:
                     tplr.logger.debug(f"No gradient files found for UID {uid}")
-                    continue
+                    # Skip to retry logic
+                    raise FileNotFoundError(
+                        f"No gradient files in directory: {base_dir}"
+                    )
 
                 # Sort by timestamp to get the most recent
                 gradient_files.sort(reverse=True)
@@ -1074,57 +1078,54 @@ class Comms(ChainManager):
                     tplr.logger.debug(
                         f"No gradient files within time window for UID {uid}"
                     )
-                    continue
+                    # Skip to retry logic
+                    raise FileNotFoundError(
+                        f"No valid gradient files within time window in: {base_dir}"
+                    )
 
                 # Use the most recent valid file
                 latest_file, _ = valid_files[0]
                 file_path = os.path.join(base_dir, latest_file)
 
-                try:
-                    # This is where failures often happen (file I/O)
-                    state_dict = torch.load(file_path)
+                # This is where failures often happen (file I/O)
+                state_dict = torch.load(file_path)
 
-                    # Load metadata (assuming it's stored in a companion JSON file)
-                    metadata_path = file_path.replace(".pt", ".json")
-                    if os.path.exists(metadata_path):
-                        with open(metadata_path, "r") as f:
-                            metadata = json.load(f)
-                        global_step = metadata.get("global_step", 0)
-                    else:
-                        # Default global step if metadata file doesn't exist
-                        global_step = 0
+                # Load metadata (assuming it's stored in a companion JSON file)
+                metadata_path = file_path.replace(".pt", ".json")
+                if os.path.exists(metadata_path):
+                    with open(metadata_path, "r") as f:
+                        metadata = json.load(f)
+                    global_step = metadata.get("global_step", 0)
+                else:
+                    # Default global step if metadata file doesn't exist
+                    global_step = 0
 
-                    tplr.logger.debug(
-                        f"Successfully loaded gradient from {file_path} for UID {uid}"
-                    )
-                    return state_dict, global_step
-
-                except Exception as e:
-                    # This is a retryable error - file exists but couldn't be loaded
-                    tplr.logger.warning(f"Error loading gradient for UID {uid}: {e}")
-                    last_error = e
-                    # Continue to retry logic
+                tplr.logger.debug(
+                    f"Successfully loaded gradient from {file_path} for UID {uid}"
+                )
+                return state_dict, global_step
 
             except Exception as e:
-                # General error in the function
+                # Log specific error
                 tplr.logger.warning(f"Error in get_from_disk for UID {uid}: {e}")
                 last_error = e
-                # Continue to retry logic
 
-            # If we get here, we need to retry
-            retry_count += 1
+                # Retry logic
+                retry_count += 1
 
-            # Stop if we've reached max retries
-            if retry_count > max_retries:
-                break
+                # Stop if we've reached max retries
+                if retry_count > max_retries:
+                    break
 
-            # Calculate backoff with jitter
-            delay = retry_delay * (2 ** (retry_count - 1))
-            jitter_amount = random.uniform(0, jitter * delay)
-            total_delay = delay + jitter_amount
+                # Calculate backoff with jitter
+                delay = retry_delay * (2 ** (retry_count - 1))
+                jitter_amount = random.uniform(0, jitter * delay)
+                total_delay = delay + jitter_amount
 
-            tplr.logger.debug(f"Waiting {total_delay:.2f}s before retry for UID {uid}")
-            await asyncio.sleep(total_delay)
+                tplr.logger.debug(
+                    f"Waiting {total_delay:.2f}s before retry for UID {uid}"
+                )
+                await asyncio.sleep(total_delay)
 
         # If we get here, all retries failed
         if retry_count > 0:  # Only log this if we actually tried retries

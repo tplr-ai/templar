@@ -997,8 +997,8 @@ class Comms(ChainManager):
         stale_retention: int = 10,
         time_min: datetime = None,
         time_max: datetime = None,
-        max_retries: int = 5,
-        retry_delay: float = 2.5,
+        max_retries: int = 3,
+        retry_delay: float = 1.0,
         jitter: float = 0.2,
     ) -> Optional[Tuple[Dict[str, torch.Tensor], int]]:
         """

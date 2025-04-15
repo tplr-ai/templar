@@ -179,6 +179,7 @@ async def evaluate_peer(
     scheduler,
     random_batches,
     random_pages,
+    comms,
 ):
     """
     Evaluates a peer's gradient update on both own and random data.
@@ -278,6 +279,24 @@ async def evaluate_peer(
     total_time = tplr.T() - start_time
     logger.info(f"UID {uid}: Completed evaluation in {total_time} seconds")
 
+    # --- Compute sync score for miner ---
+    debug_result = await comms.get(
+        uid=str(uid),
+        window=sync_window - 1,
+        key="debug",
+        local=False,
+        stale_retention=10,
+    )
+
+    if debug_result is not None and debug_result[0] is not None:
+        miner_debug_dict = debug_result[0]
+        sync_score = await compute_sync_score(
+            model, miner_debug_dict, scheduler, index_range=(10, 12)
+        )
+        logger.info(f"UID {uid}: Sync score: {sync_score}")
+    else:
+        sync_score = 0.0
+
     result = {
         "uid": uid,
         "loss_before_per_batch_own": loss_before_own,
@@ -291,6 +310,7 @@ async def evaluate_peer(
         "miner_pages": miner_pages,
         "local_pages": local_pages,
         "pages_random": random_pages,
+        "sync_score": sync_score,
     }
 
     del loss_before_own, loss_after_own, loss_before_random, loss_after_random
@@ -362,6 +382,7 @@ async def evaluate_peers_parallel(
                     scheduler,
                     random_batches,  # noqa
                     random_pages,  # noqa
+                    comms,
                 )
                 return uid, eval_payload
             else:
@@ -431,83 +452,6 @@ def apply_gradient_update(
     return model
 
 
-async def parallel_evaluate_peer(
-    eval_uid: int,
-    state_dict: dict,
-    data_own_batches: list,
-    data_random_batches: list,
-    base_model,
-    tokenizer,
-    device: str,
-    transformer,
-    compressor,
-    xshapes: dict,
-    totalks: dict,
-    hparams,
-    lr: float,
-) -> tuple:
-    """
-    Isolated evaluation for one peer.
-    Returns (eval_uid, loss_before_own, loss_after_own, loss_before_random, loss_after_random, binary_indicator)
-    """
-    sample_size_own = max(1, int(len(data_own_batches) * hparams.validator_sample_rate))
-    sampled_indices_own = sorted(
-        random.sample(range(len(data_own_batches)), sample_size_own)
-    )
-    sample_size_random = max(
-        1, int(len(data_random_batches) * hparams.validator_sample_rate)
-    )
-    sampled_indices_random = sorted(
-        random.sample(range(len(data_random_batches)), sample_size_random)
-    )
-
-    model_own = copy.deepcopy(base_model).to(device)
-    loss_before_own, _ = compute_avg_loss(
-        model_own, data_own_batches, sampled_indices_own, tokenizer, device
-    )
-    apply_gradient_update(
-        model_own, state_dict, transformer, compressor, xshapes, totalks, device, lr
-    )
-    loss_after_own, _ = compute_avg_loss(
-        model_own, data_own_batches, sampled_indices_own, tokenizer, device
-    )
-
-    model_random = copy.deepcopy(base_model).to(device)
-    loss_before_random, _ = compute_avg_loss(
-        model_random, data_random_batches, sampled_indices_random, tokenizer, device
-    )
-    apply_gradient_update(
-        model_random, state_dict, transformer, compressor, xshapes, totalks, device, lr
-    )
-    loss_after_random, _ = compute_avg_loss(
-        model_random, data_random_batches, sampled_indices_random, tokenizer, device
-    )
-
-    improvement_own = (
-        ((loss_before_own - loss_after_own) / loss_before_own)
-        if loss_before_own > 0
-        else 0.0
-    )
-    improvement_random = (
-        ((loss_before_random - loss_after_random) / loss_before_random)
-        if loss_before_random > 0
-        else 0.0
-    )
-    binary_indicator = 1 if improvement_own > improvement_random else -1
-
-    del model_own, model_random
-    torch.cuda.empty_cache()
-
-    return (
-        eval_uid,
-        loss_before_own,
-        loss_after_own,
-        loss_before_random,
-        loss_after_random,
-        binary_indicator,
-    )
-
-
 def safe_last(metric_list):
     """
     Returns the last value in the metric list or 0.0 if empty.
@@ -546,3 +490,75 @@ def aggregate_evaluation_metrics(eval_results: dict) -> dict:
     aggregated = {key: totals[key] / count for key in keys}
     aggregated["evaluated_count"] = len(valid_results)
     return aggregated
+
+
+async def compute_sync_score(model, debug_dict, scheduler, index_range=(10, 12)):
+    """
+    Computes the sync score by comparing the model with the provided debug dictionary.
+    """
+    current_lr = scheduler.get_last_lr()[0]
+    comparison_metrics = await tplr.neurons.compare_model_with_debug_dict(
+        model=model,
+        debug_dict=debug_dict,
+        learning_rate=current_lr,
+        index_range=index_range,
+    )
+    if not comparison_metrics.get("success", False):
+        return 0.0
+    avg_steps_behind = comparison_metrics.get("avg_steps_behind", 5.0)
+    x = min(avg_steps_behind, 5.0)
+    sync_score = max(0.0, (1.0 - x / 5.0) ** 2.5)
+    return sync_score
+
+
+def update_weights(
+    final_moving_avg_scores: torch.Tensor, evaluated_uids: set, power: float, logger
+) -> torch.Tensor:
+    """
+    Update weights based on the final moving average scores using minimum power normalization.
+    Only scores from evaluated UIDs are considered.
+    """
+    weights = torch.zeros_like(final_moving_avg_scores)
+    evaluated_mask = torch.zeros_like(final_moving_avg_scores, dtype=torch.bool)
+    evaluated_mask[list(evaluated_uids)] = True
+    positive_mask = (final_moving_avg_scores > 0) & evaluated_mask
+    if positive_mask.any():
+        weights[positive_mask] = min_power_normalization(
+            final_moving_avg_scores[positive_mask],
+            power=power,
+        )
+        weight_sum = weights.sum().item()
+        logger.debug(f"Weight sum: {weight_sum}")
+        if abs(weight_sum - 1.0) > 1e-6:
+            logger.warning(f"Weights sum to {weight_sum}, expected close to 1.0")
+    else:
+        logger.info("No positive scores found, all weights set to 0")
+    return weights
+
+
+def min_power_normalization(logits, power=2.0, epsilon=1e-8):
+    """Normalizes logits using a minimum power normalization approach.
+
+    This function applies power normalization to the input logits, raising them to a power
+    and normalizing to create a probability distribution. If the sum is too small (below epsilon),
+    returns zeros to avoid division by very small numbers.
+
+    Args:
+        logits (torch.Tensor): Input tensor to be normalized
+        power (float, optional): Power to raise the logits to. Defaults to 2.0.
+        epsilon (float, optional): Small value to prevent division by zero. Defaults to 1e-8.
+
+    Returns:
+        torch.Tensor: Normalized probabilities
+    """
+    if logits.dim() == 0:
+        logits = logits.unsqueeze(0)
+
+    powered_logits = logits**power
+    sum_powered = torch.sum(powered_logits)
+    if sum_powered > epsilon:
+        probabilities = powered_logits / sum_powered
+    else:
+        probabilities = torch.zeros_like(powered_logits)
+
+    return probabilities

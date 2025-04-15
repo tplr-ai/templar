@@ -278,7 +278,7 @@ class Validator:
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
 
-        self.trueskill_env = trueskill.TrueSkill(draw_probability=0, beta=100)
+        self.trueskill_env = trueskill.TrueSkill(draw_probability=0, beta=100, tau=0.1)
         self.trueskill_ratings = {}  # Dictionary to store peer ratings
 
     async def run(self):

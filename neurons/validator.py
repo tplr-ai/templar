@@ -29,6 +29,7 @@ from contextlib import contextmanager
 from io import StringIO
 from time import perf_counter
 from types import SimpleNamespace
+import trueskill
 
 import bittensor as bt
 import numpy as np
@@ -277,6 +278,11 @@ class Validator:
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
 
+        self.trueskill_env = trueskill.TrueSkill(
+            mu=25.0, sigma=25.0 / 3, beta=25.0 / 6, tau=25.0 / 300, draw_probability=0
+        )
+        self.trueskill_ratings = {}  # Dictionary to store peer ratings
+
     async def run(self):
         # Start background block listener
         self.loop = asyncio.get_running_loop()
@@ -287,6 +293,9 @@ class Validator:
         all_uids = list(range(len(self.metagraph.S)))
         # Use config peers if provided
         self.comms.peers = np.array([uid for uid in all_uids if uid not in [0, 1]])
+        for uid in self.comms.peers:
+            if int(uid) not in self.trueskill_ratings:
+                self.trueskill_ratings[int(uid)] = self.trueskill_env.Rating()
 
         tplr.logger.info("Loaded commitments")
         await self.comms.load_local_checkpoint(
@@ -894,6 +903,17 @@ class Validator:
                         f"Gradient Score: {self.gradient_scores[eval_uid]}"
                     )
 
+                    # Initialize or update TrueSkill rating for this peer
+                    if eval_uid not in self.trueskill_ratings:
+                        self.trueskill_ratings[eval_uid] = self.trueskill_env.Rating()
+
+                    # Record the gradient score for later TrueSkill updates
+                    if not hasattr(self, "current_window_scores"):
+                        self.current_window_scores = {}
+                    self.current_window_scores[eval_uid] = self.gradient_scores[
+                        eval_uid
+                    ].item()
+
                     # Update exponential moving average of gradient scores with alpha=gradient_score_ma_alpha
                     # New score = (1-alpha)*old_score + alpha*new_score
                     self.gradient_moving_avg_scores[eval_uid] = (
@@ -1002,6 +1022,68 @@ class Validator:
                     f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
                 )
 
+            # Update TrueSkill ratings based on gradient scores for this window
+            if (
+                hasattr(self, "current_window_scores")
+                and len(self.current_window_scores) > 1
+            ):
+                # Get UIDs and scores
+                window_uids = list(self.current_window_scores.keys())
+                scores = [self.current_window_scores[uid] for uid in window_uids]
+
+                # Create teams list for TrueSkill
+                teams = [[self.trueskill_ratings[uid]] for uid in window_uids]
+
+                # Calculate ranks based on gradient scores (lower rank = better performance)
+                # In TrueSkill, lower ranks are better (rank 0 is 1st place)
+                ranks = []
+                for score in scores:
+                    # Count how many peers have better scores than this one
+                    rank = sum(1 for s in scores if s > score)
+                    ranks.append(rank)
+
+                # Update TrueSkill ratings
+                new_ratings = self.trueskill_env.rate(teams, ranks=ranks)
+
+                # Store updated ratings
+                for i, uid in enumerate(window_uids):
+                    self.trueskill_ratings[uid] = new_ratings[i][0]
+
+                    # Log updated TrueSkill values
+                    trueskill_mu = float(self.trueskill_ratings[uid].mu)
+                    trueskill_sigma = float(self.trueskill_ratings[uid].sigma)
+                    trueskill_score = float(trueskill_mu - 3 * trueskill_sigma)
+
+                    # Log to WandB and InfluxDB
+                    self.wandb.log(
+                        {
+                            f"validator/trueskill/mu/{uid}": trueskill_mu,
+                            f"validator/trueskill/sigma/{uid}": trueskill_sigma,
+                            f"validator/trueskill/score/{uid}": trueskill_score,
+                        },
+                        step=self.global_step,
+                    )
+
+                    self.metrics_logger.log(
+                        measurement="validator_trueskill",
+                        tags={
+                            "eval_uid": str(uid),
+                            "window": int(self.sync_window),
+                            "global_step": int(self.global_step),
+                        },
+                        fields={
+                            "mu": trueskill_mu,
+                            "sigma": trueskill_sigma,
+                            "score": trueskill_score,
+                        },
+                    )
+
+                tplr.logger.info(
+                    f"Updated TrueSkill ratings for {len(window_uids)} peers based on gradient scores"
+                )
+
+                # Clear the current window scores
+                self.current_window_scores = {}
             # Log scores and metrics for evaluated UIDs as a table
             headers = [
                 "UID",
@@ -1011,9 +1093,14 @@ class Validator:
                 "Norm Binary Score",
                 "Final Moving Avg",
                 "Weight",
+                "TrueSkill",
             ]
             table = [headers]
             for uid in sorted(self.evaluated_uids):
+                trueskill_info = "N/A"
+                if uid in self.trueskill_ratings:
+                    rating = self.trueskill_ratings[uid]
+                    trueskill_info = f"{rating.mu - 3 * rating.sigma:.2f}"
                 row = [
                     str(uid),
                     f"{self.gradient_scores[uid]:.4f}",
@@ -1022,6 +1109,7 @@ class Validator:
                     f"{self.normalised_binary_moving_averages[uid]:.4f}",
                     f"{self.final_moving_avg_scores[uid]:.4f}",
                     f"{self.weights[uid]:.4f}",
+                    trueskill_info,
                 ]
                 table.append(row)
 

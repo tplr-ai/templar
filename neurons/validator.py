@@ -964,9 +964,9 @@ class Validator:
                         f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[eval_uid]}"
                     )
 
-                    # Your existing final_score calculation with sync_score added
                     final_score = sign_preserving_multiplication(
-                        self.gradient_moving_avg_scores[eval_uid],
+                        self.trueskill_ratings[eval_uid].mu
+                        - 3 * self.trueskill_ratings[eval_uid].sigma,
                         self.normalised_binary_moving_averages[eval_uid],
                     )
                     tplr.logger.debug(

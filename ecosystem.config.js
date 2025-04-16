@@ -1,18 +1,7 @@
 require('dotenv').config();
 const child_process = require('child_process');
-const NUM_MINERS = process.env.NUM_MINERS || 3;
-const PROJECT_NAME = `test-trueskill`;
-
-// Special miner configuration (the one that will use more pages)
-const SPECIAL_MINER_INDEX = process.env.SPECIAL_MINER_INDEX || 1;
-const SPECIAL_MINER_PAGES = process.env.SPECIAL_MINER_PAGES || 12;
-const SPECIAL_MINER_PREFIX = process.env.SPECIAL_MINER_PREFIX || '12page';
-
-// Desync miner configuration
-const DESYNC_MINER_INDEX = process.env.DESYNC_MINER_INDEX || 2;
-const DESYNC_WINDOWS = process.env.DESYNC_WINDOWS || 3;
-const WARMUP_WINDOWS = process.env.WARMUP_WINDOWS || 10;
-const DESYNC_MINER_PREFIX = process.env.DESYNC_MINER_PREFIX || 'desync';
+const NUM_MINERS = process.env.NUM_MINERS || 7; // 7 miners with different configurations
+const PROJECT_NAME = `test-trueskill-8x`;
 
 // Get the latest commit hash (first 7 characters)
 let commitHash = 'unknown';
@@ -23,27 +12,29 @@ try {
     console.error('Failed to get git commit hash:', error.message);
 }
 
-const minerConfigs = [...Array(Number(NUM_MINERS))].map((_, index) => {
-    const isSpecialMiner = (index + 1) === Number(SPECIAL_MINER_INDEX);
-    const isDesyncMiner = (index + 1) === Number(DESYNC_MINER_INDEX);
+// Common warmup windows for all desynced miners
+const WARMUP_WINDOWS = process.env.WARMUP_WINDOWS || 10;
+
+// Define miner configurations - desync windows and pages
+const minerConfigList = [
+    { desync: 0, pages: 6, prefix: 'baseline' },     // UID 2: baseline
+    { desync: 0, pages: 6, prefix: 'baseline' },     // UID 3: baseline
+    { desync: 1, pages: 6, prefix: 'desync-1' },     // UID 4: 1 window desync
+    { desync: 2, pages: 6, prefix: 'desync-2' },     // UID 5: 2 windows desync
+    { desync: 3, pages: 6, prefix: 'desync-3' },     // UID 6: 3 windows desync
+    { desync: 10, pages: 6, prefix: 'desync-10' },   // UID 7: 10 windows desync
+    { desync: 0, pages: 12, prefix: '12page' }       // UID 8: 12 pages
+];
+
+const minerConfigs = [...Array(Math.min(NUM_MINERS, minerConfigList.length))].map((_, index) => {
+    const config = minerConfigList[index];
     
-    // Set special flags for the special miner
-    const pagesArg = isSpecialMiner ? ` --pages ${SPECIAL_MINER_PAGES}` : '';
+    // Set desync args based on configuration
+    const desyncArg = config.desync > 0 ? 
+        ` --desync ${config.desync} --warmup ${WARMUP_WINDOWS}` : '';
     
-    // Set desync flags for the desync miner
-    const desyncArg = isDesyncMiner ? ` --desync ${DESYNC_WINDOWS} --warmup ${WARMUP_WINDOWS}` : '';
-    
-    // Include commit hash in the name prefix
-    const normalPrefix = `commit-${commitHash}-baseline`;
-    const specialPrefix = `commit-${commitHash}-${SPECIAL_MINER_PREFIX}`;
-    const desyncPrefix = `commit-${commitHash}-${DESYNC_MINER_PREFIX}`;
-    
-    let prefixArg = ` --name_prefix "${normalPrefix}"`;
-    if (isSpecialMiner) {
-        prefixArg = ` --name_prefix "${specialPrefix}"`;
-    } else if (isDesyncMiner) {
-        prefixArg = ` --name_prefix "${desyncPrefix}"`;
-    }
+    // Set pages arg if specified
+    const pagesArg = config.pages ? ` --pages ${config.pages}` : '';
     
     return {
         name: `TM${index}`,
@@ -54,7 +45,7 @@ const minerConfigs = [...Array(Number(NUM_MINERS))].map((_, index) => {
             PROJECT_NAME: PROJECT_NAME,
             COMMIT_HASH: commitHash
         },
-        args: `--wallet.name miner${index + 1} --wallet.hotkey default --device cuda:${index} --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}"${pagesArg}${desyncArg}${prefixArg}`
+        args: `--wallet.name miner${index + 1} --wallet.hotkey default --device cuda:${index + 1} --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}"${pagesArg}${desyncArg} --name_prefix "${commitHash}-${config.prefix}"`
     };
 });
 
@@ -70,7 +61,7 @@ module.exports = {
                 PROJECT_NAME: PROJECT_NAME,
                 COMMIT_HASH: commitHash
             },
-            args: `--wallet.name validator --wallet.hotkey default --device cuda:3 --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}" --name_prefix "${commitHash}-baseline"`
+            args: `--wallet.name validator --wallet.hotkey default --device cuda:0 --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}" --name_prefix "${commitHash}"`
         }
     ]
 }

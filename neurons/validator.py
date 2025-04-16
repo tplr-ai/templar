@@ -954,37 +954,7 @@ class Validator:
                         f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}"
                     )
 
-                    self.final_scores[eval_uid] = self.openskill_ratings[
-                        eval_uid
-                    ].ordinal() * max(self.binary_moving_averages[eval_uid].item(), 0)
-                    tplr.logger.debug(
-                        f"Computed Final Score for UID {eval_uid}: {self.final_scores[eval_uid]}"
-                    )
-
                     self.evaluated_uids.add(eval_uid)
-
-                    # 12. Calculate weights using min power norm
-                    self.weights = torch.zeros_like(self.final_scores)
-                    evaluated_mask = torch.zeros_like(
-                        self.final_scores, dtype=torch.bool
-                    )
-                    evaluated_mask[list(self.evaluated_uids)] = True
-                    positive_mask = (self.final_scores > 0) & evaluated_mask
-                    if positive_mask.any():
-                        self.weights[positive_mask] = min_power_normalization(
-                            self.final_scores[positive_mask],
-                            power=self.hparams.power_normalisation,
-                        )
-                        weight_sum = self.weights.sum().item()
-                        tplr.logger.debug(f"Weight sum: {weight_sum}")
-                        if abs(weight_sum - 1.0) > 1e-6:
-                            tplr.logger.warning(
-                                f"Weights sum to {weight_sum}, expected close to 1.0"
-                            )
-                    else:
-                        tplr.logger.info(
-                            "No positive scores found, all weights set to 0"
-                        )
 
                     tplr.logger.info(
                         f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
@@ -1022,6 +992,36 @@ class Validator:
                     openskill_score = float(
                         self.openskill_ratings[uid].ordinal()
                     )  # Conservative estimate
+
+                    self.final_scores[uid] = self.openskill_ratings[
+                        uid
+                    ].ordinal() * max(self.binary_moving_averages[uid].item(), 0)
+                    tplr.logger.info(
+                        f"Computed Final Score for UID {uid}: {self.final_scores[uid]}"
+                    )
+
+                    # 12. Calculate weights using min power norm
+                    self.weights = torch.zeros_like(self.final_scores)
+                    evaluated_mask = torch.zeros_like(
+                        self.final_scores, dtype=torch.bool
+                    )
+                    evaluated_mask[list(self.evaluated_uids)] = True
+                    positive_mask = (self.final_scores > 0) & evaluated_mask
+                    if positive_mask.any():
+                        self.weights[positive_mask] = min_power_normalization(
+                            self.final_scores[positive_mask],
+                            power=self.hparams.power_normalisation,
+                        )
+                        weight_sum = self.weights.sum().item()
+                        tplr.logger.debug(f"Weight sum: {weight_sum}")
+                        if abs(weight_sum - 1.0) > 1e-6:
+                            tplr.logger.warning(
+                                f"Weights sum to {weight_sum}, expected close to 1.0"
+                            )
+                    else:
+                        tplr.logger.info(
+                            "No positive scores found, all weights set to 0"
+                        )
 
                     # Log to WandB
                     self.wandb.log(
@@ -1061,10 +1061,10 @@ class Validator:
             # Log scores and metrics for evaluated UIDs as a table
             headers = [
                 "UID",
-                "Last Score",
+                "Gradient Score",
                 "Binary Indicator",
                 "Binary Moving Avg",
-                "Final Moving Avg",
+                "Final Score",
                 "Weight",
                 "OpenSkill",
             ]

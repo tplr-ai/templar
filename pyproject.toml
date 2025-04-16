@@ -31,7 +31,7 @@ dependencies = [
     "influxdb-client>=1.48.0",
     "multiprocessing-logging>=0.3.4",
     "python-logging-loki>=0.3.1",
-    "trueskill>=0.4.5",
+    "openskill>=6.1.0a0",
 ]
 
 [project.optional-dependencies]

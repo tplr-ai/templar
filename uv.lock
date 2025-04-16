@@ -2083,6 +2083,15 @@ wheels = [
 ]
 
 [[package]]
+name = "openskill"
+version = "6.1.0a0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5d/5d/e12dd5ee27bd26df3c60d025c70f8a6d6f730369ca3fcc2e256d0e5b59ba/openskill-6.1.0a0.tar.gz", hash = "sha256:572bdc632895e3440d3377f5d5718ad14c801ab2915b706af487b214ff4c80f3", size = 44975 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/16/060358e1d881465c9b3677c1b6db297cc0fe8b7685be8c100f5c61c91cfb/openskill-6.1.0a0-py3-none-any.whl", hash = "sha256:d8116ee79c75ce0dcea8ad19c1f70711ad34afadeb3a287e6b556a1ef3666ec8", size = 46439 },
+]
+
+[[package]]
 name = "packaging"
 version = "24.2"
 source = { registry = "https://pypi.org/simple" }
@@ -3605,6 +3614,7 @@ dependencies = [
     { name = "influxdb-client" },
     { name = "lm-eval" },
     { name = "multiprocessing-logging" },
+    { name = "openskill" },
     { name = "pip" },
     { name = "psutil" },
     { name = "pyarrow" },
@@ -3615,7 +3625,6 @@ dependencies = [
     { name = "scipy" },
     { name = "torch" },
     { name = "transformers" },
-    { name = "trueskill" },
     { name = "wandb" },
     { name = "zstandard" },
 ]
@@ -3652,6 +3661,7 @@ requires-dist = [
     { name = "lm-eval", specifier = ">=0.4.8" },
     { name = "matplotlib", marker = "extra == 'dev'" },
     { name = "multiprocessing-logging", specifier = ">=0.3.4" },
+    { name = "openskill", specifier = ">=6.1.0a0" },
     { name = "pandas", marker = "extra == 'dev'" },
     { name = "pip" },
     { name = "psutil", specifier = ">=7.0.0" },
@@ -3671,7 +3681,6 @@ requires-dist = [
     { name = "seaborn", marker = "extra == 'dev'" },
     { name = "torch" },
     { name = "transformers" },
-    { name = "trueskill", specifier = ">=0.4.5" },
     { name = "wandb" },
     { name = "zstandard" },
 ]
@@ -3741,15 +3750,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/06/00/59500052cb1cf8cf5316be93598946bc451f14072c6ff256904428eaf03c/triton-3.2.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8d9b215efc1c26fa7eefb9a157915c92d52e000d2bf83e5f69704047e63f125c", size = 253159365 },
     { url = "https://files.pythonhosted.org/packages/c7/30/37a3384d1e2e9320331baca41e835e90a3767303642c7a80d4510152cbcf/triton-3.2.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e5dfa23ba84541d7c0a531dfce76d8bcd19159d50a4a8b14ad01e91734a5c1b0", size = 253154278 },
 ]
-
-[[package]]
-name = "trueskill"
-version = "0.4.5"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "six" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/d0/b1/572f309178eacdccd9f9f5f3e3e14fb3543a89c6259d62b36660350af2b9/trueskill-0.4.5.tar.gz", hash = "sha256:9d62b48d2428369d712bd9becff9f9a2caa325e1a2ab5f9392d34bff757867bb", size = 21315 }
 
 [[package]]
 name = "typepy"

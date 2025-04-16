@@ -394,6 +394,58 @@ class Validator:
             evaluation_uids = self.comms.peers
             tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
 
+            data_start = tplr.T()
+            pages_random = await retry_call(
+                tplr.r2_dataset.R2DatasetLoader.next_pages,
+                offset=self.sync_window * self.hparams.pages_per_window,
+                n_pages=self.hparams.pages_per_window,
+                seed=random.randint(0, 10000),
+                attempts=3,
+                delay=1,
+                context="random pages",
+                **{},
+            )
+            if pages_random is None:
+                tplr.logger.error("Failed to load random pages. Skipping evaluation.")
+                continue
+
+            loader_random = await retry_call(
+                tplr.r2_dataset.R2DatasetLoader.create,
+                batch_size=self.hparams.batch_size,
+                sequence_length=self.hparams.sequence_length,
+                pages_info=pages_random,
+                tokenizer=self.tokenizer,
+                attempts=3,
+                delay=1,
+                context="random loader",
+                **{},
+            )
+            if loader_random is None:
+                tplr.logger.error(
+                    "Failed to create random loader. Skipping evaluation."
+                )
+                continue
+
+            # Sample random batches from the loader
+            batches_random = []
+            for batch in loader_random:
+                batches_random.append(batch)
+
+            total_batches_random = len(batches_random)
+            sample_size_random = max(
+                1,
+                int(total_batches_random * self.hparams.validator_sample_rate),
+            )
+            sampled_indices_random = random.sample(
+                range(total_batches_random), sample_size_random
+            )
+            sampled_indices_random = sorted(
+                sampled_indices_random
+            )  # Sort for sequential access
+
+            tplr.logger.info(
+                f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded random evaluation data"
+            )
             avg_loss_before_per_batch_own = 0.0
             avg_loss_after_per_batch_own = 0.0
             avg_loss_before_per_batch_random = 0.0
@@ -696,42 +748,6 @@ class Validator:
 
                     # 7. Load evaluation data from random page
                     model_random_data_eval = copy.deepcopy(self.model)
-                    data_start = tplr.T()
-                    pages_random = await retry_call(
-                        tplr.r2_dataset.R2DatasetLoader.next_pages,
-                        offset=self.sync_window * self.hparams.pages_per_window,
-                        n_pages=self.hparams.pages_per_window,
-                        seed=random.randint(0, 10000),
-                        attempts=3,
-                        delay=1,
-                        context="random pages",
-                        **{},
-                    )
-                    if pages_random is None:
-                        tplr.logger.error(
-                            "Failed to load random pages. Skipping evaluation."
-                        )
-                        continue
-
-                    loader_random = await retry_call(
-                        tplr.r2_dataset.R2DatasetLoader.create,
-                        batch_size=self.hparams.batch_size,
-                        sequence_length=self.hparams.sequence_length,
-                        pages_info=pages_random,
-                        tokenizer=self.tokenizer,
-                        attempts=3,
-                        delay=1,
-                        context="random loader",
-                        **{},
-                    )
-                    if loader_random is None:
-                        tplr.logger.error(
-                            "Failed to create random loader. Skipping evaluation."
-                        )
-                        continue
-                    tplr.logger.info(
-                        f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded random evaluation data"
-                    )
                     state_dict, _ = eval_result
 
                     # 8. Compute initial loss
@@ -742,25 +758,6 @@ class Validator:
 
                     with torch.no_grad():
                         model_random_data_eval.eval()
-                        # Sample random batches from the loader
-                        batches_random = []
-                        for batch in loader_random:
-                            batches_random.append(batch)
-
-                        total_batches_random = len(batches_random)
-                        sample_size_random = max(
-                            1,
-                            int(
-                                total_batches_random
-                                * self.hparams.validator_sample_rate
-                            ),
-                        )
-                        sampled_indices_random = random.sample(
-                            range(total_batches_random), sample_size_random
-                        )
-                        sampled_indices_random = sorted(
-                            sampled_indices_random
-                        )  # Sort for sequential access
 
                         tplr.logger.info(
                             f"Evaluating {sample_size_random}/{total_batches_random} batches ({self.hparams.validator_sample_rate * 100:.1f}%)"
@@ -853,12 +850,6 @@ class Validator:
                             torch.cuda.empty_cache()
 
                     # Clean up stored batches, loader & pages
-                    del (
-                        batches_random,
-                        pages_random,
-                        loader_random,
-                        model_random_data_eval,
-                    )
                     torch.cuda.empty_cache()
 
                     self.loss_after_per_batch_random = (

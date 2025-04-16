@@ -245,7 +245,6 @@ class Validator:
         self.final_scores = torch.zeros(256, dtype=torch.float32)
         self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
         self.weights = torch.zeros(256, dtype=torch.float32)
-        self.normalised_binary_moving_averages = torch.zeros(256, dtype=torch.float32)
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -953,18 +952,10 @@ class Validator:
                         f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}"
                     )
 
-                    # Normalize binary moving average to [0,1] range
-                    self.normalised_binary_moving_averages[eval_uid] = (
-                        (self.binary_moving_averages[eval_uid]) / 2
-                    )
-                    tplr.logger.debug(
-                        f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[eval_uid]}"
-                    )
-
-                    self.final_scores[eval_uid] = sign_preserving_multiplication(
-                        self.trueskill_ratings[eval_uid].mu
-                        - 3 * self.trueskill_ratings[eval_uid].sigma,
-                        self.normalised_binary_moving_averages[eval_uid],
+                    self.final_scores[eval_uid] = self.trueskill_ratings[
+                        eval_uid
+                    ].mu - 3 * self.trueskill_ratings[eval_uid].sigma * min(
+                        self.binary_moving_averages[eval_uid].item(), 0
                     )
                     tplr.logger.debug(
                         f"Computed Final Score for UID {eval_uid}: {self.final_scores[eval_uid]}"
@@ -1071,7 +1062,6 @@ class Validator:
                 "Last Score",
                 "Binary Indicator",
                 "Binary Moving Avg",
-                "Norm Binary Score",
                 "Final Moving Avg",
                 "Weight",
                 "TrueSkill",
@@ -1087,7 +1077,6 @@ class Validator:
                     f"{self.gradient_scores[uid]:.4f}",
                     f"{self.binary_indicator_scores[uid]:.4f}",
                     f"{self.binary_moving_averages[uid]:.4f}",
-                    f"{self.normalised_binary_moving_averages[uid]:.4f}",
                     f"{self.final_scores[uid]:.4f}",
                     f"{self.weights[uid]:.4f}",
                     trueskill_info,
@@ -1138,9 +1127,6 @@ class Validator:
                 gradient_score = float(self.gradient_scores[uid].item())
                 binary_indicator = float(self.binary_indicator_scores[uid].item())
                 binary_moving_avg = float(self.binary_moving_averages[uid].item())
-                normalised_binary = float(
-                    self.normalised_binary_moving_averages[uid].item()
-                )
                 final_scores = float(self.final_scores[uid].item())
                 weight = float(self.weights[uid].item())
                 loss_improvement_own = float(self.loss_improvements_own.get(uid, 0.0))
@@ -1159,7 +1145,6 @@ class Validator:
                         f"validator/gradient_scores/{uid}": gradient_score,
                         f"validator/binary_indicators/{uid}": binary_indicator,
                         f"validator/binary_moving_averages/{uid}": binary_moving_avg,
-                        f"validator/normalised_binary_scores/{uid}": normalised_binary,
                         f"validator/final_scores/{uid}": final_scores,
                         f"validator/weights/{uid}": weight,
                         f"validator/loss_improvements_own/{uid}": loss_improvement_own,
@@ -1182,7 +1167,6 @@ class Validator:
                         "gradient_score": gradient_score,
                         "binary_indicator": binary_indicator,
                         "binary_moving_avg": binary_moving_avg,
-                        "normalised_binary": normalised_binary,
                         "final_moving_avg_score": final_scores,
                         "weight": weight,
                         "loss_improvement_own": loss_improvement_own,
@@ -1423,11 +1407,6 @@ async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
             await asyncio.sleep(delay)
     tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
     return None
-
-
-def sign_preserving_multiplication(a, b):
-    return -abs(a) * abs(b) if a < 0 or b < 0 else a * b
-
 
 if __name__ == "__main__":
     asyncio.run(Validator().run())

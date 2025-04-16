@@ -997,21 +997,20 @@ class Validator:
                         self.final_scores, dtype=torch.bool
                     )
                     evaluated_mask[list(self.evaluated_uids)] = True
-                    positive_mask = (self.final_scores > 0) & evaluated_mask
-                    if positive_mask.any():
-                        self.weights[positive_mask] = min_power_normalization(
-                            self.final_scores[positive_mask],
-                            power=self.hparams.power_normalisation,
-                        )
-                        weight_sum = self.weights.sum().item()
-                        tplr.logger.debug(f"Weight sum: {weight_sum}")
-                        if abs(weight_sum - 1.0) > 1e-6:
-                            tplr.logger.warning(
-                                f"Weights sum to {weight_sum}, expected close to 1.0"
-                            )
-                    else:
-                        tplr.logger.info(
-                            "No positive scores found, all weights set to 0"
+                    eval_scores = self.final_scores[evaluated_mask]
+                    min_score = eval_scores.min().item()
+                    shifted_scores = eval_scores - min_score + 1e-5
+                    # Apply power normalization to the shifted scores
+                    self.weights[evaluated_mask] = min_power_normalization(
+                        shifted_scores,
+                        power=self.hparams.power_normalisation,
+                    )
+
+                    weight_sum = self.weights.sum().item()
+                    tplr.logger.debug(f"Weight sum: {weight_sum}")
+                    if abs(weight_sum - 1.0) > 1e-6:
+                        tplr.logger.warning(
+                            f"Weights sum to {weight_sum}, expected close to 1.0"
                         )
 
                     # Log to WandB

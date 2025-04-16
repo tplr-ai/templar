@@ -19,11 +19,11 @@ const WARMUP_WINDOWS = process.env.WARMUP_WINDOWS || 10;
 const minerConfigList = [
     { desync: 0, pages: 6, prefix: 'baseline' },     // UID 2: baseline
     { desync: 0, pages: 6, prefix: 'baseline' },     // UID 3: baseline
-    { desync: 1, pages: 6, prefix: 'desync-1' },     // UID 4: 1 window desync
-    { desync: 2, pages: 6, prefix: 'desync-2' },     // UID 5: 2 windows desync
-    { desync: 3, pages: 6, prefix: 'desync-3' },     // UID 6: 3 windows desync
-    { desync: 10, pages: 6, prefix: 'desync-10' },   // UID 7: 10 windows desync
-    { desync: 0, pages: 12, prefix: '12page' }       // UID 8: 12 pages
+    { desync: 0, pages: 6, prefix: 'baseline' }      // UID 4: baseline
+    { desync: 1, pages: 6, prefix: 'desync-1' },     // UID 5: 1 window desync
+    { desync: 2, pages: 6, prefix: 'desync-2' },     // UID 6: 2 windows desync
+    { desync: 3, pages: 6, prefix: 'desync-3' },     // UID 7: 3 windows desync
+    { desync: 10, pages: 6, prefix: 'desync-10' },   // UID 8: 10 windows desync
 ];
 
 const minerConfigs = [...Array(Math.min(NUM_MINERS, minerConfigList.length))].map((_, index) => {

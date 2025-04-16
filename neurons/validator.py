@@ -242,7 +242,7 @@ class Validator:
         self.gradient_scores = torch.zeros(256, dtype=torch.float32)
         self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
         self.gradient_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
-        self.final_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
+        self.final_scores = torch.zeros(256, dtype=torch.float32)
         self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
         self.weights = torch.zeros(256, dtype=torch.float32)
         self.normalised_binary_moving_averages = torch.zeros(256, dtype=torch.float32)
@@ -271,9 +271,6 @@ class Validator:
             group="validator",
             job_type="validation",
         )
-        # Initialize final score history (for sliding-window averaging)
-        self.final_score_history = defaultdict(list)
-
         # Initialize peer related attributes
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
@@ -964,41 +961,27 @@ class Validator:
                         f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[eval_uid]}"
                     )
 
-                    final_score = sign_preserving_multiplication(
+                    self.final_scores[eval_uid] = sign_preserving_multiplication(
                         self.trueskill_ratings[eval_uid].mu
                         - 3 * self.trueskill_ratings[eval_uid].sigma,
                         self.normalised_binary_moving_averages[eval_uid],
                     )
                     tplr.logger.debug(
-                        f"Computed Final Score for UID {eval_uid}: {final_score}"
-                    )
-
-                    # Sliding window update for the final moving average score
-                    self.final_score_history[eval_uid].append(final_score)
-                    if (
-                        len(self.final_score_history[eval_uid])
-                        > self.hparams.moving_average_window
-                    ):
-                        self.final_score_history[eval_uid].pop(0)
-                    self.final_moving_avg_scores[eval_uid] = sum(
-                        self.final_score_history[eval_uid]
-                    ) / len(self.final_score_history[eval_uid])
-                    tplr.logger.debug(
-                        f"Updated Final Moving Average Score for UID {eval_uid}: {self.final_moving_avg_scores[eval_uid]}"
+                        f"Computed Final Score for UID {eval_uid}: {self.final_scores[eval_uid]}"
                     )
 
                     self.evaluated_uids.add(eval_uid)
 
                     # 12. Calculate weights using min power norm
-                    self.weights = torch.zeros_like(self.final_moving_avg_scores)
+                    self.weights = torch.zeros_like(self.final_scores)
                     evaluated_mask = torch.zeros_like(
-                        self.final_moving_avg_scores, dtype=torch.bool
+                        self.final_scores, dtype=torch.bool
                     )
                     evaluated_mask[list(self.evaluated_uids)] = True
-                    positive_mask = (self.final_moving_avg_scores > 0) & evaluated_mask
+                    positive_mask = (self.final_scores > 0) & evaluated_mask
                     if positive_mask.any():
                         self.weights[positive_mask] = min_power_normalization(
-                            self.final_moving_avg_scores[positive_mask],
+                            self.final_scores[positive_mask],
                             power=self.hparams.power_normalisation,
                         )
                         weight_sum = self.weights.sum().item()
@@ -1105,7 +1088,7 @@ class Validator:
                     f"{self.binary_indicator_scores[uid]:.4f}",
                     f"{self.binary_moving_averages[uid]:.4f}",
                     f"{self.normalised_binary_moving_averages[uid]:.4f}",
-                    f"{self.final_moving_avg_scores[uid]:.4f}",
+                    f"{self.final_scores[uid]:.4f}",
                     f"{self.weights[uid]:.4f}",
                     trueskill_info,
                 ]
@@ -1158,7 +1141,7 @@ class Validator:
                 normalised_binary = float(
                     self.normalised_binary_moving_averages[uid].item()
                 )
-                final_moving_avg = float(self.final_moving_avg_scores[uid].item())
+                final_scores = float(self.final_scores[uid].item())
                 weight = float(self.weights[uid].item())
                 loss_improvement_own = float(self.loss_improvements_own.get(uid, 0.0))
                 loss_improvement_random = float(
@@ -1177,7 +1160,7 @@ class Validator:
                         f"validator/binary_indicators/{uid}": binary_indicator,
                         f"validator/binary_moving_averages/{uid}": binary_moving_avg,
                         f"validator/normalised_binary_scores/{uid}": normalised_binary,
-                        f"validator/final_moving_avg_scores/{uid}": final_moving_avg,
+                        f"validator/final_scores/{uid}": final_scores,
                         f"validator/weights/{uid}": weight,
                         f"validator/loss_improvements_own/{uid}": loss_improvement_own,
                         f"validator/loss_improvements_random/{uid}": loss_improvement_random,
@@ -1200,7 +1183,7 @@ class Validator:
                         "binary_indicator": binary_indicator,
                         "binary_moving_avg": binary_moving_avg,
                         "normalised_binary": normalised_binary,
-                        "final_moving_avg_score": final_moving_avg,
+                        "final_moving_avg_score": final_scores,
                         "weight": weight,
                         "loss_improvement_own": loss_improvement_own,
                         "loss_improvement_random": loss_improvement_random,

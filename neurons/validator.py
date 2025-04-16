@@ -952,11 +952,10 @@ class Validator:
                         f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}"
                     )
 
-                    self.final_scores[eval_uid] = self.trueskill_ratings[
-                        eval_uid
-                    ].mu - 3 * self.trueskill_ratings[eval_uid].sigma * min(
-                        self.binary_moving_averages[eval_uid].item(), 0
-                    )
+                    self.final_scores[eval_uid] = (
+                        self.trueskill_ratings[eval_uid].mu
+                        - 3 * self.trueskill_ratings[eval_uid].sigma
+                    ) * max(self.binary_moving_averages[eval_uid].item(), 0)
                     tplr.logger.debug(
                         f"Computed Final Score for UID {eval_uid}: {self.final_scores[eval_uid]}"
                     )
@@ -1407,6 +1406,7 @@ async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
             await asyncio.sleep(delay)
     tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
     return None
+
 
 if __name__ == "__main__":
     asyncio.run(Validator().run())

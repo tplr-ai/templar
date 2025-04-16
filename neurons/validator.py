@@ -1073,7 +1073,7 @@ class Validator:
                 openscore_info = "N/A"
                 if uid in self.openskill_ratings:
                     rating = self.openskill_ratings[uid]
-                    skill_info = f"{rating.ordinal():.2f} (μ={rating.mu:.1f}, σ={rating.sigma:.1f})"
+                    openscore_info = f"{rating.ordinal():.2f} (μ={rating.mu:.1f}, σ={rating.sigma:.1f})"
                 row = [
                     str(uid),
                     f"{self.gradient_scores[uid]:.4f}",

@@ -20,10 +20,10 @@ const minerConfigList = [
     { desync: 0, pages: 6, prefix: 'baseline' },     // UID 2: baseline
     { desync: 0, pages: 6, prefix: 'baseline' },     // UID 3: baseline
     { desync: 0, pages: 6, prefix: 'baseline' },     // UID 4: baseline
-    { desync: 1, pages: 6, prefix: 'desync-1' },     // UID 5: 1 window desync
-    { desync: 2, pages: 6, prefix: 'desync-2' },     // UID 6: 2 windows desync
-    { desync: 3, pages: 6, prefix: 'desync-3' },     // UID 7: 3 windows desync
-    { desync: 10, pages: 6, prefix: 'desync-10' }    // UID 8: 10 windows desync
+    { desync: 0, pages: 6, prefix: 'baseline' },     // UID 5: 1 window desync
+    { desync: 0, pages: 6, prefix: 'baseline' },     // UID 6: 2 windows desync
+    { desync: 0, pages: 6, prefix: 'baseline' },     // UID 7: 3 windows desync
+    { desync: 0, pages: 6, prefix: 'baseline' }      // UID 8: 10 windows desync
 ];
 
 const minerConfigs = [...Array(Math.min(NUM_MINERS, minerConfigList.length))].map((_, index) => {

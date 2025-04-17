@@ -6,6 +6,7 @@ Usage
 -----
 $ python scripts/benchmarks/benchmark_loader_compare.py
 """
+
 import os, asyncio, psutil, torch, json
 from pathlib import Path
 from dotenv import load_dotenv
@@ -14,7 +15,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt, seaborn as sns
 
 # --- env --------------------------------------------------------------------
-REPO = Path(__file__).resolve().parents[2]          # project root
+REPO = Path(__file__).resolve().parents[2]  # project root
 load_dotenv(REPO / ".env", override=True)
 
 # sanity‑check creds once so we fail early
@@ -29,28 +30,28 @@ for k in [
 # --- tplr -------------------------------------------------------------------
 import tplr
 from tplr.logging import logger, debug, T
-from tplr.r1_old     import R2DatasetLoader as R1Loader
+from tplr.r1_old import R2DatasetLoader as R1Loader
 from tplr.r2_dataset import R2DatasetLoader as R2Loader
 
 debug()  # verbose logs if you want them – comment‑out for silence
 
 
 # --------------------------------------------------------------------------- #
-N_COMPARE_BATCHES   = 3          # batches per iteration whose tokens are compared
-ITERATIONS          = 3
-CONFIGS = [                     # (n_pages, batch, seq_len) – edit at will
-    (1,   4,  512),
-    (1,   8,  512),
-    (4,   4,  512),
-    (5,   6, 2048),
+N_COMPARE_BATCHES = 3  # batches per iteration whose tokens are compared
+ITERATIONS = 3
+CONFIGS = [  # (n_pages, batch, seq_len) – edit at will
+    (1, 4, 512),
+    (1, 8, 512),
+    (4, 4, 512),
+    (5, 6, 2048),
 ]
 
 tokenizer = tplr.load_hparams().tokenizer
-PROC      = psutil.Process()
+PROC = psutil.Process()
 
-OUT_DIR   = REPO / "scripts" / "benchmarks" / "compare_results"
+OUT_DIR = REPO / "scripts" / "benchmarks" / "compare_results"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
-CSV_PATH  = OUT_DIR / "loader_compare_results.csv"
+CSV_PATH = OUT_DIR / "loader_compare_results.csv"
 
 
 # --------------------------------------------------------------------------- #
@@ -87,7 +88,7 @@ async def run_one_loader(
             break
     proc_time = T() - t1
     rss_after = PROC.memory_info().rss / 1_048_576
-    mem_used  = rss_after - rss_before
+    mem_used = rss_after - rss_before
 
     return dict(
         tag=tag,
@@ -97,7 +98,7 @@ async def run_one_loader(
         tokens=toks,
         tps=toks / proc_time if proc_time else 0,
         mem_mb=mem_used,
-        batches=batches,        # for equality test
+        batches=batches,  # for equality test
     )
 
 
@@ -107,19 +108,15 @@ async def benchmark():
     for n_pages, batch_size, seq_len in CONFIGS:
         for it in range(ITERATIONS):
             # deterministic page list – assert both helpers agree
-            seed = it                    # seed must be int
-            pages_r1 = await R1Loader.next_pages(offset=it,
-                                                 n_pages=n_pages,
-                                                 seed=seed)
-            pages_r2 = await R2Loader.next_pages(offset=it,
-                                                 n_pages=n_pages,
-                                                 seed=seed)
+            seed = it  # seed must be int
+            pages_r1 = await R1Loader.next_pages(offset=it, n_pages=n_pages, seed=seed)
+            pages_r2 = await R2Loader.next_pages(offset=it, n_pages=n_pages, seed=seed)
             assert pages_r1 == pages_r2, (
                 "next_pages mismatch, seed logic diverged:\n"
                 f"r1: {pages_r1[:3]} …\n"
                 f"r2: {pages_r2[:3]} …"
             )
-            pages = pages_r1                        # use for both loaders
+            pages = pages_r1  # use for both loaders
 
             r1 = await run_one_loader(
                 R1Loader, pages, batch_size, seq_len, "r1_old", it
@@ -133,7 +130,9 @@ async def benchmark():
                 if not torch.equal(b1, b2):
                     # dump a repro snippet + fail hard
                     repro = dict(pages=pages, batch_size=batch_size, seq_len=seq_len)
-                    (OUT_DIR / "mismatch_repro.json").write_text(json.dumps(repro, indent=2))
+                    (OUT_DIR / "mismatch_repro.json").write_text(
+                        json.dumps(repro, indent=2)
+                    )
                     raise ValueError(
                         "Token mismatch between loaders "
                         f"(config={n_pages, batch_size, seq_len}, iter={it})"
@@ -156,17 +155,18 @@ async def benchmark():
 def plot(df: pd.DataFrame):
     """Tiny helper – writes a couple of comparison plots."""
     for metric, title in [
-        ("tps",    "Tokens/s"),
-        ("create_s","Loader‑create time (s)"),
-        ("iterate_s","Iterate time (s)"),
+        ("tps", "Tokens/s"),
+        ("create_s", "Loader‑create time (s)"),
+        ("iterate_s", "Iterate time (s)"),
         ("mem_mb", "ΔRSS (MiB)"),
     ]:
-        plt.figure(figsize=(10,5))
+        plt.figure(figsize=(10, 5))
         sns.barplot(
             data=df,
-            x="tag", y=metric,
+            x="tag",
+            y=metric,
             hue="n_pages",
-            errorbar="sd",          # new API
+            errorbar="sd",  # new API
         )
         plt.title(title)
         plt.savefig(OUT_DIR / f"{metric}.png")
@@ -178,7 +178,7 @@ if __name__ == "__main__":
     df = asyncio.run(benchmark())
     df.to_csv(CSV_PATH, index=False)
     print("\n== raw metrics saved to", CSV_PATH)
-    print(df.groupby(["tag"]).agg(dict(tps=["mean","std"], mem_mb="mean")).round(2))
+    print(df.groupby(["tag"]).agg(dict(tps=["mean", "std"], mem_mb="mean")).round(2))
 
     try:
         plot(df)

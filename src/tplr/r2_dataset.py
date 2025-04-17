@@ -500,7 +500,7 @@ class R2DatasetLoader(DatasetLoader):
                     if not ids:
                         continue
                     all_tokens.extend(ids)
-                    if ids[-1] != eos:          # keep EOS sentinel
+                    if ids[-1] != eos:  # keep EOS sentinel
                         all_tokens.append(eos)
 
                 self._token_cache[cache_key] = all_tokens

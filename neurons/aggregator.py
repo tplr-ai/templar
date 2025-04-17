@@ -427,9 +427,6 @@ class AggregationServer:
             target=self.block_listener, args=(self.loop,), daemon=True
         ).start()
 
-        # Initialize comms background tasks
-        self.comms.start_background_tasks()
-
         # Set up sync window to track which windows we've processed
         self.sync_window = self.current_window
         self.comms.current_window = self.current_window

@@ -1,6 +1,7 @@
 """
 Evaluation utilities for the validator
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +12,6 @@ from typing import (
     Dict,
     List,
     Mapping,
-    MutableMapping,
     Optional,
     Sequence,
     Tuple,
@@ -45,7 +45,7 @@ def apply_compressed_gradient(
     model: torch.nn.Module,
     state_dict: TensorDict,
     transformer: TransformDCT,
-    compressor: CompressDCT, 
+    compressor: CompressDCT,
     xshapes: ShapeDict,
     totalks: KsDict,
     device: torch.device,
@@ -86,8 +86,7 @@ def apply_compressed_gradient(
 async def load_and_compare_pages(
     uid: UID,
     sync_window: int,
-    hparams: Any,  # TODO: formal dataclass
-    tokenizer: PreTrainedTokenizerBase,  # noqa: F841  (currently unused)
+    hparams: HParams,
     state_dict: Mapping[str, Any],
 ) -> Tuple[Optional[List[int]], List[int]]:
     """
@@ -135,7 +134,9 @@ def compute_average_loss(
     """
     total_batches: int = len(batches)
     sample_size: int = max(1, int(total_batches * sample_rate))
-    sampled_indices: List[int] = sorted(random.sample(range(total_batches), sample_size))
+    sampled_indices: List[int] = sorted(
+        random.sample(range(total_batches), sample_size)
+    )
     total_loss: float = 0.0
     count: int = 0
 
@@ -146,8 +147,8 @@ def compute_average_loss(
             input_ids = torch.tensor(batch, dtype=torch.long, device=device)
             pad_raw = tokenizer.pad_token_id
             pad_val: int = pad_raw if isinstance(pad_raw, int) else 0
-            pad_t  = torch.tensor(pad_val, dtype=input_ids.dtype, device=device)
-            mask   = input_ids.eq(pad_t)          # Tensor[bool]
+            pad_t = torch.tensor(pad_val, dtype=input_ids.dtype, device=device)
+            mask = input_ids.eq(pad_t)  # Tensor[bool]
             input_ids = input_ids.masked_fill(mask, 0)
             with torch.autocast("cuda"):
                 outputs = model(input_ids=input_ids, labels=input_ids)
@@ -223,7 +224,9 @@ def compute_improvement_metrics(
     )
 
     gradient_score: float = relative_improvement_random
-    binary_indicator: int = 1 if relative_improvement_own > relative_improvement_random else -1
+    binary_indicator: int = (
+        1 if relative_improvement_own > relative_improvement_random else -1
+    )
     return (
         relative_improvement_own,
         relative_improvement_random,
@@ -239,7 +242,7 @@ async def evaluate_peer(
     hparams: Any,
     tokenizer: PreTrainedTokenizerBase,
     model: torch.nn.Module,
-    transformer: TransformDCT ,
+    transformer: TransformDCT,
     compressor: CompressDCT,
     xshapes: ShapeDict,
     totalks: KsDict,
@@ -247,7 +250,7 @@ async def evaluate_peer(
     scheduler: torch.optim.lr_scheduler._LRScheduler,
     random_batches: Sequence[Sequence[int]],
     random_pages: List[int],
-    comms: Comms,  
+    comms: Comms,
 ) -> Dict[str, Any]:
     """
     Evaluate a peer's gradient on *own* data and shared *random* data.
@@ -343,7 +346,7 @@ async def evaluate_peer(
     )
 
     miner_pages, local_pages = await load_and_compare_pages(
-        uid, sync_window, hparams, tokenizer, state_dict
+        uid, sync_window, hparams, state_dict
     )
 
     total_time: float = tplr.T() - start_time
@@ -404,7 +407,7 @@ async def evaluate_peers_parallel(
     tokenizer: PreTrainedTokenizerBase,
     config: Any,
     model: torch.nn.Module,
-    transformer: TransformDCT ,
+    transformer: TransformDCT,
     compressor: CompressDCT,
     xshapes: ShapeDict,
     totalks: KsDict,
@@ -456,7 +459,7 @@ async def evaluate_peers_parallel(
                     totalks,
                     device,
                     scheduler,
-                    random_batches,
+                    random_batches,  # noqa
                     random_pages,
                     comms,
                 )
@@ -504,19 +507,22 @@ def compute_avg_loss(
                 input_ids = torch.tensor(batch, dtype=torch.long, device=device)
                 pad_raw = tokenizer.pad_token_id
                 pad_val: int = pad_raw if isinstance(pad_raw, int) else 0
-                pad_t  = torch.tensor(pad_val, dtype=input_ids.dtype, device=device)
-                mask   = input_ids.eq(pad_t)
+                pad_t = torch.tensor(pad_val, dtype=input_ids.dtype, device=device)
+                mask = input_ids.eq(pad_t)
                 input_ids = input_ids.masked_fill(mask, 0)
                 outputs = model(input_ids=input_ids, labels=input_ids)
                 total_loss += float(outputs.loss)
                 n_batches_count += 1
-    return (total_loss / n_batches_count if n_batches_count > 0 else 0.0, n_batches_count)
+    return (
+        total_loss / n_batches_count if n_batches_count > 0 else 0.0,
+        n_batches_count,
+    )
 
 
 def apply_gradient_update(
     model: torch.nn.Module,
     state_dict: TensorDict,
-    transformer: TransformDCT ,
+    transformer: TransformDCT,
     compressor: CompressDCT,
     xshapes: ShapeDict,
     totalks: KsDict,
@@ -546,7 +552,7 @@ def apply_gradient_update(
 
 
 def aggregate_evaluation_metrics(
-    eval_results: Mapping[UID, Optional[Mapping[str, Any]]]
+    eval_results: Mapping[UID, Optional[Mapping[str, Any]]],
 ) -> Dict[str, Any]:
     """
     Aggregate peer metrics for logging/dashboard.

@@ -24,6 +24,7 @@ from typing import Protocol, runtime_checkable
 # Local imports
 from .logging import logger
 
+
 @runtime_checkable
 class HParams(Protocol):
     """
@@ -76,6 +77,7 @@ class HParams(Protocol):
     # populated at runtime by `create_namespace`
     tokenizer: AutoTokenizer
     model_config: LlamaConfig
+
 
 DEFAULT_HPARAMS = {
     # Run configuration

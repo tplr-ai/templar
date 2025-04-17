@@ -343,6 +343,8 @@ class Validator:
                 "avg_steps_behind": avg_steps_behind,
                 "max_steps_behind": max_steps_behind,
             },
+            with_system_metrics=True,
+            with_gpu_metrics=True,
         )
 
     async def run(self):
@@ -582,6 +584,8 @@ class Validator:
                         "score_before": float(old_score),
                         "score_after": float(new_score),
                     },
+                    with_system_metrics=True,
+                    with_gpu_metrics=True,
                 )
 
             # Calculate time window for this sync window
@@ -1071,6 +1075,8 @@ class Validator:
                                 ),
                                 "reason": str(e)[:255],  # Truncate long error messages
                             },
+                            with_system_metrics=True,
+                            with_gpu_metrics=True,
                         )
 
                         # Skip the rest of processing for this peer
@@ -1606,6 +1612,8 @@ class Validator:
                         "final_moving_avg_score": final_moving_avg,
                         "weight": weight,
                     },
+                    with_system_metrics=True,
+                    with_gpu_metrics=True,
                 )
 
             # 17. Set weights periodically
@@ -1755,6 +1763,8 @@ class Validator:
                     "total_peers": int(len(self.comms.peers)),
                     "total_skipped": int(total_skipped),
                 },
+                with_system_metrics=True,
+                with_gpu_metrics=True,
             )
             tplr.logger.info("Finished metrics logging call for validator")
 

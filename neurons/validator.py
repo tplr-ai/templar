@@ -252,9 +252,6 @@ class Validator:
             self.final_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
             self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
             self.weights = torch.zeros(256, dtype=torch.float32)
-            self.normalised_binary_moving_averages = torch.zeros(
-                256, dtype=torch.float32
-            )
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -304,7 +301,6 @@ class Validator:
             self.gradient_moving_avg_scores[uid] = 0.0
             self.binary_moving_averages[uid] = 0.0
             self.binary_indicator_scores[uid] = 0.0
-            self.normalised_binary_moving_averages[uid] = 0.0
             self.sync_scores[uid] = 0.0
             if uid in self.eval_peers:
                 del self.eval_peers[uid]
@@ -1353,14 +1349,6 @@ class Validator:
                         f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}"
                     )
 
-                    # Normalize binary moving average to [0,1] range
-                    self.normalised_binary_moving_averages[eval_uid] = (
-                        (self.binary_moving_averages[eval_uid]) / 2
-                    )
-                    tplr.logger.debug(
-                        f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[eval_uid]}"
-                    )
-
                     sync_result = await self.evaluate_miner_sync(eval_uid)
                     sync_score = cast(
                         float,
@@ -1375,7 +1363,7 @@ class Validator:
                     final_score = (
                         sign_preserving_multiplication(
                             self.gradient_moving_avg_scores[eval_uid],
-                            self.normalised_binary_moving_averages[eval_uid],
+                            self.binary_moving_averages[eval_uid],
                         )
                         * sync_score
                     )
@@ -1520,7 +1508,6 @@ class Validator:
                 "Last Score",
                 "Binary Indicator",
                 "Binary Moving Avg",
-                "Norm Binary Score",
                 "Final Moving Avg",
                 "Sync score",
                 "Weight",
@@ -1532,7 +1519,6 @@ class Validator:
                     f"{self.gradient_scores[uid]:.4f}",
                     f"{self.binary_indicator_scores[uid]:.4f}",
                     f"{self.binary_moving_averages[uid]:.4f}",
-                    f"{self.normalised_binary_moving_averages[uid]:.4f}",
                     f"{self.final_moving_avg_scores[uid]:.4f}",
                     f"{self.sync_scores[uid]:.4f}",
                     f"{self.weights[uid]:.4f}",
@@ -1583,9 +1569,6 @@ class Validator:
                 gradient_score = float(self.gradient_scores[uid].item())
                 binary_indicator = float(self.binary_indicator_scores[uid].item())
                 binary_moving_avg = float(self.binary_moving_averages[uid].item())
-                normalised_binary = float(
-                    self.normalised_binary_moving_averages[uid].item()
-                )
                 sync_score = float(self.sync_scores[uid].item())
                 final_moving_avg = float(self.final_moving_avg_scores[uid].item())
                 weight = float(self.weights[uid].item())
@@ -1595,7 +1578,6 @@ class Validator:
                         f"validator/gradient_scores/{uid}": gradient_score,
                         f"validator/binary_indicators/{uid}": binary_indicator,
                         f"validator/binary_moving_averages/{uid}": binary_moving_avg,
-                        f"validator/normalised_binary_scores/{uid}": normalised_binary,
                         f"validator/final_moving_avg_scores/{uid}": final_moving_avg,
                         f"validator/sync_score/{uid}": sync_score,
                         f"validator/weights/{uid}": weight,
@@ -1615,7 +1597,6 @@ class Validator:
                         "gradient_score": gradient_score,
                         "binary_indicator": binary_indicator,
                         "binary_moving_avg": binary_moving_avg,
-                        "normalised_binary": normalised_binary,
                         "sync_score": sync_score,
                         "final_moving_avg_score": final_moving_avg,
                         "weight": weight,
@@ -2300,7 +2281,6 @@ class Validator:
                 final_moving_avg_scores=self.final_moving_avg_scores,
                 binary_moving_averages=self.binary_moving_averages,
                 weights=self.weights,
-                normalised_binary_moving_averages=self.normalised_binary_moving_averages,
             )
         except Exception as e:
             tplr.logger.warning(f"Failed to save validator state: {e}")
@@ -2344,11 +2324,6 @@ class Validator:
             )
             self.weights = (
                 torch.from_numpy(state["weights"]).float().to(self.config.device)
-            )
-            self.normalised_binary_moving_averages = (
-                torch.from_numpy(state["normalised_binary_moving_averages"])
-                .float()
-                .to(self.config.device)
             )
 
             tplr.logger.info(f"Loaded state: {state}")

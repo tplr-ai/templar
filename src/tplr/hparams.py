@@ -19,9 +19,63 @@
 import json
 from types import SimpleNamespace
 from transformers import AutoTokenizer, LlamaConfig
+from typing import Protocol, runtime_checkable
 
 # Local imports
 from .logging import logger
+
+@runtime_checkable
+class HParams(Protocol):
+    """
+    Structural interface the rest of the codebase relies on.
+
+    We purpose‑built a Protocol instead of a dataclass / TypedDict so the
+    existing `SimpleNamespace` that `create_namespace()` returns still
+    type‑checks without runtime changes.
+
+    Only attributes that appear in code are listed; extend as needed.
+    """
+
+    # --- run / data config -------------------------------------------------
+    spec_version: int
+    project: str
+    sequence_length: int
+    pages_per_window: int
+    batch_size: int
+
+    # validator‑specific knobs
+    validator_sample_rate: float
+    parallel_eval_uids: int
+
+    # model / training
+    learning_rate: float
+    blocks_per_window: int
+    windows_per_sync: int
+    windows_per_weights: int
+    momentum_decay: float
+    topk_compression: int
+    target_chunk: int
+    scores_alpha: float
+
+    # architecture
+    tokenizer_name: str
+    hidden_size: int
+    num_hidden_layers: int
+    num_attention_heads: int
+    intermediate_size: int
+    num_key_value_heads: int
+    activation_function: str
+    max_position_embeddings: int
+
+    # buckets / scheduler
+    bucket_name: str
+    warmup_steps: int
+    alpha_f: float
+    t_max: int
+
+    # populated at runtime by `create_namespace`
+    tokenizer: AutoTokenizer
+    model_config: LlamaConfig
 
 DEFAULT_HPARAMS = {
     # Run configuration
@@ -56,10 +110,13 @@ DEFAULT_HPARAMS = {
     "warmup_steps": 250,
     "alpha_f": 0.1,  # Final learning rate multiplier
     "t_max": 20000,  # Total steps for cosine decay
+    # Validator extras ------------------------------------------------------
+    "validator_sample_rate": 0.1,
+    "parallel_eval_uids": 3,
 }
 
 
-def create_namespace(hparams: dict) -> SimpleNamespace:
+def create_namespace(hparams: dict) -> HParams:
     """
     Create a SimpleNamespace from the hyperparameters and add model configuration.
 
@@ -101,12 +158,12 @@ def create_namespace(hparams: dict) -> SimpleNamespace:
         logger.error(f"Failed to create model config: {e}")
         raise
 
-    return hparams_ns
+    return hparams_ns  # type: ignore[return-value]
 
 
 def load_hparams(
     hparams_file: str = "hparams.json", use_local_run_hparams: bool = False
-) -> SimpleNamespace:
+) -> HParams:
     """
     Load hyperparameters from a JSON file.
 

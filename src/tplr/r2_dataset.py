@@ -224,7 +224,7 @@ class R2DatasetLoader(DatasetLoader):
 
     @staticmethod
     async def next_pages(
-        offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
+        offset: int, n_pages: int, seed: int, num_rows_per_page: int = 100
     ) -> list:
         """Get next n_pages random pages starting from offset."""
         configs_data = await R2DatasetLoader.fetch_dataset_configs()

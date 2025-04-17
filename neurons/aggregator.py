@@ -202,6 +202,7 @@ class AggregationServer:
 
     async def process_window(self):
         """Process a single window: gather gradients, aggregate, and store."""
+        get_data_start = tplr.T()
         tplr.logger.info(
             f"Starting window processing (iteration {self.iteration_counter}, window {self.sync_window - 1})"
         )
@@ -232,29 +233,6 @@ class AggregationServer:
             time_max = datetime.now(timezone.utc) + timedelta(minutes=30)
             tplr.logger.info(f"Using fallback time window: {time_min} to {time_max}")
 
-        # Wait until t_max has passed, plus additional wait time
-        now = datetime.now(timezone.utc)
-        if now < time_max:
-            wait_seconds = (time_max - now).total_seconds() + cast(
-                int, self.config.wait_time
-            )
-            tplr.logger.info(
-                f"Waiting {wait_seconds:.1f} seconds until after t_max plus {self.config.wait_time}s buffer..."
-            )
-            await asyncio.sleep(wait_seconds)
-            tplr.logger.info(
-                f"Wait complete. Starting gradient collection at {datetime.now(timezone.utc)}"
-            )
-        else:
-            # We're already past t_max, just add a small buffer
-            tplr.logger.info(
-                f"Already past t_max. Waiting additional {self.config.wait_time}s buffer..."
-            )
-            await asyncio.sleep(cast(int, self.config.wait_time))
-            tplr.logger.info(
-                f"Wait complete. Starting gradient collection at {datetime.now(timezone.utc)}"
-            )
-
         # Use comms to select gather peers
         peer_start = tplr.T()
         await tplr.neurons.update_peers(
@@ -269,6 +247,8 @@ class AggregationServer:
             f"Selection parameters: topk={self.hparams.topk_peers}%, min={self.hparams.minimum_peers}, max_topk={self.hparams.max_topk_peers}"
         )
         tplr.logger.info(f"Selected UIDs: {selected_uids}")
+
+        get_data_time = tplr.T() - get_data_start
 
         # Use the gather function to collect gradients
         tplr.logger.info(
@@ -372,7 +352,7 @@ class AggregationServer:
             )
 
             # Print summary
-            total_time = gather_time + process_time + store_time
+            total_time = get_data_start + gather_time + process_time + store_time
             tplr.logger.info(f"Window: {self.sync_window - 1}")
             tplr.logger.info(f"Target UIDs: {selected_uids}")
             tplr.logger.info(

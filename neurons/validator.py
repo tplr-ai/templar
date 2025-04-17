@@ -840,10 +840,9 @@ class Validator:
                             f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}"
                         )
 
-                        # Normalize binary moving average to [0,1] range.
                         self.normalised_binary_moving_averages[eval_uid] = (
-                            self.binary_moving_averages[eval_uid] + 1
-                        ) / 2
+                            self.binary_moving_averages[eval_uid] / 2
+                        )
                         tplr.logger.debug(
                             f"Normalised Binary Moving Average Score : {self.normalised_binary_moving_averages[eval_uid]}"
                         )

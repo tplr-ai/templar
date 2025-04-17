@@ -73,7 +73,8 @@ class R2DatasetLoader(DatasetLoader):
 
     # Class-level caches
     _metadata_cache = {}  # Cache for metadata by config
-    _parquet_cache = {}  # Cache ParquetFile objects
+    _parquet_cache: dict[str, dict] = {}
+    _token_cache: dict[str, list[int]] = {}
     _fs = None  # Single filesystem instance
 
     # Static configuration
@@ -92,6 +93,13 @@ class R2DatasetLoader(DatasetLoader):
     _round_robin_index = 0  # global counter for dataset round-robin selection
     _fs_cache = {}  # maps account_id to a cached s3fs.S3FileSystem
     _fs_lock = threading.Lock()  # lock for fs cache and round robin
+
+    # ------------------------------------------------------------------ #
+    # Per‑shard locks – guarantees that only one thread/coro touches a   #
+    # given ParquetFile at a time (pyarrow ParquetFile is _not_ thread   #
+    # safe).                                                             #
+    # ------------------------------------------------------------------ #
+    _shard_locks: dict[str, asyncio.Lock] = {}
 
     def __init__(
         self,
@@ -431,52 +439,71 @@ class R2DatasetLoader(DatasetLoader):
 
                 # Calculate offset within shard
                 shard_offset = page_number - cumulative_rows
+                shard_path = chosen_shard["path"]
 
-                # Read data from exact position
-                pf_data = self._parquet_cache.get(chosen_shard["path"])
-                if not pf_data:
-                    fs = self._get_fs()
-                    max_retries = 3
-                    for attempt in range(max_retries):
-                        try:
-                            f = fs.open(
-                                chosen_shard["path"],
-                                "rb",
-                                buffer_size=self.READ_BUFFER_SIZE,
-                            )
-                            pf = pq.ParquetFile(
-                                f, memory_map=False
-                            )  # Disable memory mapping
-                            pf_data = {"file": f, "parquet": pf}
-                            self._parquet_cache[chosen_shard["path"]] = pf_data
-                            break
-                        except Exception as e:
-                            if attempt < max_retries - 1:
-                                logger.warning(
-                                    f"Attempt {attempt + 1} failed to open parquet file {chosen_shard['path']} with error: {e}. Retrying..."
+                # ------------------------------------------------------ #
+                # Acquire (or create) a lock _specific_ to this parquet  #
+                # shard.  This prevents concurrent threads from calling  #
+                # read_row_group() on the same ParquetFile object.       #
+                # ------------------------------------------------------ #
+                lock = R2DatasetLoader._shard_locks.get(shard_path)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    R2DatasetLoader._shard_locks[shard_path] = lock
+
+                async with lock:
+                    # -------------------------------------------------- #
+                    # 1. Open / fetch ParquetFile from cache             #
+                    # -------------------------------------------------- #
+                    pf_data = self._parquet_cache.get(shard_path)
+                    if not pf_data:
+                        fs = self._get_fs()
+                        max_retries = 3
+                        for attempt in range(max_retries):
+                            try:
+                                f = fs.open(
+                                    shard_path,
+                                    "rb",
+                                    buffer_size=self.READ_BUFFER_SIZE,
                                 )
-                                await asyncio.sleep(2**attempt)  # Exponential backoff
-                            else:
-                                logger.error(
-                                    f"Failed to open parquet file {chosen_shard['path']} after {max_retries} attempts: {e}"
-                                )
-                                raise
+                                pf = pq.ParquetFile(
+                                    f, memory_map=False
+                                )  # Disable memory mapping
+                                pf_data = {"file": f, "parquet": pf}
+                                self._parquet_cache[shard_path] = pf_data
+                                break
+                            except Exception as e:
+                                if attempt < max_retries - 1:
+                                    logger.warning(
+                                        f"Attempt {attempt + 1} failed to open parquet file {shard_path} with error: {e}. Retrying..."
+                                    )
+                                    await asyncio.sleep(
+                                        2**attempt
+                                    )  # Exponential backoff
+                                else:
+                                    logger.error(
+                                        f"Failed to open parquet file {shard_path} after {max_retries} attempts: {e}"
+                                    )
+                                    raise
 
-                # Fix: Ensure row group index is within bounds
-                num_row_groups = pf_data["parquet"].num_row_groups
-                rows_per_group = chosen_shard["num_rows"] // num_row_groups
-                group_index = min(shard_offset // rows_per_group, num_row_groups - 1)
+                    # pf_data is guaranteed to be populated here
+                    num_row_groups = pf_data["parquet"].num_row_groups
 
-                # Read the row group
-                table = await asyncio.to_thread(
-                    pf_data["parquet"].read_row_group,
-                    group_index,
-                    columns=["text"],
-                    use_threads=True,
-                )
+                    # -------------------------------------------------- #
+                    # 2. Actually read the row group while still holding #
+                    #    the shard lock.                                 #
+                    # -------------------------------------------------- #
+                    table = await asyncio.to_thread(
+                        pf_data["parquet"].read_row_group,
+                        shard_offset,
+                        columns=["text"],
+                        use_threads=True,
+                    )
+
+                # (lock released here) --------------------------------- #
 
                 # Adjust start_idx based on actual rows in the group
-                start_idx = shard_offset % rows_per_group
+                start_idx = shard_offset % num_row_groups
                 group_rows = len(table)  # Get actual rows in this group
                 start_idx = min(start_idx, max(0, group_rows - self.num_rows_per_page))
 

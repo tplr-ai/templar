@@ -249,7 +249,6 @@ class Validator:
             self.gradient_scores = torch.zeros(256, dtype=torch.float32)
             self.sync_scores = torch.zeros(256, dtype=torch.float32)
             self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
-            self.gradient_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
             self.final_scores = torch.zeros(256, dtype=torch.float32)
             self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
             self.weights = torch.zeros(256, dtype=torch.float32)
@@ -299,7 +298,6 @@ class Validator:
             self.final_scores[uid] = 0.0
             self.weights[uid] = 0.0
             self.gradient_scores[uid] = 0.0
-            self.gradient_moving_avg_scores[uid] = 0.0
             self.binary_moving_averages[uid] = 0.0
             self.binary_indicator_scores[uid] = 0.0
             self.sync_scores[uid] = 0.0
@@ -394,6 +392,19 @@ class Validator:
                 openskill_sigma = float(self.openskill_ratings[uid].sigma)
                 openskill_ordinal = float(self.openskill_ratings[uid].ordinal())
 
+                sync_score = float(
+                    self.sync_scores[uid].item() if uid in self.evaluated_uids else 0.0
+                )
+
+                self.final_scores[uid] = (
+                    openskill_mu
+                    * max(0, self.binary_moving_averages[uid].item())
+                    * sync_score
+                )
+                tplr.logger.info(
+                    f"Computed Final Score for UID {uid}: {self.final_scores[uid]}"
+                )
+
                 # Log to WandB
                 self.wandb.log(
                     {
@@ -425,6 +436,37 @@ class Validator:
 
             # Clear the current window scores
             self.current_window_scores = {}
+
+    def update_weights(self) -> None:
+        """
+        Update the weights for all evaluated peers using min power normalization.
+
+        This method:
+        1. Creates a mask for peers that have been evaluated
+        2. Extracts scores for evaluated peers
+        3. Shifts all scores to be positive by subtracting the minimum score
+        4. Applies power normalization to the shifted scores
+        5. Verifies that weights sum to approximately 1.0
+
+        The shifting approach ensures all peers receive some weight proportional to
+        their relative performance, rather than filtering out peers with negative scores.
+        """
+        self.weights = torch.zeros_like(self.final_scores)
+        evaluated_mask = torch.zeros_like(self.final_scores, dtype=torch.bool)
+        evaluated_mask[list(self.evaluated_uids)] = True
+        eval_scores = self.final_scores[evaluated_mask]
+        min_score = eval_scores.min().item()
+        shifted_scores = eval_scores - min_score + 1e-5
+        # Apply power normalization to the shifted scores
+        self.weights[evaluated_mask] = min_power_normalization(
+            shifted_scores,
+            power=self.hparams.power_normalisation,
+        )
+
+        weight_sum = self.weights.sum().item()
+        tplr.logger.debug(f"Weight sum: {weight_sum}")
+        if abs(weight_sum - 1.0) > 1e-6:
+            tplr.logger.warning(f"Weights sum to {weight_sum}, expected close to 1.0")
 
     async def run(self):
         # Start background block listener
@@ -1381,19 +1423,6 @@ class Validator:
                         eval_uid
                     ].item()
 
-                    # Update exponential moving average of gradient scores with alpha=gradient_score_ma_alpha
-                    # New score = (1-alpha)*old_score + alpha*new_score
-                    self.gradient_moving_avg_scores[eval_uid] = (
-                        1 - self.hparams.gradient_score_ma_alpha
-                    ) * self.gradient_moving_avg_scores[
-                        eval_uid
-                    ] + self.hparams.gradient_score_ma_alpha * self.gradient_scores[
-                        eval_uid
-                    ]
-                    tplr.logger.debug(
-                        f"Gradient moving average : {self.gradient_moving_avg_scores[eval_uid]}"
-                    )
-
                     # Calculate binary indicator for overfitting detection
                     improvement_own = (
                         (loss_before_own - loss_after_own) / loss_before_own
@@ -1435,42 +1464,7 @@ class Validator:
                     # Store the sync score for this miner
                     self.sync_scores[eval_uid] = sync_score
 
-                    # Your existing final_score calculation with sync_score added
-                    self.final_scores[eval_uid] = (
-                        sign_preserving_multiplication(
-                            self.gradient_moving_avg_scores[eval_uid],
-                            self.binary_moving_averages[eval_uid],
-                        )
-                        * sync_score
-                    )
-                    tplr.logger.debug(
-                        f"Computed Final Score for UID {eval_uid}: {self.final_scores[eval_uid]}"
-                    )
-
                     self.evaluated_uids.add(eval_uid)
-
-                    # 12. Calculate weights using min power norm
-                    self.weights = torch.zeros_like(self.final_scores)
-                    evaluated_mask = torch.zeros_like(
-                        self.final_scores, dtype=torch.bool
-                    )
-                    evaluated_mask[list(self.evaluated_uids)] = True
-                    positive_mask = (self.final_scores > 0) & evaluated_mask
-                    if positive_mask.any():
-                        self.weights[positive_mask] = min_power_normalization(
-                            self.final_scores[positive_mask],
-                            power=self.hparams.power_normalisation,
-                        )
-                        weight_sum = self.weights.sum().item()
-                        tplr.logger.debug(f"Weight sum: {weight_sum}")
-                        if abs(weight_sum - 1.0) > 1e-6:
-                            tplr.logger.warning(
-                                f"Weights sum to {weight_sum}, expected close to 1.0"
-                            )
-                    else:
-                        tplr.logger.info(
-                            "No positive scores found, all weights set to 0"
-                        )
 
                     evaluated_peers += 1
                     tplr.logger.info(
@@ -1496,34 +1490,6 @@ class Validator:
 
                     # Ensure the UID is included in evaluated_uids
                     self.evaluated_uids.add(eval_uid)
-
-                    # Recalculate weights
-                    self.weights = torch.zeros_like(self.final_scores)
-                    evaluated_mask = torch.zeros_like(
-                        self.final_scores, dtype=torch.bool
-                    )
-                    evaluated_mask[list(self.evaluated_uids)] = True
-
-                    positive_mask = (self.final_scores > 0) & evaluated_mask
-
-                    if positive_mask.any():
-                        # Apply normalization to all positive scores at once
-                        self.weights[positive_mask] = min_power_normalization(
-                            self.final_scores[positive_mask],
-                            power=self.hparams.power_normalisation,
-                        )
-
-                        # Log warning if weights don't sum to 1
-                        weight_sum = self.weights.sum().item()
-                        tplr.logger.debug(f"Weight sum: {weight_sum}")
-                        if abs(weight_sum - 1.0) > 1e-6:
-                            tplr.logger.warning(
-                                f"Weights sum to {weight_sum}, expected close to 1.0"
-                            )
-                    else:
-                        tplr.logger.info(
-                            "No positive scores found, all weights set to 0"
-                        )
 
                     # Log updated scores
                     tplr.logger.info(
@@ -1557,6 +1523,7 @@ class Validator:
                 )
 
             self.update_openskill_ratings()
+            self.update_weights()
             # Log scores and metrics for evaluated UIDs as a table
             headers = [
                 "UID",
@@ -2338,7 +2305,6 @@ class Validator:
                 gradient_scores=self.gradient_scores,
                 sync_scores=self.sync_scores,
                 binary_indicator_scores=self.binary_indicator_scores,
-                gradient_moving_avg_scores=self.gradient_moving_avg_scores,
                 final_scores=self.final_scores,
                 binary_moving_averages=self.binary_moving_averages,
                 weights=self.weights,
@@ -2365,11 +2331,6 @@ class Validator:
             )
             self.binary_indicator_scores = (
                 torch.from_numpy(state["binary_indicator_scores"])
-                .float()
-                .to(self.config.device)
-            )
-            self.gradient_moving_avg_scores = (
-                torch.from_numpy(state["gradient_moving_avg_scores"])
                 .float()
                 .to(self.config.device)
             )

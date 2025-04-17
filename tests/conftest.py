@@ -190,7 +190,6 @@ def mock_validator(mocker, mock_metagraph, num_active_miners):
     # Set up test data
     validator.gradient_scores = np.zeros(256)
     validator.binary_indicator_scores = np.zeros(256)
-    validator.gradient_moving_avg_scores = np.zeros(256)
     validator.final_scores = np.zeros(256)
     validator.binary_moving_averages = np.zeros(256)
     validator.weights = np.zeros(256)

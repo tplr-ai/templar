@@ -1008,7 +1008,9 @@ class Validator:
                                     )
 
                                 p.data.sub_(
-                                    grad.sign(), alpha=self.scheduler.get_last_lr()[0]
+                                    grad.sign(),
+                                    alpha=self.scheduler.get_last_lr()[0]
+                                    * self.hparams.eval_lr_factor,
                                 )
                     except Exception as e:
                         old_score = self.final_scores[eval_uid].item()
@@ -1206,7 +1208,9 @@ class Validator:
                                 ).to(self.config.device)
 
                                 p.data.sub_(
-                                    grad.sign(), alpha=self.scheduler.get_last_lr()[0]
+                                    grad.sign(),
+                                    alpha=self.scheduler.get_last_lr()[0]
+                                    * self.hparams.eval_lr_factor,
                                 )
                     except Exception as e:
                         tplr.logger.error(
@@ -2268,9 +2272,7 @@ class Validator:
                 .to(self.config.device)
             )
             self.final_scores = (
-                torch.from_numpy(state["final_scores"])
-                .float()
-                .to(self.config.device)
+                torch.from_numpy(state["final_scores"]).float().to(self.config.device)
             )
             self.binary_moving_averages = (
                 torch.from_numpy(state["binary_moving_averages"])

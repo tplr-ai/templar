@@ -352,7 +352,7 @@ class AggregationServer:
             )
 
             # Print summary
-            total_time = get_data_start + gather_time + process_time + store_time
+            total_time = get_data_time + gather_time + process_time + store_time
             tplr.logger.info(f"Window: {self.sync_window - 1}")
             tplr.logger.info(f"Target UIDs: {selected_uids}")
             tplr.logger.info(

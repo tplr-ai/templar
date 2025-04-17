@@ -42,11 +42,11 @@ Then edit `group_vars/all/vault.yml` with the following critical settings:
 remote_mode: false  # Set to true for remote server deployment
 
 # Wallet Configuration - MUST be configured correctly
-cold_wallet_name: "your_wallet_folder_name"  # Name of folder under ~/.bittensor/wallets
-bittensor_wallet_password: "your_password"   # Password for your wallet (if encrypted)
-owner_hotkey: "primary_hotkey_name"          # Hotkey that will create the subnet
-validator_hotkeys: ["validator1", "validator2"]  # List of hotkeys for validators
-miner_hotkeys: ["miner1", "miner2"]          # List of hotkeys for miners
+cold_wallet_name: "owner"                    # Base name for wallet generation
+owner_hotkey: "default"                      # Hotkey name for the owner wallet
+validator_hotkeys: ["validator1", "validator2"]  # Identifier list for validators
+miner_hotkeys: ["miner1", "miner2"]          # Identifier list for miners
+# Note: Passwordless wallets will be created automatically on the target machine
 
 # Network Settings
 network: "local"  # Network name (local, test, finney, etc)
@@ -107,6 +107,15 @@ The deployment process follows these steps in sequence:
    - Ensures proper network connectivity
 
 ### 4. Technical Implementation Details
+
+#### Wallet Management
+The playbook uses a secure approach to wallet management:
+- **Passwordless Wallets**: Creates passwordless wallets directly on the target machine
+- **Naming Convention**: Uses `owner` as the main wallet and `owner_validator_1`, etc. for node wallets
+- **Hotkeys**: Each wallet gets a default hotkey that is used for network operations
+- **Security**: No wallet data is transferred from your local machine to remote targets
+- **Funding Flow**: Only the owner wallet is funded via the faucet, all wallets are registered to the subnet, and validators are staked automatically
+- **Efficient Process**: TAO is only needed for the owner wallet, which is used for subnet creation and validator staking
 
 #### Python Environment
 The playbook uses modern Python tooling:

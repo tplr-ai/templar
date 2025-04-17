@@ -220,7 +220,7 @@ class CeliumProvider(BaseProvider):
         # Prepare the request payload
         payload = {
             "pod_name": pod_name,
-            "template_id": "4cfad2d5-9c35-44c2-87a7-51b54b0db91a",  # Hardcoded template ID
+            "template_id": "1742e309-5dcb-4de6-84f3-ad7190df4689",  # Hardcoded template ID
             "user_public_key": user_public_keys,
         }
 
@@ -245,10 +245,9 @@ class CeliumProvider(BaseProvider):
 
             # Wait for pod to initialize and get connection details
             print("Waiting for pod to initialize...")
-            import time
-
             # Initialize variables for continuous polling
             import datetime
+            import time
 
             ssh_port = 22  # Default SSH port if port mapping not found
             ssh_host = None

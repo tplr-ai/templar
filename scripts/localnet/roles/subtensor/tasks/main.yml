@@ -39,11 +39,24 @@
   when: not subtensor_binary.stat.exists
   tags: subtensor
 
+- name: Check if Subtensor RPC is already running and responsive
+  shell: "curl -s -H 'Content-Type: application/json' -d '{\"id\":1, \"jsonrpc\":\"2.0\", \"method\": \"system_health\", \"params\":[]}' http://127.0.0.1:9944 | grep -q result"
+  register: subtensor_already_running
+  failed_when: false
+  changed_when: false
+  tags: subtensor
+
+- name: Debug Subtensor runtime status
+  debug:
+    msg: "Existing Subtensor RPC service detected and responding: {{ subtensor_already_running.rc == 0 }}"
+  tags: subtensor
+
 - name: Check if Subtensor PM2 process is running
   shell: pm2 list | grep Subtensor
   register: pm2_check
   failed_when: false
   changed_when: false
+  when: subtensor_already_running.rc != 0
   tags: subtensor
 
 - name: Start Subtensor node with PM2
@@ -52,7 +65,7 @@
     chdir: "{{ ansible_env.HOME }}/subtensor"
   environment:
     PATH: "{{ ansible_env.HOME }}/.cargo/bin:{{ ansible_env.PATH }}"
-  when: pm2_check.rc != 0
+  when: subtensor_already_running.rc != 0 and pm2_check.rc != 0
   tags: subtensor
 
 - name: Wait for Subtensor RPC port 9944 to be available
@@ -60,8 +73,9 @@
     host: 127.0.0.1
     port: 9944
     state: started
-    timeout: 180
+    timeout: 600
     delay: 5
+  when: subtensor_already_running.rc != 0
   tags: subtensor
 
 - name: Verify Subtensor node is responding to RPC requests
@@ -71,4 +85,17 @@
   delay: 10
   until: rpc_check.rc == 0
   failed_when: rpc_check.rc != 0 and rpc_check.attempts|default(0) >= 20
+  when: subtensor_already_running.rc != 0
+  tags: subtensor
+
+- name: Final verification of Subtensor operational status
+  shell: "curl -s -H 'Content-Type: application/json' -d '{\"id\":1, \"jsonrpc\":\"2.0\", \"method\": \"system_name\", \"params\":[]}' http://127.0.0.1:9944"
+  register: subtensor_system_name
+  failed_when: false
+  changed_when: false
+  tags: subtensor
+
+- name: Report Subtensor operational status
+  debug:
+    msg: "Subtensor is operational: {{ 'Subtensor' in subtensor_system_name.stdout }}"
   tags: subtensor

@@ -39,6 +39,7 @@ import numpy as np
 # Third party
 import torch
 import uvloop
+from openskill.models import PlackettLuce
 from rich.console import Console
 from rich.table import Table
 from torch.optim import SGD
@@ -288,6 +289,10 @@ class Validator:
         # Initialize peer related attributes
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
+        self.openskill_model = PlackettLuce(
+            beta=self.hparams.openskill_beta, tau=self.hparams.openskill_tau
+        )
+        self.openskill_ratings = {}  # Dictionary to store peer ratings
 
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
@@ -343,6 +348,83 @@ class Validator:
             with_system_metrics=True,
             with_gpu_metrics=True,
         )
+
+    def update_openskill_ratings(self):
+        """
+        Update OpenSkill ratings based on gradient scores and recalculate final scores.
+
+        This method:
+        1. Processes all peers evaluated in the current window
+        2. Updates their OpenSkill ratings based on gradient performance
+        3. Recalculates final scores using OpenSkill mu value combined with binary and sync scores
+        4. Logs the updated ratings to monitoring systems
+
+        The OpenSkill rating system provides a probabilistic skill rating that accounts for
+        uncertainty and relative performance between peers. Ratings are updated using the
+        PlackettLuce model where higher gradient scores indicate better performance.
+
+        The final score calculation combines:
+        - OpenSkill mu (mean skill estimate)
+        - Binary moving average (filtered to non-negative values)
+        - Sync score (model synchronization quality)
+        """
+        if (
+            hasattr(self, "current_window_scores")
+            and len(self.current_window_scores) > 1
+        ):
+            # Get UIDs and scores
+            window_uids = list(self.current_window_scores.keys())
+
+            # Calculate ranks based on gradient scores (lower rank = better performance)
+            # In OpenSkill, ranks start at 1 (best) and increase for worse performers
+            scores = [self.current_window_scores[uid] for uid in window_uids]
+
+            # Create teams list for OpenSkill
+            teams = [[self.openskill_ratings[uid]] for uid in window_uids]
+
+            # Rate the teams using scores (higher score is better in OpenSkill)
+            rated_teams = self.openskill_model.rate(teams, scores=scores)
+
+            # Store updated ratings
+            for i, uid in enumerate(window_uids):
+                self.openskill_ratings[uid] = rated_teams[i][0]
+
+                # Log updated OpenSkill values
+                openskill_mu = float(self.openskill_ratings[uid].mu)
+                openskill_sigma = float(self.openskill_ratings[uid].sigma)
+                openskill_ordinal = float(self.openskill_ratings[uid].ordinal())
+
+                # Log to WandB
+                self.wandb.log(
+                    {
+                        f"validator/openskill/mu/{uid}": openskill_mu,
+                        f"validator/openskill/sigma/{uid}": openskill_sigma,
+                        f"validator/openskill/ordinal/{uid}": openskill_ordinal,
+                    },
+                    step=self.global_step,
+                )
+
+                # Log to InfluxDB
+                self.metrics_logger.log(
+                    measurement="validator_openskill",
+                    tags={
+                        "eval_uid": str(uid),
+                        "window": int(self.sync_window),
+                        "global_step": int(self.global_step),
+                    },
+                    fields={
+                        "mu": openskill_mu,
+                        "sigma": openskill_sigma,
+                        "ordinal": openskill_ordinal,
+                    },
+                )
+
+            tplr.logger.info(
+                f"Updated OpenSkill ratings for {len(window_uids)} peers based on gradient scores"
+            )
+
+            # Clear the current window scores
+            self.current_window_scores = {}
 
     async def run(self):
         # Start background block listener
@@ -1286,6 +1368,19 @@ class Validator:
                         f"Gradient Score: {self.gradient_scores[eval_uid]}"
                     )
 
+                    # Initialize or update OpenSkill rating for this peer
+                    if eval_uid not in self.openskill_ratings:
+                        self.openskill_ratings[eval_uid] = self.openskill_model.rating(
+                            name=str(eval_uid)
+                        )
+
+                    # Record the gradient score for later OpenSkill updates
+                    if not hasattr(self, "current_window_scores"):
+                        self.current_window_scores = {}
+                    self.current_window_scores[eval_uid] = self.gradient_scores[
+                        eval_uid
+                    ].item()
+
                     # Update exponential moving average of gradient scores with alpha=gradient_score_ma_alpha
                     # New score = (1-alpha)*old_score + alpha*new_score
                     self.gradient_moving_avg_scores[eval_uid] = (
@@ -1461,6 +1556,7 @@ class Validator:
                     f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
                 )
 
+            self.update_openskill_ratings()
             # Log scores and metrics for evaluated UIDs as a table
             headers = [
                 "UID",
@@ -1470,9 +1566,14 @@ class Validator:
                 "Final Score",
                 "Sync score",
                 "Weight",
+                "OpenSkill",
             ]
             table = [headers]
             for uid in sorted(self.evaluated_uids):
+                openscore_info = "N/A"
+                if uid in self.openskill_ratings:
+                    rating = self.openskill_ratings[uid]
+                    openscore_info = f"{rating.ordinal():.2f} (μ={rating.mu:.1f}, σ={rating.sigma:.1f})"
                 row = [
                     str(uid),
                     f"{self.gradient_scores[uid]:.4f}",
@@ -1481,6 +1582,7 @@ class Validator:
                     f"{self.final_scores[uid]:.4f}",
                     f"{self.sync_scores[uid]:.4f}",
                     f"{self.weights[uid]:.4f}",
+                    openscore_info,
                 ]
                 table.append(row)
 

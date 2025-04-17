@@ -450,8 +450,8 @@ class Validator:
             avg_loss_after_per_batch_own = 0.0
             avg_loss_before_per_batch_random = 0.0
             avg_loss_after_per_batch_random = 0.0
-            for eval_uid in evaluation_uids:
-                tplr.logger.info(f"Evaluating uid: {eval_uid}")
+            for eval_uid in np.random.choice(evaluation_uids, size=2, replace=False):
+                tplr.logger.info(f"Evaluating uid: {eval_uid}, type: {type(eval_uid)}")
 
                 eval_result = await self.comms.get_from_disk(
                     uid=str(eval_uid),
@@ -986,7 +986,7 @@ class Validator:
 
                     self.final_scores[uid] = self.openskill_ratings[
                         uid
-                    ].ordinal() * max(self.binary_moving_averages[uid].item(), 0)
+                    ].mu * max(self.binary_moving_averages[uid].item(), 0)
                     tplr.logger.info(
                         f"Computed Final Score for UID {uid}: {self.final_scores[uid]}"
                     )

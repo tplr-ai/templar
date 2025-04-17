@@ -249,7 +249,7 @@ class Validator:
             self.sync_scores = torch.zeros(256, dtype=torch.float32)
             self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
             self.gradient_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
-            self.final_moving_avg_scores = torch.zeros(256, dtype=torch.float32)
+            self.final_scores = torch.zeros(256, dtype=torch.float32)
             self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
             self.weights = torch.zeros(256, dtype=torch.float32)
         self.evaluated_uids = set()
@@ -285,17 +285,13 @@ class Validator:
         self.missing_gradient_slash_rate = 0.75
         self.sync_score_slash_rate = 0.75
 
-        # Initialize final score history (for sliding-window averaging)
-        self.final_score_history = defaultdict(list)
-
         # Initialize peer related attributes
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
 
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
-            self.final_score_history[uid] = []
-            self.final_moving_avg_scores[uid] = 0.0
+            self.final_scores[uid] = 0.0
             self.weights[uid] = 0.0
             self.gradient_scores[uid] = 0.0
             self.gradient_moving_avg_scores[uid] = 0.0
@@ -530,10 +526,10 @@ class Validator:
                 if uid not in self.inactive_scores:
                     self.inactive_scores[uid] = (
                         current_window,
-                        self.final_moving_avg_scores[uid].item(),
+                        self.final_scores[uid].item(),
                     )
                     tplr.logger.info(
-                        f"UID {uid} became inactive at window {current_window} with score {self.final_moving_avg_scores[uid].item():.4f}"
+                        f"UID {uid} became inactive at window {current_window} with score {self.final_scores[uid].item():.4f}"
                     )
 
             # Apply penalties to all inactive peers
@@ -549,18 +545,14 @@ class Validator:
                     continue
 
                 # Apply flat 25% penalty instead of exponential decay
-                old_score = self.final_moving_avg_scores[uid].item()
+                old_score = self.final_scores[uid].item()
                 new_score = old_score  # Initialize new_score with old_score value
-                if self.final_moving_avg_scores[uid] > 0:
-                    self.final_moving_avg_scores[uid] *= (
+                if self.final_scores[uid] > 0:
+                    self.final_scores[uid] *= (
                         0.75  # Apply flat 25% reduction for positive scores only
                     )
 
-                    self.final_score_history[uid] = [
-                        final_score * 0.75 if final_score > 0 else final_score
-                        for final_score in self.final_score_history[uid]
-                    ]
-                    new_score = self.final_moving_avg_scores[uid].item()
+                    new_score = self.final_scores[uid].item()
 
                     tplr.logger.info(
                         f"UID {uid} penalized for inactivity: "
@@ -697,49 +689,35 @@ class Validator:
                         avg_steps_behind,
                         self.hparams.sync_max_steps_behind,
                     )
-                    if self.final_moving_avg_scores[uid] > 0:
-                        self.final_moving_avg_scores[uid] *= self.sync_score_slash_rate
-                        self.final_score_history[uid] = [
-                            final_score * self.sync_score_slash_rate
-                            if final_score > 0
-                            else final_score
-                            for final_score in self.final_score_history[uid]
-                        ]
+                    if self.final_scores[uid] > 0:
+                        self.final_scores[uid] *= self.sync_score_slash_rate
 
             # Slash peers failing to submit gradients
             for uid in skipped_uids:
                 tplr.logger.info(
                     f"No gradient gathered from UID {uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}."
                 )
-                if 0 <= uid < self.final_moving_avg_scores.size(0):
-                    old_score = self.final_moving_avg_scores[uid].item()
+                if 0 <= uid < self.final_scores.size(0):
+                    old_score = self.final_scores[uid].item()
 
                     # Only reduce positive scores
-                    if self.final_moving_avg_scores[uid] > 0:
-                        self.final_moving_avg_scores[uid] *= (
-                            self.missing_gradient_slash_rate
-                        )
-                        self.final_score_history[uid] = [
-                            final_score * self.missing_gradient_slash_rate
-                            if final_score > 0
-                            else final_score
-                            for final_score in self.final_score_history[uid]
-                        ]
+                    if self.final_scores[uid] > 0:
+                        self.final_scores[uid] *= self.missing_gradient_slash_rate
 
-                        new_score = self.final_moving_avg_scores[uid].item()
+                        new_score = self.final_scores[uid].item()
                         tplr.logger.info(
-                            f"Reduced moving average score of UID {uid} from {old_score:.4f} to {new_score:.4f} "
+                            f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} "
                             f"due to missing gradient in gather."
                         )
                     else:
                         tplr.logger.info(
-                            f"Skipped reducing moving average score of UID {uid} (current score: {old_score:.4f}) "
+                            f"Skipped score of UID {uid} (current score: {old_score:.4f}) "
                             f"due to negative or zero value."
                         )
                     self.evaluated_uids.add(uid)
                 else:
                     tplr.logger.info(
-                        f"UID {uid} not found in final_moving_avg_scores; skipping penalty."
+                        f"UID {uid} not found in final_scores; skipping penalty."
                     )
 
             # Add check for empty peers (evaluating all peer uids)
@@ -1033,12 +1011,11 @@ class Validator:
                                     grad.sign(), alpha=self.scheduler.get_last_lr()[0]
                                 )
                     except Exception as e:
-                        old_score = self.final_moving_avg_scores[eval_uid].item()
+                        old_score = self.final_scores[eval_uid].item()
 
                         if old_score > 0:
                             # Reset positive scores to zero explicitly
-                            self.final_moving_avg_scores[eval_uid] = 0.0
-                            self.final_score_history[eval_uid] = []
+                            self.final_scores[eval_uid] = 0.0
                             tplr.logger.warning(
                                 f"Set positive score of UID {eval_uid} from {old_score:.4f} to 0.0 - invalid gradient data"
                             )
@@ -1055,7 +1032,7 @@ class Validator:
                         self.wandb.log(
                             {
                                 f"validator/slash/{eval_uid}/score_before": old_score,
-                                f"validator/slash/{eval_uid}/score_after": self.final_moving_avg_scores[
+                                f"validator/slash/{eval_uid}/score_after": self.final_scores[
                                     eval_uid
                                 ].item(),
                                 f"validator/slash/{eval_uid}/reason": str(e),
@@ -1075,7 +1052,7 @@ class Validator:
                             fields={
                                 "score_before": float(old_score),
                                 "score_after": float(
-                                    self.final_moving_avg_scores[eval_uid].item()
+                                    self.final_scores[eval_uid].item()
                                 ),
                                 "reason": str(e)[:255],  # Truncate long error messages
                             },
@@ -1360,7 +1337,7 @@ class Validator:
                     self.sync_scores[eval_uid] = sync_score
 
                     # Your existing final_score calculation with sync_score added
-                    final_score = (
+                    self.final_scores[eval_uid] = (
                         sign_preserving_multiplication(
                             self.gradient_moving_avg_scores[eval_uid],
                             self.binary_moving_averages[eval_uid],
@@ -1368,35 +1345,21 @@ class Validator:
                         * sync_score
                     )
                     tplr.logger.debug(
-                        f"Computed Final Score for UID {eval_uid}: {final_score}"
-                    )
-
-                    # Sliding window update for the final moving average score
-                    self.final_score_history[eval_uid].append(final_score)
-                    if (
-                        len(self.final_score_history[eval_uid])
-                        > self.hparams.moving_average_window
-                    ):
-                        self.final_score_history[eval_uid].pop(0)
-                    self.final_moving_avg_scores[eval_uid] = sum(
-                        self.final_score_history[eval_uid]
-                    ) / len(self.final_score_history[eval_uid])
-                    tplr.logger.debug(
-                        f"Updated Final Moving Average Score for UID {eval_uid}: {self.final_moving_avg_scores[eval_uid]}"
+                        f"Computed Final Score for UID {eval_uid}: {self.final_scores[eval_uid]}"
                     )
 
                     self.evaluated_uids.add(eval_uid)
 
                     # 12. Calculate weights using min power norm
-                    self.weights = torch.zeros_like(self.final_moving_avg_scores)
+                    self.weights = torch.zeros_like(self.final_scores)
                     evaluated_mask = torch.zeros_like(
-                        self.final_moving_avg_scores, dtype=torch.bool
+                        self.final_scores, dtype=torch.bool
                     )
                     evaluated_mask[list(self.evaluated_uids)] = True
-                    positive_mask = (self.final_moving_avg_scores > 0) & evaluated_mask
+                    positive_mask = (self.final_scores > 0) & evaluated_mask
                     if positive_mask.any():
                         self.weights[positive_mask] = min_power_normalization(
-                            self.final_moving_avg_scores[positive_mask],
+                            self.final_scores[positive_mask],
                             power=self.hparams.power_normalisation,
                         )
                         weight_sum = self.weights.sum().item()
@@ -1419,43 +1382,35 @@ class Validator:
                     tplr.logger.info(
                         f"No gradient received from UID {eval_uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}"
                     )
-                    old_score = self.final_moving_avg_scores[eval_uid].item()
+                    old_score = self.final_scores[eval_uid].item()
 
-                    if self.final_moving_avg_scores[eval_uid] > 0:
-                        self.final_moving_avg_scores[eval_uid] *= (
-                            self.missing_gradient_slash_rate
-                        )
-                        self.final_score_history[eval_uid] = [
-                            final_score * self.missing_gradient_slash_rate
-                            if final_score > 0
-                            else final_score
-                            for final_score in self.final_score_history[eval_uid]
-                        ]
-                        new_score = self.final_moving_avg_scores[eval_uid].item()
+                    if self.final_scores[eval_uid] > 0:
+                        self.final_scores[eval_uid] *= self.missing_gradient_slash_rate
+                        new_score = self.final_scores[eval_uid].item()
                         tplr.logger.info(
-                            f"Reduced moving average score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient."
+                            f"Reduced score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient."
                         )
                     else:
                         tplr.logger.info(
-                            f"Skipped reducing moving average score of UID {eval_uid} (current score: {old_score:.4f}) due to negative or zero value."
+                            f"Skipped reducing score of UID {eval_uid} (current score: {old_score:.4f}) due to negative or zero value."
                         )
 
                     # Ensure the UID is included in evaluated_uids
                     self.evaluated_uids.add(eval_uid)
 
                     # Recalculate weights
-                    self.weights = torch.zeros_like(self.final_moving_avg_scores)
+                    self.weights = torch.zeros_like(self.final_scores)
                     evaluated_mask = torch.zeros_like(
-                        self.final_moving_avg_scores, dtype=torch.bool
+                        self.final_scores, dtype=torch.bool
                     )
                     evaluated_mask[list(self.evaluated_uids)] = True
 
-                    positive_mask = (self.final_moving_avg_scores > 0) & evaluated_mask
+                    positive_mask = (self.final_scores > 0) & evaluated_mask
 
                     if positive_mask.any():
                         # Apply normalization to all positive scores at once
                         self.weights[positive_mask] = min_power_normalization(
-                            self.final_moving_avg_scores[positive_mask],
+                            self.final_scores[positive_mask],
                             power=self.hparams.power_normalisation,
                         )
 
@@ -1477,7 +1432,7 @@ class Validator:
                     )
                     # Log evaluated UID scores (fixed join call)
                     line = " | ".join(
-                        f"UID {uid}: {self.final_moving_avg_scores[uid]:.4f}"
+                        f"UID {uid}: {self.final_scores[uid]:.4f}"
                         for uid in sorted(self.evaluated_uids)
                     )
                     tplr.logger.info(line)
@@ -1485,7 +1440,7 @@ class Validator:
                     # Optionally, log to WandB
                     self.wandb.log(
                         {
-                            f"validator/final_moving_avg_scores/{eval_uid}": self.final_moving_avg_scores[
+                            f"validator/final_scores/{eval_uid}": self.final_scores[
                                 eval_uid
                             ].item(),
                             f"validator/weights/{eval_uid}": self.weights[
@@ -1505,10 +1460,10 @@ class Validator:
             # Log scores and metrics for evaluated UIDs as a table
             headers = [
                 "UID",
-                "Last Score",
+                "Gradient Score",
                 "Binary Indicator",
                 "Binary Moving Avg",
-                "Final Moving Avg",
+                "Final Score",
                 "Sync score",
                 "Weight",
             ]
@@ -1519,7 +1474,7 @@ class Validator:
                     f"{self.gradient_scores[uid]:.4f}",
                     f"{self.binary_indicator_scores[uid]:.4f}",
                     f"{self.binary_moving_averages[uid]:.4f}",
-                    f"{self.final_moving_avg_scores[uid]:.4f}",
+                    f"{self.final_scores[uid]:.4f}",
                     f"{self.sync_scores[uid]:.4f}",
                     f"{self.weights[uid]:.4f}",
                 ]
@@ -1570,7 +1525,7 @@ class Validator:
                 binary_indicator = float(self.binary_indicator_scores[uid].item())
                 binary_moving_avg = float(self.binary_moving_averages[uid].item())
                 sync_score = float(self.sync_scores[uid].item())
-                final_moving_avg = float(self.final_moving_avg_scores[uid].item())
+                final_score = float(self.final_scores[uid].item())
                 weight = float(self.weights[uid].item())
 
                 self.wandb.log(
@@ -1578,7 +1533,7 @@ class Validator:
                         f"validator/gradient_scores/{uid}": gradient_score,
                         f"validator/binary_indicators/{uid}": binary_indicator,
                         f"validator/binary_moving_averages/{uid}": binary_moving_avg,
-                        f"validator/final_moving_avg_scores/{uid}": final_moving_avg,
+                        f"validator/final_scores/{uid}": final_score,
                         f"validator/sync_score/{uid}": sync_score,
                         f"validator/weights/{uid}": weight,
                     },
@@ -1598,7 +1553,7 @@ class Validator:
                         "binary_indicator": binary_indicator,
                         "binary_moving_avg": binary_moving_avg,
                         "sync_score": sync_score,
-                        "final_moving_avg_score": final_moving_avg,
+                        "final_score": final_score,
                         "weight": weight,
                     },
                     with_system_metrics=True,
@@ -2278,7 +2233,7 @@ class Validator:
                 sync_scores=self.sync_scores,
                 binary_indicator_scores=self.binary_indicator_scores,
                 gradient_moving_avg_scores=self.gradient_moving_avg_scores,
-                final_moving_avg_scores=self.final_moving_avg_scores,
+                final_scores=self.final_scores,
                 binary_moving_averages=self.binary_moving_averages,
                 weights=self.weights,
             )
@@ -2312,8 +2267,8 @@ class Validator:
                 .float()
                 .to(self.config.device)
             )
-            self.final_moving_avg_scores = (
-                torch.from_numpy(state["final_moving_avg_scores"])
+            self.final_scores = (
+                torch.from_numpy(state["final_scores"])
                 .float()
                 .to(self.config.device)
             )

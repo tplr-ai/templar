@@ -855,12 +855,26 @@ class Comms(ChainManager):
         """GET with retry operation."""
         start_time = time.time()
         end_time = start_time + timeout
+        tried_after_time_max = False  # Track if we've tried once after passing time_max
 
         while True:
+            # Check if we've timed out
             if time.time() >= end_time:
                 tplr.logger.debug(f"GET {uid}/{window}/{key} timed out.")
                 return None
 
+            # Check if we're past time_max
+            now = datetime.now(timezone.utc)
+            past_time_max = time_max is not None and now > time_max
+
+            # If we're past time_max and already tried once, don't retry again
+            if past_time_max and tried_after_time_max:
+                tplr.logger.debug(
+                    f"Already tried once after time_max for UID {uid}, window {window}. Stopping retries."
+                )
+                return None
+
+            # Make the request
             state_dict = await self.get(
                 uid=uid,
                 window=window,
@@ -871,7 +885,7 @@ class Comms(ChainManager):
                 time_max=time_max,
             )
 
-            # Check for TOO_LATE/TOO_EARLY markers - stop retrying immediately
+            # Check for TOO_LATE/TOO_EARLY markers
             if isinstance(state_dict, dict):
                 if state_dict.get("__status") == "TOO_LATE":
                     tplr.logger.info(
@@ -884,10 +898,18 @@ class Comms(ChainManager):
                     )
                     return None
 
+            # If we got a result, return it
             if state_dict is not None:
                 return state_dict
 
-            # Retry after a short delay
+            # If we're past time_max, mark that we've tried once
+            if past_time_max:
+                tried_after_time_max = True
+                tplr.logger.debug(
+                    f"Past time_max for UID {uid}, window {window}. This is the final retry."
+                )
+
+            # Short delay before retrying
             await asyncio.sleep(0.1)
 
     async def gather(

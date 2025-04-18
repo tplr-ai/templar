@@ -208,7 +208,7 @@ class Validator:
             f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
         )
 
-        # Init comms 
+        # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",

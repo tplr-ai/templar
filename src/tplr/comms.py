@@ -1245,7 +1245,9 @@ class Comms(ChainManager):
             # 2. Check self R2 bucket
             self_bucket = self.bucket  # Use self.bucket saved in __init__
             if self_bucket:
-                result = await self._get_bucket_checkpoint(self_bucket, self.uid, version)
+                result = await self._get_bucket_checkpoint(
+                    self_bucket, self.uid, version
+                )
                 if result:
                     return result
 
@@ -1368,7 +1370,7 @@ class Comms(ChainManager):
         scheduler,
         current_window: int,
         device: str,
-        init_version: Optional[str] = None,  
+        init_version: Optional[str] = None,
     ) -> tuple[
         bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
     ]:
@@ -2050,4 +2052,3 @@ class Comms(ChainManager):
 
         tplr.logger.debug(f"Final selected items: {selected}")
         return selected
-

@@ -236,8 +236,6 @@ class Miner:
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
 
-
-
     # Main training loop.
     async def run(self):
         # Start background block listener

@@ -93,6 +93,16 @@ class Miner:
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        parser.add_argument(
+            "--checkpoint-init-version",
+            type=str,
+            default=None,
+            help=(
+                "If set, bootstrap from the latest checkpoint carrying this version "
+                "suffix (e.g. '0.8.1'). If not set or not found, fall back to the "
+                "current package __version__."
+            ),
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -164,6 +174,12 @@ class Miner:
             milestones=[250],
         )
 
+        self.bootstrap_version: str | None = self.config.checkpoint_init_version
+        tplr.logger.info(
+            f"[Miner] code_version={tplr.__version__} "
+            f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
+        )
+
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
@@ -174,6 +190,7 @@ class Miner:
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
+            checkpoint_version=self.bootstrap_version,
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
@@ -260,6 +277,7 @@ class Miner:
             scheduler=self.scheduler,
             current_window=self.current_window,
             device=cast(str, self.config.device),
+            init_version=self.bootstrap_version,
         )
         if success:
             self.momentum = loaded_momentum

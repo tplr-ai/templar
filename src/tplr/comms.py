@@ -72,6 +72,7 @@ class Comms(ChainManager):
         metagraph=None,
         hparams=None,
         uid=None,
+        checkpoint_version: str | None = None,
         **kwargs,
     ):
         self.wallet = wallet
@@ -114,6 +115,13 @@ class Comms(ChainManager):
         )  # Number of recent windows to check
 
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
+
+        # fallback to code‑version when flag not supplied
+        self.checkpoint_version: str = checkpoint_version or __version__
+
+        # keep a reference to the *whole* ckpt that was loaded once, so
+        # miners / validators can consult keys such as `start_window`.
+        self.last_checkpoint_data: dict[str, Any] | None = None
 
     async def _get_s3_client(self, bucket: Bucket):
         """
@@ -780,7 +788,7 @@ class Comms(ChainManager):
         time_max: datetime = None,
     ) -> Optional[tuple[dict, int]]:
         """GET operation."""
-        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        filename = f"{key}-{window}-{uid}-v{self.checkpoint_version}.pt"
         tplr.logger.debug(f"GET {filename} -->")
 
         try:
@@ -1212,7 +1220,7 @@ class Comms(ChainManager):
         tplr.logger.info(f"Validator Bucket: {validator_bucket}")
         return validator_bucket, validator_uid
 
-    async def get_latest_checkpoint(self):
+    async def get_latest_checkpoint(self, version):
         """
         Sequentially check:
         1. Whether the highest-staked validator has a checkpoint.
@@ -1228,7 +1236,7 @@ class Comms(ChainManager):
             ) = await self._get_highest_stake_validator_bucket()
             if validator_bucket:
                 result = await self._get_bucket_checkpoint(
-                    validator_bucket, validator_uid
+                    validator_bucket, validator_uid, version
                 )
                 if result:
                     # If successfully retrieved, return immediately.
@@ -1237,12 +1245,14 @@ class Comms(ChainManager):
             # 2. Check self R2 bucket
             self_bucket = self.bucket  # Use self.bucket saved in __init__
             if self_bucket:
-                result = await self._get_bucket_checkpoint(self_bucket, self.uid)
+                result = await self._get_bucket_checkpoint(
+                    self_bucket, self.uid, version
+                )
                 if result:
                     return result
 
             # 3. Check local storage
-            local_result = self._load_latest_local_checkpoint()
+            local_result = self._load_latest_local_checkpoint(self.checkpoint_version)
             if local_result:
                 return local_result
 
@@ -1255,10 +1265,10 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error getting latest checkpoint: {e}")
             return None
 
-    def _load_latest_local_checkpoint(self):
+    def _load_latest_local_checkpoint(self, version: str):
         try:
             local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
-            pattern = rf"checkpoint-(\d+)-{self.uid}-v{__version__}\.pt$"
+            pattern = rf"checkpoint-(\d+)-{self.uid}-v{re.escape(version)}\.pt$"
 
             if not os.path.exists(local_dir):
                 return None
@@ -1294,14 +1304,14 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error in local checkpoint loading: {e}")
             return None
 
-    async def _get_bucket_checkpoint(self, bucket, uid):
+    async def _get_bucket_checkpoint(self, bucket, uid, version: str):
         """Helper to get checkpoint from a specific bucket."""
         try:
             s3_client = await self._get_s3_client(bucket)
 
-            pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{__version__}\.pt$")
+            pat = re.compile(rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$")
 
-            # We’ll track the largest checkpoint window and its key
+            # We'll track the largest checkpoint window and its key
             latest_checkpoint = None
             max_window = -1
 
@@ -1325,7 +1335,7 @@ class Comms(ChainManager):
                 # Iterate through returned objects to find valid checkpoints
                 for obj in response["Contents"]:
                     key = obj.get("Key", "")
-                    match = pattern.match(key)
+                    match = pat.match(key)
                     if match:
                         window_number = int(match.group(1))
                         if window_number > max_window:
@@ -1360,6 +1370,7 @@ class Comms(ChainManager):
         scheduler,
         current_window: int,
         device: str,
+        init_version: Optional[str] = None,
     ) -> tuple[
         bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
     ]:
@@ -1369,7 +1380,7 @@ class Comms(ChainManager):
             tuple: (success: bool, momentum: dict, checkpoint_current_window: int,
                     optimizer: Optimizer, scheduler: LRScheduler)
         """
-        result = await self.get_latest_checkpoint()
+        result = await self.get_latest_checkpoint(init_version)
         if not result:
             tplr.logger.info("No valid checkpoints found")
             return False, {}, 0, optimizer, scheduler
@@ -1409,6 +1420,8 @@ class Comms(ChainManager):
                 f"checkpoint_sync_window={checkpoint_sync_window}, "
                 f"local_current_window={current_window}"
             )
+
+            self.last_checkpoint_data = checkpoint_data
 
             return True, momentum, checkpoint_sync_window, optimizer, scheduler
 

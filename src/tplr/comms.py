@@ -1528,6 +1528,9 @@ class Comms(ChainManager):
                     sorted_windows = sorted(window_to_keys, reverse=True)
                     selected_window = sorted_windows[1]  # Second most recent
                     tplr.logger.info(f"Selected previous window {selected_window}")
+                elif fetch_previous and len(window_to_keys) <= 1:
+                    tplr.logger.info(f"Found no previous window {selected_window}")
+                    return None
                 else:
                     selected_window = max(window_to_keys)  # Most recent
                     tplr.logger.info(f"Selected most recent window {selected_window}")

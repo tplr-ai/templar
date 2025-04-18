@@ -38,6 +38,17 @@
   "liveNow": true,
   "panels": [
     {
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 10,
+      "title": "All Evals - Charts per benchmark",
+      "type": "row"
+    },
+    {
       "datasource": {
         "type": "influxdb",
         "uid": "influx"
@@ -98,10 +109,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 9,
         "w": 12,
         "x": 0,
-        "y": 0
+        "y": 1
       },
       "id": 6,
       "options": {
@@ -124,7 +135,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"hellaswag\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"hellaswag\")\r\n  |> filter(fn: (r) => r[\"version\"] =~ /${templar_version:regex}$/)\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
@@ -191,10 +202,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 9,
         "w": 12,
         "x": 12,
-        "y": 0
+        "y": 1
       },
       "id": 7,
       "options": {
@@ -217,7 +228,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"mmlu\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"mmlu\")\r\n  |> filter(fn: (r) => r[\"version\"] =~ /${templar_version:regex}$/)\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
@@ -284,10 +295,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 9,
         "w": 12,
         "x": 0,
-        "y": 8
+        "y": 10
       },
       "id": 5,
       "options": {
@@ -310,7 +321,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"piqa\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"piqa\")\r\n  |> filter(fn: (r) => r[\"version\"] =~ /${templar_version:regex}$/)\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
@@ -377,195 +388,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 9,
         "w": 12,
         "x": 12,
-        "y": 8
-      },
-      "id": 8,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "right",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "10.4.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "influx"
-          },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"mmlu_flan_n_shot_generative\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
-          "refId": "A"
-        }
-      ],
-      "title": "Eval - mmlu_flan_n_shot_generative - 5-shot",
-      "type": "trend"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "influx"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 16
-      },
-      "id": 1,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "right",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        },
-        "xField": "step_int"
-      },
-      "pluginVersion": "10.4.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "influx"
-          },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"arc_easy\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
-          "refId": "A"
-        }
-      ],
-      "title": "Eval - arc_easy",
-      "type": "trend"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "influx"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 16
+        "y": 10
       },
       "id": 2,
       "options": {
@@ -587,7 +413,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"arc_challenge\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"arc_challenge\")\r\n  |> filter(fn: (r) => r[\"version\"] =~ /${templar_version:regex}$/)\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
@@ -654,12 +480,12 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 9,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 19
       },
-      "id": 4,
+      "id": 1,
       "options": {
         "legend": {
           "calcs": [],
@@ -680,11 +506,103 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"winogrande\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"arc_easy\")\r\n  |> filter(fn: (r) => r[\"version\"] =~ /${templar_version:regex}$/)\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
-      "title": "Eval - winogrande",
+      "title": "Eval - arc_easy",
+      "type": "trend"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influx"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 19
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influx"
+          },
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"openbookqa\")\r\n  |> filter(fn: (r) => r[\"version\"] =~ /${templar_version:regex}$/)\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
+          "refId": "A"
+        }
+      ],
+      "title": "Eval - openbookqa",
       "type": "trend"
     },
     {
@@ -749,10 +667,10 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 24
+        "x": 0,
+        "y": 28
       },
-      "id": 3,
+      "id": 4,
       "options": {
         "legend": {
           "calcs": [],
@@ -763,7 +681,8 @@
         "tooltip": {
           "mode": "single",
           "sort": "none"
-        }
+        },
+        "xField": "step_int"
       },
       "pluginVersion": "10.4.0",
       "targets": [
@@ -772,12 +691,90 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"openbookqa\")\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
+          "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"task\"] == \"winogrande\")\r\n  |> filter(fn: (r) => r[\"version\"] =~ /${templar_version:regex}$/)\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"version\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"step_int\"], columnKey: [\"version\"], valueColumn: \"_value\")\r\n  |> sort(columns: [\"step_int\"], desc: false)",
           "refId": "A"
         }
       ],
-      "title": "Eval - openbookqa",
+      "title": "Eval - winogrande",
       "type": "trend"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 36
+      },
+      "id": 11,
+      "panels": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influx"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "thresholds"
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 14,
+            "w": 24,
+            "x": 0,
+            "y": 37
+          },
+          "id": 9,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "auto",
+            "wideLayout": true
+          },
+          "pluginVersion": "10.4.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "influxdb",
+                "uid": "influx"
+              },
+              "query": "from(bucket: \"tplr\")\r\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\r\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Ebenchmark_metrics\" or r[\"_measurement\"] == \"Ebenchmark_task\")\r\n  |> filter(fn: (r) => r[\"_field\"] == \"score\")\r\n  |> filter(fn: (r) => r[\"role\"] == \"evaluator\")\r\n  |> filter(fn: (r) => r[\"version\"] =~ /${templar_version:regex}$/)\r\n  |> map(fn: (r) => ({ r with step_int: int(v: r.global_step) }))\r\n  |> group(columns: [\"task\"], mode:\"by\")\r\n  |> pivot(rowKey: [\"version\"], columnKey: [\"task\"], valueColumn: \"_value\")\r\n    |> sort(columns: [\"version\"], desc: false)\r\n",
+              "refId": "A"
+            }
+          ],
+          "title": "All Evals - Latest scores",
+          "type": "stat"
+        }
+      ],
+      "title": "All Evals - Latest Scores",
+      "type": "row"
     }
   ],
   "schemaVersion": 39,
@@ -785,10 +782,39 @@
     "evals"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influx"
+        },
+        "definition": "import \"influxdata/influxdb/schema\"\r\nschema.tagValues(\r\n  bucket: \"tplr\",\r\n  tag: \"version\"\r\n)\r\n  |> filter(fn: (r) =>\r\n    r._value !~ /(dev|test|rtdey|evan|rrr|tes|noa|ttt)/\r\n  )\r\n  |> sort(columns: [\"_value\"], desc: false)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "templar project version",
+        "multi": true,
+        "name": "templar_version",
+        "options": [],
+        "query": "import \"influxdata/influxdb/schema\"\r\nschema.tagValues(\r\n  bucket: \"tplr\",\r\n  tag: \"version\"\r\n)\r\n  |> filter(fn: (r) =>\r\n    r._value !~ /(dev|test|rtdey|evan|rrr|tes|noa|ttt)/\r\n  )\r\n  |> sort(columns: [\"_value\"], desc: false)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 6,
+        "type": "query"
+      }
+    ]
   },
   "time": {
-    "from": "now-30d",
+    "from": "now-7d",
     "to": "now"
   },
   "timepicker": {
@@ -803,6 +829,6 @@
   "timezone": "browser",
   "title": "Eval - Metrics",
   "uid": "ceia6bwlwn8qof",
-  "version": 4,
+  "version": 5,
   "weekStart": ""
 }

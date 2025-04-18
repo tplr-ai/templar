@@ -392,8 +392,7 @@ class TestValidatorState:
         return {
             "gradient_scores": np.random.rand(256),
             "binary_indicator_scores": np.random.randint(0, 2, 256),
-            "gradient_moving_avg_scores": np.random.rand(256),
-            "final_moving_avg_scores": np.random.rand(256),
+            "final_scores": np.random.rand(256),
             "binary_moving_averages": np.random.rand(256),
             "weights": np.random.rand(256),
         }
@@ -415,12 +414,8 @@ class TestValidatorState:
             test_state_data["binary_indicator_scores"],
         )
         assert np.array_equal(
-            mock_validator.gradient_moving_avg_scores,
-            test_state_data["gradient_moving_avg_scores"],
-        )
-        assert np.array_equal(
-            mock_validator.final_moving_avg_scores,
-            test_state_data["final_moving_avg_scores"],
+            mock_validator.final_scores,
+            test_state_data["final_scores"],
         )
         assert np.array_equal(
             mock_validator.binary_moving_averages,

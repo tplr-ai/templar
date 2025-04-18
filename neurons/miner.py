@@ -19,7 +19,9 @@
 # Standard library
 import argparse
 import asyncio
+import concurrent.futures
 import json
+import os
 import random
 import sys
 import threading
@@ -30,6 +32,7 @@ from typing import cast
 import bittensor as bt
 import numpy as np
 import torch
+import uvloop
 
 # Third party
 from bittensor.core.subtensor import ScaleObj
@@ -44,6 +47,9 @@ from transformers import LlamaForCausalLM
 
 # Local
 import tplr
+
+CPU_COUNT = os.cpu_count() or 4
+CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
 # GPU optimizations
 torch.manual_seed(42)
@@ -217,6 +223,9 @@ class Miner:
     async def run(self):
         # Start background block listener
         self.loop = asyncio.get_running_loop()
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
+        self.loop.set_default_executor(self.executor)
+
         self.listener = threading.Thread(
             target=self.block_listener,
             args=(self.loop,),
@@ -766,4 +775,5 @@ class Miner:
 
 # Start miner.
 if __name__ == "__main__":
+    uvloop.install()
     asyncio.run(Miner().run())

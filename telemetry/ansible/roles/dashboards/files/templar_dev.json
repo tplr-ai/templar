@@ -24,45 +24,8 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 4,
-  "links": [
-    {
-      "asDropdown": false,
-      "icon": "external link",
-      "includeVars": false,
-      "keepTime": false,
-      "tags": [],
-      "targetBlank": true,
-      "title": "tplr.ai",
-      "tooltip": "https://tplr.ai/",
-      "type": "link",
-      "url": "https://tplr.ai/"
-    },
-    {
-      "asDropdown": false,
-      "icon": "doc",
-      "includeVars": false,
-      "keepTime": false,
-      "tags": [],
-      "targetBlank": true,
-      "title": "Github",
-      "tooltip": "https://github.com/tplr-ai/templar",
-      "type": "link",
-      "url": "https://github.com/tplr-ai/templar"
-    },
-    {
-      "asDropdown": false,
-      "icon": "external link",
-      "includeVars": false,
-      "keepTime": false,
-      "tags": [],
-      "targetBlank": true,
-      "title": "@tplr_ai",
-      "tooltip": "https://x.com/tplr_ai",
-      "type": "link",
-      "url": "https://x.com/tplr_ai"
-    }
-  ],
+  "id": 7,
+  "links": [],
   "liveNow": true,
   "panels": [
     {
@@ -226,7 +189,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"loss_random_before\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> map(fn: (r) => ({ r with window_int: int(v: r.window) }))\n  |> group(columns: [\"uid\"], mode:\"by\")\n  |> pivot(rowKey: [\"window_int\"], columnKey: [\"uid\"], valueColumn: \"_value\")\n  |> sort(columns: [\"window_int\"], desc: false)",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"loss_random_before\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> map(fn: (r) => ({ r with window_int: int(v: r.window) }))\n  |> group(columns: [\"uid\"], mode:\"by\")\n  |> pivot(rowKey: [\"window_int\"], columnKey: [\"uid\"], valueColumn: \"_value\")\n  |> sort(columns: [\"window_int\"], desc: false)",
           "refId": "A"
         }
       ],
@@ -290,7 +253,8 @@
                 "mode": "absolute",
                 "steps": [
                   {
-                    "color": "green"
+                    "color": "green",
+                    "value": null
                   },
                   {
                     "color": "red",
@@ -331,7 +295,7 @@
             "h": 14,
             "w": 24,
             "x": 0,
-            "y": 21
+            "y": 7
           },
           "id": 28,
           "options": {
@@ -352,7 +316,7 @@
                 "type": "influxdb",
                 "uid": "influx"
               },
-              "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"loss_random_before\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+              "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"loss_random_before\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
               "refId": "A"
             }
           ],
@@ -364,7 +328,7 @@
       "type": "row"
     },
     {
-      "collapsed": true,
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -372,367 +336,369 @@
         "y": 21
       },
       "id": 52,
-      "panels": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "influx"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "decimals": 0,
-              "fieldMinMax": false,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "none"
-            },
-            "overrides": [
-              {
-                "__systemRef": "hideSeriesFrom",
-                "matcher": {
-                  "id": "byNames",
-                  "options": {
-                    "mode": "exclude",
-                    "names": [
-                      "peer_update_time 1"
-                    ],
-                    "prefix": "All except:",
-                    "readOnly": true
-                  }
-                },
-                "properties": [
-                  {
-                    "id": "custom.hideFrom",
-                    "value": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": true
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 8,
-            "x": 0,
-            "y": 22
-          },
-          "id": 34,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "influxdb",
-                "uid": "influx"
-              },
-              "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"peer_update_time\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
-              "refId": "A"
-            }
-          ],
-          "title": "Validator Peer Update Time",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "influx"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "decimals": 0,
-              "fieldMinMax": false,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "none"
-            },
-            "overrides": [
-              {
-                "__systemRef": "hideSeriesFrom",
-                "matcher": {
-                  "id": "byNames",
-                  "options": {
-                    "mode": "exclude",
-                    "names": [
-                      "model_update_time 1"
-                    ],
-                    "prefix": "All except:",
-                    "readOnly": true
-                  }
-                },
-                "properties": [
-                  {
-                    "id": "custom.hideFrom",
-                    "value": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": true
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 8,
-            "x": 8,
-            "y": 22
-          },
-          "id": 53,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "influxdb",
-                "uid": "influx"
-              },
-              "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"model_update_time\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
-              "refId": "A"
-            }
-          ],
-          "title": "Validator Model Update Time",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "influx"
-          },
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "decimals": 0,
-              "fieldMinMax": false,
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              },
-              "unit": "none"
-            },
-            "overrides": [
-              {
-                "__systemRef": "hideSeriesFrom",
-                "matcher": {
-                  "id": "byNames",
-                  "options": {
-                    "mode": "exclude",
-                    "names": [
-                      "window_total_time 1"
-                    ],
-                    "prefix": "All except:",
-                    "readOnly": true
-                  }
-                },
-                "properties": [
-                  {
-                    "id": "custom.hideFrom",
-                    "value": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": true
-                    }
-                  }
-                ]
-              }
-            ]
-          },
-          "gridPos": {
-            "h": 10,
-            "w": 8,
-            "x": 16,
-            "y": 22
-          },
-          "id": 54,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "single",
-              "sort": "none"
-            }
-          },
-          "pluginVersion": "10.4.0",
-          "targets": [
-            {
-              "datasource": {
-                "type": "influxdb",
-                "uid": "influx"
-              },
-              "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"window_total_time\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
-              "refId": "A"
-            }
-          ],
-          "title": "Validator Window Total Time",
-          "type": "timeseries"
-        }
-      ],
+      "panels": [],
       "title": "All Validators update time metrics",
       "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influx"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "fieldMinMax": false,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "__systemRef": "hideSeriesFrom",
+            "matcher": {
+              "id": "byNames",
+              "options": {
+                "mode": "exclude",
+                "names": [
+                  "peer_update_time 1"
+                ],
+                "prefix": "All except:",
+                "readOnly": true
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 22
+      },
+      "id": 34,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influx"
+          },
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"peer_update_time\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Validator Peer Update Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influx"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "fieldMinMax": false,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "__systemRef": "hideSeriesFrom",
+            "matcher": {
+              "id": "byNames",
+              "options": {
+                "mode": "exclude",
+                "names": [
+                  "model_update_time 1"
+                ],
+                "prefix": "All except:",
+                "readOnly": true
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 22
+      },
+      "id": 53,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influx"
+          },
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"model_update_time\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Validator Model Update Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influx"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "decimals": 0,
+          "fieldMinMax": false,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "__systemRef": "hideSeriesFrom",
+            "matcher": {
+              "id": "byNames",
+              "options": {
+                "mode": "exclude",
+                "names": [
+                  "window_total_time 1"
+                ],
+                "prefix": "All except:",
+                "readOnly": true
+              }
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 22
+      },
+      "id": 54,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "10.4.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influx"
+          },
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"window_total_time\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "refId": "A"
+        }
+      ],
+      "title": "Validator Window Total Time",
+      "type": "timeseries"
     },
     {
       "collapsed": false,
@@ -740,7 +706,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 32
       },
       "id": 48,
       "panels": [],
@@ -838,7 +804,7 @@
         "h": 10,
         "w": 8,
         "x": 0,
-        "y": 23
+        "y": 33
       },
       "id": 51,
       "options": {
@@ -860,7 +826,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"gather_time\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"gather_time\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -957,7 +923,7 @@
         "h": 10,
         "w": 8,
         "x": 8,
-        "y": 23
+        "y": 33
       },
       "id": 35,
       "options": {
@@ -979,7 +945,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"evaluation_time\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"evaluation_time\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1077,7 +1043,7 @@
         "h": 10,
         "w": 8,
         "x": 16,
-        "y": 23
+        "y": 33
       },
       "id": 33,
       "options": {
@@ -1099,7 +1065,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"total_skipped\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"total_skipped\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1140,7 +1106,7 @@
         "h": 10,
         "w": 4,
         "x": 0,
-        "y": 33
+        "y": 43
       },
       "id": 30,
       "options": {
@@ -1166,7 +1132,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> filter(fn: (r) => exists r.global_step)\n  |> drop(columns: [\"_value\"])\n  |> keep(columns: [\"_time\", \"global_step\", \"uid\"])\n  |> map(fn: (r) => ({ r with _value: int(v: r.global_step) }))\n  |> group(columns: [\"uid\"])  // Group by uid so that each table is per UID\n  |> keep(columns: [\"_time\", \"_value\", \"uid\"])\n  |> sort(columns: [\"_time\"])\n  |> aggregateWindow(every: 8m, fn: max, createEmpty: false)\n  |> yield(name: \"global_step\")\n",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> filter(fn: (r) => exists r.global_step)\n  |> drop(columns: [\"_value\"])\n  |> keep(columns: [\"_time\", \"global_step\", \"uid\"])\n  |> map(fn: (r) => ({ r with _value: int(v: r.global_step) }))\n  |> group(columns: [\"uid\"])  // Group by uid so that each table is per UID\n  |> keep(columns: [\"_time\", \"_value\", \"uid\"])\n  |> sort(columns: [\"_time\"])\n  |> aggregateWindow(every: 8m, fn: max, createEmpty: false)\n  |> yield(name: \"global_step\")\n",
           "refId": "A"
         }
       ],
@@ -1207,7 +1173,7 @@
         "h": 10,
         "w": 4,
         "x": 4,
-        "y": 33
+        "y": 43
       },
       "id": 32,
       "options": {
@@ -1233,7 +1199,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> filter(fn: (r) => exists r.window)\n  |> drop(columns: [\"_value\"])\n  |> keep(columns: [\"_time\", \"window\", \"uid\"])\n  |> map(fn: (r) => ({ r with _value: int(v: r.window) }))\n  |> group(columns: [\"uid\"])  // Group by uid so that each table is per UID\n  |> keep(columns: [\"_time\", \"_value\", \"uid\"])\n  |> sort(columns: [\"_time\"])\n  |> aggregateWindow(every: 8m, fn: max, createEmpty: false)\n  |> yield(name: \"window\")\n",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> filter(fn: (r) => exists r.window)\n  |> drop(columns: [\"_value\"])\n  |> keep(columns: [\"_time\", \"window\", \"uid\"])\n  |> map(fn: (r) => ({ r with _value: int(v: r.window) }))\n  |> group(columns: [\"uid\"])  // Group by uid so that each table is per UID\n  |> keep(columns: [\"_time\", \"_value\", \"uid\"])\n  |> sort(columns: [\"_time\"])\n  |> aggregateWindow(every: 8m, fn: max, createEmpty: false)\n  |> yield(name: \"window\")\n",
           "refId": "A"
         }
       ],
@@ -1274,7 +1240,7 @@
         "h": 10,
         "w": 4,
         "x": 8,
-        "y": 33
+        "y": 43
       },
       "id": 36,
       "options": {
@@ -1300,7 +1266,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"gather_success_rate\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"gather_success_rate\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1336,7 +1302,7 @@
         "h": 10,
         "w": 4,
         "x": 12,
-        "y": 33
+        "y": 43
       },
       "id": 37,
       "options": {
@@ -1362,7 +1328,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"learning_rate\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"learning_rate\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1398,7 +1364,7 @@
         "h": 10,
         "w": 4,
         "x": 16,
-        "y": 33
+        "y": 43
       },
       "id": 38,
       "options": {
@@ -1424,7 +1390,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"total_peers\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"total_peers\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1460,7 +1426,7 @@
         "h": 10,
         "w": 4,
         "x": 20,
-        "y": 33
+        "y": 43
       },
       "id": 39,
       "options": {
@@ -1486,7 +1452,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"evaluated_uids_count\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\"])\n  |> yield(name: \"_value\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"evaluated_uids_count\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\"])\n  |> yield(name: \"_value\")",
           "refId": "A"
         }
       ],
@@ -1584,7 +1550,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 43
+        "y": 53
       },
       "id": 42,
       "options": {
@@ -1606,7 +1572,7 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"gather_success_rate\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_window_v2\")\n  |> filter(fn: (r) => r._field == \"gather_success_rate\")\n  |> filter(fn: (r) => r[\"role\"] == \"validator\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^\\d+$/)\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
@@ -1619,7 +1585,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 63
       },
       "id": 49,
       "panels": [],
@@ -1694,7 +1660,7 @@
         "h": 14,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 64
       },
       "id": 29,
       "options": {
@@ -1715,91 +1681,12 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\")\n  |> filter(fn: (r) => r._field == \"loss\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^${uid:regex}$/)\n  |> filter(fn: (r) => r[\"role\"] == \"miner\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\")\n  |> filter(fn: (r) => r._field == \"loss\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^${uid:regex}$/)\n  |> filter(fn: (r) => r[\"role\"] == \"miner\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"uid\", \"_field\"])\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
           "refId": "A"
         }
       ],
       "title": "Miners Loss",
       "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "influx"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 11,
-        "w": 24,
-        "x": 0,
-        "y": 68
-      },
-      "id": 40,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "/^_value$/",
-          "values": true
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "10.4.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "influx"
-          },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\")\n  |> filter(fn: (r) => r._field == \"tokens_per_sec\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^${uid:regex}$/)\n  |> filter(fn: (r) => r[\"role\"] == \"miner\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> group()\n  |> top(n: 20, columns: [\"_value\"])\n  |> sort(columns: [\"_value\"], desc: true)\n  |> keep(columns: [\"_value\", \"uid\"])\n  |> yield(name: \"global_top_20_mean\")",
-          "refId": "A"
-        }
-      ],
-      "title": "Training Throughput (tokens/sec) - TOP 20",
-      "type": "stat"
-    },
-    {
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 79
-      },
-      "id": 50,
-      "panels": [],
-      "repeat": "validator_uid",
-      "repeatDirection": "h",
-      "title": "Validator $validator_uid Metrics",
-      "type": "row"
     },
     {
       "datasource": {
@@ -1832,10 +1719,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 10,
-        "w": 24,
+        "h": 23,
+        "w": 12,
         "x": 0,
-        "y": 80
+        "y": 78
       },
       "id": 6,
       "options": {
@@ -1861,11 +1748,11 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r._field == \"weight\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${validator_uid}\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"eval_uid\"] =~ /^${uid:regex}$/)\n  |> group(columns: [\"_field\", \"eval_uid\"])\n  |> last()\n  |> keep(columns: [\"eval_uid\", \"_value\"])\n  |> filter(fn: (r) => r._value > 0)\n  |> group()\n  |> sort(columns: [\"_value\"], desc: true)\n  |> yield(name: \"weight_per_eval_uid\")\n",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r._field == \"weight\")\n  |> filter(fn: (r) => r[\"uid\"] == \"1\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> filter(fn: (r) => r[\"eval_uid\"] =~ /^${uid:regex}$/)\n  |> group(columns: [\"_field\", \"eval_uid\"])\n  |> last()\n  |> keep(columns: [\"eval_uid\", \"_value\"])\n  |> filter(fn: (r) => r._value > 0)\n  |> group()\n  |> sort(columns: [\"_value\"], desc: true)\n  |> yield(name: \"weight_per_eval_uid\")\n",
           "refId": "A"
         }
       ],
-      "title": "Evaluated UID Weights (Miners)",
+      "title": "Evaluated UID Weights (Miners) - Validator 1 only",
       "type": "stat"
     },
     {
@@ -1876,178 +1763,47 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
-          "custom": {
-            "axisBorderShow": true,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineStyle": {
-              "dash": [
-                0,
-                10
-              ],
-              "fill": "dot"
-            },
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "decimals": 4,
-          "fieldMinMax": false,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "green",
                 "value": null
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 17,
-        "w": 12,
-        "x": 0,
-        "y": 90
-      },
-      "id": 41,
-      "interval": "1m",
-      "maxDataPoints": 2128,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "right",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "10.4.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "influx"
-          },
-          "query": "// Get timestamps \nstart = v.timeRangeStart\nstop = v.timeRangeStop\n\n// If the time range is greater than 1 hour, limit to most recent hour\nadjustedStart = if (int(v: stop) - int(v: start)) > 3600000000000 then \n  time(v: int(v: stop) - 3600000000000) \nelse \n  start\n\nfrom(bucket: \"tplr\")\n  |> range(start: adjustedStart, stop: stop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r[\"_field\"] == \"weight\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${validator_uid}\")\n  |> filter(fn: (r) => r[\"eval_uid\"] =~ /^${uid:regex}$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"_field\", \"eval_uid\"])\n  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
-          "refId": "A"
-        }
-      ],
-      "title": "Validator Weight Score (per eval uid)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "influx"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": true,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisGridShow": true,
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineStyle": {
-              "fill": "solid"
-            },
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "decimals": 4,
-          "fieldMinMax": false,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
+              },
               {
                 "color": "red",
-                "value": null
+                "value": 80
               }
             ]
-          },
-          "unit": "none"
+          }
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 17,
+        "h": 23,
         "w": 12,
         "x": 12,
-        "y": 90
+        "y": 78
       },
-      "id": 44,
+      "id": 40,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "right",
-          "showLegend": true
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^_value$/",
+          "values": true
         },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
       },
       "pluginVersion": "10.4.0",
       "targets": [
@@ -2056,19 +1812,222 @@
             "type": "influxdb",
             "uid": "influx"
           },
-          "query": "// Get timestamps \nstart = v.timeRangeStart\nstop = v.timeRangeStop\n\n// If the time range is greater than 1 hour, limit to most recent hour\nadjustedStart = if (int(v: stop) - int(v: start)) > 3600000000000 then \n  time(v: int(v: stop) - 3600000000000) \nelse \n  start\n\nfrom(bucket: \"tplr\")\n  |> range(start: adjustedStart, stop: stop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r._field == \"gradient_score\")\n  |> filter(fn: (r) => r[\"uid\"] == \"${validator_uid}\")\n  |> filter(fn: (r) => r[\"eval_uid\"] =~ /^${uid:regex}$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"_field\", \"eval_uid\"])\n  |> aggregateWindow(every: 30m, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+          "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Mtraining_step_v2\")\n  |> filter(fn: (r) => r._field == \"tokens_per_sec\")\n  |> filter(fn: (r) => r[\"uid\"] =~ /^${uid:regex}$/)\n  |> filter(fn: (r) => r[\"role\"] == \"miner\")\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"${config_netuid}\")\n  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)\n  |> group()\n  |> top(n: 20, columns: [\"_value\"])\n  |> sort(columns: [\"_value\"], desc: true)\n  |> keep(columns: [\"_value\", \"uid\"])\n  |> yield(name: \"global_top_20_mean\")",
           "refId": "A"
         }
       ],
-      "title": "Validator Gradient Score (per eval uid)",
-      "type": "timeseries"
+      "title": "Training Throughput (tokens/sec) - TOP 20",
+      "type": "stat"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 101
+      },
+      "id": 50,
+      "panels": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influx"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": true,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineStyle": {
+                  "dash": [
+                    0,
+                    10
+                  ],
+                  "fill": "dot"
+                },
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "decimals": 4,
+              "fieldMinMax": false,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red"
+                  }
+                ]
+              },
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 17,
+            "w": 12,
+            "x": 0,
+            "y": 24
+          },
+          "id": 41,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "10.4.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "influxdb",
+                "uid": "influx"
+              },
+              "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r[\"_measurement\"] == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r[\"_field\"] == \"weight\")\n  |> filter(fn: (r) => r[\"eval_uid\"] =~ /^${uid:regex}$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"_field\", \"eval_uid\"])\n  |> aggregateWindow(every: 30m, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")",
+              "refId": "A"
+            }
+          ],
+          "title": "Validator Weight Score (per eval uid) - Validator 1 only",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influx"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": true,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisGridShow": true,
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 0,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "decimals": 4,
+              "fieldMinMax": false,
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red"
+                  }
+                ]
+              },
+              "unit": "none"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 17,
+            "w": 12,
+            "x": 12,
+            "y": 24
+          },
+          "id": 44,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "right",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "10.4.0",
+          "targets": [
+            {
+              "datasource": {
+                "type": "influxdb",
+                "uid": "influx"
+              },
+              "query": "from(bucket: \"tplr\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"Vvalidator_scores\")\n  |> filter(fn: (r) => r._field == \"gradient_score\")\n  |> filter(fn: (r) => r[\"uid\"] == \"1\")  \n  |> filter(fn: (r) => r[\"eval_uid\"] =~ /^${uid:regex}$/)\n  |> filter(fn: (r) => r[\"version\"] == \"${templar_version}\")\n  |> filter(fn: (r) => r[\"config_netuid\"] == \"3\")\n  |> filter(fn: (r) => r[\"config_project\"] == \"templar\")\n  |> sort(columns: [\"_time\"])\n  |> group(columns: [\"_field\", \"eval_uid\"])\n  |> aggregateWindow(every: 30m, fn: mean, createEmpty: false)\n  |> yield(name: \"mean\")\n",
+              "refId": "A"
+            }
+          ],
+          "title": "Validator Gradient Score (per eval uid) - Validator 1 only",
+          "type": "timeseries"
+        }
+      ],
+      "title": "Validator 1 Metrics",
+      "type": "row"
     }
   ],
   "refresh": "",
   "schemaVersion": 39,
-  "tags": [
-    "templar"
-  ],
+  "tags": [],
   "templating": {
     "list": [
       {
@@ -2102,32 +2061,18 @@
       },
       {
         "current": {
-          "selected": false,
-          "text": "0.2.73",
-          "value": "0.2.73"
+          "selected": true,
+          "text": "0.2.72dev-evan3",
+          "value": "0.2.72dev-evan3"
         },
-        "datasource": {
-          "type": "marcusolsson-json-datasource",
-          "uid": "templar-version-json"
-        },
-        "definition": "$.version",
+        "definition": "import \"influxdata/influxdb/schema\"\r\n\r\nschema.tagValues(\r\n  bucket: \"tplr\",\r\n  tag: \"version\"\r\n)\r\n  |> filter(fn: (r) =>\r\n    r._value =~ /dev|test/\r\n  )",
         "hide": 1,
         "includeAll": false,
         "label": "templar project version",
         "multi": false,
         "name": "templar_version",
         "options": [],
-        "query": {
-          "cacheDurationSeconds": 30,
-          "fields": [
-            {
-              "jsonPath": "$.version"
-            }
-          ],
-          "method": "GET",
-          "queryParams": "",
-          "urlPath": ""
-        },
+        "query": "import \"influxdata/influxdb/schema\"\r\n\r\nschema.tagValues(\r\n  bucket: \"tplr\",\r\n  tag: \"version\"\r\n)\r\n  |> filter(fn: (r) =>\r\n    r._value =~ /dev|test/\r\n  )",
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
@@ -2135,38 +2080,29 @@
         "type": "query"
       },
       {
-        "allValue": "1",
         "current": {
-          "selected": true,
-          "text": [
-            "1"
-          ],
-          "value": [
-            "1"
-          ]
+          "selected": false,
+          "text": "2",
+          "value": "2"
         },
-        "datasource": {
-          "type": "influxdb",
-          "uid": "influx"
-        },
-        "definition": "import \"influxdata/influxdb/schema\"\nimport \"influxdata/influxdb/v1\"\n\nv1.tagValues(\n  bucket: \"tplr\",\n  tag: \"uid\",\n  predicate: (r) => r._measurement == \"Vvalidator_window_v2\" and r.role == \"validator\" and r.config_netuid == \"3\" and r.config_project == \"templar\" and r.version == \"${templar_version}\"\n)\n  |> sort()",
-        "hide": 2,
-        "includeAll": true,
-        "label": "Validator Uid",
-        "multi": true,
-        "name": "validator_uid",
+        "definition": "import \"influxdata/influxdb/schema\"\r\n\r\nschema.tagValues(\r\n  bucket: \"tplr\",\r\n  tag: \"config_netuid\"\r\n)",
+        "hide": 0,
+        "includeAll": false,
+        "label": "dev netuid",
+        "multi": false,
+        "name": "config_netuid",
         "options": [],
-        "query": "import \"influxdata/influxdb/schema\"\nimport \"influxdata/influxdb/v1\"\n\nv1.tagValues(\n  bucket: \"tplr\",\n  tag: \"uid\",\n  predicate: (r) => r._measurement == \"Vvalidator_window_v2\" and r.role == \"validator\" and r.config_netuid == \"3\" and r.config_project == \"templar\" and r.version == \"${templar_version}\"\n)\n  |> sort()",
+        "query": "import \"influxdata/influxdb/schema\"\r\n\r\nschema.tagValues(\r\n  bucket: \"tplr\",\r\n  tag: \"config_netuid\"\r\n)",
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
-        "sort": 5,
+        "sort": 0,
         "type": "query"
       }
     ]
   },
   "time": {
-    "from": "now-3h",
+    "from": "now-30m",
     "to": "now"
   },
   "timepicker": {
@@ -2181,8 +2117,8 @@
     ]
   },
   "timezone": "",
-  "title": "Templar Metrics",
-  "uid": "templar_metrics",
-  "version": 62,
+  "title": "Templar Dev Gathers",
+  "uid": "templar_dev_gathers",
+  "version": 4,
   "weekStart": ""
 }

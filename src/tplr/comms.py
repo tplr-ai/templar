@@ -15,46 +15,47 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 # type: ignore
+import asyncio
+import concurrent.futures
+import json
+import math
 import os
 import random
 import re
-import math
-import json
 import time
-from aiobotocore.client import AioBaseClient
-from botocore.exceptions import ClientError, ConnectionClosedError
+from datetime import datetime, timezone
+
+# from .hparams import HParams
+from types import SimpleNamespace
+from typing import Any, Dict, List, Literal, Optional, Tuple
+
+import aiofiles
+import bittensor as bt
+import botocore
 import numpy as np
 import torch
-import asyncio
-import aiofiles
-import botocore
-from datetime import datetime, timezone
-import bittensor as bt
-
-from tqdm import tqdm as std_tqdm
-from typing import List, Dict, Literal, Optional
+from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
-
-from . import __version__
-from .config import client_config, BUCKET_SECRETS
-from .chain import ChainManager
-from .schemas import Bucket
-
-import tplr as tplr
-# from .hparams import HParams
-
-from types import SimpleNamespace
-from typing import Any, Tuple
-from transformers import LlamaForCausalLM
+from botocore.exceptions import ClientError, ConnectionClosedError
 from torch.optim import SGD
 from torch.optim.lr_scheduler import SequentialLR
-from .compress import TransformDCT, CompressDCT
+from tqdm import tqdm as std_tqdm
+from transformers import LlamaForCausalLM
 
+import tplr as tplr
+
+from . import __version__
+from .chain import ChainManager
+from .compress import CompressDCT, TransformDCT
+from .config import BUCKET_SECRETS, client_config
+from .schemas import Bucket
 
 # Constants
 CF_REGION_NAME: str = "enam"
 LOCAL_TMP_DIR = "/tmp/local_store"
 PEERS_FILE_PREFIX = "peers_"
+CPU_COUNT = os.cpu_count() or 4
+CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
 # Types
 PeerArray = np.ndarray[Any, np.dtype[np.int64]]
@@ -112,9 +113,7 @@ class Comms(ChainManager):
             self.hparams.recent_windows
         )  # Number of recent windows to check
 
-        # Add connection management
-        self.client_semaphore = asyncio.Semaphore(30)  # Limit concurrent connections
-        self.retry_config = {"max_attempts": 3, "backoff_base": 1.5}
+        self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
 
     async def _get_s3_client(self, bucket: Bucket):
         """
@@ -161,6 +160,10 @@ class Comms(ChainManager):
 
     def start_background_tasks(self):
         self.loop = asyncio.get_running_loop()
+
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
+        self.loop.set_default_executor(self.executor)
+
         # Start background tasks
         self.loop.create_task(self.track_active_peers())
 
@@ -855,12 +858,26 @@ class Comms(ChainManager):
         """GET with retry operation."""
         start_time = time.time()
         end_time = start_time + timeout
+        tried_after_time_max = False  # Track if we've tried once after passing time_max
 
         while True:
+            # Check if we've timed out
             if time.time() >= end_time:
                 tplr.logger.debug(f"GET {uid}/{window}/{key} timed out.")
                 return None
 
+            # Check if we're past time_max
+            now = datetime.now(timezone.utc)
+            past_time_max = time_max is not None and now > time_max
+
+            # If we're past time_max and already tried once, don't retry again
+            if past_time_max and tried_after_time_max:
+                tplr.logger.debug(
+                    f"Already tried once after time_max for UID {uid}, window {window}. Stopping retries."
+                )
+                return None
+
+            # Make the request
             state_dict = await self.get(
                 uid=uid,
                 window=window,
@@ -871,7 +888,7 @@ class Comms(ChainManager):
                 time_max=time_max,
             )
 
-            # Check for TOO_LATE/TOO_EARLY markers - stop retrying immediately
+            # Check for TOO_LATE/TOO_EARLY markers
             if isinstance(state_dict, dict):
                 if state_dict.get("__status") == "TOO_LATE":
                     tplr.logger.info(
@@ -884,10 +901,18 @@ class Comms(ChainManager):
                     )
                     return None
 
+            # If we got a result, return it
             if state_dict is not None:
                 return state_dict
 
-            # Retry after a short delay
+            # If we're past time_max, mark that we've tried once
+            if past_time_max:
+                tried_after_time_max = True
+                tplr.logger.debug(
+                    f"Past time_max for UID {uid}, window {window}. This is the final retry."
+                )
+
+            # Short delay before retrying
             await asyncio.sleep(0.1)
 
     async def gather(
@@ -1138,8 +1163,8 @@ class Comms(ChainManager):
         """Background task to keep track of active peers."""
         while True:
             active_peers = set()
-            tasks = []
-            semaphore = asyncio.Semaphore(10)  # Limit concurrent S3 requests
+            max_concurrent = min(30, len(self.commitments) if self.commitments else 10)
+            semaphore = asyncio.Semaphore(max_concurrent)
 
             tplr.logger.debug(f"Commitments: {self.commitments}")
 
@@ -1151,10 +1176,15 @@ class Comms(ChainManager):
                     if is_active:
                         active_peers.add(uid)
 
-            for uid in self.commitments.keys():
-                tasks.append(check_peer(uid))
+            # Buffer the processing of commitments to avoid blocking the event loop (over resourcing)
+            batch_size = 50
+            commitment_uids = list(self.commitments.keys())
 
-            await asyncio.gather(*tasks)
+            for i in range(0, len(commitment_uids), batch_size):
+                batch_uids = commitment_uids[i : i + batch_size]
+                batch_tasks = [check_peer(uid) for uid in batch_uids]
+                await asyncio.gather(*batch_tasks)
+
             self.active_peers = active_peers
 
             tplr.logger.info(
@@ -1528,6 +1558,9 @@ class Comms(ChainManager):
                     sorted_windows = sorted(window_to_keys, reverse=True)
                     selected_window = sorted_windows[1]  # Second most recent
                     tplr.logger.info(f"Selected previous window {selected_window}")
+                elif fetch_previous and len(window_to_keys) <= 1:
+                    tplr.logger.info(f"Found no previous window {selected_window}")
+                    return None
                 else:
                     selected_window = max(window_to_keys)  # Most recent
                     tplr.logger.info(f"Selected most recent window {selected_window}")

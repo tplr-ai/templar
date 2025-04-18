@@ -17,18 +17,24 @@
 
 import argparse
 import asyncio
+import concurrent.futures
 import gc
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
 import bittensor as bt
+import uvloop
 from bittensor.core.subtensor import ScaleObj
 from transformers import LlamaConfig, LlamaForCausalLM
 
 # Import tplr functions
 import tplr
+
+CPU_COUNT = os.cpu_count() or 4
+CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
 
 class AggregationServer:
@@ -202,6 +208,7 @@ class AggregationServer:
 
     async def process_window(self):
         """Process a single window: gather gradients, aggregate, and store."""
+        get_data_start = tplr.T()
         tplr.logger.info(
             f"Starting window processing (iteration {self.iteration_counter}, window {self.sync_window - 1})"
         )
@@ -232,29 +239,6 @@ class AggregationServer:
             time_max = datetime.now(timezone.utc) + timedelta(minutes=30)
             tplr.logger.info(f"Using fallback time window: {time_min} to {time_max}")
 
-        # Wait until t_max has passed, plus additional wait time
-        now = datetime.now(timezone.utc)
-        if now < time_max:
-            wait_seconds = (time_max - now).total_seconds() + cast(
-                int, self.config.wait_time
-            )
-            tplr.logger.info(
-                f"Waiting {wait_seconds:.1f} seconds until after t_max plus {self.config.wait_time}s buffer..."
-            )
-            await asyncio.sleep(wait_seconds)
-            tplr.logger.info(
-                f"Wait complete. Starting gradient collection at {datetime.now(timezone.utc)}"
-            )
-        else:
-            # We're already past t_max, just add a small buffer
-            tplr.logger.info(
-                f"Already past t_max. Waiting additional {self.config.wait_time}s buffer..."
-            )
-            await asyncio.sleep(cast(int, self.config.wait_time))
-            tplr.logger.info(
-                f"Wait complete. Starting gradient collection at {datetime.now(timezone.utc)}"
-            )
-
         # Use comms to select gather peers
         peer_start = tplr.T()
         await tplr.neurons.update_peers(
@@ -269,6 +253,8 @@ class AggregationServer:
             f"Selection parameters: topk={self.hparams.topk_peers}%, min={self.hparams.minimum_peers}, max_topk={self.hparams.max_topk_peers}"
         )
         tplr.logger.info(f"Selected UIDs: {selected_uids}")
+
+        get_data_time = tplr.T() - get_data_start
 
         # Use the gather function to collect gradients
         tplr.logger.info(
@@ -372,7 +358,7 @@ class AggregationServer:
             )
 
             # Print summary
-            total_time = gather_time + process_time + store_time
+            total_time = get_data_time + gather_time + process_time + store_time
             tplr.logger.info(f"Window: {self.sync_window - 1}")
             tplr.logger.info(f"Target UIDs: {selected_uids}")
             tplr.logger.info(
@@ -442,13 +428,13 @@ class AggregationServer:
 
         # Start background block listener thread
         self.loop = asyncio.get_running_loop()
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
+        self.loop.set_default_executor(self.executor)
+
         self.stop_event = asyncio.Event()
         self.listener = threading.Thread(
             target=self.block_listener, args=(self.loop,), daemon=True
         ).start()
-
-        # Initialize comms background tasks
-        self.comms.start_background_tasks()
 
         # Set up sync window to track which windows we've processed
         self.sync_window = self.current_window
@@ -542,4 +528,5 @@ class AggregationServer:
 
 # Start the aggregation server
 if __name__ == "__main__":
+    uvloop.install()
     asyncio.run(AggregationServer().run())

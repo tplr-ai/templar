@@ -17,6 +17,12 @@ import psutil
 from pathlib import Path
 from transformers import AutoTokenizer
 import sys
+import uvloop
+import concurrent.futures
+import os
+
+# Get CPU count for thread pool
+CPU_COUNT = os.cpu_count() or 4
 
 # Find and load the correct .env file
 env_path = Path(__file__).parent.parent.parent / ".env"
@@ -51,6 +57,10 @@ class ParquetLoaderBenchmark:
         self.hparams = tplr.load_hparams()
         self.tokenizer = self.hparams.tokenizer
         self.results = []
+
+        R2DatasetLoader.MAX_CONCURRENT_REQUESTS = CPU_COUNT * 2
+        R2DatasetLoader.READ_BUFFER_SIZE = 8 * 1024 * 1024
+        R2DatasetLoader._metadata_cache = {}
 
     async def benchmark_loader(
         self, n_pages, batch_size, sequence_length, n_iterations=3
@@ -188,6 +198,11 @@ async def main():
         (24, 16, 2048),
     ]
 
+    loop = asyncio.get_running_loop()
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
+
+    loop.set_default_executor(executor)
+
     for n_pages, batch_size, sequence_length in configs:
         logger.info(
             f"\nTesting configuration: pages={n_pages}, batch={batch_size}, seq={sequence_length}"
@@ -224,4 +239,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    uvloop.install()
     asyncio.run(main())

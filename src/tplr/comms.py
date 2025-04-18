@@ -1220,7 +1220,7 @@ class Comms(ChainManager):
         tplr.logger.info(f"Validator Bucket: {validator_bucket}")
         return validator_bucket, validator_uid
 
-    async def get_latest_checkpoint(self):
+    async def get_latest_checkpoint(self, version):
         """
         Sequentially check:
         1. Whether the highest-staked validator has a checkpoint.
@@ -1236,7 +1236,7 @@ class Comms(ChainManager):
             ) = await self._get_highest_stake_validator_bucket()
             if validator_bucket:
                 result = await self._get_bucket_checkpoint(
-                    validator_bucket, validator_uid
+                    validator_bucket, validator_uid, version
                 )
                 if result:
                     # If successfully retrieved, return immediately.
@@ -1245,7 +1245,7 @@ class Comms(ChainManager):
             # 2. Check self R2 bucket
             self_bucket = self.bucket  # Use self.bucket saved in __init__
             if self_bucket:
-                result = await self._get_bucket_checkpoint(self_bucket, self.uid)
+                result = await self._get_bucket_checkpoint(self_bucket, self.uid, version)
                 if result:
                     return result
 
@@ -1378,7 +1378,7 @@ class Comms(ChainManager):
             tuple: (success: bool, momentum: dict, checkpoint_current_window: int,
                     optimizer: Optimizer, scheduler: LRScheduler)
         """
-        result = await self.get_latest_checkpoint()
+        result = await self.get_latest_checkpoint(init_version)
         if not result:
             tplr.logger.info("No valid checkpoints found")
             return False, {}, 0, optimizer, scheduler
@@ -2051,18 +2051,3 @@ class Comms(ChainManager):
         tplr.logger.debug(f"Final selected items: {selected}")
         return selected
 
-    async def _get_latest_checkpoint(self, *, version: str):
-        """Uses version‑aware regex when scanning buckets / local."""
-        # 1. Highest‑stake validator bucket
-        vb, vu = await self._get_highest_stake_validator_bucket()
-        if vb:
-            r = await self._get_bucket_checkpoint(vb, vu, version)
-            if r:
-                return r
-        # 2. own bucket
-        if self.bucket:
-            r = await self._get_bucket_checkpoint(self.bucket, self.uid, version)
-            if r:
-                return r
-        # 3. local
-        return self._load_latest_local_checkpoint(version)

@@ -174,6 +174,12 @@ class Miner:
             milestones=[250],
         )
 
+        self.bootstrap_version: str | None = self.config.checkpoint_init_version
+        tplr.logger.info(
+            f"[Miner] code_version={tplr.__version__} "
+            f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
+        )
+
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
@@ -184,6 +190,7 @@ class Miner:
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
+            checkpoint_version=self.bootstrap_version,
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
@@ -229,7 +236,7 @@ class Miner:
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
 
-        self.bootstrap_version: str | None = self.config.checkpoint_init_version
+
 
     # Main training loop.
     async def run(self):

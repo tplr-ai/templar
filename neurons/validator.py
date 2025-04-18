@@ -202,8 +202,13 @@ class Validator:
             milestones=[250],
         )
 
-        # Init comms with required chain management args,
-        # including transformer and compressor for gradient decoding.
+        self.bootstrap_version: str | None = self.config.checkpoint_init_version
+        tplr.logger.info(
+            f"[Miner] code_version={tplr.__version__} "
+            f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
+        )
+
+        # Init comms 
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",
@@ -213,7 +218,7 @@ class Validator:
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
-            totalks=self.totalks,
+            checkpoint_version=self.bootstrap_version,
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")

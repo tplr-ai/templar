@@ -89,7 +89,7 @@ def config() -> bt.Config:
     parser.add_argument(
         "--tasks",
         type=str,
-        default="arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu,mmlu_flan_n_shot_generative",
+        default="arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu",
         help="Comma-separated list of tasks to evaluate",
     )
     parser.add_argument(
@@ -487,11 +487,11 @@ class Evaluator:
         self.eval_counter += 1
 
         task_list: list[str] = self.config.tasks.split(",")  # type: ignore
-        has_mmlu_task = "mmlu_flan_n_shot_generative" in task_list
+        has_mmlu_task = "mmlu" in task_list
         should_run_mmlu_n_shot = has_mmlu_task and (
             self.config.skip_gaps or self.eval_counter % 4 == 0
         )
-        regular_tasks = [t for t in task_list if t != "mmlu_flan_n_shot_generative"]
+        regular_tasks = [t for t in task_list if t != "mmlu"]
         tasks = ",".join(regular_tasks)
 
         if tasks:
@@ -515,12 +515,10 @@ class Evaluator:
             tplr.logger.info("No regular tasks to run")
 
         if should_run_mmlu_n_shot:
-            tplr.logger.info(
-                f"Run #{self.eval_counter}: Running mmlu_flan_n_shot_generative"
-            )
+            tplr.logger.info(f"Run #{self.eval_counter}: Running mmlu")
 
             exit_code, benchmark_runtime = self._run_lm_eval(
-                tasks="mmlu_flan_n_shot_generative",
+                tasks="mmlu",
                 output_dir=results_dir,
                 model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH},dtype=bfloat16",
                 batch_size="auto",
@@ -529,7 +527,7 @@ class Evaluator:
             )
 
             self._process_results(
-                task_name="mmlu_flan_n_shot_generative",
+                task_name="mmlu",
                 results_dir=results_dir,
                 global_step=global_step,
                 checkpoint_window=checkpoint_window,
@@ -541,7 +539,7 @@ class Evaluator:
             torch.cuda.empty_cache()
         elif has_mmlu_task:
             tplr.logger.info(
-                f"Skipping mmlu_flan_n_shot_generative (run #{self.eval_counter}, next at run #{(self.eval_counter // 4 + 1) * 4})"
+                f"Skipping mmlu (run #{self.eval_counter}, next at run #{(self.eval_counter // 4 + 1) * 4})"
             )
 
         shutil.rmtree(MODEL_PATH)

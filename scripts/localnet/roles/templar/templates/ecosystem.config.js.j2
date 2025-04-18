@@ -16,7 +16,7 @@ module.exports = {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
-            args: `--wallet.name {{ cold_wallet_name }} --wallet.hotkey {{ hk }} --device cuda:{{ miner_devices[loop.index0] if miner_devices is defined else loop.index0 }} --subtensor.network {{ network }} --netuid {{ netuid }} --enable-influxdb --use_wandb --project "${PROJECT_NAME}"`
+            args: `--wallet.name "{{ cold_wallet_name }}_{{ hk }}" --wallet.hotkey default --device cuda:{{ miner_devices[loop.index0] if miner_devices is defined else loop.index0 }} --subtensor.network {{ network }} --netuid {{ netuid }} --enable-influxdb --use_wandb --project "${PROJECT_NAME}"`
         }{% if not loop.last or validator_hotkeys|length > 0 or (aggregator_hotkeys|default([]))|length > 0 %},{% endif %}
         {% endfor %}
         {% for hk in validator_hotkeys %}
@@ -28,7 +28,7 @@ module.exports = {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
-            args: `--wallet.name {{ cold_wallet_name }} --wallet.hotkey {{ hk }} --device cuda:{{ validator_devices[loop.index0] if validator_devices is defined else loop.index0 + (miner_hotkeys|length if miner_hotkeys is defined else 0) }} --subtensor.network {{ network }} --netuid {{ netuid }} --enable-influxdb --use_wandb --project "${PROJECT_NAME}"`
+            args: `--wallet.name "{{ cold_wallet_name }}_{{ hk }}" --wallet.hotkey default --device cuda:{{ validator_devices[loop.index0] if validator_devices is defined else loop.index0 + (miner_hotkeys|length if miner_hotkeys is defined else 0) }} --subtensor.network {{ network }} --netuid {{ netuid }} --enable-influxdb --use_wandb --project "${PROJECT_NAME}"`
         }{% if not loop.last or (aggregator_hotkeys|default([]))|length > 0 %},{% endif %}
         {% endfor %}
         {% for hk in aggregator_hotkeys|default([]) %}
@@ -40,7 +40,13 @@ module.exports = {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
-            args: `--wallet.name {{ cold_wallet_name }} --wallet.hotkey {{ hk }} --device cuda:{{ aggregator_devices[loop.index0] if aggregator_devices is defined else loop.index0 + (validator_hotkeys|length + miner_hotkeys|length if validator_hotkeys is defined and miner_hotkeys is defined else 0) }} --subtensor.network {{ network }} --netuid {{ netuid }} --enable-influxdb --use_wandb --project "${PROJECT_NAME}"`
+            {% if validator_hotkeys|length >= loop.index %}
+            {# If there's a corresponding validator, use the same GPU as that validator #}
+            args: `--wallet.name "{{ cold_wallet_name }}_{{ hk }}" --wallet.hotkey default --device cuda:{{ validator_devices[loop.index0] if validator_devices is defined else loop.index0 + (miner_hotkeys|length if miner_hotkeys is defined else 0) }} --subtensor.network {{ network }} --netuid {{ netuid }} --enable-influxdb --use_wandb --project "${PROJECT_NAME}"`
+            {% else %}
+            {# If there's no corresponding validator, use a fallback device allocation #}
+            args: `--wallet.name "{{ cold_wallet_name }}_{{ hk }}" --wallet.hotkey default --device cuda:{{ aggregator_devices[loop.index0] if aggregator_devices is defined else loop.index0 % (validator_hotkeys|length if validator_hotkeys|length > 0 else 1) + (miner_hotkeys|length if miner_hotkeys is defined else 0) }} --subtensor.network {{ network }} --netuid {{ netuid }} --enable-influxdb --use_wandb --project "${PROJECT_NAME}"`
+            {% endif %}
         }{% if not loop.last %},{% endif %}
         {% endfor %}
     ]

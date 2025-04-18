@@ -32,6 +32,7 @@ dependencies = [
     "multiprocessing-logging>=0.3.4",
     "python-logging-loki>=0.3.1",
     "uvloop>=0.21.0",
+    "openskill>=6.0.2",
 ]
 
 [project.optional-dependencies]

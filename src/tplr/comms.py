@@ -72,6 +72,7 @@ class Comms(ChainManager):
         metagraph=None,
         hparams=None,
         uid=None,
+        checkpoint_version: str | None = None,
         **kwargs,
     ):
         self.wallet = wallet
@@ -114,6 +115,13 @@ class Comms(ChainManager):
         )  # Number of recent windows to check
 
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
+
+        # fallback to code‑version when flag not supplied
+        self.checkpoint_version: str = checkpoint_version or __version__
+
+        # keep a reference to the *whole* ckpt that was loaded once, so
+        # miners / validators can consult keys such as `start_window`.
+        self.last_checkpoint_data: dict[str, Any] | None = None
 
     async def _get_s3_client(self, bucket: Bucket):
         """
@@ -780,7 +788,7 @@ class Comms(ChainManager):
         time_max: datetime = None,
     ) -> Optional[tuple[dict, int]]:
         """GET operation."""
-        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        filename = f"{key}-{window}-{uid}-v{self.checkpoint_version}.pt"
         tplr.logger.debug(f"GET {filename} -->")
 
         try:
@@ -1242,7 +1250,7 @@ class Comms(ChainManager):
                     return result
 
             # 3. Check local storage
-            local_result = self._load_latest_local_checkpoint()
+            local_result = self._load_latest_local_checkpoint(self.checkpoint_version)
             if local_result:
                 return local_result
 
@@ -1255,10 +1263,10 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error getting latest checkpoint: {e}")
             return None
 
-    def _load_latest_local_checkpoint(self):
+    def _load_latest_local_checkpoint(self, version: str):
         try:
             local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
-            pattern = rf"checkpoint-(\d+)-{self.uid}-v{__version__}\.pt$"
+            pattern = rf"checkpoint-(\d+)-{self.uid}-v{re.escape(version)}\.pt$"
 
             if not os.path.exists(local_dir):
                 return None
@@ -1294,14 +1302,14 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error in local checkpoint loading: {e}")
             return None
 
-    async def _get_bucket_checkpoint(self, bucket, uid):
+    async def _get_bucket_checkpoint(self, bucket, uid, version: str):
         """Helper to get checkpoint from a specific bucket."""
         try:
             s3_client = await self._get_s3_client(bucket)
 
-            pattern = re.compile(rf"^checkpoint-(\d+)-{uid}-v{__version__}\.pt$")
+            pat = re.compile(rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$")
 
-            # We’ll track the largest checkpoint window and its key
+            # We'll track the largest checkpoint window and its key
             latest_checkpoint = None
             max_window = -1
 
@@ -1325,7 +1333,7 @@ class Comms(ChainManager):
                 # Iterate through returned objects to find valid checkpoints
                 for obj in response["Contents"]:
                     key = obj.get("Key", "")
-                    match = pattern.match(key)
+                    match = pat.match(key)
                     if match:
                         window_number = int(match.group(1))
                         if window_number > max_window:
@@ -1360,6 +1368,7 @@ class Comms(ChainManager):
         scheduler,
         current_window: int,
         device: str,
+        init_version: Optional[str] = None,  
     ) -> tuple[
         bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
     ]:
@@ -1409,6 +1418,8 @@ class Comms(ChainManager):
                 f"checkpoint_sync_window={checkpoint_sync_window}, "
                 f"local_current_window={current_window}"
             )
+
+            self.last_checkpoint_data = checkpoint_data
 
             return True, momentum, checkpoint_sync_window, optimizer, scheduler
 
@@ -2039,3 +2050,19 @@ class Comms(ChainManager):
 
         tplr.logger.debug(f"Final selected items: {selected}")
         return selected
+
+    async def _get_latest_checkpoint(self, *, version: str):
+        """Uses version‑aware regex when scanning buckets / local."""
+        # 1. Highest‑stake validator bucket
+        vb, vu = await self._get_highest_stake_validator_bucket()
+        if vb:
+            r = await self._get_bucket_checkpoint(vb, vu, version)
+            if r:
+                return r
+        # 2. own bucket
+        if self.bucket:
+            r = await self._get_bucket_checkpoint(self.bucket, self.uid, version)
+            if r:
+                return r
+        # 3. local
+        return self._load_latest_local_checkpoint(version)

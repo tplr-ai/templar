@@ -112,9 +112,14 @@ class Validator:
             help="Local run - use toy model, small enough for a laptop.",
         )
         parser.add_argument(
-            "--log-to-private-wandb",
-            action="store_true",
-            help="Logs to the entity you are signed in to if true, else to the public 'tplr'.",
+            "--checkpoint-init-version",
+            type=str,
+            default=None,
+            help=(
+                "If set, bootstrap from the latest checkpoint carrying this version "
+                "suffix (e.g. '0.8.1'). If not set or not found, fall back to the "
+                "current package __version__."
+            ),
         )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
@@ -541,6 +546,7 @@ class Validator:
             scheduler=self.scheduler,
             current_window=self.current_window,
             device=self.config.device,
+            init_version=self.bootstrap_version,
         )
         if success:
             self.momentum = loaded_momentum

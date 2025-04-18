@@ -18,6 +18,7 @@
 # Standard library
 import argparse
 import asyncio
+import concurrent.futures
 import copy
 import os
 import random
@@ -37,6 +38,7 @@ import numpy as np
 
 # Third party
 import torch
+import uvloop
 from rich.console import Console
 from rich.table import Table
 from torch.optim import SGD
@@ -49,6 +51,9 @@ from transformers import LlamaForCausalLM
 
 # Local
 import tplr
+
+CPU_COUNT = os.cpu_count() or 4
+CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
 # GPU optimizations.
 torch.manual_seed(42)
@@ -350,6 +355,9 @@ class Validator:
     async def run(self):
         # Start background block listener
         self.loop = asyncio.get_running_loop()
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
+        self.loop.set_default_executor(self.executor)
+
         self.listener = threading.Thread(
             target=self.block_listener, args=(self.loop,), daemon=True
         ).start()
@@ -2448,4 +2456,5 @@ def sign_preserving_multiplication(a, b):
 
 
 if __name__ == "__main__":
+    uvloop.install()
     asyncio.run(Validator().run())

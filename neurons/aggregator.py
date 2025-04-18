@@ -17,18 +17,24 @@
 
 import argparse
 import asyncio
+import concurrent.futures
 import gc
+import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
 import bittensor as bt
+import uvloop
 from bittensor.core.subtensor import ScaleObj
 from transformers import LlamaConfig, LlamaForCausalLM
 
 # Import tplr functions
 import tplr
+
+CPU_COUNT = os.cpu_count() or 4
+CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
 
 class AggregationServer:
@@ -422,6 +428,9 @@ class AggregationServer:
 
         # Start background block listener thread
         self.loop = asyncio.get_running_loop()
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
+        self.loop.set_default_executor(self.executor)
+
         self.stop_event = asyncio.Event()
         self.listener = threading.Thread(
             target=self.block_listener, args=(self.loop,), daemon=True
@@ -519,4 +528,5 @@ class AggregationServer:
 
 # Start the aggregation server
 if __name__ == "__main__":
+    uvloop.install()
     asyncio.run(AggregationServer().run())

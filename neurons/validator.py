@@ -797,6 +797,18 @@ class Validator:
                 success_rate = cast(float, state_dict.get("success_rate", 0.0))
             gather_time = tplr.T() - gather_start
 
+            from_aggregator = 1 if aggregation_result is not None else 0
+            tplr.logger.info(
+                f"Using gradient source: {'aggregator' if from_aggregator else 'gather'}"
+            )
+
+            self.wandb.log(
+                {
+                    "validator/aggregator_gradient": from_aggregator,
+                },
+                step=self.global_step,
+            )
+
             tplr.logger.info(f"Skipped UIDs: {skipped_uids}")
 
             gather_sync_scores = await asyncio.gather(

@@ -49,8 +49,8 @@ dev = [
     "seaborn",
     "ruff",
     "pytest-xdist",
-    "bittensor-cli"
-
+    "bittensor-cli",
+    "pre-commit>=4.2.0",
 ]
 
 [tool.pytest.ini_options]

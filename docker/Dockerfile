@@ -32,7 +32,7 @@ ENV WALLET_HOTKEY=""
 ENV CUDA_DEVICE="cuda:0"
 ENV NETWORK="test"
 ENV DEBUG="false"
-ENV NODE_TYPE="" 
+ENV NODE_TYPE=""
 
 # Make entrypoint script executable
 RUN chmod +x /app/scripts/entrypoint.sh
@@ -41,4 +41,4 @@ RUN chmod +x /app/scripts/entrypoint.sh
 VOLUME ["/root/.bittensor/wallets", "/app/logs"]
 
 # Set entrypoint
-ENTRYPOINT ["/app/scripts/entrypoint.sh"] 
+ENTRYPOINT ["/app/scripts/entrypoint.sh"]

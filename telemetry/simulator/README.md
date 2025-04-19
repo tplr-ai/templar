@@ -50,5 +50,5 @@ The simulator generates a wide range of metrics similar to those in the actual m
 
 ### Development
 
-To add new simulated metrics or modify existing ones, edit the `generate_miner_metrics()` and 
+To add new simulated metrics or modify existing ones, edit the `generate_miner_metrics()` and
 `add_system_metrics()` methods in the `MetricsSimulator` class.

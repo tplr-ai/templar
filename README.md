@@ -6,9 +6,9 @@
 
 <div align="center">
 <pre>
-__|__ _  _ _  _ | _  _  
-  †  (/_| | ||_)|(_||   
-  |          |          
+__|__ _  _ _  _ | _  _
+  †  (/_| | ||_)|(_|| 
+  |          |        
 </pre>
 </div>
 
@@ -81,18 +81,18 @@ This section provides a detailed explanation of the incentive mechanism employed
 
 4. **Momentum Update and Compression**:
    - Apply **momentum decay** to the previous momentum buffer:
-   
+
    $m_i^{t+1} = \gamma m_i^t + \eta g_i^t$
-   
+
    - $m_i^t$: Momentum buffer for miner $i$ at step $t$
    - $\gamma$: Momentum decay factor
    - $\eta$: Learning rate
    - $g_i^t$: Gradient computed by miner $i$ at step $t$
 
    - Apply **weight decay** to the model parameters:
-   
+
    $\theta^{t+1} = (1 - \lambda)\theta^t$
-   
+
    - $\lambda$: Weight decay coefficient
 
 5. **Gradient Transformation and Compression**:
@@ -133,7 +133,7 @@ This section provides a detailed explanation of the incentive mechanism employed
 - **Aggregated Gradient**:
 
   $\delta_{\text{agg}} = \sum_{i \in \mathcal{P}} \tilde{g}_i^t$
-  
+
   - $\mathcal{P}$: Set of peer miners
 
 ---
@@ -157,21 +157,21 @@ This section provides a detailed explanation of the incentive mechanism employed
 4. **Evaluation of Miners**:
    - For the selected miner $i$:
      - **Compute Loss Before** applying the miner's gradient:
-       
+
        $L_{\text{before}} = \mathcal{L}(\theta^t; D_i)$
-       
+
        - $D_i$: Dataset assigned to miner $i$
      - **Apply** the miner's gradient:
-       
+
        $\theta^{t+1} = \theta^t + \delta_i$
-       
+
        - $\delta_i$: Decompressed gradient from miner $i$
      - **Compute Loss After** applying the gradient:
-       
+
        $L_{\text{after}} = \mathcal{L}(\theta^{t+1}; D_i)$
-       
+
      - **Compute Improvement**:
-       
+
        $s_i = L_{\text{before}} - L_{\text{after}}$
 
 5. **Score Calculation**:
@@ -179,11 +179,11 @@ This section provides a detailed explanation of the incentive mechanism employed
 
 6. **Weight Assignment and Update**:
    - Update the moving average of the miner's score:
-   
+
      $\bar{s}_i = \alpha s_i + (1 - \alpha)\bar{s}_i$
-     
+
    - Compute weights as the moving average of improvement scores:
-   
+
      $w_i = \bar{s}_i$
 
 7. **Blockchain Update**:
@@ -200,15 +200,15 @@ This section provides a detailed explanation of the incentive mechanism employed
   - Before update: $L_{\text{before}} = \mathcal{L}(\theta^t; D_i)$
   - After update: $L_{\text{after}} = \mathcal{L}(\theta^{t+1}; D_i)$
 - **Miner's Score**:
-  
+
   $s_i = L_{\text{before}} - L_{\text{after}}$
-  
+
 - **Moving Average Score**:
-  
+
   $\bar{s}_i = \alpha s_i + (1 - \alpha)\bar{s}_i$
-  
+
 - **Assigned Weight**:
-  
+
   $w_i = \bar{s}_i$
 
 ---
@@ -242,7 +242,7 @@ The incentive mechanism in **τemplar** aims to:
 
 4. **Weight Computation**:
    - Compute weights as the moving average of improvement scores:
-   
+
      $w_i = \bar{s}_i$
 
      - The moving average:
@@ -284,15 +284,15 @@ $$\max_{\delta_i} \quad w_i = \frac{e^{\bar{s}i}}{\sum{j \in \mathcal{M}} e^{\ba
 Subject to:
 
 - **Update Rule**:
-  
+
   $\delta_i = \text{Compress}(\gamma m_i^{t} + \eta g_i^t)$
 
 - **Model Update**:
-  
+
   $\theta^{t+1} = \theta^{t} + \delta_{\text{agg}}$
 
 - **Score Function**:
-  
+
   $s_i = L(\theta^{t}; D_i) - L(\theta^{t} + \delta_i; D_i)$
 
 The optimal strategy for miners is to compute accurate gradients that lead to a reduction in loss on their assigned data.
@@ -329,4 +329,3 @@ The incentive mechanism in **τemplar** effectively encourages miners to contrib
 The careful design of data assignment, gradient evaluation, and weight distribution fosters a self-regulating ecosystem where honest participation is the most profitable strategy. Formal guarantees provide robustness against malicious actors, promoting the overall improvement of the model through collaborative effort.
 
 Thus, **τemplar** creates a sustainable and efficient framework for decentralized collaborative learning, leveraging incentives to drive positive contributions and advance the shared model's performance.
-

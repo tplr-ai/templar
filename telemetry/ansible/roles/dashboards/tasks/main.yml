@@ -71,7 +71,7 @@
   ignore_errors: true
   when: not ansible_check_mode and grafana_health is defined and grafana_health.status is defined and grafana_health.status == 200
 
-- name: Get dashboard ID from search 
+- name: Get dashboard ID from search
   uri:
     url: "http://localhost:{{ grafana_http_port }}/api/search?query=templar_metrics&type=dash-db"
     method: GET

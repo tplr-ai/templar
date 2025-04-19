@@ -5,7 +5,7 @@
 provisioning:
   # Type of provisioning to use (ansible, script, or docker)
   type: ansible
-  
+
   # Ansible provisioning configuration
   playbook: ./playbook.yml
   # Optional: Root directory where Ansible playbooks and related files are located
@@ -22,11 +22,11 @@ provisioning:
   extra_vars:
     app_env: development
     gpu_driver: nvidia-latest
-  
+
   # For script provisioning (uncomment to use):
   # type: script
   # script: ./setup.sh
-  
+
   # For docker provisioning (uncomment to use):
   # type: docker
   # compose_file: ./docker-compose.yml
@@ -51,7 +51,7 @@ sync:
 reload:
   # Type of reload mechanism to use (currently only ansible is supported)
   type: ansible
-  
+
   # Ansible reload configuration
   playbook: ./reload.yml
   # Root directory where Ansible files are located

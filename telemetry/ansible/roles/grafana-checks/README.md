@@ -11,7 +11,7 @@ This role performs comprehensive verification of a Grafana stack deployment to e
 
 ## Usage
 
-The role is included in the main playbook and will run by default as part of the deployment. 
+The role is included in the main playbook and will run by default as part of the deployment.
 You can also run the checks independently using tags:
 
 ```bash

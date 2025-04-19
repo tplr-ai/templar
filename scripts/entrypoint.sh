@@ -61,4 +61,4 @@ elif [ "$NODE_TYPE" = "validator" ]; then
 else
     echo "Error: NODE_TYPE must be either \"miner\" or \"validator\""
     exit 1
-fi 
+fi

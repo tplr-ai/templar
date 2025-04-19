@@ -16,7 +16,7 @@ prompt_with_default() {
 prompt_required() {
     local prompt="$1"
     local response=""
-    
+
     while [ -z "$response" ]; do
         echo -n "$prompt: "
         read response
@@ -52,4 +52,4 @@ docker compose -f "$COMPOSE_FILE" up -d
 echo -e "\n✅ Containers started successfully!"
 echo "📝 Logs are available in the ./logs directory"
 echo -e "\nTo follow logs, run:"
-echo "docker compose -f $COMPOSE_FILE logs -f" 
+echo "docker compose -f $COMPOSE_FILE logs -f"

@@ -1,4 +1,4 @@
 checkpoints
 wandb
 .pytest*
-.venv 
+.venv

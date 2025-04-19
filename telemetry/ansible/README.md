@@ -7,7 +7,7 @@ This Ansible project provides a clean, modular approach to deploying Grafana wit
 ```
 ansible/
 ├── ansible.cfg                  # Ansible configuration
-├── inventory                    # Server inventory 
+├── inventory                    # Server inventory
 ├── playbook.yml                 # Main playbook
 ├── roles/                       # Modular roles
 │   ├── grafana/                 # Grafana installation and configuration
@@ -138,10 +138,10 @@ If you encounter errors with Grafana:
    ```bash
    # Check service status
    systemctl status grafana-server
-   
+
    # View logs
    journalctl -u grafana-server -n 50
-   
+
    # Check if Grafana is listening
    netstat -tulpn | grep 3000
    ```
@@ -151,10 +151,10 @@ If you encounter errors with Grafana:
    ```bash
    # Fix ownership
    sudo chown -R grafana:grafana /var/lib/grafana /etc/grafana /var/log/grafana
-   
+
    # Fix permissions
    sudo chmod -R 755 /var/lib/grafana /etc/grafana /var/log/grafana
-   
+
    # Restart service
    sudo systemctl restart grafana-server
    ```
@@ -164,25 +164,25 @@ If you encounter errors with Grafana:
    ```bash
    # Check NGINX config
    sudo nginx -t
-   
+
    # Check NGINX logs
    sudo tail -f /var/log/nginx/error.log
-   
+
    # Test direct Grafana access
    curl -v http://localhost:3000/api/health
    ```
-   
+
    For SSL-related issues:
    ```bash
    # Check certificate validity
    openssl x509 -in /etc/nginx/ssl/nginx_cert.pem -text -noout
-   
+
    # Test SSL connection
    openssl s_client -connect localhost:443
-   
+
    # Check certificate permissions
    ls -la /etc/nginx/ssl/
-   
+
    # Verify SSL configuration in Nginx
    grep -r "ssl" /etc/nginx/sites-enabled/
    ```
@@ -208,7 +208,7 @@ If you encounter 403 Forbidden errors or redirection to login page when trying t
 
 2. **Ensure Complete Public Access (No Login Required)**:
    - The updated configuration handles this through multiple layers:
-   
+
    a. Environment variables (via grafana-env.j2):
    ```
    GF_AUTH_ANONYMOUS_ENABLED=true
@@ -216,7 +216,7 @@ If you encounter 403 Forbidden errors or redirection to login page when trying t
    GF_AUTH_DISABLE_LOGIN_FORM=true
    GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/dashboards/templar_metrics.json
    ```
-   
+
    b. Grafana.ini settings (already updated):
    ```ini
    [auth.anonymous]
@@ -224,14 +224,14 @@ If you encounter 403 Forbidden errors or redirection to login page when trying t
    org_name = Templar AI
    org_role = Viewer
    hide_version = true
-   
+
    [auth]
    disable_login_form = true
-   
+
    [dashboards]
    default_home_dashboard_path = /etc/grafana/dashboards/templar_metrics.json
    ```
-   
+
    c. NGINX configuration (improved to handle WebSockets properly):
    - Added WebSocket proxy settings for live updates
    - Optimized buffer settings for better performance

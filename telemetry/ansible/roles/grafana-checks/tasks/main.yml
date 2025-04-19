@@ -400,9 +400,9 @@
 
 - name: Calculate NGINX Proxy status
   set_fact:
-    nginx_proxy_ok: "{{ 
-      (nginx_proxy_http.status in [301, 302] if nginx_proxy_http.status is defined else false) and 
-      (nginx_proxy_https.status == 200 if nginx_proxy_https.status is defined else false) 
+    nginx_proxy_ok: "{{
+      (nginx_proxy_http.status in [301, 302] if nginx_proxy_http.status is defined else false) and
+      (nginx_proxy_https.status == 200 if nginx_proxy_https.status is defined else false)
     }}"
 
 - name: Calculate Anonymous Dashboard Access status

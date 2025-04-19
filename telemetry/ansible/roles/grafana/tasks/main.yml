@@ -58,7 +58,7 @@
     group: "{{ grafana_system_group }}"
     mode: 0640
   notify: restart grafana
-  
+
 - name: Add home dashboard environment variable to Grafana server
   lineinfile:
     path: /etc/default/grafana-server

@@ -100,7 +100,7 @@ Provisioning uses the `.rentcompute.yml` file in your current directory. Example
 provisioning:
   # Type: ansible, script, or docker
   type: ansible
-  
+
   # Ansible configuration
   playbook: ./playbook.yml
   # Target hosts group (should match hosts: in playbook)
@@ -113,11 +113,11 @@ provisioning:
   extra_vars:
     app_env: development
     gpu_driver: nvidia-latest
-  
+
   # For script provisioning (uncomment to use)
   # type: script
   # script: ./setup.sh
-  
+
   # For docker provisioning (uncomment to use)
   # type: docker
   # compose_file: ./docker-compose.yml

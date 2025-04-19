@@ -63,7 +63,7 @@ This guide will help you set up and run a validator for **τemplar**. Validators
 2. **Enable Docker GPU Support**:
 
    Follow the official NVIDIA Container Toolkit installation guide:
-   
+
    ```bash
    # 1. Configure the production repository
    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
@@ -209,11 +209,11 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
    export NETWORK=your_network
    export NETUID=your_netuid
    export DEBUG=your_debug_setting
-   
+
    # Gradients R2 credentials
    export R2_GRADIENTS_ACCOUNT_ID=your_r2_account_id
    export R2_GRADIENTS_BUCKET_NAME=your_r2_bucket_name
-   export R2_GRADIENTS_READ_ACCESS_KEY_ID=your_r2_read_access_key_id 
+   export R2_GRADIENTS_READ_ACCESS_KEY_ID=your_r2_read_access_key_id
    export R2_GRADIENTS_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
    export R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
    export R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
@@ -223,7 +223,7 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
    export R2_DATASET_BUCKET_NAME=edu-dataset
    export R2_DATASET_READ_ACCESS_KEY_ID=7cadbe19f880785e46898b558ef70ce8
    export R2_DATASET_READ_SECRET_ACCESS_KEY=9787434d676b05dce69cc4e76c6af74d795b606feafd031944444780d5f72272
-   
+
    export GITHUB_USER=your_github_username
    ```
 

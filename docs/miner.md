@@ -149,7 +149,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    # Additional Settings
    DEBUG=false
    ```
-   
+
 
    Replace the placeholders with your actual values.
 
@@ -231,7 +231,7 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    # Install uv tool (if needed)
    pip install uv
    ```
-   
+
   *PM2 Support Installation
   ```bash
    # Install uv and configure venv
@@ -275,11 +275,11 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    export NETWORK=your_network
    export NETUID=your_netuid
    export DEBUG=your_debug_setting
-   
+
    # Gradients R2 credentials
    export R2_GRADIENTS_ACCOUNT_ID=your_r2_account_id
    export R2_GRADIENTS_BUCKET_NAME=your_r2_bucket_name
-   export R2_GRADIENTS_READ_ACCESS_KEY_ID=your_r2_read_access_key_id 
+   export R2_GRADIENTS_READ_ACCESS_KEY_ID=your_r2_read_access_key_id
    export R2_GRADIENTS_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
    export R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
    export R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
@@ -295,7 +295,7 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    export R2_AGGREGATOR_BUCKET_NAME="aggregator"
    export R2_AGGREGATOR_READ_ACCESS_KEY_ID="aa7ea943895323963edba7323e4e12b9"
    export R2_AGGREGATOR_READ_SECRET_ACCESS_KEY="8557ba9fc49a5482fff35d591c808bbdf0ec306bf08d9524c2055736aca915d1"
-   
+
    export GITHUB_USER=your_github_username
    ```
 
@@ -322,7 +322,7 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    --device cuda \
    --subtensor.network <network> \
    --sync_state \
-   --netuid <netuid> 
+   --netuid <netuid>
   ```
 
 ---

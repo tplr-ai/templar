@@ -18,4 +18,3 @@ All notable changes to this project will be documented in this file.
 - Rename to r2
 - Ignore types
 - Analyer tables
-

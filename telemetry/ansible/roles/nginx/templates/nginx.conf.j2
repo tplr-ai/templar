@@ -46,7 +46,7 @@ http {
     client_header_timeout 15;
     send_timeout 60;
     reset_timedout_connection on;
-    
+
     # Set higher timeouts for proxying
     proxy_connect_timeout 60s;
     proxy_send_timeout 60s;
@@ -54,7 +54,7 @@ http {
 
     # Rate limiting for API protection
     limit_req_zone $binary_remote_addr zone=grafanaapilimit:10m rate=10r/s;
-    
+
     # Connection limits for high traffic (adjust based on your server capacity)
     limit_conn_zone $binary_remote_addr zone=conn_limit_per_ip:10m;
     limit_req_zone $binary_remote_addr zone=req_limit_per_ip:10m rate=50r/s;

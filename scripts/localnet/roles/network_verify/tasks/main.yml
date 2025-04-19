@@ -35,4 +35,3 @@
     msg: "{{ subnet_metagraph.stdout_lines }}"
   when: rpc_check.rc == 0
   tags: network_verify
-

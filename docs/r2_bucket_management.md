@@ -44,7 +44,7 @@ A Python utility to manage objects in Cloudflare R2 buckets with various deletio
    uv python install 3.12
    uv python pin 3.12
    uv venv .venv
-   source .venv/bin/activate 
+   source .venv/bin/activate
    uv pip install -e . --prerelease=allow
    uv pip install torch --index-url https://download.pytorch.org/whl/cu118
    ```

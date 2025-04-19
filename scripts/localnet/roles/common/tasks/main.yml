@@ -97,7 +97,7 @@
     state: present
     extra_args: --no-cache-dir
   tags: common
-  
+
 - name: Install uv package installer
   become: true
   shell: |
@@ -108,13 +108,13 @@
   args:
     executable: /bin/bash
   tags: common
-  
+
 - name: Verify uv installation
   shell: which uv
   register: uv_which
   changed_when: false
   tags: common
-  
+
 - name: Show uv location
   debug:
     var: uv_which.stdout

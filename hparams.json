@@ -45,7 +45,6 @@
     "uids_per_window": 3,
     "time_window_delta_seconds": 10,
     "reset_inactivity_windows": 25,
-    "max_gradient_score": 0.05,
     "sync_max_steps_behind": 3,
     "eval_lr_factor": 0.2,
     "openskill_beta": 100,

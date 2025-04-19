@@ -228,3 +228,33 @@ For more information, see the [uv documentation](https://docs.astral.sh/uv/).
 
 `Ruff` handles linting and formatting. Configuration for this tool is defined
 in `pyproject.toml`.
+
+#### Pre-commit Hooks
+
+We use [`pre-commit`](https://pre-commit.com) to run automated checks before
+committing or merging code.
+
+`pre-commit` is included in the development dependencies. To install it (along
+with all other dev tools), run:
+
+```bash
+uv sync --all-extras --frozen
+```
+
+Then, install the Git hooks:
+
+```bash
+pre-commit install
+```
+
+This ensures the hooks defined in `.pre-commit-config.yaml` are run
+automatically before each commit.
+
+If you want to manually check all files before committing (a dry run), you can
+use:
+
+```bash
+pre-commit run --all-files
+```
+
+These checks will also run automatically every time you make a commit.

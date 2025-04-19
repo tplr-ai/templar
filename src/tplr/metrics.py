@@ -15,6 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import asyncio
 import logging
 import os
 import statistics
@@ -28,7 +29,7 @@ import torch
 from bittensor import Config as BT_Config
 from influxdb_client.client.influxdb_client import InfluxDBClient
 from influxdb_client.client.write.point import Point
-from influxdb_client.client.write_api import SYNCHRONOUS
+from influxdb_client.client.write_api import ASYNCHRONOUS
 from influxdb_client.domain.write_precision import WritePrecision
 
 from . import __version__
@@ -104,7 +105,7 @@ class MetricsLogger:
 
         url = f"https://{host}:{port}"
         self.client = InfluxDBClient(url=url, token=token, org=org)
-        self.write_api = self.client.write_api(write_options=SYNCHRONOUS)
+        self.write_api = self.client.write_api(write_options=ASYNCHRONOUS)
         self.database = database
         self.org = org
         self.prefix = prefix
@@ -153,7 +154,7 @@ class MetricsLogger:
         timestamp=None,
         with_system_metrics=False,
         with_gpu_metrics=False,
-    ):
+    ) -> None:
         """
         Logs metrics to InfluxDB.
 
@@ -185,12 +186,20 @@ class MetricsLogger:
                 point = point.field(field_key, field_value)
             point = point.time(timestamp, WritePrecision.NS)
 
-            with self.lock:
-                self.write_api.write(bucket=self.database, org=self.org, record=point)
-                logger.debug(f"Successfully logged metrics to InfluxDB: {measurement}")
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, self._write_point, point)
 
         except Exception as e:
-            logger.error(f"Error logging metrics: {e}")
+            logger.error(f"Failed to schedule metrics write: {e}")
+
+    def _write_point(self, point):
+        """Blocking call, runs in background thread."""
+        try:
+            with self.lock:
+                self.write_api.write(bucket=self.database, org=self.org, record=point)
+            logger.debug("Metrics written (async).")
+        except Exception as e:
+            logger.exception(f"Async metrics write failed: {e}")
 
     def _process_fields(self, fields):
         """Process field values and handle lists"""

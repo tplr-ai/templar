@@ -205,11 +205,18 @@ class Miner:
             job_type="mining",
         )
 
-        # Initialize metrics logger for InfluxDB
+        bucket_info = self.comms.get_own_bucket("gradients", "write")
+
+        # Initialize metrics logger
         self.metrics_logger = tplr.metrics.MetricsLogger(
+            endpoint_url=f"https://{bucket_info.account_id}.r2.cloudflarestorage.com",
+            region_name=tplr.R2DatasetLoader.CF_REGION_NAME,
+            bucket=bucket_info.name,
+            access_key_id=bucket_info.access_key_id,
+            secret_access_key=bucket_info.secret_access_key,
             prefix="M",
             uid=self.uid,
-            config=self.config,
+            config=self.config,  # type: ignore
             role="miner",
             group="miner",
             job_type="mining",

@@ -143,10 +143,17 @@ class AggregationServer:
             job_type="aggregation",
         )
 
-        # Initialize metrics logger for InfluxDB if available
+        bucket_info = self.comms.get_own_bucket("gradients", "write")
+
+        # Initialize metrics logger
         self.metrics_logger = tplr.metrics.MetricsLogger(
+            endpoint_url=f"https://{bucket_info.account_id}.r2.cloudflarestorage.com",
+            region_name=tplr.R2DatasetLoader.CF_REGION_NAME,
+            bucket=bucket_info.name,
+            access_key_id=bucket_info.access_key_id,
+            secret_access_key=bucket_info.secret_access_key,
             prefix="A",
-            uid=self.uid,
+            uid=f"{self.uid}",
             config=self.config,
             role="aggregator",
             group="aggregator",

@@ -440,33 +440,45 @@ class Validator:
     def update_weights(self) -> None:
         """
         Update the weights for all evaluated peers using min power normalization.
-
         This method:
         1. Creates a mask for peers that have been evaluated
-        2. Extracts scores for evaluated peers
-        3. Shifts all scores to be positive by subtracting the minimum score
-        4. Applies power normalization to the shifted scores
-        5. Verifies that weights sum to approximately 1.0
-
-        The shifting approach ensures all peers receive some weight proportional to
-        their relative performance, rather than filtering out peers with negative scores.
+        2. Creates a mask for evaluated peers with positive scores
+        3. Applies power normalization to only the positive scores
+        4. Verifies that weights sum to approximately 1.0
+        This approach only assigns weights to peers with positive scores.
         """
         self.weights = torch.zeros_like(self.final_scores)
         evaluated_mask = torch.zeros_like(self.final_scores, dtype=torch.bool)
         evaluated_mask[list(self.evaluated_uids)] = True
-        eval_scores = self.final_scores[evaluated_mask]
-        min_score = eval_scores.min().item()
-        shifted_scores = eval_scores - min_score + 1e-5
-        # Apply power normalization to the shifted scores
-        self.weights[evaluated_mask] = min_power_normalization(
-            shifted_scores,
-            power=self.hparams.power_normalisation,
-        )
 
-        weight_sum = self.weights.sum().item()
-        tplr.logger.debug(f"Weight sum: {weight_sum}")
-        if abs(weight_sum - 1.0) > 1e-6:
-            tplr.logger.warning(f"Weights sum to {weight_sum}, expected close to 1.0")
+        # Create a mask for positive scores among evaluated peers
+        positive_mask = evaluated_mask.clone()
+        positive_mask[evaluated_mask] = self.final_scores[evaluated_mask] > 0
+
+        # Only consider peers with positive scores
+        positive_scores = self.final_scores[positive_mask]
+
+        if len(positive_scores) > 0:
+            # Apply power normalization to only the positive scores
+            normalized_weights = min_power_normalization(
+                positive_scores,
+                power=self.hparams.power_normalisation,
+            )
+
+            # Assign weights only to peers with positive scores
+            self.weights[positive_mask] = normalized_weights
+
+            weight_sum = self.weights.sum().item()
+            tplr.logger.debug(f"Weight sum: {weight_sum}")
+
+            if abs(weight_sum - 1.0) > 1e-6:
+                tplr.logger.warning(
+                    f"Weights sum to {weight_sum}, expected close to 1.0"
+                )
+        else:
+            tplr.logger.warning(
+                "No positive scores found among evaluated peers. All weights set to zero."
+            )
 
     async def run(self):
         # Start background block listener

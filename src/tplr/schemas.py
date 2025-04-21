@@ -17,6 +17,13 @@
 
 # Global imports
 from pydantic import BaseModel
+from pydantic import Field
+
+# Pydantic v2: ConfigDict replaces inner `class Config`
+try:  # v2
+    from pydantic import ConfigDict
+except ImportError:  # v1 fallback – noqa: D401
+    ConfigDict = dict  # type: ignore
 
 
 class Bucket(BaseModel):
@@ -34,11 +41,12 @@ class Bucket(BaseModel):
             return self.dict() == other.dict()
         return False
 
-    name: str
-    account_id: str
-    access_key_id: str
-    secret_access_key: str
+    name: str = Field(..., min_length=1)
+    account_id: str = Field(..., min_length=1)
+    access_key_id: str = Field(..., min_length=1)
+    secret_access_key: str = Field(..., min_length=1)
 
-    class Config:
-        str_min_length = 1
-        str_strip_whitespace = True
+    # v2 style; silently ignored by v1
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+    )

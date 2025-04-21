@@ -4,6 +4,11 @@ Unit tests for the MetricsLogger class.
 
 import json
 import unittest.mock as mock
+import asyncio
+import concurrent.futures
+import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from bittensor import Config as BT_Config
@@ -11,6 +16,80 @@ from influxdb_client.client.write.point import Point
 
 import tplr
 from tplr.metrics import MetricsLogger
+
+
+# patch the constructor before importing MetricsLogger (avoids real HTTP)
+with patch("tplr.metrics.InfluxDBClient", autospec=True):
+    from tplr.metrics import MetricsLogger
+
+
+# ---------------------------------------------------------------------------
+# helper: make the current event‑loop synchronous for this test only
+# ---------------------------------------------------------------------------
+def _patch_loop_run_sync(monkeypatch):
+    loop = asyncio.get_event_loop()
+
+    def _run_sync(executor, func, *args, **kwargs):
+        """Immediate, in‑thread replacement for run_in_executor."""
+        func(*args, **kwargs)
+
+        class _Done:
+            def result(self, _=None):  # noqa: D401
+                return None
+
+        return _Done()
+
+    monkeypatch.setattr(loop, "run_in_executor", _run_sync, raising=True)
+    return loop
+
+
+# ---------------------------------------------------------------------------
+# fixture: returns a fresh logger + its write() mock each time
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def logger(monkeypatch):
+    _patch_loop_run_sync(monkeypatch)  # make run_in_executor sync
+
+    write_mock = MagicMock()
+    log = MetricsLogger(prefix="test")
+    log.write_api = SimpleNamespace(write=write_mock)  # no real I/O
+    return log, write_mock
+
+
+@pytest.fixture(autouse=True)
+def _sync_run_in_executor(monkeypatch):
+    """
+    • Ensure the main thread has an event‑loop (needed by MetricsLogger).
+    • Patch BaseEventLoop.run_in_executor so it executes the task immediately.
+    """
+
+    # ------------------------------------------------------------------
+    # 1.  guarantee an event‑loop is present
+    # ------------------------------------------------------------------
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:  # no loop yet
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    # ------------------------------------------------------------------
+    # 2.  patch run_in_executor → synchronous
+    # ------------------------------------------------------------------
+    def _run_sync(self, executor, func, *args, **kwargs):
+        try:
+            res = func(*args, **kwargs)  # run immediately
+        except Exception as exc:
+            fut = concurrent.futures.Future()
+            fut.set_exception(exc)
+            return fut
+
+        fut = concurrent.futures.Future()
+        fut.set_result(res)
+        return fut
+
+    monkeypatch.setattr(
+        asyncio.BaseEventLoop, "run_in_executor", _run_sync, raising=True
+    )
 
 
 class TestMetricsLogger:
@@ -375,3 +454,39 @@ class TestMetricsLogger:
         assert call_args[1]["org"] == metrics_logger.org
         assert isinstance(call_args[1]["record"], Point)
         assert call_args[1]["record"]._name == f"test{measurement}"
+
+    def test_log_with_wait(self, metrics_logger, mock_influxdb_client):
+        """Test logging with wait."""
+        measurement = "test_with_wait"
+        tags = {"tag1": "value1"}
+        fields = {"field1": 42}
+
+        metrics_logger.log(
+            measurement=measurement,
+            tags=tags,
+            fields=fields,
+            with_system_metrics=False,
+            with_gpu_metrics=False,
+        )
+
+        # --------------------------------------------------------------
+        # run_in_executor schedules _write_point on a background thread.
+        # Wait (≤2 s) until that thread calls write_api.write, then check.
+        # --------------------------------------------------------------
+        def _wait_for_call(m, timeout=2.0):
+            end = time.time() + timeout
+            while time.time() < end and m.call_count == 0:
+                time.sleep(0.01)
+            assert m.call_count == 1, (
+                f"Expected 'write' to be called once; got {m.call_count}"
+            )
+
+        mock_write = mock_influxdb_client.return_value.write_api.return_value.write
+        _wait_for_call(mock_write)
+
+    def test_log_invokes_write_once(self, logger):
+        log, write_mock = logger
+
+        log.log("train_step", tags={}, fields={"loss": 0.123})
+
+        write_mock.assert_called_once()

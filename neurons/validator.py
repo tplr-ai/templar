@@ -450,7 +450,7 @@ class Validator:
             avg_loss_after_per_batch_own = 0.0
             avg_loss_before_per_batch_random = 0.0
             avg_loss_after_per_batch_random = 0.0
-            for eval_uid in np.random.choice(evaluation_uids, size=2, replace=False):
+            for eval_uid in np.random.choice(evaluation_uids, size=7, replace=False):
                 tplr.logger.info(f"Evaluating uid: {eval_uid}, type: {type(eval_uid)}")
 
                 eval_result = await self.comms.get_from_disk(

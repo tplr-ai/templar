@@ -256,16 +256,6 @@ class Miner:
             name_prefix=self.config.name_prefix,
         )
 
-        # Initialize metrics logger for InfluxDB
-        self.metrics_logger = tplr.metrics.MetricsLogger(
-            prefix="M",
-            uid=self.uid,
-            config=self.config,
-            role="miner",
-            group="miner",
-            job_type="mining",
-        )
-
     # Main training loop.
     async def run(self):
         # Start background block listener
@@ -662,29 +652,6 @@ class Miner:
                 step=self.global_step,
             )
 
-            self.metrics_logger.log(
-                measurement="training_step_v2",
-                tags={
-                    "window": self.current_window,
-                    "global_step": self.global_step,
-                },
-                fields={
-                    "loss": loss_value,
-                    "n_gather_peers": int(len(self.comms.peers)),
-                    "gather_success_rate": gather_success_rate,
-                    "gather_peers": json.dumps(self.comms.peers.tolist()),
-                    "skipped_peers": json.dumps(
-                        np.array(gather_result.skipped_uids).tolist()
-                        if gather_result
-                        else []
-                    ),
-                    "window_total_time": window_total_time,
-                    "compression_time": compression_time,
-                    "gather_time": gather_time,
-                    "put_time": put_completion_time,
-                    "model_update_time": model_update_time,
-                },
-            )
             tplr.logger.info("Finished metrics logging call for miner")
 
             self.global_step += 1

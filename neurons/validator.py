@@ -260,15 +260,6 @@ class Validator:
             name_prefix=self.config.name_prefix,
         )
 
-        # Initialize metrics logger for InfluxDB
-        self.metrics_logger = tplr.metrics.MetricsLogger(
-            prefix="V",
-            uid=self.uid,
-            config=self.config,
-            role="validator",
-            group="validator",
-            job_type="validation",
-        )
         # Initialize peer related attributes
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
@@ -1016,21 +1007,6 @@ class Validator:
                         step=self.global_step,
                     )
 
-                    # Log to InfluxDB
-                    self.metrics_logger.log(
-                        measurement="validator_openskill",
-                        tags={
-                            "eval_uid": str(uid),
-                            "window": int(self.sync_window),
-                            "global_step": int(self.global_step),
-                        },
-                        fields={
-                            "mu": openskill_mu,
-                            "sigma": openskill_sigma,
-                            "score": openskill_score,
-                        },
-                    )
-
                 tplr.logger.info(
                     f"Updated OpenSkill ratings for {len(window_uids)} peers based on gradient scores"
                 )
@@ -1140,27 +1116,6 @@ class Validator:
                     step=self.global_step,
                 )
 
-                # Log to InfluxDB metrics per UID with primitive types
-                self.metrics_logger.log(
-                    measurement="validator_scores",
-                    tags={
-                        "eval_uid": str(uid),
-                        "window": int(self.sync_window),
-                        "global_step": int(self.global_step),
-                    },
-                    fields={
-                        "gradient_score": gradient_score,
-                        "binary_indicator": binary_indicator,
-                        "binary_moving_avg": binary_moving_avg,
-                        "final_moving_avg_score": final_scores,
-                        "weight": weight,
-                        "loss_improvement_own": loss_improvement_own,
-                        "loss_improvement_random": loss_improvement_random,
-                        "relative_improvement_own": relative_improvement_own,
-                        "relative_improvement_random": relative_improvement_random,
-                    },
-                )
-
             # 14. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
@@ -1216,36 +1171,6 @@ class Validator:
             self.wandb.log(evaluation_metrics, step=self.global_step)
 
             # Log metrics to InfluxDB in parallel using primitive types
-            gather_success_rate = float(success_rate * 100)
-            total_skipped = len(skipped_uids)
-
-            self.metrics_logger.log(
-                measurement="validator_window_v2",
-                tags={
-                    "window": int(self.sync_window),
-                    "global_step": int(self.global_step),
-                },
-                fields={
-                    "loss_own_before": float(avg_loss_before_per_batch_own),
-                    "loss_own_after": float(avg_loss_after_per_batch_own),
-                    "loss_random_before": float(avg_loss_before_per_batch_random),
-                    "loss_random_after": float(avg_loss_after_per_batch_random),
-                    "loss_own_improvement": float(self.relative_improvement_own),
-                    "loss_random_improvement": float(self.relative_improvement_random),
-                    "current_block": int(self.current_block),
-                    "evaluated_uids_count": int(len(self.evaluated_uids)),
-                    "learning_rate": float(self.scheduler.get_last_lr()[0]),
-                    "active_miners_count": int(len(self.valid_score_indices)),
-                    "gather_success_rate": gather_success_rate,
-                    "window_total_time": float(tplr.T() - window_start),
-                    "peer_update_time": float(tplr.T() - peer_start),
-                    "gather_time": float(gather_time),
-                    "evaluation_time": float(tplr.T() - eval_start),
-                    "model_update_time": float(tplr.T() - update_start),
-                    "total_peers": int(len(self.comms.peers)),
-                    "total_skipped": int(total_skipped),
-                },
-            )
             tplr.logger.info("Finished metrics logging call for validator")
 
             # 18. Increment global step

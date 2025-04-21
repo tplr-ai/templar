@@ -397,7 +397,7 @@ class Validator:
                 )
 
                 self.final_scores[uid] = (
-                    openskill_mu
+                    openskill_ordinal
                     * max(0, self.binary_moving_averages[uid].item())
                     * sync_score
                 )

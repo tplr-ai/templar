@@ -839,6 +839,7 @@ class Validator:
                     )
                     if self.final_scores[uid] > 0:
                         self.final_scores[uid] *= self.sync_score_slash_rate
+                        self.binary_moving_averages[uid] *= self.sync_score_slash_rate
 
             # Slash peers failing to submit gradients
             for uid in skipped_uids:
@@ -851,6 +852,9 @@ class Validator:
                     # Only reduce positive scores
                     if self.final_scores[uid] > 0:
                         self.final_scores[uid] *= self.missing_gradient_slash_rate
+                        self.binary_moving_averages[uid] *= (
+                            self.missing_gradient_slash_rate
+                        )
 
                         new_score = self.final_scores[uid].item()
                         tplr.logger.info(
@@ -1502,6 +1506,10 @@ class Validator:
 
                     if self.final_scores[eval_uid] > 0:
                         self.final_scores[eval_uid] *= self.missing_gradient_slash_rate
+                        self.binary_moving_averages[eval_uid] *= (
+                            self.missing_gradient_slash_rate
+                        )
+
                         new_score = self.final_scores[eval_uid].item()
                         tplr.logger.info(
                             f"Reduced score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient."

@@ -15,17 +15,16 @@ try {
 // Common warmup windows for all desynced miners
 const WARMUP_WINDOWS = process.env.WARMUP_WINDOWS || 10;
 
-// Define miner configurations - desync windows and pages
+// Define miner configurations - desync windows, pages, and random_pages_only flag
 const minerConfigList = [
-    { desync: 0, pages: 6, prefix: 'baseline' },     // UID 2: baseline
-    { desync: 0, pages: 6, prefix: 'baseline' },     // UID 3: baseline
-    { desync: 0, pages: 6, prefix: 'baseline' },     // UID 4: baseline
-    { desync: 0, pages: 12, prefix: '12page-sync' }, // UID 5: 12 pages sync
-    { desync: 1, pages: 6, prefix: 'desync-1' },     // UID 6: 1 windows desync
-    { desync: 2, pages: 6, prefix: 'desync-2' },     // UID 7: 2 windows desync
-    { desync: 3, pages: 6, prefix: 'desync-3' }      // UID 8: 3 windows desync
+    { desync: 0, pages: 6, prefix: 'baseline', random_pages_only: false },     // UID 2: baseline
+    { desync: 0, pages: 6, prefix: 'baseline', random_pages_only: false },     // UID 3: baseline
+    { desync: 0, pages: 6, prefix: 'random-pages', random_pages_only: true },     // UID 4: only random pages
+    { desync: 0, pages: 12, prefix: '12page-sync', random_pages_only: false }, // UID 5: 12 pages sync
+    { desync: 1, pages: 6, prefix: 'desync-1', random_pages_only: false },     // UID 6: 1 windows desync
+    { desync: 2, pages: 6, prefix: 'desync-2', random_pages_only: false },     // UID 7: 2 windows desync
+    { desync: 3, pages: 6, prefix: 'desync-3', random_pages_only: false }       // UID 8: 3 windows desync
 ];
-
 const minerConfigs = [...Array(Math.min(NUM_MINERS, minerConfigList.length))].map((_, index) => {
     const config = minerConfigList[index];
     
@@ -36,6 +35,9 @@ const minerConfigs = [...Array(Math.min(NUM_MINERS, minerConfigList.length))].ma
     // Set pages arg if specified
     const pagesArg = config.pages ? ` --pages ${config.pages}` : '';
     
+    // Set random_pages_only flag if specified
+    const randomPagesArg = config.random_pages_only ? ' --random_pages_only' : '';
+    
     return {
         name: `TM${index}`,
         script: "neurons/miner.py",
@@ -45,7 +47,7 @@ const minerConfigs = [...Array(Math.min(NUM_MINERS, minerConfigList.length))].ma
             PROJECT_NAME: PROJECT_NAME,
             COMMIT_HASH: commitHash
         },
-        args: `--wallet.name miner${index + 1} --wallet.hotkey default --device cuda:${index + 1} --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}"${pagesArg}${desyncArg} --name_prefix "${commitHash}-${config.prefix}"`
+        args: `--wallet.name miner${index + 1} --wallet.hotkey default --device cuda:${index + 1} --subtensor.network local --netuid 2 --use_wandb --project "${PROJECT_NAME}"${pagesArg}${desyncArg}${randomPagesArg} --name_prefix "${commitHash}-${config.prefix}"`
     };
 });
 

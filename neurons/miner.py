@@ -111,6 +111,11 @@ class Miner:
             default=0,
             help="Number of windows to run before applying desync",
         )
+        parser.add_argument(
+            "--random_pages_only",
+            action="store_true",
+            help="Use only random pages instead of assigned pages",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -229,9 +234,13 @@ class Miner:
 
         # Log desync and warmup configuration
         if self.desync_steps > 0:
-            tplr.logger.info(f"Desync configured: Will desync by {self.desync_steps} windows")
+            tplr.logger.info(
+                f"Desync configured: Will desync by {self.desync_steps} windows"
+            )
             if self.warmup_steps > 0:
-                tplr.logger.info(f"Warmup configured: Will run {self.warmup_steps} windows before desyncing")
+                tplr.logger.info(
+                    f"Warmup configured: Will run {self.warmup_steps} windows before desyncing"
+                )
             else:
                 tplr.logger.info("No warmup configured: Will desync immediately")
         else:
@@ -266,7 +275,7 @@ class Miner:
             args=(self.loop,),
             daemon=True,
         )
-        self.listener.start()  #
+        self.listener.start()
 
         all_uids = list(range(len(self.metagraph.S)))
         # Use config peers if provided
@@ -303,7 +312,9 @@ class Miner:
             if self.desync_steps > 0:
                 if self.warmup_steps > 0 and self.warmup_counter < self.warmup_steps:
                     # In warmup phase, run normally
-                    tplr.logger.info(f"Warmup window {self.warmup_counter + 1}/{self.warmup_steps}")
+                    tplr.logger.info(
+                        f"Warmup window {self.warmup_counter + 1}/{self.warmup_steps}"
+                    )
                     self.warmup_counter += 1
                 elif not self.desync_active:
                     # Start desync phase
@@ -312,12 +323,16 @@ class Miner:
                     # Wait for the specified number of windows before continuing
                     target_window = step_window + self.desync_steps
                     tplr.logger.info(f"Waiting until window {target_window}")
-                    
+
                     while self.current_window < target_window:
                         await asyncio.sleep(1)
-                        tplr.logger.info(f"Desync: Current window {self.current_window}, waiting for {target_window}")
-                    
-                    tplr.logger.info(f"Desync complete! Resuming at window {self.current_window}")
+                        tplr.logger.info(
+                            f"Desync: Current window {self.current_window}, waiting for {target_window}"
+                        )
+
+                    tplr.logger.info(
+                        f"Desync complete! Resuming at window {self.current_window}"
+                    )
                     # Update step_window to the current window after desync
                     step_window = self.current_window
 
@@ -329,21 +344,42 @@ class Miner:
                 f"Using {self.hparams.pages_per_window} pages for training"
             )
 
-            pages_own = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset=step_window * self.default_pages,
-                n_pages=self.default_pages
-                if self.default_pages <= self.hparams.pages_per_window
-                else self.hparams.pages_per_window,
-                seed=self.uid,  # type: ignore
-            )
-            pages_random = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset=step_window * self.default_pages,
-                n_pages=(self.hparams.pages_per_window - self.default_pages)
-                if self.default_pages <= self.hparams.pages_per_window
-                else 0,
-                seed=np.random.randint(1000, 10000),  # type: ignore
-            )
-            pages = pages_own + pages_random
+            # Check if we should use only random pages based on the flag
+            if self.config.random_pages_only:
+                tplr.logger.info(
+                    "Flag --random_pages_only is set, using only random pages"
+                )
+
+                # Load all pages as random pages
+                pages_random = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    offset=step_window * self.default_pages,
+                    n_pages=self.hparams.pages_per_window,  # Use all available page slots for random pages
+                    seed=np.random.randint(1000, 10000),  # Use random seed
+                )
+                pages = pages_random
+
+                tplr.logger.info(
+                    "Using only random pages for training (no assigned pages)"
+                )
+            else:
+                pages_own = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    offset=step_window * self.default_pages,
+                    n_pages=self.default_pages
+                    if self.default_pages <= self.hparams.pages_per_window
+                    else self.hparams.pages_per_window,
+                    seed=self.uid,  # type: ignore
+                )
+                pages_random = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                    offset=step_window * self.default_pages,
+                    n_pages=(self.hparams.pages_per_window - self.default_pages)
+                    if self.default_pages <= self.hparams.pages_per_window
+                    else 0,
+                    seed=np.random.randint(1000, 10000),  # type: ignore
+                )
+                pages = pages_own + pages_random
+
+                tplr.logger.info("Using regular mix of assigned and random pages")
+
             loader = await tplr.r2_dataset.R2DatasetLoader.create(
                 batch_size=self.hparams.batch_size,
                 sequence_length=self.hparams.sequence_length,
@@ -354,7 +390,7 @@ class Miner:
                 f"{tplr.P(step_window, tplr.T() - data_start)} Loaded training data"
             )
             tplr.logger.info(
-                f"Pages: {[p[1] for p in pages]} for  Window: {step_window}"
+                f"Pages: {[p[1] for p in pages]} for Window: {step_window}"
             )  # type: ignore
 
             # 3. Accumulate gradients over batches

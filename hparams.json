@@ -38,7 +38,7 @@
     "active_check_interval": 60,
     "recent_windows": 5,
     "power_normalisation": 1.2,
-    "validator_sample_rate": 0.2,
+    "validator_sample_rate": 0.1,
     "catch_up_threshold": 15,
     "catch_up_batch_size": 5,
     "catch_up_timeout": 300,

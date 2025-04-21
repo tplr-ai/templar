@@ -273,7 +273,7 @@ class Validator:
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
 
-        self.openskill_model = PlackettLuce(beta=100, tau=0.1)
+        self.openskill_model = PlackettLuce(beta=20, tau=0.1)
         self.openskill_ratings = {}  # Dictionary to store peer ratings
 
     async def run(self):
@@ -986,7 +986,7 @@ class Validator:
 
                     self.final_scores[uid] = self.openskill_ratings[
                         uid
-                    ].mu * max(self.binary_moving_averages[uid].item(), 0)
+                    ].ordinal() * max(self.binary_moving_averages[uid].item(), 0)
                     tplr.logger.info(
                         f"Computed Final Score for UID {uid}: {self.final_scores[uid]}"
                     )

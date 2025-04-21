@@ -1,7 +1,7 @@
 require('dotenv').config();
 const child_process = require('child_process');
 const NUM_MINERS = process.env.NUM_MINERS || 7; // 7 miners with different configurations
-const PROJECT_NAME = `test-trueskill-8x`;
+const PROJECT_NAME = `test-openskill`;
 
 // Get the latest commit hash (first 7 characters)
 let commitHash = 'unknown';
@@ -20,10 +20,10 @@ const minerConfigList = [
     { desync: 0, pages: 6, prefix: 'baseline' },     // UID 2: baseline
     { desync: 0, pages: 6, prefix: 'baseline' },     // UID 3: baseline
     { desync: 0, pages: 6, prefix: 'baseline' },     // UID 4: baseline
-    { desync: 0, pages: 6, prefix: 'baseline' },     // UID 5: 1 window desync
-    { desync: 0, pages: 6, prefix: 'baseline' },     // UID 6: 2 windows desync
-    { desync: 0, pages: 6, prefix: 'baseline' },     // UID 7: 3 windows desync
-    { desync: 0, pages: 6, prefix: 'baseline' }      // UID 8: 10 windows desync
+    { desync: 0, pages: 12, prefix: '12page-sync' }, // UID 5: 12 pages sync
+    { desync: 1, pages: 6, prefix: 'desync-1' },     // UID 6: 1 windows desync
+    { desync: 2, pages: 6, prefix: 'desync-2' },     // UID 7: 2 windows desync
+    { desync: 3, pages: 6, prefix: 'desync-3' }      // UID 8: 3 windows desync
 ];
 
 const minerConfigs = [...Array(Math.min(NUM_MINERS, minerConfigList.length))].map((_, index) => {

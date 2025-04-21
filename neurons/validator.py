@@ -723,29 +723,6 @@ class Validator:
                         if self.loss_before_per_batch_own > 0
                         else 0.0
                     )
-                    self.loss_improvements_own[eval_uid] = self.loss_improvement_own
-                    self.loss_improvements_random[eval_uid] = (
-                        self.loss_improvement_random
-                    )
-                    self.relative_improvements_own[eval_uid] = (
-                        self.relative_improvement_own
-                    )
-                    self.relative_improvements_random[eval_uid] = (
-                        self.relative_improvement_random
-                    )
-                    tplr.logger.info(
-                        f"Loss improvement own (UID {eval_uid}): {self.loss_improvements_own[eval_uid]:.4f}"
-                    )
-                    tplr.logger.info(
-                        f"Loss improvement random (UID {eval_uid}): {self.loss_improvements_random[eval_uid]:.4f}"
-                    )
-                    tplr.logger.info(
-                        f"Relative improvement own (UID {eval_uid}): {self.relative_improvements_own[eval_uid]:.4f}"
-                    )
-                    tplr.logger.info(
-                        f"Relative improvement random (UID {eval_uid}): {self.relative_improvements_random[eval_uid]:.4f}"
-                    )
-
                     # 7. Load evaluation data from random page
                     model_random_data_eval = copy.deepcopy(self.model)
                     state_dict, _ = eval_result
@@ -882,7 +859,7 @@ class Validator:
                     # Calculate original performance score (gradient quality)
                     self.gradient_scores[eval_uid] = min(
                         self.hparams.max_gradient_score,
-                        (loss_before_random - loss_after_random) / loss_before_random,
+                        self.relative_improvement_random,
                     )
                     tplr.logger.debug(
                         f"Gradient Score: {self.gradient_scores[eval_uid]}"
@@ -915,21 +892,37 @@ class Validator:
                     )
 
                     # Calculate binary indicator for overfitting detection
-                    improvement_own = (
-                        (loss_before_own - loss_after_own) / loss_before_own
-                        if loss_before_own > 0
-                        else 0
-                    )
-                    improvement_random = (
-                        (loss_before_random - loss_after_random) / loss_before_random
-                        if loss_before_random > 0
-                        else 0
-                    )
                     self.binary_indicator_scores[eval_uid] = (
-                        1 if improvement_own > improvement_random else -1
+                        1
+                        if self.relative_improvement_own
+                        > self.relative_improvement_random
+                        else -1
                     )
                     tplr.logger.info(
                         f"Binary Indicator Score : {self.binary_indicator_scores[eval_uid]}"
+                    )
+
+                    self.loss_improvements_own[eval_uid] = self.loss_improvement_own
+                    self.loss_improvements_random[eval_uid] = (
+                        self.loss_improvement_random
+                    )
+                    self.relative_improvements_own[eval_uid] = (
+                        self.relative_improvement_own
+                    )
+                    self.relative_improvements_random[eval_uid] = (
+                        self.relative_improvement_random
+                    )
+                    tplr.logger.info(
+                        f"Loss improvement own (UID {eval_uid}): {self.loss_improvements_own[eval_uid]:.4f}"
+                    )
+                    tplr.logger.info(
+                        f"Loss improvement random (UID {eval_uid}): {self.loss_improvements_random[eval_uid]:.4f}"
+                    )
+                    tplr.logger.info(
+                        f"Relative improvement own (UID {eval_uid}): {self.relative_improvements_own[eval_uid]:.4f}"
+                    )
+                    tplr.logger.info(
+                        f"Relative improvement random (UID {eval_uid}): {self.relative_improvements_random[eval_uid]:.4f}"
                     )
 
                     # Update binary moving average using exponential moving average formula:

@@ -17,13 +17,13 @@ const WARMUP_WINDOWS = process.env.WARMUP_WINDOWS || 10;
 
 // Define miner configurations - desync windows, pages, and random_pages_only flag
 const minerConfigList = [
-    { desync: 0, pages: 6, prefix: 'baseline', random_pages_only: false },     // UID 2: baseline
-    { desync: 0, pages: 6, prefix: 'baseline', random_pages_only: false },     // UID 3: baseline
-    { desync: 0, pages: 6, prefix: 'random-pages', random_pages_only: true },     // UID 4: only random pages
-    { desync: 0, pages: 12, prefix: '12page-sync', random_pages_only: false }, // UID 5: 12 pages sync
-    { desync: 1, pages: 6, prefix: 'desync-1', random_pages_only: false },     // UID 6: 1 windows desync
-    { desync: 2, pages: 6, prefix: 'desync-2', random_pages_only: false },     // UID 7: 2 windows desync
-    { desync: 3, pages: 6, prefix: 'desync-3', random_pages_only: false }       // UID 8: 3 windows desync
+    { desync: 0, pages: 40, prefix: 'baseline', random_pages_only: false },     // UID 2: baseline
+    { desync: 0, pages: 40, prefix: 'baseline', random_pages_only: false },     // UID 3: baseline
+    { desync: 0, pages: 40, prefix: 'baseline', random_pages_only: false },     // UID 4: baseline
+    { desync: 0, pages: 40, prefix: 'random-pages', random_pages_only: true },  // UID 5: Random pages
+    { desync: 1, pages: 40, prefix: 'desync-1', random_pages_only: false },     // UID 6: 1 windows desync
+    { desync: 2, pages: 40, prefix: 'desync-2', random_pages_only: false },     // UID 7: 2 windows desync
+    { desync: 3, pages: 40, prefix: 'desync-3', random_pages_only: false }      // UID 8: 3 windows desync
 ];
 const minerConfigs = [...Array(Math.min(NUM_MINERS, minerConfigList.length))].map((_, index) => {
     const config = minerConfigList[index];

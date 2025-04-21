@@ -40,6 +40,8 @@ from . import __version__
 from .config import client_config, BUCKET_SECRETS
 from .chain import ChainManager
 from .schemas import Bucket
+from .gradient_cache import GradientCache
+
 
 import tplr as tplr
 # from .hparams import HParams
@@ -1000,43 +1002,34 @@ class Comms(ChainManager):
         max_retries: int = 3,
         retry_delay: float = 1.0,
         jitter: float = 0.2,
-        use_mmap: bool = True,  # Use memory-mapped files
     ) -> Optional[Tuple[Dict[str, torch.Tensor], int]]:
         """
-        Retrieve gradients using memory-mapped files for better multi-process performance.
-
-        Args:
-            uid: User ID to fetch gradient from
-            window: Training window
-            key: Type of data to retrieve
-            local: Whether to use local storage
-            stale_retention: Number of windows to keep before cleanup
-            time_min: Minimum time for filtering gradients
-            time_max: Maximum time for filtering gradients
-            max_retries: Maximum number of retries
-            retry_delay: Base delay between retries in seconds
-            jitter: Random jitter factor to add to retry delay
-            use_mmap: Whether to use memory-mapped file access
-
-        Returns:
-            Tuple of (state_dict, global_step) or None if not found after retries
+        Retrieve gradients from local disk storage with caching for better performance.
         """
+        # Initialize cache if not already done
+        if not hasattr(self, "_gradient_cache"):
+            self._gradient_cache = GradientCache(logger=tplr.logger)
+            # Optionally configure cache size
+            # GradientCache.set_max_size(300)  # Increase cache size if needed
+
+        # Try to get from cache first
+        cached_data = self._gradient_cache.get(uid, window, key, time_min, time_max)
+        if cached_data is not None:
+            tplr.logger.debug(f"Cache hit for UID {uid}")
+            return cached_data
+
+        # Cache miss - load from disk with original implementation
         retry_count = 0
         last_error = None
 
         while retry_count <= max_retries:
             try:
-                # Log retry attempts (not for the first attempt)
-                if retry_count > 0:
-                    tplr.logger.debug(
-                        f"Retry {retry_count}/{max_retries} for get_from_disk UID {uid}"
-                    )
-
                 # Construct the path to the user's gradient directory
                 base_dir = os.path.join(self.storage_path, str(uid), str(window), key)
 
                 if not os.path.exists(base_dir):
                     tplr.logger.debug(f"No gradient directory found for UID {uid}")
+                    # Skip to retry logic
                     raise FileNotFoundError(f"Directory not found: {base_dir}")
 
                 # List all gradient files in the directory
@@ -1045,6 +1038,7 @@ class Comms(ChainManager):
 
                 if not gradient_files:
                     tplr.logger.debug(f"No gradient files found for UID {uid}")
+                    # Skip to retry logic
                     raise FileNotFoundError(
                         f"No gradient files in directory: {base_dir}"
                     )
@@ -1055,6 +1049,7 @@ class Comms(ChainManager):
                 # Apply time filters if provided
                 valid_files = []
                 for file_name in gradient_files:
+                    # Extract timestamp from filename (assuming format like "gradient_TIMESTAMP.pt")
                     try:
                         timestamp_str = file_name.split("_")[1].split(".")[0]
                         file_time = datetime.fromtimestamp(float(timestamp_str))
@@ -1076,6 +1071,7 @@ class Comms(ChainManager):
                     tplr.logger.debug(
                         f"No gradient files within time window for UID {uid}"
                     )
+                    # Skip to retry logic
                     raise FileNotFoundError(
                         f"No valid gradient files within time window in: {base_dir}"
                     )
@@ -1084,15 +1080,8 @@ class Comms(ChainManager):
                 latest_file, _ = valid_files[0]
                 file_path = os.path.join(base_dir, latest_file)
 
-                # Load the state dict using memory mapping when possible
-                if use_mmap:
-                    # Use PyTorch's memory-mapped loading
-                    state_dict = torch.load(
-                        file_path, map_location="cpu", mmap=True
-                    )  # Enable memory mapping
-                else:
-                    # Fallback to regular loading
-                    state_dict = torch.load(file_path)
+                # This is where failures often happen (file I/O)
+                state_dict = torch.load(file_path)
 
                 # Load metadata (assuming it's stored in a companion JSON file)
                 metadata_path = file_path.replace(".pt", ".json")
@@ -1107,7 +1096,12 @@ class Comms(ChainManager):
                 tplr.logger.debug(
                     f"Successfully loaded gradient from {file_path} for UID {uid}"
                 )
-                return state_dict, global_step
+
+                # Store in cache before returning
+                result = (state_dict, global_step)
+                self._gradient_cache.put(uid, window, key, result, time_min, time_max)
+
+                return result
 
             except Exception as e:
                 # Log specific error

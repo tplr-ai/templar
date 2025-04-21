@@ -242,16 +242,21 @@ class Validator:
         self.valid_score_indices = []
 
         # Caching
-        self.state_path = f"validator-state-{tplr.__version__}.npz"
+        self.state_path = f"validator-state-{tplr.__version__}.pt"
         if os.path.isfile(self.state_path):
             self.load_state()
         else:
-            self.gradient_scores = torch.zeros(256, dtype=torch.float32)
-            self.sync_scores = torch.zeros(256, dtype=torch.float32)
-            self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
-            self.final_scores = torch.zeros(256, dtype=torch.float32)
-            self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
-            self.weights = torch.zeros(256, dtype=torch.float32)
+            d = self.config.device
+            self.gradient_scores = torch.zeros(256, dtype=torch.float32, device=d)
+            self.sync_scores = torch.zeros(256, dtype=torch.float32, device=d)
+            self.binary_indicator_scores = torch.zeros(
+                256, dtype=torch.float32, device=d
+            )
+            self.final_scores = torch.zeros(256, dtype=torch.float32, device=d)
+            self.binary_moving_averages = torch.zeros(
+                256, dtype=torch.float32, device=d
+            )
+            self.weights = torch.zeros(256, dtype=torch.float32, device=d)
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -2304,60 +2309,65 @@ class Validator:
         self.scheduler.step()
         torch.cuda.empty_cache()
 
-    def save_state(self):
-        """Saves the state of the validator to a file."""
-        try:
-            tplr.logger.info("Saving validator state.")
+    # ------------- state helpers ----------------
+    def _state_dict(self) -> dict:
+        """Return cpu tensors ready for torch.save."""
+        return {
+            "global_step": self.global_step,
+            "gradient_scores": self.gradient_scores.cpu(),
+            "sync_scores": self.sync_scores.cpu(),
+            "binary_indicator_scores": self.binary_indicator_scores.cpu(),
+            "final_scores": self.final_scores.cpu(),
+            "binary_moving_averages": self.binary_moving_averages.cpu(),
+            "weights": self.weights.cpu(),
+        }
 
-            # Save the state of the validator to file.
-            np.savez(
-                self.state_path,
-                global_step=self.global_step,
-                gradient_scores=self.gradient_scores,
-                sync_scores=self.sync_scores,
-                binary_indicator_scores=self.binary_indicator_scores,
-                final_scores=self.final_scores,
-                binary_moving_averages=self.binary_moving_averages,
-                weights=self.weights,
-            )
+    def save_state(self):
+        """Saves the current validator state to disk.
+
+        This method serializes the validator's state dictionary to the configured state path.
+        The state includes global step, various score metrics, and weights.
+
+        Exceptions during saving are caught and logged as warnings.
+        """
+        try:
+            tplr.logger.info("Saving validator state")
+            torch.save(self._state_dict(), self.state_path)
         except Exception as e:
             tplr.logger.warning(f"Failed to save validator state: {e}")
 
     def load_state(self):
-        """Loads the state of the validator from a file."""
+        """Loads the validator state from disk.
+
+        This method deserializes the validator's state from the configured state path
+        and updates the validator's internal state variables. The state includes:
+        - global_step: Training iteration counter
+        - gradient_scores: Scores based on gradient quality
+        - sync_scores: Scores based on synchronization performance
+        - binary_indicator_scores: Binary classification scores
+        - final_scores: Combined final evaluation scores
+        - binary_moving_averages: Moving averages of binary indicators
+        - weights: Peer weighting values
+
+        All tensors are converted to float and moved to the configured device.
+        Exceptions during loading are caught and logged as warnings.
+        """
         try:
-            tplr.logger.info("Loading validator state.")
-
-            # Load the state from file with pickle support.
-            state = np.load(self.state_path, allow_pickle=True)
-
-            # Convert NumPy arrays to PyTorch tensors and move to the correct device.
+            tplr.logger.info("Loading validator state")
+            state = torch.load(self.state_path, map_location=self.config.device)
+            self.global_step = int(state.get("global_step", 0))
             self.gradient_scores = (
-                torch.from_numpy(state["gradient_scores"])
-                .float()
-                .to(self.config.device)
+                state["gradient_scores"].float().to(self.config.device)
             )
-            self.sync_scores = (
-                torch.from_numpy(state["sync_scores"]).float().to(self.config.device)
-            )
+            self.sync_scores = state["sync_scores"].float().to(self.config.device)
             self.binary_indicator_scores = (
-                torch.from_numpy(state["binary_indicator_scores"])
-                .float()
-                .to(self.config.device)
+                state["binary_indicator_scores"].float().to(self.config.device)
             )
-            self.final_scores = (
-                torch.from_numpy(state["final_scores"]).float().to(self.config.device)
-            )
+            self.final_scores = state["final_scores"].float().to(self.config.device)
             self.binary_moving_averages = (
-                torch.from_numpy(state["binary_moving_averages"])
-                .float()
-                .to(self.config.device)
+                state["binary_moving_averages"].float().to(self.config.device)
             )
-            self.weights = (
-                torch.from_numpy(state["weights"]).float().to(self.config.device)
-            )
-
-            tplr.logger.info(f"Loaded state: {state}")
+            self.weights = state["weights"].float().to(self.config.device)
         except Exception as e:
             tplr.logger.warning(f"Failed to load validator state: {e}")
 

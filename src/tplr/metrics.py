@@ -16,12 +16,13 @@
 # DEALINGS IN THE SOFTWARE.
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import statistics
+import threading
 import time
 import uuid
-from threading import Lock
 from typing import Any, Dict, Final
 
 import psutil
@@ -29,7 +30,7 @@ import torch
 from bittensor import Config as BT_Config
 from influxdb_client.client.influxdb_client import InfluxDBClient
 from influxdb_client.client.write.point import Point
-from influxdb_client.client.write_api import ASYNCHRONOUS
+from influxdb_client.client.write_api import WriteOptions, WriteType
 from influxdb_client.domain.write_precision import WritePrecision
 
 from . import __version__
@@ -58,6 +59,26 @@ INFLUXDB_DATABASE: Final[str] = os.environ.get("INFLUXDB_DATABASE", DEFAULT_DATA
 INFLUXDB_ORG: Final[str] = os.environ.get("INFLUXDB_ORG", DEFAULT_ORG)
 
 
+class MertricsLoggerWriteOptions(WriteOptions):
+    """
+    Custom WriteOptions for InfluxDB client.
+    """
+
+    def __init__(self, batch_size: int = 5_000):
+        super().__init__(
+            write_type=WriteType.batching,
+            batch_size=batch_size,
+            flush_interval=60 * 1_000,
+            jitter_interval=10 * 1_000,
+            retry_interval=10 * 1_000,
+            max_retries=5,
+            max_retry_delay=125_000,
+            max_retry_time=360_000,
+            exponential_base=2,
+            max_close_wait=600_000,
+        )
+
+
 class MetricsLogger:
     """
     Metrics Logger for Distributed Training using InfluxDB.
@@ -79,6 +100,8 @@ class MetricsLogger:
         config: BT_Config | None = None,
         group: str = "",
         job_type: str = "",
+        max_queue_size: int = 600_000,
+        max_workers: int = 1,
     ):
         """
         Initializes the InfluxDB client and prepares metadata for logging.
@@ -105,7 +128,11 @@ class MetricsLogger:
 
         url = f"https://{host}:{port}"
         self.client = InfluxDBClient(url=url, token=token, org=org)
-        self.write_api = self.client.write_api(write_options=ASYNCHRONOUS)
+        self.write_api = self.client.write_api(
+            write_options=MertricsLoggerWriteOptions(
+                batch_size=10_000 if role == "validator" else 1_000,
+            ),
+        )
         self.database = database
         self.org = org
         self.prefix = prefix
@@ -116,7 +143,13 @@ class MetricsLogger:
         self.role = role
         self.group = group
         self.job_type = job_type
-        self.lock = Lock()
+        self._max_queue = max_queue_size
+        self._max_workers = max_workers
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        if not self._ready.wait(timeout=5):
+            logger.warning("MetricsLogger worker not ready in 5s")
 
     def process_value(self, v):
         if isinstance(v, int):
@@ -186,17 +219,36 @@ class MetricsLogger:
                 point = point.field(field_key, field_value)
             point = point.time(timestamp, WritePrecision.NS)
 
-            loop = asyncio.get_event_loop()
-            loop.run_in_executor(None, self._write_point, point)
+            self._loop.call_soon_threadsafe(self._queue.put_nowait, point)
 
         except Exception as e:
             logger.error(f"Failed to schedule metrics write: {e}")
 
+    def _run(self):
+        self._loop = asyncio.new_event_loop()
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=self._max_queue)
+        self._buffers: dict[str, Point] = {}
+        self._lock = asyncio.Lock()
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=self._max_workers
+        )
+        self._loop.set_default_executor(self._executor)
+        self._loop.create_task(self._consumer())
+        self._ready.set()
+        self._loop.run_forever()
+
+    async def _consumer(self):
+        while True:
+            record = await self._queue.get()
+            await self._handle(record)
+
+    async def _handle(self, point: Point) -> None:
+        self._loop.run_in_executor(None, self._write_point, point)
+
     def _write_point(self, point):
         """Blocking call, runs in background thread."""
         try:
-            with self.lock:
-                self.write_api.write(bucket=self.database, org=self.org, record=point)
+            self.write_api.write(bucket=self.database, org=self.org, record=point)
             logger.debug("Metrics written (async).")
         except Exception as e:
             logger.exception(f"Async metrics write failed: {e}")

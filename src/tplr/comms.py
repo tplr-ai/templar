@@ -72,7 +72,6 @@ class Comms(ChainManager):
         metagraph=None,
         hparams=None,
         uid=None,
-        checkpoint_version: str | None = None,
         **kwargs,
     ):
         self.wallet = wallet
@@ -115,9 +114,6 @@ class Comms(ChainManager):
         )  # Number of recent windows to check
 
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
-
-        # fallback to code‑version when flag not supplied
-        self.checkpoint_version: str = checkpoint_version or __version__
 
         # keep a reference to the *whole* ckpt that was loaded once, so
         # miners / validators can consult keys such as `start_window`.
@@ -788,7 +784,7 @@ class Comms(ChainManager):
         time_max: datetime = None,
     ) -> Optional[tuple[dict, int]]:
         """GET operation."""
-        filename = f"{key}-{window}-{uid}-v{self.checkpoint_version}.pt"
+        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         tplr.logger.debug(f"GET {filename} -->")
 
         try:
@@ -1252,7 +1248,7 @@ class Comms(ChainManager):
                     return result
 
             # 3. Check local storage
-            local_result = self._load_latest_local_checkpoint(self.checkpoint_version)
+            local_result = self._load_latest_local_checkpoint(version)
             if local_result:
                 return local_result
 

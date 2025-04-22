@@ -190,7 +190,6 @@ class Miner:
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
-            checkpoint_version=self.bootstrap_version,
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")

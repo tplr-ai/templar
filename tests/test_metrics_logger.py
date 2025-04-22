@@ -1,10 +1,10 @@
 # test_metrics_logger.py
 
-import unittest.mock as mock
 import asyncio
-import time  # Need time for sleep
-from unittest.mock import MagicMock, patch, Mock  # Import Mock
 import logging
+import time  # Need time for sleep
+import unittest.mock as mock
+from unittest.mock import MagicMock, Mock, patch  # Import Mock
 
 import pytest
 from bittensor import Config as BT_Config
@@ -74,11 +74,17 @@ class TestMetricsLogger:
             mock_write_api_instance.write._mock_name = (
                 "mock_write_api_instance.write"  # For logs
             )
+            mock_write_api_instance.write.side_effect = None
+
             log.debug(
                 f" Configured Mock Write API Instance [ID: {id(mock_write_api_instance)}], Write Method [ID: {id(mock_write_api_instance.write)}]"
             )
             mock_client_instance.write_api.return_value = mock_write_api_instance
             yield mock_client_class
+
+            mock_write_api_instance.write.side_effect = None
+            mock_write_api_instance.write.reset_mock()
+
             log.debug("Exiting mock_influxdb_client fixture, patch deactivated.")
 
     @pytest.fixture
@@ -297,11 +303,25 @@ class TestMetricsLogger:
         write_mock.assert_called_once()
         log.debug("test_log_with_config_tags completed.")
 
-    def test_log_with_exception(self, metrics_logger):
-        log.debug("Running test_log_with_exception...")
+    @pytest.fixture
+    def exception_mock_metrics_logger(self, metrics_logger):
+        """Create a separate metrics logger instance for the exception test."""
         write_mock = self.get_write_method_mock(metrics_logger)
+        write_mock.reset_mock()
         test_exception = Exception("InfluxDB write failed in test")
         write_mock.side_effect = test_exception
+
+        yield metrics_logger
+
+        write_mock.side_effect = None
+        write_mock.reset_mock()
+
+    def test_log_with_exception(self, exception_mock_metrics_logger):
+        log.debug("Running test_log_with_exception...")
+
+        metrics_logger = exception_mock_metrics_logger
+        write_mock = self.get_write_method_mock(metrics_logger)
+
         # The logger internally catches the exception from write_api.write
         # but the call to run_in_executor should still succeed.
         metrics_logger.log("exception_test", {}, {})
@@ -310,6 +330,7 @@ class TestMetricsLogger:
             f"'{write_mock._mock_name}' not called within timeout (even with exception)"
         )
         write_mock.assert_called_once()  # Check it was attempted
+
         log.debug("test_log_with_exception completed.")
 
     def test_miner_metrics_pattern(
@@ -330,12 +351,65 @@ class TestMetricsLogger:
         write_mock.assert_called_once()
         log.debug("test_miner_metrics_pattern completed.")
 
-    def test_log_call_invokes_write_once(self, metrics_logger):
-        log.debug("Running test_log_call_invokes_write_once...")
-        metrics_logger.log("single_call_test", {}, {})
+    @pytest.fixture
+    def clean_mock_metrics_logger(self, metrics_logger):
+        """Create a clean metrics logger instance with reset mocks."""
         write_mock = self.get_write_method_mock(metrics_logger)
+
+        write_mock.reset_mock()
+        write_mock.side_effect = None
+
+        yield metrics_logger
+
+    def test_log_call_invokes_write_once(self, clean_mock_metrics_logger):
+        log.debug("Running test_log_call_invokes_write_once...")
+
+        metrics_logger = clean_mock_metrics_logger
+        write_mock = self.get_write_method_mock(metrics_logger)
+
+        metrics_logger.log("single_call_test", {}, {})
         assert wait_for_mock_call(write_mock), (
             f"'{write_mock._mock_name}' not called within timeout"
         )
         write_mock.assert_called_once()
         log.debug("test_log_call_invokes_write_once completed.")
+
+    def test_log_with_sample_rate(self, metrics_logger):
+        """Test that sample_rate parameter controls logging frequency."""
+        log.debug("Running test_log_with_sample_rate...")
+
+        write_mock = self.get_write_method_mock(metrics_logger)
+
+        write_mock.side_effect = None
+        write_mock.reset_mock()
+
+        with patch("random.random", return_value=0.5):
+            write_mock.reset_mock()
+
+            # Call log with sample_rate=0.8 (should log because 0.5 < 0.8)
+            metrics_logger.log(
+                measurement="test_sample",
+                tags={"test": "value"},
+                fields={"field": 1.0},
+                sample_rate=0.8,
+            )
+
+            assert wait_for_mock_call(write_mock), (
+                f"'{write_mock._mock_name}' not called within timeout"
+            )
+            write_mock.assert_called_once()
+
+        with patch("random.random", return_value=0.9):
+            write_mock.reset_mock()
+
+            metrics_logger.log(
+                measurement="test_sample",
+                tags={"test": "value"},
+                fields={"field": 1.0},
+                sample_rate=0.8,
+            )
+
+            time.sleep(0.1)
+            write_mock.assert_not_called()
+
+        log.debug("test_log_with_sample_rate completed.")

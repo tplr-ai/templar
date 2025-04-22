@@ -93,8 +93,8 @@ def _sync_run_in_executor(monkeypatch):
     )
 
 
-# ✨ NEW – make MetricsLogger think it's enabled everywhere ────────────────
-@pytest.fixture(scope="session", autouse=True)
+# assure env‑vars for every test (function scope fits monkeypatch) ──────
+@pytest.fixture(autouse=True)
 def _dummy_influx_env(monkeypatch):
     """
     CI doesn't ship real InfluxDB credentials; without them MetricsLogger

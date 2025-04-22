@@ -41,6 +41,28 @@ def _make_validator(tmp_path, device="cpu"):
     v.binary_moving_averages = torch.rand(256, dtype=torch.float32, device=d)
     v.weights = torch.rand(256, dtype=torch.float32, device=d)
 
+    # ── dummy OpenSkill machinery ──────────────────────────────────────────
+    class _Rating:
+        def __init__(self, mu, sigma):
+            self.mu = mu
+            self.sigma = sigma
+
+        # keep the typical definition: μ − 3 σ
+        def ordinal(self):
+            return self.mu - 3 * self.sigma
+
+    class _OSModel:
+        def rating(self, *, mu, sigma, name=None):
+            r = _Rating(mu, sigma)
+            r.name = name
+            return r
+
+    v.openskill_model = _OSModel()
+    v.openskill_ratings = {
+        1: v.openskill_model.rating(mu=25.0, sigma=8.333, name="1"),
+        2: v.openskill_model.rating(mu=28.0, sigma=7.500, name="2"),
+    }
+
     # attach needed methods (already defined on the class)
     v._state_dict = v_cls._state_dict.__get__(v)
     v.save_state = v_cls.save_state.__get__(v)
@@ -91,6 +113,13 @@ def test_save_and_load_roundtrip(tmp_path):
         assert torch.equal(t1, t2), f"Tensor mismatch for {name}"
         assert t1.dtype == t2.dtype
         assert t2.device.type == "cpu"
+
+    # OpenSkill ratings round‑trip
+    assert v1.openskill_ratings.keys() == v2.openskill_ratings.keys()
+    for uid in v1.openskill_ratings:
+        r1, r2 = v1.openskill_ratings[uid], v2.openskill_ratings[uid]
+        assert pytest.approx(r1.mu) == r2.mu, f"mu mismatch for uid {uid}"
+        assert pytest.approx(r1.sigma) == r2.sigma, f"sigma mismatch for uid {uid}"
 
 
 def test_save_path_extension_is_pt(tmp_path):

@@ -537,6 +537,11 @@ class Validator:
                 f"Using start_window: {self.start_window}, global_step: {self.global_step}"
             )
 
+        checkpoint_window_buffer = 5
+        has_new_checkpoint = (
+            self.global_step
+            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
+        )
         # Proceed to load checkpoint
         (
             success,
@@ -550,7 +555,9 @@ class Validator:
             scheduler=self.scheduler,
             current_window=self.current_window,
             device=self.config.device,
-            init_version=self.bootstrap_version,
+            init_version=tplr.__version__
+            if has_new_checkpoint
+            else self.bootstrap_version,
         )
         if success:
             self.momentum = loaded_momentum
@@ -563,12 +570,15 @@ class Validator:
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
             # Only catch up if we're behind
-            if loaded_checkpoint_window < self.current_window:
+            if (
+                loaded_checkpoint_window < self.current_window
+                and self.global_step > checkpoint_window_buffer
+            ):
                 tplr.logger.info(
                     f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
                 )
                 await tplr.neurons.catchup_with_aggregation_server(
-                    self, loaded_checkpoint_window
+                    self, max(loaded_checkpoint_window, self.start_window)
                 )
             else:
                 tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")

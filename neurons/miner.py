@@ -263,6 +263,11 @@ class Miner:
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
 
+        checkpoint_window_buffer = 5
+        has_new_checkpoint = (
+            self.global_step
+            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
+        )
         # Proceed to load checkpoint
         (
             success,
@@ -276,7 +281,9 @@ class Miner:
             scheduler=self.scheduler,
             current_window=self.current_window,
             device=cast(str, self.config.device),
-            init_version=self.bootstrap_version,
+            init_version=tplr.__version__
+            if has_new_checkpoint
+            else self.bootstrap_version,
         )
         if success:
             self.momentum = loaded_momentum
@@ -289,7 +296,10 @@ class Miner:
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
             # Only catch up if we're behind
-            if loaded_checkpoint_window < self.current_window:
+            if (
+                loaded_checkpoint_window < self.current_window
+                and self.global_step > checkpoint_window_buffer
+            ):
                 tplr.logger.info(
                     f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
                 )

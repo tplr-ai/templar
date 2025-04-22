@@ -9,6 +9,7 @@ import concurrent.futures
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+import os
 
 import pytest
 from bittensor import Config as BT_Config
@@ -90,6 +91,25 @@ def _sync_run_in_executor(monkeypatch):
     monkeypatch.setattr(
         asyncio.BaseEventLoop, "run_in_executor", _run_sync, raising=True
     )
+
+
+# ✨ NEW – make MetricsLogger think it's enabled everywhere ────────────────
+@pytest.fixture(scope="session", autouse=True)
+def _dummy_influx_env(monkeypatch):
+    """
+    CI doesn't ship real InfluxDB credentials; without them MetricsLogger
+    short‑circuits and 'write' is never called.  Provide harmless dummy
+    values so the existing assertions remain valid both locally and in CI.
+    """
+    for k, v in {
+        "INFLUXDB_TOKEN": "unit‑test‑token",
+        "INFLUXDB_URL":   "http://localhost:8086",
+        "INFLUXDB_ORG":   "unit‑test‑org",
+        "INFLUXDB_BUCKET":"unit‑test‑bucket",
+    }.items():
+        if not os.environ.get(k):          # don't clobber a real value
+            monkeypatch.setenv(k, v)
+    yield
 
 
 class TestMetricsLogger:

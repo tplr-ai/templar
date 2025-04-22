@@ -132,7 +132,7 @@ def trace() -> None:
 bt.logging.off()
 
 logger.setLevel(logging.INFO)
-logger.propagate = False
+logger.propagate = True
 logger.handlers.clear()
 logger.addHandler(
     RichHandler(

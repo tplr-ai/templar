@@ -258,6 +258,11 @@ class Miner:
 
         # Fetch start_window from highest stake validator
         self.start_window = await self.comms.get_start_window()
+        if self.start_window is None:
+            raise RuntimeError(
+                "Could not find a valid start window. This should not be possible."
+            )
+
         tplr.logger.info(f"Using start_window: {self.start_window}")
 
         self.global_step = self.current_window - self.start_window
@@ -287,7 +292,6 @@ class Miner:
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -304,7 +308,7 @@ class Miner:
                     f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
                 )
                 await tplr.neurons.catchup_with_aggregation_server(
-                    self, loaded_checkpoint_window
+                    self, max(loaded_checkpoint_window, self.start_window)
                 )
             else:
                 tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")

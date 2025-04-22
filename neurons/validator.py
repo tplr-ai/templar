@@ -532,10 +532,16 @@ class Validator:
                 "This validator is not the highest staked. Waiting to fetch start_window."
             )
             self.start_window = await self.comms.get_start_window()
-            self.global_step = self.current_window - self.start_window
-            tplr.logger.info(
-                f"Using start_window: {self.start_window}, global_step: {self.global_step}"
+
+        if self.start_window is None:
+            raise RuntimeError(
+                "Could not find a valid start window. This should not be possible."
             )
+
+        self.global_step = self.current_window - self.start_window
+        tplr.logger.info(
+            f"Using start_window: {self.start_window}, global_step: {self.global_step}"
+        )
 
         checkpoint_window_buffer = 5
         has_new_checkpoint = (
@@ -561,7 +567,6 @@ class Validator:
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(

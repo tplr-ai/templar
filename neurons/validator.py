@@ -1657,7 +1657,7 @@ class Validator:
 
             tplr.logger.info("Updated scores for evaluated UIDs:\n" + table_str)
 
-            # Log WandB metrics per UID
+            should_downsample = len(self.evaluated_uids) > 8
             for uid in sorted(self.evaluated_uids):
                 # Extract primitive values from tensors for WandB
                 gradient_score = float(self.gradient_scores[uid].item())
@@ -1696,7 +1696,7 @@ class Validator:
                     },
                     with_system_metrics=True,
                     with_gpu_metrics=True,
-                    sample_rate=0.8,
+                    sample_rate=0.8 if should_downsample else 1.0,
                 )
 
             # 17. Set weights periodically

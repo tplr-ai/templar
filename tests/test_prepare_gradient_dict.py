@@ -84,7 +84,7 @@ def test_return_structure_and_types(caplog):
     pages = [["doc1", "page1"]]
     step_window = 5
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("INFO", logger="templar"):
         # Call the helper function.
         result = prepare_gradient_dict(miner, pages, step_window)
 
@@ -412,7 +412,7 @@ def test_logging_behavior(caplog):
     pages = [["doc_log", "page_log"]]
     step_window = 15
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("INFO", logger="templar"):
         prepare_gradient_dict(miner, pages, step_window)
 
     expected_str = f"Attached metadata to gradient: {{'pages_info': {pages}, 'window': {step_window}}}"

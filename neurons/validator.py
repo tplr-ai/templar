@@ -402,7 +402,7 @@ class Validator:
                 )
 
                 self.final_scores[uid] = (
-                    openskill_mu
+                    openskill_ordinal
                     * max(0, self.binary_moving_averages[uid].item())
                     * sync_score
                 )
@@ -445,33 +445,45 @@ class Validator:
     def update_weights(self) -> None:
         """
         Update the weights for all evaluated peers using min power normalization.
-
         This method:
         1. Creates a mask for peers that have been evaluated
-        2. Extracts scores for evaluated peers
-        3. Shifts all scores to be positive by subtracting the minimum score
-        4. Applies power normalization to the shifted scores
-        5. Verifies that weights sum to approximately 1.0
-
-        The shifting approach ensures all peers receive some weight proportional to
-        their relative performance, rather than filtering out peers with negative scores.
+        2. Creates a mask for evaluated peers with positive scores
+        3. Applies power normalization to only the positive scores
+        4. Verifies that weights sum to approximately 1.0
+        This approach only assigns weights to peers with positive scores.
         """
         self.weights = torch.zeros_like(self.final_scores)
         evaluated_mask = torch.zeros_like(self.final_scores, dtype=torch.bool)
         evaluated_mask[list(self.evaluated_uids)] = True
-        eval_scores = self.final_scores[evaluated_mask]
-        min_score = eval_scores.min().item()
-        shifted_scores = eval_scores - min_score + 1e-5
-        # Apply power normalization to the shifted scores
-        self.weights[evaluated_mask] = min_power_normalization(
-            shifted_scores,
-            power=self.hparams.power_normalisation,
-        )
 
-        weight_sum = self.weights.sum().item()
-        tplr.logger.debug(f"Weight sum: {weight_sum}")
-        if abs(weight_sum - 1.0) > 1e-6:
-            tplr.logger.warning(f"Weights sum to {weight_sum}, expected close to 1.0")
+        # Create a mask for positive scores among evaluated peers
+        positive_mask = evaluated_mask.clone()
+        positive_mask[evaluated_mask] = self.final_scores[evaluated_mask] > 0
+
+        # Only consider peers with positive scores
+        positive_scores = self.final_scores[positive_mask]
+
+        if len(positive_scores) > 0:
+            # Apply power normalization to only the positive scores
+            normalized_weights = min_power_normalization(
+                positive_scores,
+                power=self.hparams.power_normalisation,
+            )
+
+            # Assign weights only to peers with positive scores
+            self.weights[positive_mask] = normalized_weights
+
+            weight_sum = self.weights.sum().item()
+            tplr.logger.debug(f"Weight sum: {weight_sum}")
+
+            if abs(weight_sum - 1.0) > 1e-6:
+                tplr.logger.warning(
+                    f"Weights sum to {weight_sum}, expected close to 1.0"
+                )
+        else:
+            tplr.logger.warning(
+                "No positive scores found among evaluated peers. All weights set to zero."
+            )
 
     async def run(self):
         # Start background block listener
@@ -832,6 +844,7 @@ class Validator:
                     )
                     if self.final_scores[uid] > 0:
                         self.final_scores[uid] *= self.sync_score_slash_rate
+                        self.binary_moving_averages[uid] *= self.sync_score_slash_rate
 
             # Slash peers failing to submit gradients
             for uid in skipped_uids:
@@ -844,6 +857,9 @@ class Validator:
                     # Only reduce positive scores
                     if self.final_scores[uid] > 0:
                         self.final_scores[uid] *= self.missing_gradient_slash_rate
+                        self.binary_moving_averages[uid] *= (
+                            self.missing_gradient_slash_rate
+                        )
 
                         new_score = self.final_scores[uid].item()
                         tplr.logger.info(
@@ -916,20 +932,31 @@ class Validator:
                 )
                 continue
 
-            common_loader_random = await retry_call(
-                tplr.r2_dataset.R2DatasetLoader.create,
-                batch_size=self.hparams.batch_size,
-                sequence_length=self.hparams.sequence_length,
-                pages_info=pages_random,
-                tokenizer=self.tokenizer,
-                attempts=3,
-                delay=1,
-                context="random loader - common",
-                **{},
+            # Start preloading the random loader as a task
+            dataloader_tasks = {}
+
+            # Start the random loader task using a high random seed
+            random_seed = random.randint(
+                1000, 10000000
+            )  # Using high seed number for random context
+            dataloader_tasks["random_loader"] = asyncio.create_task(
+                self.preload_dataloader(seed=random_seed)
             )
             tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation."
+                f"Started preloading common random dataloader with seed {random_seed}"
             )
+
+            # Start preloading all UID-specific dataloaders in parallel
+            for uid in evaluation_uids:
+                dataloader_tasks[uid] = asyncio.create_task(
+                    self.preload_dataloader(seed=uid)
+                )
+                tplr.logger.info(
+                    f"Started preloading dataloader for UID {uid} (as seed)"
+                )
+
+            # Process each UID evaluation, awaiting the preloaded data when needed
+            common_loader_random = None
 
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
@@ -967,22 +994,39 @@ class Validator:
                             f"Missing pages info metadata from miner UID {eval_uid}"
                         )
 
-                    # Load local pages exactly once from the dataset loader with retry handling.
-                    local_pages = await retry_call(
-                        tplr.r2_dataset.R2DatasetLoader.next_pages,
-                        offset=self.sync_window * self.hparams.pages_per_window,
-                        n_pages=self.hparams.pages_per_window,
-                        seed=eval_uid,
-                        attempts=3,
-                        delay=1,
-                        context=f"local pages for UID {eval_uid}",
-                        **{},
-                    )
-                    if local_pages is None:
-                        tplr.logger.error(
-                            f"Failed to load local pages for UID {eval_uid}. Skipping evaluation for this peer."
-                        )
+                    # Await the preloaded dataloader for this UID
+                    loader_data = None
+                    local_pages = None
+                    loader_own = None
+                    data_start = tplr.T()
+                    if eval_uid in dataloader_tasks:
+                        try:
+                            loader_data = await dataloader_tasks[eval_uid]
+                            if loader_data:
+                                loader_own = loader_data["loader"]
+                                local_pages = loader_data["pages"]
+                                tplr.logger.info(
+                                    f"Successfully awaited preloaded dataloader for UID {eval_uid}"
+                                )
+                            else:
+                                tplr.logger.warning(
+                                    f"Preloaded data for UID {eval_uid} was None, skipping"
+                                )
+                                continue
+                        except Exception as e:
+                            tplr.logger.error(
+                                f"Error awaiting preloaded data for UID {eval_uid}: {str(e)}"
+                            )
+                            loader_data = None
+                            continue
+                        finally:
+                            # Clean up the task reference
+                            del dataloader_tasks[eval_uid]
+
+                    if local_pages is None or loader_own is None:
                         continue
+
+                    # Verify pages match if miner sent them
                     if miner_pages is not None:
                         if local_pages != miner_pages:
                             tplr.logger.warning(
@@ -996,24 +1040,7 @@ class Validator:
                         tplr.logger.info(
                             f"Using local pages for UID {eval_uid} as miner metadata is missing."
                         )
-                    data_start = tplr.T()
-                    # Create the evaluation loader using the locally loaded pages.
-                    loader_own = await retry_call(
-                        tplr.r2_dataset.R2DatasetLoader.create,
-                        batch_size=self.hparams.batch_size,
-                        sequence_length=self.hparams.sequence_length,
-                        pages_info=local_pages,
-                        tokenizer=self.tokenizer,
-                        attempts=3,
-                        delay=1,
-                        context=f"own loader for UID {eval_uid}",
-                        **{},
-                    )
-                    if loader_own is None:
-                        tplr.logger.error(
-                            f"Failed to create loader for own data for UID {eval_uid}. Skipping evaluation."
-                        )
-                        continue
+
                     tplr.logger.info(
                         f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}"
                     )
@@ -1263,6 +1290,30 @@ class Validator:
 
                     # 7. Use common random loader for evaluation
                     model_random_data_eval = copy.deepcopy(self.model)
+
+                    # Await the random loader task if this is the first time we're using it
+                    if (
+                        common_loader_random is None
+                        and "random_loader" in dataloader_tasks
+                    ):
+                        try:
+                            random_loader_data = await dataloader_tasks["random_loader"]
+                            if random_loader_data:
+                                common_loader_random = random_loader_data["loader"]
+                                tplr.logger.info(
+                                    f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation."
+                                )
+                            else:
+                                tplr.logger.error(
+                                    "Preloaded random loader was None, cannot continue evaluation"
+                                )
+                                continue
+                            # Clean up the task reference after we've used it
+                            del dataloader_tasks["random_loader"]
+                        except Exception as e:
+                            tplr.logger.error(f"Error loading random loader: {str(e)}")
+                            continue
+
                     loader_random = common_loader_random
 
                     # 8. Compute initial loss
@@ -1495,6 +1546,10 @@ class Validator:
 
                     if self.final_scores[eval_uid] > 0:
                         self.final_scores[eval_uid] *= self.missing_gradient_slash_rate
+                        self.binary_moving_averages[eval_uid] *= (
+                            self.missing_gradient_slash_rate
+                        )
+
                         new_score = self.final_scores[eval_uid].item()
                         tplr.logger.info(
                             f"Reduced score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient."
@@ -1841,6 +1896,15 @@ class Validator:
 
             # Clean up common random loader after evaluations for this window.
             del common_loader_random, pages_random
+            for _, task in dataloader_tasks.items():
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except Exception:
+                    pass
+            dataloader_tasks.clear()
+
             torch.cuda.empty_cache()
 
     def select_initial_peers(self) -> tplr.comms.PeerArray | None:
@@ -2370,6 +2434,78 @@ class Validator:
             self.weights = state["weights"].float().to(self.config.device)
         except Exception as e:
             tplr.logger.warning(f"Failed to load validator state: {e}")
+
+    async def preload_dataloader(self, seed: int):
+        """
+        Preload a dataloader using a seed value.
+
+        Args:
+            seed: Seed value for generating pages
+                 Values > 255 are considered for random dataloaders
+
+        Returns:
+            Dictionary containing:
+                - loader: The created dataloader
+                - pages: The pages used
+                - is_random: Whether this is considered a random loader (seed > 255)
+        """
+        # Determine if this is a random context based on seed value
+        is_random = seed > 255
+        context_id = "random" if is_random else f"UID: {seed}"
+
+        try:
+            # Generate pages based on seed
+            tplr.logger.info(f"Generating pages for {context_id}")
+            local_pages = await retry_call(
+                tplr.r2_dataset.R2DatasetLoader.next_pages,
+                offset=self.sync_window * self.hparams.pages_per_window,
+                n_pages=self.hparams.pages_per_window,
+                seed=seed,
+                attempts=3,
+                delay=1,
+                context=f"pages for {context_id}",
+                **{},
+            )
+
+            if local_pages is None:
+                tplr.logger.error(
+                    f"Failed to load pages for {context_id}. Cannot preload dataloader."
+                )
+                return None
+
+            # Log which pages we're using
+            page_ids = [p[1] for p in local_pages]
+            tplr.logger.info(
+                f"Creating dataloader for {context_id} using pages: {page_ids}"
+            )
+
+            # Create the evaluation loader using the generated pages
+            loader = await retry_call(
+                tplr.r2_dataset.R2DatasetLoader.create,
+                batch_size=self.hparams.batch_size,
+                sequence_length=self.hparams.sequence_length,
+                pages_info=local_pages,
+                tokenizer=self.tokenizer,
+                attempts=3,
+                delay=1,
+                context=f"loader for {context_id}",
+                **{},
+            )
+
+            if loader is None:
+                tplr.logger.error(
+                    f"Failed to create loader for {context_id} with valid pages."
+                )
+                return None
+
+            tplr.logger.info(
+                f"Successfully preloaded dataloader for {context_id} with pages: {page_ids}"
+            )
+
+            return {"loader": loader, "pages": local_pages, "is_random": is_random}
+        except Exception as e:
+            tplr.logger.error(f"Error preloading data for {context_id}: {str(e)}")
+            return None
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

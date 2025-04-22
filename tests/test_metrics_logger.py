@@ -103,11 +103,11 @@ def _dummy_influx_env(monkeypatch):
     """
     for k, v in {
         "INFLUXDB_TOKEN": "unit‑test‑token",
-        "INFLUXDB_URL":   "http://localhost:8086",
-        "INFLUXDB_ORG":   "unit‑test‑org",
-        "INFLUXDB_BUCKET":"unit‑test‑bucket",
+        "INFLUXDB_URL": "http://localhost:8086",
+        "INFLUXDB_ORG": "unit‑test‑org",
+        "INFLUXDB_BUCKET": "unit‑test‑bucket",
     }.items():
-        if not os.environ.get(k):          # don't clobber a real value
+        if not os.environ.get(k):  # don't clobber a real value
             monkeypatch.setenv(k, v)
     yield
 

@@ -37,7 +37,7 @@
     "peer_list_window_margin": 2,
     "active_check_interval": 60,
     "recent_windows": 5,
-    "power_normalisation": 1.2,
+    "power_normalisation": 2.0,
     "validator_sample_rate": 0.1,
     "catch_up_threshold": 15,
     "catch_up_batch_size": 5,
@@ -47,6 +47,6 @@
     "reset_inactivity_windows": 25,
     "sync_max_steps_behind": 3,
     "eval_lr_factor": 0.2,
-    "openskill_beta": 100,
+    "openskill_beta": 20,
     "openskill_tau": 0.1
 }

@@ -27,3 +27,7 @@ test: dev
 
 bistro:
     ps aux | grep Bistro
+
+cov:
+    uv run pytest tests/ -v --cov=src --cov-report=xml --cov-report=term
+

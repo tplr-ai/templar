@@ -1679,7 +1679,6 @@ class Validator:
                     step=self.global_step,
                 )
 
-                # Log to InfluxDB metrics per UID with primitive types
                 self.metrics_logger.log(
                     measurement="validator_scores",
                     tags={
@@ -1697,6 +1696,7 @@ class Validator:
                     },
                     with_system_metrics=True,
                     with_gpu_metrics=True,
+                    sample_rate=0.8,
                 )
 
             # 17. Set weights periodically

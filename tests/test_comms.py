@@ -885,7 +885,9 @@ async def test_load_checkpoint_success(monkeypatch):
     }
 
     # get_latest_checkpoint -> (checkpoint_data, checkpoint_window)
-    async def _fake_get_latest_checkpoint():
+    # It's called with init_version, so the mock needs to accept it.
+    async def _fake_get_latest_checkpoint(version: str):
+        # TODO: Consider asserting the value of 'version' if it's important for the test logic.
         return checkpoint_data, 1
 
     monkeypatch.setattr(comms, "get_latest_checkpoint", _fake_get_latest_checkpoint)

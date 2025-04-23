@@ -56,6 +56,8 @@ import tplr
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
+STATE_LOCAL_DIR = os.path.join(os.getcwd(), ".local_state")
+
 # GPU optimizations.
 torch.manual_seed(42)
 torch.cuda.manual_seed_all(42)
@@ -242,7 +244,15 @@ class Validator:
         self.valid_score_indices = []
 
         # Caching
-        self.state_path = f"validator-state-{tplr.__version__}.npz"
+        self.state_dir = os.path.join(
+            STATE_LOCAL_DIR,
+            self.wallet.hotkey.ss58_address,
+        )
+        self.state_path = os.path.join(
+            self.state_dir,
+            f"validator-state-{tplr.__version__}.npz",
+        )
+        os.makedirs(self.state_dir, exist_ok=True)
         if os.path.isfile(self.state_path):
             self.load_state()
         else:

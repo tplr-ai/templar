@@ -6,6 +6,7 @@ services:
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
+      - ./.local_state:/app/.local_state
     environment:
       - NODE_TYPE=${NODE_TYPE:-miner}
       - WALLET_NAME=${WALLET_NAME}

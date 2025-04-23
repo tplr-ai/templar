@@ -1969,7 +1969,7 @@ class Validator:
         #    - non-zero weight,
         #    - not already a gather peer
         # ----------------------------------------------------------------------
-        non_zero_weight_uids = torch.nonzero(self.weights).flatten().numpy()
+        non_zero_weight_uids = torch.nonzero(self.weights.cpu()).flatten().numpy()
         active_non_zero_weight_uids = np.intersect1d(
             list(self.comms.active_peers),
             non_zero_weight_uids,

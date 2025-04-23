@@ -1376,6 +1376,7 @@ class Comms(ChainManager):
             tuple: (success: bool, momentum: dict, checkpoint_current_window: int,
                     optimizer: Optimizer, scheduler: LRScheduler)
         """
+        init_version = init_version if init_version is not None else __version__
         result = await self.get_latest_checkpoint(init_version)
         if not result:
             tplr.logger.info("No valid checkpoints found")

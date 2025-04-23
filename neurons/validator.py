@@ -939,21 +939,6 @@ class Validator:
 
             # Pre-load common random loader for all evaluated UIDs in this window.
             data_start_random = tplr.T()
-            pages_random = await retry_call(
-                tplr.r2_dataset.R2DatasetLoader.next_pages,
-                offset=self.sync_window * self.hparams.pages_per_window,
-                n_pages=self.hparams.pages_per_window,
-                seed=random.randint(1000, 10000000),
-                attempts=3,
-                delay=1,
-                context="random pages - common loader",
-                **{},
-            )
-            if pages_random is None:
-                tplr.logger.error(
-                    f"Failed to load common random pages for window {self.sync_window}. Skipping evaluation for this window."
-                )
-                continue
 
             # Start preloading the random loader as a task
             dataloader_tasks = {}
@@ -1853,7 +1838,7 @@ class Validator:
             self.global_step += 1
 
             # Clean up common random loader after evaluations for this window.
-            del common_loader_random, pages_random
+            del common_loader_random
             for _, task in dataloader_tasks.items():
                 if not task.done():
                     task.cancel()

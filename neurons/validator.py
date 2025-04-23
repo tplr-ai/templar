@@ -112,11 +112,6 @@ class Validator:
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
-        parser.add_argument(
-            "--log-to-private-wandb",
-            action="store_true",
-            help="Logs to the entity you are signed in to if true, else to the public 'tplr'.",
-        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -198,8 +193,13 @@ class Validator:
             milestones=[250],
         )
 
-        # Init comms with required chain management args,
-        # including transformer and compressor for gradient decoding.
+        self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
+        tplr.logger.info(
+            f"[Miner] code_version={tplr.__version__} "
+            f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
+        )
+
+        # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",
@@ -209,7 +209,6 @@ class Validator:
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
-            totalks=self.totalks,
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
@@ -556,11 +555,22 @@ class Validator:
                 "This validator is not the highest staked. Waiting to fetch start_window."
             )
             self.start_window = await self.comms.get_start_window()
-            self.global_step = self.current_window - self.start_window
-            tplr.logger.info(
-                f"Using start_window: {self.start_window}, global_step: {self.global_step}"
+
+        if self.start_window is None:
+            raise RuntimeError(
+                "Could not find a valid start window. This should not be possible."
             )
 
+        self.global_step = self.current_window - self.start_window
+        tplr.logger.info(
+            f"Using start_window: {self.start_window}, global_step: {self.global_step}"
+        )
+
+        checkpoint_window_buffer = 5
+        has_new_checkpoint = (
+            self.global_step
+            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
+        )
         # Proceed to load checkpoint
         (
             success,
@@ -574,10 +584,12 @@ class Validator:
             scheduler=self.scheduler,
             current_window=self.current_window,
             device=self.config.device,
+            init_version=tplr.__version__
+            if has_new_checkpoint
+            else self.bootstrap_version,
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -586,12 +598,15 @@ class Validator:
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
             # Only catch up if we're behind
-            if loaded_checkpoint_window < self.current_window:
+            if (
+                loaded_checkpoint_window < self.current_window
+                and self.global_step > checkpoint_window_buffer
+            ):
                 tplr.logger.info(
                     f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
                 )
                 await tplr.neurons.catchup_with_aggregation_server(
-                    self, loaded_checkpoint_window
+                    self, max(loaded_checkpoint_window, self.start_window)
                 )
             else:
                 tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")

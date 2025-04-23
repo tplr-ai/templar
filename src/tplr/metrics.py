@@ -43,13 +43,13 @@ RUNTIME_ID: Final[str] = str(uuid.uuid4())
 CACHED_GPU_METRICS_INTERVAL: Final[int] = 2
 
 DEFAULT_HOST: Final[str] = (
-    "pliftu8n85-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws"
+    "cddnkvuk6l-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws"
 )
 DEFAULT_PORT: Final[int] = 8086
 DEFAULT_DATABASE: Final[str] = "tplr"
 DEFAULT_ORG: Final[str] = "tplr"
 FALLBACK_INFLUXDB_TOKEN: Final[str] = (
-    "lTRclLtRXOJWGOB-vr1mhtp5SholImgBH705pMgK1_0sCzTzAXivhd4gPwJhRoK6HLRvG8cxjhOTEy1hlm4D3Q=="
+    "sikfH_RR_5j2q7yQO9wtNQ5vDxC3jX_2UmhiqkaIBIbPuxIMMDSyQu9VMVCP37x5APwG440eFwOdOjkwlfEdgw=="
 )
 
 # Allow overriding defaults with environment variables

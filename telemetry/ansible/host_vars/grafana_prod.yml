@@ -6,11 +6,11 @@ grafana_domain: "18.217.218.11"  # Using IP as domain
 grafana_http_port: 3000
 
 # InfluxDB connection details
-grafana_influxdb_host: "pliftu8n85-tzxeth774u3fvf.timestream-influxdb.us-east-2.on.aws"
-grafana_influxdb_port: "8086"
+grafana_influxdb_host: ""
+grafana_influxdb_port: ""
 grafana_influxdb_database: "tplr"
 grafana_influxdb_org: "tplr"
 # InfluxDB Authentication - Using exact auth token provided
-grafana_influxdb_token: "T20qIrL_Oi4kzR_MtUuDxh2vCa2SKUMbCCiTln03TvZukvRr3HENsz-wAUXtJkgfzsY2cjC_4Xog-dBrrypL3g=="
+grafana_influxdb_token: ""
 grafana_influxdb_protocol: "https"
 grafana_influxdb_use_api_config: false  # No need to use API config as we use file-based provisioning

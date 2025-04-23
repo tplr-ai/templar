@@ -93,16 +93,6 @@ class Miner:
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
-        parser.add_argument(
-            "--checkpoint-init-version",
-            type=str,
-            default=None,
-            help=(
-                "If set, bootstrap from the latest checkpoint carrying this version "
-                "suffix (e.g. '0.8.1'). If not set or not found, fall back to the "
-                "current package __version__."
-            ),
-        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -174,7 +164,7 @@ class Miner:
             milestones=[250],
         )
 
-        self.bootstrap_version: str | None = self.config.checkpoint_init_version
+        self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
         tplr.logger.info(
             f"[Miner] code_version={tplr.__version__} "
             f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
@@ -190,7 +180,6 @@ class Miner:
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
-            checkpoint_version=self.bootstrap_version,
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
@@ -259,11 +248,21 @@ class Miner:
 
         # Fetch start_window from highest stake validator
         self.start_window = await self.comms.get_start_window()
+        if self.start_window is None:
+            raise RuntimeError(
+                "Could not find a valid start window. This should not be possible."
+            )
+
         tplr.logger.info(f"Using start_window: {self.start_window}")
 
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
 
+        checkpoint_window_buffer = 5
+        has_new_checkpoint = (
+            self.global_step
+            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
+        )
         # Proceed to load checkpoint
         (
             success,
@@ -277,11 +276,12 @@ class Miner:
             scheduler=self.scheduler,
             current_window=self.current_window,
             device=cast(str, self.config.device),
-            init_version=self.bootstrap_version,
+            init_version=tplr.__version__
+            if has_new_checkpoint
+            else self.bootstrap_version,
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -290,12 +290,15 @@ class Miner:
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
             # Only catch up if we're behind
-            if loaded_checkpoint_window < self.current_window:
+            if (
+                loaded_checkpoint_window < self.current_window
+                and self.global_step > checkpoint_window_buffer
+            ):
                 tplr.logger.info(
                     f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
                 )
                 await tplr.neurons.catchup_with_aggregation_server(
-                    self, loaded_checkpoint_window
+                    self, max(loaded_checkpoint_window, self.start_window)
                 )
             else:
                 tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")

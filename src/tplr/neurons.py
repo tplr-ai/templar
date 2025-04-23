@@ -91,7 +91,7 @@ def prepare_gradient_dict(miner, pages, step_window):
         # Change 1: In the first iteration, set momentum = grad instead of adding
         if is_first_iteration:
             # Set momentum directly to grad (multiplied by lr to maintain scale)
-            miner.momentum[n] = grad.clone()
+            miner.momentum[n] = grad.clone() * lr
         else:
             # Normal behavior for later iterations
             miner.momentum[n].add_(grad, alpha=lr)

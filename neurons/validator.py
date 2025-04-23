@@ -42,6 +42,7 @@ import uvloop
 from openskill.models import PlackettLuce
 from rich.console import Console
 from rich.table import Table
+from torch import autocast
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
@@ -479,6 +480,33 @@ class Validator:
             tplr.logger.warning(
                 "No positive scores found among evaluated peers. All weights set to zero."
             )
+
+    def evaluate_model_on_batches(
+        self,
+        model: torch.nn.Module,
+        batches: list[list[int]],
+        sampled_indices: list[int],
+    ) -> tuple[float, int]:
+        total_loss = 0.0
+        n_batches = 0
+        with torch.no_grad():
+            model.eval()
+            with autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
+                for i, batch in enumerate(batches):
+                    if i not in sampled_indices:
+                        continue
+                    input_ids = torch.tensor(batch, dtype=torch.long).to(model.device)
+                    labels = input_ids.clone()
+                    labels = torch.where(
+                        labels == self.tokenizer.pad_token_id, -100, labels
+                    )
+                    outputs = model(input_ids=input_ids, labels=labels)
+                    total_loss += outputs.loss.item()
+                    n_batches += 1
+                    del input_ids, labels, outputs
+                    torch.cuda.empty_cache()
+
+        return total_loss, n_batches
 
     async def run(self):
         # Start background block listener
@@ -1046,9 +1074,6 @@ class Validator:
                     # 9. Compute loss before applying gradient
                     self.optimizer.zero_grad()
                     model_own_data_eval.zero_grad()
-                    loss_before_own = 0.0
-                    n_batches = 0
-
                     with torch.no_grad():
                         model_own_data_eval.eval()
                         batches_own = []
@@ -1071,23 +1096,9 @@ class Validator:
                             f"Evaluating {sample_size_own}/{total_batches_own} batches ({self.hparams.validator_sample_rate * 100:.1f}%)"
                         )
 
-                        for i, batch in enumerate(batches_own):
-                            if i not in sampled_indices_own:
-                                continue
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(
-                                model_own_data_eval.device
-                            )
-                            labels = input_ids.clone()
-                            labels = torch.where(
-                                labels == self.tokenizer.pad_token_id, -100, labels
-                            )
-                            outputs = model_own_data_eval(
-                                input_ids=input_ids, labels=labels
-                            )
-                            loss_before_own += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                        loss_before_own, n_batches = self.evaluate_model_on_batches(
+                            model_own_data_eval, batches_own, sampled_indices_own
+                        )
 
                     self.loss_before_per_batch_own = (
                         loss_before_own / n_batches if n_batches > 0 else 0
@@ -1231,27 +1242,9 @@ class Validator:
                     # 10. Compute loss after gradient application
                     self.optimizer.zero_grad()
                     model_own_data_eval.zero_grad()
-                    loss_after_own = 0.0
-                    n_batches = 0
-                    with torch.no_grad():
-                        model_own_data_eval.eval()
-                        for i, batch in enumerate(batches_own):
-                            if i not in sampled_indices_own:
-                                continue
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(
-                                model_own_data_eval.device
-                            )
-                            labels = input_ids.clone()
-                            labels = torch.where(
-                                labels == self.tokenizer.pad_token_id, -100, labels
-                            )
-                            outputs = model_own_data_eval(
-                                input_ids=input_ids, labels=labels
-                            )
-                            loss_after_own += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                    loss_after_own, n_batches = self.evaluate_model_on_batches(
+                        model_own_data_eval, batches_own, sampled_indices_own
+                    )
 
                     # Clean up stored batches
                     del batches_own, local_pages, loader_own, model_own_data_eval
@@ -1314,9 +1307,6 @@ class Validator:
                     # 8. Compute initial loss
                     self.optimizer.zero_grad()
                     model_random_data_eval.zero_grad()
-                    loss_before_random = 0.0
-                    n_batches = 0
-
                     with torch.no_grad():
                         model_random_data_eval.eval()
                         # Sample random batches from the loader
@@ -1343,22 +1333,11 @@ class Validator:
                             f"Evaluating {sample_size_random}/{total_batches_random} batches ({self.hparams.validator_sample_rate * 100:.1f}%)"
                         )
 
-                        for idx in sampled_indices_random:
-                            batch = batches_random[idx]
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(
-                                model_random_data_eval.device
-                            )
-                            labels = input_ids.clone()
-                            labels = torch.where(
-                                labels == self.tokenizer.pad_token_id, -100, labels
-                            )
-                            outputs = model_random_data_eval(
-                                input_ids=input_ids, labels=labels
-                            )
-                            loss_before_random += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                        loss_before_random, n_batches = self.evaluate_model_on_batches(
+                            model_random_data_eval,
+                            batches_random,
+                            sampled_indices_random,
+                        )
 
                     self.loss_before_per_batch_random = (
                         loss_before_random / n_batches if n_batches > 0 else 0
@@ -1408,27 +1387,11 @@ class Validator:
                     # 10. Compute loss after gradient application for random data
                     self.optimizer.zero_grad()
                     model_random_data_eval.zero_grad()
-                    loss_after_random = 0.0
-                    n_batches = 0
-                    with torch.no_grad():
-                        model_random_data_eval.eval()
-                        for i, batch in enumerate(batches_random):
-                            if i not in sampled_indices_random:
-                                continue
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(
-                                model_random_data_eval.device
-                            )
-                            labels = input_ids.clone()
-                            labels = torch.where(
-                                labels == self.tokenizer.pad_token_id, -100, labels
-                            )
-                            outputs = model_random_data_eval(
-                                input_ids=input_ids, labels=labels
-                            )
-                            loss_after_random += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                    loss_after_random, n_batches = self.evaluate_model_on_batches(
+                        model_random_data_eval,
+                        batches_random,
+                        sampled_indices_random,
+                    )
 
                     # Clean up stored batches, loader & pages
                     del (

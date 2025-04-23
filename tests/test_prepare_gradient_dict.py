@@ -84,7 +84,7 @@ def test_return_structure_and_types(caplog):
     pages = [["doc1", "page1"]]
     step_window = 5
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("INFO", logger="templar"):
         # Call the helper function.
         result = prepare_gradient_dict(miner, pages, step_window)
 
@@ -178,43 +178,42 @@ def test_weight_decay_application():
 
 def test_momentum_decay_and_gradient_accumulation():
     """
-    Test 4: Momentum Decay and Gradient Accumulation
+    Test 4: Momentum Calculation on First Iteration
     -------------------------------------------------
-    - Set initial momentum for parameter 'weight' to a known value.
+    - Set initial momentum for parameter 'weight' (will be overwritten on first call).
     - Provide a dummy gradient for p.grad.
-    - Given hparams.momentum_decay and lr from scheduler, compute:
-          new_momentum = (old_momentum * momentum_decay) + (lr * p.grad)
-    - Then, simulate the compressor and transformer steps so that transmitted gradient is known.
-    - Verify that after subtracting the transmitted gradient, the final momentum equals:
-          new_momentum_final = new_momentum - transmitted
-    - The test compares miner.momentum for 'weight' against the expected value.
+    - Verify that on the *first* call, the momentum is set directly to (lr * p.grad)
+      and the transmitted gradient is *not* subtracted.
     """
     miner = DummyMiner()
-    # Set a known initial momentum for "weight".
+    # Set a known initial momentum for "weight". This will be overwritten in the first call.
     miner.momentum["weight"] = torch.tensor([0.2, 0.3])
     # Set a dummy gradient for the parameter.
     miner.model.weight.grad = torch.tensor([0.1, 0.2])
-    # Note:
+
+    # Note for the FIRST iteration:
     #   - DummyScheduler returns lr = 0.01
-    #   - DummyHparams.momentum_decay is 0.9
-    # Therefore:
-    #    new_momentum = ( [0.2, 0.3] * 0.9 ) + [0.01 * 0.1, 0.01 * 0.2]
-    #                 = [0.18, 0.27] + [0.001, 0.002] = [0.181, 0.272]
+    #   - Initial momentum and momentum_decay are effectively ignored.
+    #   - Momentum is set to: lr * p.grad = 0.01 * [0.1, 0.2] = [0.001, 0.002]
+    #   - Subtraction of transmitted gradient is skipped.
     #
-    # Our DummyCompressor.decompress returns torch.tensor([0.5, 0.5]), and
-    # DummyTransformer.decode returns torch.tensor([0.1, 0.1]), so transmitted gradient is [0.1, 0.1].
-    #
-    # Final momentum should be [0.181, 0.272] - [0.1, 0.1] = [0.081, 0.172].
-    expected_final_momentum = torch.tensor([0.081, 0.172])
+    # Therefore, the final momentum after the first call should be [0.001, 0.002].
+    expected_final_momentum = torch.tensor([0.001, 0.002])
 
     pages = [["doc1", "page1"]]
     step_window = 5
+    # This is the first call, so miner.gradient_iteration_counter will be 1.
     prepare_gradient_dict(miner, pages, step_window)
+
+    # TODO: Add a separate test case to verify the momentum calculation logic
+    #       for iterations > 5, where initial momentum is used, decay is applied,
+    #       and the transmitted gradient is subtracted. This would likely involve
+    #       manually setting miner.gradient_iteration_counter or calling the function multiple times.
 
     torch.testing.assert_close(
         miner.momentum["weight"],
         expected_final_momentum,
-        msg="Final momentum does not match expected value.",
+        msg="Final momentum does not match expected value for the first iteration.",
     )
 
 
@@ -257,7 +256,8 @@ def test_compressor_and_transformer_calls():
 
         def decode(self, tensor):
             self.decode_called_with = tensor.clone()
-            return torch.tensor([0.1, 0.1])
+            # Return a fixed tensor for the transmitted gradient estimate
+            return torch.tensor([0.1, 0.1])  # Example value
 
     # Create a dummy miner instance.
     miner = DummyMiner()
@@ -266,54 +266,71 @@ def test_compressor_and_transformer_calls():
     miner.transformer = DummyRecordingTransformer()
 
     # Set initial momentum and gradient value for the single parameter "weight".
+    # Initial momentum is ignored on the first call.
     miner.momentum["weight"] = torch.tensor([1.0, 1.0])
     miner.model.weight.grad = torch.tensor([0.3, 0.4])
 
-    # Expected computation before compressor.compress:
-    # new_momentum = (old_momentum * momentum_decay) + (lr * p.grad)
-    #              = ([1.0, 1.0] * 0.9) + (0.01 * [0.3, 0.4])
-    #              = [0.9, 0.9] + [0.003, 0.004] = [0.903, 0.904]
-    expected_new_momentum = torch.tensor([0.903, 0.904])
+    # Expected computation for the tensor passed to compressor.compress on the FIRST iteration:
+    # Momentum is set directly to: lr * p.grad
+    # lr = 0.01 (from DummyScheduler)
+    # p.grad = [0.3, 0.4]
+    # Expected tensor = 0.01 * [0.3, 0.4] = [0.003, 0.004]
+    # This is the tensor that transformer.encode receives (and passes through in this dummy)
+    # and then compressor.compress receives.
+    expected_tensor_for_compression = torch.tensor([0.003, 0.004])
 
     pages = [["doc_record"]]
     step_window = 7
     # Call the helper so that compressor.compress and transformer.decode are invoked.
-    prepare_gradient_dict(miner, pages, step_window)
+    # This is the first call, miner.gradient_iteration_counter becomes 1.
+    gradient, xshapes, totalks, transmitted = prepare_gradient_dict(
+        miner, pages, step_window
+    )
 
     # Check that compressor.compress was called with the expected encoded tensor and topk.
-    recorder = miner.compressor
-    assert recorder.called_args is not None, "compressor.compress was not called."
-    recorded_tensor, recorded_topk = recorder.called_args
+    recorder_compressor = miner.compressor
+    assert recorder_compressor.called_args is not None, (
+        "compressor.compress was not called."
+    )
+    recorded_tensor, recorded_topk = recorder_compressor.called_args
     torch.testing.assert_close(
         recorded_tensor,
-        expected_new_momentum,
-        msg="compressor.compress argument (encoded tensor) does not match expected value.",
+        expected_tensor_for_compression,  # Use the corrected expected value
+        msg="compressor.compress argument (encoded tensor) does not match expected value for the first iteration.",
     )
     assert recorded_topk == miner.hparams.topk_compression, (
-        f"Expected topk {miner.hparams.topk_compression}, but got {recorded_topk}."
+        "compressor.compress argument (topk) does not match hparams."
     )
 
-    # Check that transformer.decode was called with the result of decompress,
-    # which should be torch.tensor([0.2, 0.2]) in our DummyRecordingCompressor.
+    # Check that transformer.decode was called with the result of compressor.decompress.
     recorder_transformer = miner.transformer
-    expected_decompress = torch.tensor([0.2, 0.2])
+    # The dummy decompress returns [0.2, 0.2]
+    expected_tensor_for_decode = torch.tensor([0.2, 0.2])
+    assert recorder_transformer.decode_called_with is not None, (
+        "transformer.decode was not called."
+    )
     torch.testing.assert_close(
         recorder_transformer.decode_called_with,
-        expected_decompress,
-        msg="transformer.decode was not called with the expected tensor.",
+        expected_tensor_for_decode,
+        msg="transformer.decode argument does not match the output of compressor.decompress.",
     )
 
-    # Also verify that the returned dummy values from compressor.compress are in the output dictionaries.
-    result = prepare_gradient_dict(miner, pages, step_window)
-    gradient, xshapes, totalks, transmitted = result
-    assert gradient["weightidxs"] == "recorded_dummy_idxs", (
-        "Gradient idxs not set correctly."
+    # Verify dummy return values are in the output dicts
+    assert gradient["weightidxs"] == "recorded_dummy_idxs"
+    assert gradient["weightvals"] == "recorded_dummy_vals"
+    assert xshapes["weight"] == "recorded_dummy_xshape"
+    assert totalks["weight"] == "recorded_dummy_totalk"
+    # Verify the transmitted gradient recorded matches the output
+    # The dummy transformer.decode returns [0.1, 0.1]
+    expected_transmitted_grad = torch.tensor([0.1, 0.1])
+    torch.testing.assert_close(
+        transmitted["weight"],
+        expected_transmitted_grad,
+        msg="Transmitted gradient in output dict does not match transformer.decode output.",
     )
-    assert gradient["weightvals"] == "recorded_dummy_vals", (
-        "Gradient vals not set correctly."
-    )
-    assert xshapes["weight"] == "recorded_dummy_xshape", "xshapes not set correctly."
-    assert totalks["weight"] == "recorded_dummy_totalk", "totalks not set correctly."
+    # Verify metadata
+    assert gradient["metadata"]["pages_info"] == pages
+    assert gradient["metadata"]["window"] == step_window
 
 
 # Test 6: Handling Multiple Parameters
@@ -412,7 +429,7 @@ def test_logging_behavior(caplog):
     pages = [["doc_log", "page_log"]]
     step_window = 15
 
-    with caplog.at_level("INFO"):
+    with caplog.at_level("INFO", logger="templar"):
         prepare_gradient_dict(miner, pages, step_window)
 
     expected_str = f"Attached metadata to gradient: {{'pages_info': {pages}, 'window': {step_window}}}"

@@ -42,6 +42,7 @@ import uvloop
 from openskill.models import PlackettLuce
 from rich.console import Console
 from rich.table import Table
+from torch import autocast
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
@@ -110,11 +111,6 @@ class Validator:
             "--local",
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
-        )
-        parser.add_argument(
-            "--log-to-private-wandb",
-            action="store_true",
-            help="Logs to the entity you are signed in to if true, else to the public 'tplr'.",
         )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
@@ -197,8 +193,13 @@ class Validator:
             milestones=[250],
         )
 
-        # Init comms with required chain management args,
-        # including transformer and compressor for gradient decoding.
+        self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
+        tplr.logger.info(
+            f"[Miner] code_version={tplr.__version__} "
+            f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
+        )
+
+        # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",
@@ -208,7 +209,6 @@ class Validator:
             metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
-            totalks=self.totalks,
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
@@ -242,16 +242,21 @@ class Validator:
         self.valid_score_indices = []
 
         # Caching
-        self.state_path = f"validator-state-{tplr.__version__}.npz"
+        self.state_path = f"validator-state-{tplr.__version__}.pt"
         if os.path.isfile(self.state_path):
             self.load_state()
         else:
-            self.gradient_scores = torch.zeros(256, dtype=torch.float32)
-            self.sync_scores = torch.zeros(256, dtype=torch.float32)
-            self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
-            self.final_scores = torch.zeros(256, dtype=torch.float32)
-            self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
-            self.weights = torch.zeros(256, dtype=torch.float32)
+            d = self.config.device
+            self.gradient_scores = torch.zeros(256, dtype=torch.float32, device=d)
+            self.sync_scores = torch.zeros(256, dtype=torch.float32, device=d)
+            self.binary_indicator_scores = torch.zeros(
+                256, dtype=torch.float32, device=d
+            )
+            self.final_scores = torch.zeros(256, dtype=torch.float32, device=d)
+            self.binary_moving_averages = torch.zeros(
+                256, dtype=torch.float32, device=d
+            )
+            self.weights = torch.zeros(256, dtype=torch.float32, device=d)
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -397,7 +402,7 @@ class Validator:
                 )
 
                 self.final_scores[uid] = (
-                    openskill_mu
+                    openskill_ordinal
                     * max(0, self.binary_moving_averages[uid].item())
                     * sync_score
                 )
@@ -440,33 +445,72 @@ class Validator:
     def update_weights(self) -> None:
         """
         Update the weights for all evaluated peers using min power normalization.
-
         This method:
         1. Creates a mask for peers that have been evaluated
-        2. Extracts scores for evaluated peers
-        3. Shifts all scores to be positive by subtracting the minimum score
-        4. Applies power normalization to the shifted scores
-        5. Verifies that weights sum to approximately 1.0
-
-        The shifting approach ensures all peers receive some weight proportional to
-        their relative performance, rather than filtering out peers with negative scores.
+        2. Creates a mask for evaluated peers with positive scores
+        3. Applies power normalization to only the positive scores
+        4. Verifies that weights sum to approximately 1.0
+        This approach only assigns weights to peers with positive scores.
         """
         self.weights = torch.zeros_like(self.final_scores)
         evaluated_mask = torch.zeros_like(self.final_scores, dtype=torch.bool)
         evaluated_mask[list(self.evaluated_uids)] = True
-        eval_scores = self.final_scores[evaluated_mask]
-        min_score = eval_scores.min().item()
-        shifted_scores = eval_scores - min_score + 1e-5
-        # Apply power normalization to the shifted scores
-        self.weights[evaluated_mask] = min_power_normalization(
-            shifted_scores,
-            power=self.hparams.power_normalisation,
-        )
 
-        weight_sum = self.weights.sum().item()
-        tplr.logger.debug(f"Weight sum: {weight_sum}")
-        if abs(weight_sum - 1.0) > 1e-6:
-            tplr.logger.warning(f"Weights sum to {weight_sum}, expected close to 1.0")
+        # Create a mask for positive scores among evaluated peers
+        positive_mask = evaluated_mask.clone()
+        positive_mask[evaluated_mask] = self.final_scores[evaluated_mask] > 0
+
+        # Only consider peers with positive scores
+        positive_scores = self.final_scores[positive_mask]
+
+        if len(positive_scores) > 0:
+            # Apply power normalization to only the positive scores
+            normalized_weights = min_power_normalization(
+                positive_scores,
+                power=self.hparams.power_normalisation,
+            )
+
+            # Assign weights only to peers with positive scores
+            self.weights[positive_mask] = normalized_weights
+
+            weight_sum = self.weights.sum().item()
+            tplr.logger.debug(f"Weight sum: {weight_sum}")
+
+            if abs(weight_sum - 1.0) > 1e-6:
+                tplr.logger.warning(
+                    f"Weights sum to {weight_sum}, expected close to 1.0"
+                )
+        else:
+            tplr.logger.warning(
+                "No positive scores found among evaluated peers. All weights set to zero."
+            )
+
+    def evaluate_model_on_batches(
+        self,
+        model: torch.nn.Module,
+        batches: list[list[int]],
+        sampled_indices: list[int],
+    ) -> tuple[float, int]:
+        total_loss = 0.0
+        n_batches = 0
+        with torch.no_grad():
+            model.eval()
+            with autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
+                for i, batch in enumerate(batches):
+                    if i not in sampled_indices:
+                        continue
+                    input_ids = torch.tensor(batch, dtype=torch.long).to(model.device)
+                    labels = input_ids.clone()
+                    labels = torch.where(
+                        labels == self.tokenizer.pad_token_id, -100, labels
+                    )
+                    outputs = model(input_ids=input_ids, labels=labels)
+                    total_loss += outputs.loss.item()
+                    n_batches += 1
+                    del input_ids, labels, outputs
+                    torch.cuda.empty_cache()
+
+        return total_loss, n_batches
 
     async def run(self):
         # Start background block listener
@@ -511,11 +555,22 @@ class Validator:
                 "This validator is not the highest staked. Waiting to fetch start_window."
             )
             self.start_window = await self.comms.get_start_window()
-            self.global_step = self.current_window - self.start_window
-            tplr.logger.info(
-                f"Using start_window: {self.start_window}, global_step: {self.global_step}"
+
+        if self.start_window is None:
+            raise RuntimeError(
+                "Could not find a valid start window. This should not be possible."
             )
 
+        self.global_step = self.current_window - self.start_window
+        tplr.logger.info(
+            f"Using start_window: {self.start_window}, global_step: {self.global_step}"
+        )
+
+        checkpoint_window_buffer = 5
+        has_new_checkpoint = (
+            self.global_step
+            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
+        )
         # Proceed to load checkpoint
         (
             success,
@@ -529,10 +584,12 @@ class Validator:
             scheduler=self.scheduler,
             current_window=self.current_window,
             device=self.config.device,
+            init_version=tplr.__version__
+            if has_new_checkpoint
+            else self.bootstrap_version,
         )
         if success:
             self.momentum = loaded_momentum
-            self.global_step = loaded_checkpoint_window - self.start_window
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -541,12 +598,15 @@ class Validator:
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
             # Only catch up if we're behind
-            if loaded_checkpoint_window < self.current_window:
+            if (
+                loaded_checkpoint_window < self.current_window
+                and self.global_step > checkpoint_window_buffer
+            ):
                 tplr.logger.info(
                     f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
                 )
                 await tplr.neurons.catchup_with_aggregation_server(
-                    self, loaded_checkpoint_window
+                    self, max(loaded_checkpoint_window, self.start_window)
                 )
             else:
                 tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
@@ -827,6 +887,7 @@ class Validator:
                     )
                     if self.final_scores[uid] > 0:
                         self.final_scores[uid] *= self.sync_score_slash_rate
+                        self.binary_moving_averages[uid] *= self.sync_score_slash_rate
 
             # Slash peers failing to submit gradients
             for uid in skipped_uids:
@@ -839,6 +900,9 @@ class Validator:
                     # Only reduce positive scores
                     if self.final_scores[uid] > 0:
                         self.final_scores[uid] *= self.missing_gradient_slash_rate
+                        self.binary_moving_averages[uid] *= (
+                            self.missing_gradient_slash_rate
+                        )
 
                         new_score = self.final_scores[uid].item()
                         tplr.logger.info(
@@ -895,36 +959,32 @@ class Validator:
 
             # Pre-load common random loader for all evaluated UIDs in this window.
             data_start_random = tplr.T()
-            pages_random = await retry_call(
-                tplr.r2_dataset.R2DatasetLoader.next_pages,
-                offset=self.sync_window * self.hparams.pages_per_window,
-                n_pages=self.hparams.pages_per_window,
-                seed=random.randint(1000, 10000000),
-                attempts=3,
-                delay=1,
-                context="random pages - common loader",
-                **{},
-            )
-            if pages_random is None:
-                tplr.logger.error(
-                    f"Failed to load common random pages for window {self.sync_window}. Skipping evaluation for this window."
-                )
-                continue
 
-            common_loader_random = await retry_call(
-                tplr.r2_dataset.R2DatasetLoader.create,
-                batch_size=self.hparams.batch_size,
-                sequence_length=self.hparams.sequence_length,
-                pages_info=pages_random,
-                tokenizer=self.tokenizer,
-                attempts=3,
-                delay=1,
-                context="random loader - common",
-                **{},
+            # Start preloading the random loader as a task
+            dataloader_tasks = {}
+
+            # Start the random loader task using a high random seed
+            random_seed = random.randint(
+                1000, 10000000
+            )  # Using high seed number for random context
+            dataloader_tasks["random_loader"] = asyncio.create_task(
+                self.preload_dataloader(seed=random_seed)
             )
             tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation."
+                f"Started preloading common random dataloader with seed {random_seed}"
             )
+
+            # Start preloading all UID-specific dataloaders in parallel
+            for uid in evaluation_uids:
+                dataloader_tasks[uid] = asyncio.create_task(
+                    self.preload_dataloader(seed=uid)
+                )
+                tplr.logger.info(
+                    f"Started preloading dataloader for UID {uid} (as seed)"
+                )
+
+            # Process each UID evaluation, awaiting the preloaded data when needed
+            common_loader_random = None
 
             for eval_uid in evaluation_uids:
                 tplr.logger.info(f"Evaluating uid: {eval_uid}")
@@ -962,22 +1022,39 @@ class Validator:
                             f"Missing pages info metadata from miner UID {eval_uid}"
                         )
 
-                    # Load local pages exactly once from the dataset loader with retry handling.
-                    local_pages = await retry_call(
-                        tplr.r2_dataset.R2DatasetLoader.next_pages,
-                        offset=self.sync_window * self.hparams.pages_per_window,
-                        n_pages=self.hparams.pages_per_window,
-                        seed=eval_uid,
-                        attempts=3,
-                        delay=1,
-                        context=f"local pages for UID {eval_uid}",
-                        **{},
-                    )
-                    if local_pages is None:
-                        tplr.logger.error(
-                            f"Failed to load local pages for UID {eval_uid}. Skipping evaluation for this peer."
-                        )
+                    # Await the preloaded dataloader for this UID
+                    loader_data = None
+                    local_pages = None
+                    loader_own = None
+                    data_start = tplr.T()
+                    if eval_uid in dataloader_tasks:
+                        try:
+                            loader_data = await dataloader_tasks[eval_uid]
+                            if loader_data:
+                                loader_own = loader_data["loader"]
+                                local_pages = loader_data["pages"]
+                                tplr.logger.info(
+                                    f"Successfully awaited preloaded dataloader for UID {eval_uid}"
+                                )
+                            else:
+                                tplr.logger.warning(
+                                    f"Preloaded data for UID {eval_uid} was None, skipping"
+                                )
+                                continue
+                        except Exception as e:
+                            tplr.logger.error(
+                                f"Error awaiting preloaded data for UID {eval_uid}: {str(e)}"
+                            )
+                            loader_data = None
+                            continue
+                        finally:
+                            # Clean up the task reference
+                            del dataloader_tasks[eval_uid]
+
+                    if local_pages is None or loader_own is None:
                         continue
+
+                    # Verify pages match if miner sent them
                     if miner_pages is not None:
                         if local_pages != miner_pages:
                             tplr.logger.warning(
@@ -991,24 +1068,7 @@ class Validator:
                         tplr.logger.info(
                             f"Using local pages for UID {eval_uid} as miner metadata is missing."
                         )
-                    data_start = tplr.T()
-                    # Create the evaluation loader using the locally loaded pages.
-                    loader_own = await retry_call(
-                        tplr.r2_dataset.R2DatasetLoader.create,
-                        batch_size=self.hparams.batch_size,
-                        sequence_length=self.hparams.sequence_length,
-                        pages_info=local_pages,
-                        tokenizer=self.tokenizer,
-                        attempts=3,
-                        delay=1,
-                        context=f"own loader for UID {eval_uid}",
-                        **{},
-                    )
-                    if loader_own is None:
-                        tplr.logger.error(
-                            f"Failed to create loader for own data for UID {eval_uid}. Skipping evaluation."
-                        )
-                        continue
+
                     tplr.logger.info(
                         f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}"
                     )
@@ -1019,9 +1079,6 @@ class Validator:
                     # 9. Compute loss before applying gradient
                     self.optimizer.zero_grad()
                     model_own_data_eval.zero_grad()
-                    loss_before_own = 0.0
-                    n_batches = 0
-
                     with torch.no_grad():
                         model_own_data_eval.eval()
                         batches_own = []
@@ -1044,23 +1101,9 @@ class Validator:
                             f"Evaluating {sample_size_own}/{total_batches_own} batches ({self.hparams.validator_sample_rate * 100:.1f}%)"
                         )
 
-                        for i, batch in enumerate(batches_own):
-                            if i not in sampled_indices_own:
-                                continue
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(
-                                model_own_data_eval.device
-                            )
-                            labels = input_ids.clone()
-                            labels = torch.where(
-                                labels == self.tokenizer.pad_token_id, -100, labels
-                            )
-                            outputs = model_own_data_eval(
-                                input_ids=input_ids, labels=labels
-                            )
-                            loss_before_own += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                        loss_before_own, n_batches = self.evaluate_model_on_batches(
+                            model_own_data_eval, batches_own, sampled_indices_own
+                        )
 
                     self.loss_before_per_batch_own = (
                         loss_before_own / n_batches if n_batches > 0 else 0
@@ -1204,27 +1247,9 @@ class Validator:
                     # 10. Compute loss after gradient application
                     self.optimizer.zero_grad()
                     model_own_data_eval.zero_grad()
-                    loss_after_own = 0.0
-                    n_batches = 0
-                    with torch.no_grad():
-                        model_own_data_eval.eval()
-                        for i, batch in enumerate(batches_own):
-                            if i not in sampled_indices_own:
-                                continue
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(
-                                model_own_data_eval.device
-                            )
-                            labels = input_ids.clone()
-                            labels = torch.where(
-                                labels == self.tokenizer.pad_token_id, -100, labels
-                            )
-                            outputs = model_own_data_eval(
-                                input_ids=input_ids, labels=labels
-                            )
-                            loss_after_own += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                    loss_after_own, n_batches = self.evaluate_model_on_batches(
+                        model_own_data_eval, batches_own, sampled_indices_own
+                    )
 
                     # Clean up stored batches
                     del batches_own, local_pages, loader_own, model_own_data_eval
@@ -1258,14 +1283,35 @@ class Validator:
 
                     # 7. Use common random loader for evaluation
                     model_random_data_eval = copy.deepcopy(self.model)
+
+                    # Await the random loader task if this is the first time we're using it
+                    if (
+                        common_loader_random is None
+                        and "random_loader" in dataloader_tasks
+                    ):
+                        try:
+                            random_loader_data = await dataloader_tasks["random_loader"]
+                            if random_loader_data:
+                                common_loader_random = random_loader_data["loader"]
+                                tplr.logger.info(
+                                    f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation."
+                                )
+                            else:
+                                tplr.logger.error(
+                                    "Preloaded random loader was None, cannot continue evaluation"
+                                )
+                                continue
+                            # Clean up the task reference after we've used it
+                            del dataloader_tasks["random_loader"]
+                        except Exception as e:
+                            tplr.logger.error(f"Error loading random loader: {str(e)}")
+                            continue
+
                     loader_random = common_loader_random
 
                     # 8. Compute initial loss
                     self.optimizer.zero_grad()
                     model_random_data_eval.zero_grad()
-                    loss_before_random = 0.0
-                    n_batches = 0
-
                     with torch.no_grad():
                         model_random_data_eval.eval()
                         # Sample random batches from the loader
@@ -1292,22 +1338,11 @@ class Validator:
                             f"Evaluating {sample_size_random}/{total_batches_random} batches ({self.hparams.validator_sample_rate * 100:.1f}%)"
                         )
 
-                        for idx in sampled_indices_random:
-                            batch = batches_random[idx]
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(
-                                model_random_data_eval.device
-                            )
-                            labels = input_ids.clone()
-                            labels = torch.where(
-                                labels == self.tokenizer.pad_token_id, -100, labels
-                            )
-                            outputs = model_random_data_eval(
-                                input_ids=input_ids, labels=labels
-                            )
-                            loss_before_random += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                        loss_before_random, n_batches = self.evaluate_model_on_batches(
+                            model_random_data_eval,
+                            batches_random,
+                            sampled_indices_random,
+                        )
 
                     self.loss_before_per_batch_random = (
                         loss_before_random / n_batches if n_batches > 0 else 0
@@ -1357,27 +1392,11 @@ class Validator:
                     # 10. Compute loss after gradient application for random data
                     self.optimizer.zero_grad()
                     model_random_data_eval.zero_grad()
-                    loss_after_random = 0.0
-                    n_batches = 0
-                    with torch.no_grad():
-                        model_random_data_eval.eval()
-                        for i, batch in enumerate(batches_random):
-                            if i not in sampled_indices_random:
-                                continue
-                            input_ids = torch.tensor(batch, dtype=torch.long).to(
-                                model_random_data_eval.device
-                            )
-                            labels = input_ids.clone()
-                            labels = torch.where(
-                                labels == self.tokenizer.pad_token_id, -100, labels
-                            )
-                            outputs = model_random_data_eval(
-                                input_ids=input_ids, labels=labels
-                            )
-                            loss_after_random += outputs.loss.item()
-                            n_batches += 1
-                            del input_ids, labels, outputs
-                            torch.cuda.empty_cache()
+                    loss_after_random, n_batches = self.evaluate_model_on_batches(
+                        model_random_data_eval,
+                        batches_random,
+                        sampled_indices_random,
+                    )
 
                     # Clean up stored batches, loader & pages
                     del (
@@ -1490,6 +1509,10 @@ class Validator:
 
                     if self.final_scores[eval_uid] > 0:
                         self.final_scores[eval_uid] *= self.missing_gradient_slash_rate
+                        self.binary_moving_averages[eval_uid] *= (
+                            self.missing_gradient_slash_rate
+                        )
+
                         new_score = self.final_scores[eval_uid].item()
                         tplr.logger.info(
                             f"Reduced score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient."
@@ -1835,7 +1858,16 @@ class Validator:
             self.global_step += 1
 
             # Clean up common random loader after evaluations for this window.
-            del common_loader_random, pages_random
+            del common_loader_random
+            for _, task in dataloader_tasks.items():
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except Exception:
+                    pass
+            dataloader_tasks.clear()
+
             torch.cuda.empty_cache()
 
     def select_initial_peers(self) -> tplr.comms.PeerArray | None:
@@ -2304,62 +2336,187 @@ class Validator:
         self.scheduler.step()
         torch.cuda.empty_cache()
 
-    def save_state(self):
-        """Saves the state of the validator to a file."""
-        try:
-            tplr.logger.info("Saving validator state.")
+    # ------------- state helpers ----------------
+    def _state_dict(self) -> dict:
+        """Return cpu tensors ready for torch.save."""
+        return {
+            "global_step": self.global_step,
+            "gradient_scores": self.gradient_scores.cpu(),
+            "sync_scores": self.sync_scores.cpu(),
+            "binary_indicator_scores": self.binary_indicator_scores.cpu(),
+            "final_scores": self.final_scores.cpu(),
+            "binary_moving_averages": self.binary_moving_averages.cpu(),
+            "weights": self.weights.cpu(),
+            # Store OpenSkill statistics per‑uid so we can fully restore them.
+            # ordinal is redundant (mu/σ ⇒ ordinal) but handy for debugging.
+            "openskill_ratings": {
+                int(uid): {
+                    "mu": float(r.mu),
+                    "sigma": float(r.sigma),
+                    "ordinal": float(r.ordinal()),
+                }
+                for uid, r in self.openskill_ratings.items()
+            },
+        }
 
-            # Save the state of the validator to file.
-            np.savez(
-                self.state_path,
-                global_step=self.global_step,
-                gradient_scores=self.gradient_scores,
-                sync_scores=self.sync_scores,
-                binary_indicator_scores=self.binary_indicator_scores,
-                final_scores=self.final_scores,
-                binary_moving_averages=self.binary_moving_averages,
-                weights=self.weights,
-            )
+    def save_state(self):
+        """Saves the current validator state to disk.
+
+        This method serializes the validator's state dictionary to the configured state path.
+        The state includes global step, various score metrics, and weights.
+
+        Exceptions during saving are caught and logged as warnings.
+        """
+        try:
+            tplr.logger.info("Saving validator state")
+            torch.save(self._state_dict(), self.state_path)
         except Exception as e:
             tplr.logger.warning(f"Failed to save validator state: {e}")
 
     def load_state(self):
-        """Loads the state of the validator from a file."""
+        """Loads the validator state from disk.
+
+        This method deserializes the validator's state from the configured state path
+        and updates the validator's internal state variables. The state includes:
+        - global_step: Training iteration counter
+        - gradient_scores: Scores based on gradient quality
+        - sync_scores: Scores based on synchronization performance
+        - binary_indicator_scores: Binary classification scores
+        - final_scores: Combined final evaluation scores
+        - binary_moving_averages: Moving averages of binary indicators
+        - weights: Peer weighting values
+        - openskill_ratings: Dictionary mapping UIDs to OpenSkill rating objects
+          that track each peer's skill level using a Bayesian rating system.
+          Each rating contains:
+          - mu: Mean skill estimate (higher is better)
+          - sigma: Uncertainty in the skill estimate (lower means more certainty)
+          - ordinal: Conservative skill estimate (mu - n*sigma) used for ranking
+
+        All tensors are converted to float and moved to the configured device.
+        Exceptions during loading are caught and logged as warnings.
+        """
+        tplr.logger.info("Loading validator state")
+
+        # ── stage 1: read file ─────────────────────────────────────────────
         try:
-            tplr.logger.info("Loading validator state.")
-
-            # Load the state from file with pickle support.
-            state = np.load(self.state_path, allow_pickle=True)
-
-            # Convert NumPy arrays to PyTorch tensors and move to the correct device.
-            self.gradient_scores = (
-                torch.from_numpy(state["gradient_scores"])
-                .float()
-                .to(self.config.device)
-            )
-            self.sync_scores = (
-                torch.from_numpy(state["sync_scores"]).float().to(self.config.device)
-            )
-            self.binary_indicator_scores = (
-                torch.from_numpy(state["binary_indicator_scores"])
-                .float()
-                .to(self.config.device)
-            )
-            self.final_scores = (
-                torch.from_numpy(state["final_scores"]).float().to(self.config.device)
-            )
-            self.binary_moving_averages = (
-                torch.from_numpy(state["binary_moving_averages"])
-                .float()
-                .to(self.config.device)
-            )
-            self.weights = (
-                torch.from_numpy(state["weights"]).float().to(self.config.device)
-            )
-
-            tplr.logger.info(f"Loaded state: {state}")
+            state = torch.load(self.state_path, map_location=self.config.device)
+        except FileNotFoundError:
+            tplr.logger.warning(f"No validator state found at {self.state_path}")
+            return
         except Exception as e:
-            tplr.logger.warning(f"Failed to load validator state: {e}")
+            tplr.logger.warning(f"Failed to deserialize validator state: {e}")
+            return
+
+        # ── stage 2: selectively hydrate fields ────────────────────────────
+        # NOTE: use `.get` so missing keys don't blow up wrong‑schema tests.
+        self.global_step = int(
+            state.get("global_step", getattr(self, "global_step", 0))
+        )
+
+        def _maybe(name):
+            if name in state:
+                setattr(
+                    self,
+                    name,
+                    state[name].float().to(self.config.device),
+                )
+
+        for _tensor in (
+            "gradient_scores",
+            "sync_scores",
+            "binary_indicator_scores",
+            "final_scores",
+            "binary_moving_averages",
+            "weights",
+        ):
+            _maybe(_tensor)
+
+        # ── OpenSkill ratings ──────────────────────────────────────────────
+        try:
+            saved_os = state.get("openskill_ratings", {})
+            self.openskill_ratings = {
+                int(uid): self.openskill_model.rating(
+                    mu=float(osd["mu"]), sigma=float(osd["sigma"]), name=str(uid)
+                )
+                for uid, osd in saved_os.items()
+            }
+            tplr.logger.info(
+                f"Restored OpenSkill ratings for {len(self.openskill_ratings)} peers"
+            )
+        except Exception as e:
+            tplr.logger.warning(f"Failed to restore OpenSkill ratings: {e}")
+
+    async def preload_dataloader(self, seed: int):
+        """
+        Preload a dataloader using a seed value.
+
+        Args:
+            seed: Seed value for generating pages
+                 Values > 255 are considered for random dataloaders
+
+        Returns:
+            Dictionary containing:
+                - loader: The created dataloader
+                - pages: The pages used
+                - is_random: Whether this is considered a random loader (seed > 255)
+        """
+        # Determine if this is a random context based on seed value
+        is_random = seed > 255
+        context_id = "random" if is_random else f"UID: {seed}"
+
+        try:
+            # Generate pages based on seed
+            tplr.logger.info(f"Generating pages for {context_id}")
+            local_pages = await retry_call(
+                tplr.r2_dataset.R2DatasetLoader.next_pages,
+                offset=self.sync_window * self.hparams.pages_per_window,
+                n_pages=self.hparams.pages_per_window,
+                seed=seed,
+                attempts=3,
+                delay=1,
+                context=f"pages for {context_id}",
+                **{},
+            )
+
+            if local_pages is None:
+                tplr.logger.error(
+                    f"Failed to load pages for {context_id}. Cannot preload dataloader."
+                )
+                return None
+
+            # Log which pages we're using
+            page_ids = [p[1] for p in local_pages]
+            tplr.logger.info(
+                f"Creating dataloader for {context_id} using pages: {page_ids}"
+            )
+
+            # Create the evaluation loader using the generated pages
+            loader = await retry_call(
+                tplr.r2_dataset.R2DatasetLoader.create,
+                batch_size=self.hparams.batch_size,
+                sequence_length=self.hparams.sequence_length,
+                pages_info=local_pages,
+                tokenizer=self.tokenizer,
+                attempts=3,
+                delay=1,
+                context=f"loader for {context_id}",
+                **{},
+            )
+
+            if loader is None:
+                tplr.logger.error(
+                    f"Failed to create loader for {context_id} with valid pages."
+                )
+                return None
+
+            tplr.logger.info(
+                f"Successfully preloaded dataloader for {context_id} with pages: {page_ids}"
+            )
+
+            return {"loader": loader, "pages": local_pages, "is_random": is_random}
+        except Exception as e:
+            tplr.logger.error(f"Error preloading data for {context_id}: {str(e)}")
+            return None
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

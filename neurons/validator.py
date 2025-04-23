@@ -243,16 +243,21 @@ class Validator:
         self.valid_score_indices = []
 
         # Caching
-        self.state_path = f"validator-state-{tplr.__version__}.npz"
+        self.state_path = f"validator-state-{tplr.__version__}.pt"
         if os.path.isfile(self.state_path):
             self.load_state()
         else:
-            self.gradient_scores = torch.zeros(256, dtype=torch.float32)
-            self.sync_scores = torch.zeros(256, dtype=torch.float32)
-            self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32)
-            self.final_scores = torch.zeros(256, dtype=torch.float32)
-            self.binary_moving_averages = torch.zeros(256, dtype=torch.float32)
-            self.weights = torch.zeros(256, dtype=torch.float32)
+            d = self.config.device
+            self.gradient_scores = torch.zeros(256, dtype=torch.float32, device=d)
+            self.sync_scores = torch.zeros(256, dtype=torch.float32, device=d)
+            self.binary_indicator_scores = torch.zeros(
+                256, dtype=torch.float32, device=d
+            )
+            self.final_scores = torch.zeros(256, dtype=torch.float32, device=d)
+            self.binary_moving_averages = torch.zeros(
+                256, dtype=torch.float32, device=d
+            )
+            self.weights = torch.zeros(256, dtype=torch.float32, device=d)
         self.evaluated_uids = set()
 
         # Add step tracking
@@ -2316,62 +2321,115 @@ class Validator:
         self.scheduler.step()
         torch.cuda.empty_cache()
 
-    def save_state(self):
-        """Saves the state of the validator to a file."""
-        try:
-            tplr.logger.info("Saving validator state.")
+    # ------------- state helpers ----------------
+    def _state_dict(self) -> dict:
+        """Return cpu tensors ready for torch.save."""
+        return {
+            "global_step": self.global_step,
+            "gradient_scores": self.gradient_scores.cpu(),
+            "sync_scores": self.sync_scores.cpu(),
+            "binary_indicator_scores": self.binary_indicator_scores.cpu(),
+            "final_scores": self.final_scores.cpu(),
+            "binary_moving_averages": self.binary_moving_averages.cpu(),
+            "weights": self.weights.cpu(),
+            # Store OpenSkill statistics per‑uid so we can fully restore them.
+            # ordinal is redundant (mu/σ ⇒ ordinal) but handy for debugging.
+            "openskill_ratings": {
+                int(uid): {
+                    "mu": float(r.mu),
+                    "sigma": float(r.sigma),
+                    "ordinal": float(r.ordinal()),
+                }
+                for uid, r in self.openskill_ratings.items()
+            },
+        }
 
-            # Save the state of the validator to file.
-            np.savez(
-                self.state_path,
-                global_step=self.global_step,
-                gradient_scores=self.gradient_scores,
-                sync_scores=self.sync_scores,
-                binary_indicator_scores=self.binary_indicator_scores,
-                final_scores=self.final_scores,
-                binary_moving_averages=self.binary_moving_averages,
-                weights=self.weights,
-            )
+    def save_state(self):
+        """Saves the current validator state to disk.
+
+        This method serializes the validator's state dictionary to the configured state path.
+        The state includes global step, various score metrics, and weights.
+
+        Exceptions during saving are caught and logged as warnings.
+        """
+        try:
+            tplr.logger.info("Saving validator state")
+            torch.save(self._state_dict(), self.state_path)
         except Exception as e:
             tplr.logger.warning(f"Failed to save validator state: {e}")
 
     def load_state(self):
-        """Loads the state of the validator from a file."""
+        """Loads the validator state from disk.
+
+        This method deserializes the validator's state from the configured state path
+        and updates the validator's internal state variables. The state includes:
+        - global_step: Training iteration counter
+        - gradient_scores: Scores based on gradient quality
+        - sync_scores: Scores based on synchronization performance
+        - binary_indicator_scores: Binary classification scores
+        - final_scores: Combined final evaluation scores
+        - binary_moving_averages: Moving averages of binary indicators
+        - weights: Peer weighting values
+        - openskill_ratings: Dictionary mapping UIDs to OpenSkill rating objects
+          that track each peer's skill level using a Bayesian rating system.
+          Each rating contains:
+          - mu: Mean skill estimate (higher is better)
+          - sigma: Uncertainty in the skill estimate (lower means more certainty)
+          - ordinal: Conservative skill estimate (mu - n*sigma) used for ranking
+
+        All tensors are converted to float and moved to the configured device.
+        Exceptions during loading are caught and logged as warnings.
+        """
+        tplr.logger.info("Loading validator state")
+
+        # ── stage 1: read file ─────────────────────────────────────────────
         try:
-            tplr.logger.info("Loading validator state.")
-
-            # Load the state from file with pickle support.
-            state = np.load(self.state_path, allow_pickle=True)
-
-            # Convert NumPy arrays to PyTorch tensors and move to the correct device.
-            self.gradient_scores = (
-                torch.from_numpy(state["gradient_scores"])
-                .float()
-                .to(self.config.device)
-            )
-            self.sync_scores = (
-                torch.from_numpy(state["sync_scores"]).float().to(self.config.device)
-            )
-            self.binary_indicator_scores = (
-                torch.from_numpy(state["binary_indicator_scores"])
-                .float()
-                .to(self.config.device)
-            )
-            self.final_scores = (
-                torch.from_numpy(state["final_scores"]).float().to(self.config.device)
-            )
-            self.binary_moving_averages = (
-                torch.from_numpy(state["binary_moving_averages"])
-                .float()
-                .to(self.config.device)
-            )
-            self.weights = (
-                torch.from_numpy(state["weights"]).float().to(self.config.device)
-            )
-
-            tplr.logger.info(f"Loaded state: {state}")
+            state = torch.load(self.state_path, map_location=self.config.device)
+        except FileNotFoundError:
+            tplr.logger.warning(f"No validator state found at {self.state_path}")
+            return
         except Exception as e:
-            tplr.logger.warning(f"Failed to load validator state: {e}")
+            tplr.logger.warning(f"Failed to deserialize validator state: {e}")
+            return
+
+        # ── stage 2: selectively hydrate fields ────────────────────────────
+        # NOTE: use `.get` so missing keys don't blow up wrong‑schema tests.
+        self.global_step = int(
+            state.get("global_step", getattr(self, "global_step", 0))
+        )
+
+        def _maybe(name):
+            if name in state:
+                setattr(
+                    self,
+                    name,
+                    state[name].float().to(self.config.device),
+                )
+
+        for _tensor in (
+            "gradient_scores",
+            "sync_scores",
+            "binary_indicator_scores",
+            "final_scores",
+            "binary_moving_averages",
+            "weights",
+        ):
+            _maybe(_tensor)
+
+        # ── OpenSkill ratings ──────────────────────────────────────────────
+        try:
+            saved_os = state.get("openskill_ratings", {})
+            self.openskill_ratings = {
+                int(uid): self.openskill_model.rating(
+                    mu=float(osd["mu"]), sigma=float(osd["sigma"]), name=str(uid)
+                )
+                for uid, osd in saved_os.items()
+            }
+            tplr.logger.info(
+                f"Restored OpenSkill ratings for {len(self.openskill_ratings)} peers"
+            )
+        except Exception as e:
+            tplr.logger.warning(f"Failed to restore OpenSkill ratings: {e}")
 
     async def preload_dataloader(self, seed: int):
         """

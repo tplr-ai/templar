@@ -172,9 +172,7 @@ class Evaluator:
         self.hparams = tplr.load_hparams()
         self.wallet = bt.wallet(config=self.config)
 
-        self.version = getattr(
-            self.hparams, "checkpoint_init_version", tplr.__version__
-        )
+        self.version = tplr.__version__
 
         # Mock for the comms class
         self.uid = 1

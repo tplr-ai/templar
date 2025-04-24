@@ -9,6 +9,7 @@ import io
 import asyncio
 import pyarrow as pa
 import pyarrow.parquet as pq
+import itertools
 
 # Find and load the correct .env file
 env_path = Path(__file__).parent.parent / ".env"
@@ -1172,3 +1173,80 @@ def test_validate_configuration_correctness(monkeypatch):
         assert region == expected_region, (
             f"Expected region {expected_region}, got {region}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression test: concurrent access to the same ParquetFile must be safe.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_concurrent_parquet_read_threadsafe(monkeypatch):
+    """
+    Spawn many concurrent `_process_page` calls that share the same shard / Parquet
+    file. Before the lock-fix this would crash with:
+        AttributeError: 'NoneType' object has no attribute '_log_stats'
+    """
+    # ------------------------------------------------------------------ setup
+    # Build an in-memory parquet file with 5 row-groups (10 rows each).
+    rows = [f"row {i}" for i in range(50)]
+    table = pa.table({"text": rows})
+    buffer = io.BytesIO()
+    pq.write_table(table, buffer, row_group_size=10)
+    parquet_bytes = buffer.getvalue()
+
+    # Dummy FS that serves the same bytes and keeps a call counter.
+    class MemoryFS:
+        def __init__(self):
+            self.open_calls = 0
+
+        def open(self, *args, **kwargs):
+            self.open_calls += 1
+            return io.BytesIO(parquet_bytes)
+
+        def __getattr__(self, attr):
+            return lambda *a, **k: None  # no-op for other fs attrs
+
+    mem_fs = MemoryFS()
+    monkeypatch.setattr(R2DatasetLoader, "_get_fs", lambda *a, **k: mem_fs)
+
+    # Fake metadata so the loader sees a single shard.
+    dummy_config = "dummy_cfg"
+    dummy_shard = {"path": "dummy/path", "num_rows": 50}
+
+    async def fake_metadata(self):
+        return (
+            {
+                dummy_config: {
+                    "total_rows": 50,
+                    "split": "train",
+                    "shards": [dummy_shard],
+                }
+            },
+            {"configs": [{"config_name": dummy_config}]},
+        )
+
+    monkeypatch.setattr(R2DatasetLoader, "_load_r2_metadata", fake_metadata)
+
+    # Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    loader = R2DatasetLoader(
+        batch_size=1, sequence_length=20, tokenizer=tokenizer, pack_samples=False
+    )
+    loader.num_rows_per_page = 2
+    sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
+
+    # ------------------------------------------------------------------ test
+    pages = [(dummy_config, i, "train") for i in range(10)]  # 10 distinct offsets
+    tasks = [asyncio.create_task(loader._process_page(p, sem)) for p in pages]
+    results = await asyncio.gather(*tasks)
+
+    # Sanity: every call returned tokens
+    assert all(isinstance(tokens, list) and tokens for tokens in results)
+
+    # The file shouldn't have been reopened for every call (cache reuse works)
+    assert mem_fs.open_calls < len(pages), (
+        f"Expected cached parquet handle, but open() was called {mem_fs.open_calls} "
+        "times for only {len(pages)} page requests"
+    )

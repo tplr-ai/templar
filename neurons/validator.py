@@ -193,6 +193,11 @@ class Validator:
             milestones=[250],
         )
 
+        self.openskill_model = PlackettLuce(
+            beta=self.hparams.openskill_beta, tau=self.hparams.openskill_tau
+        )
+        self.openskill_ratings = {}  # Dictionary to store peer ratings
+
         self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
         tplr.logger.info(
             f"[Miner] code_version={tplr.__version__} "
@@ -293,10 +298,6 @@ class Validator:
         # Initialize peer related attributes
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
-        self.openskill_model = PlackettLuce(
-            beta=self.hparams.openskill_beta, tau=self.hparams.openskill_tau
-        )
-        self.openskill_ratings = {}  # Dictionary to store peer ratings
 
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:

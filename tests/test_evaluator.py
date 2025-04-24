@@ -6,11 +6,12 @@
 4. Updating tracking state correctly
 """
 
-import sys
 import os
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 import torch
-from unittest.mock import MagicMock, patch, AsyncMock
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -42,6 +43,7 @@ def setup_evaluator_with_mocks():
         evaluator.model = MagicMock()
         evaluator.metrics_logger = MagicMock()
         evaluator.comms = MagicMock()
+        evaluator.version = "test_version"
 
         yield evaluator
 
@@ -67,11 +69,13 @@ async def test_evaluator_skips_old_checkpoints(evaluator):
         "momentum": {"layer.weight": torch.zeros(10, 10)},
     }
 
-    evaluator.comms.get_latest_checkpoint = AsyncMock(
-        return_value=(old_checkpoint_data, None)
-    )
+    mock_get_latest = AsyncMock(return_value=(old_checkpoint_data, None))
+    evaluator.comms.get_latest_checkpoint = mock_get_latest
 
     success, data, window, step = await evaluator.load_latest_model()
+
+    # Verify that get_latest_checkpoint was called with the version parameter
+    mock_get_latest.assert_called_once_with(version=evaluator.version)
 
     assert not success, "Should not load when checkpoint window equals last_eval_window"
     assert window == 100, "Should return correct window number"
@@ -110,11 +114,13 @@ async def test_evaluator_loads_new_checkpoints(evaluator):
         return None
 
     evaluator.model.load_state_dict.side_effect = capture_model_load
-    evaluator.comms.get_latest_checkpoint = AsyncMock(
-        return_value=(new_checkpoint_data, None)
-    )
+    mock_get_latest = AsyncMock(return_value=(new_checkpoint_data, None))
+    evaluator.comms.get_latest_checkpoint = mock_get_latest
 
     success, data, window, step = await evaluator.load_latest_model()
+
+    # Verify that get_latest_checkpoint was called with the version parameter
+    mock_get_latest.assert_called_once_with(version=evaluator.version)
 
     assert success, "Should load when checkpoint window > last_eval_window"
     assert window == 110, "Should return correct window number"

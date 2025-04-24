@@ -446,7 +446,14 @@ class R2DatasetLoader(DatasetLoader):
                             pf = pq.ParquetFile(
                                 f, memory_map=False
                             )  # Disable memory mapping
-                            pf_data = {"file": f, "parquet": pf}
+
+                            # one lock per file – guarantees that only one
+                            # thread touches the underlying handle at a time
+                            pf_data = {
+                                "file": f,
+                                "parquet": pf,
+                                "lock": threading.Lock(),
+                            }
                             self._parquet_cache[chosen_shard["path"]] = pf_data
                             break
                         except Exception as e:
@@ -461,18 +468,19 @@ class R2DatasetLoader(DatasetLoader):
                                 )
                                 raise
 
+                # Read the row group – protect the shared handle
+                def _read_group():
+                    with pf_data["lock"]:
+                        return pf_data["parquet"].read_row_group(
+                            group_index, columns=["text"], use_threads=True
+                        )
+
                 # Fix: Ensure row group index is within bounds
                 num_row_groups = pf_data["parquet"].num_row_groups
                 rows_per_group = chosen_shard["num_rows"] // num_row_groups
                 group_index = min(shard_offset // rows_per_group, num_row_groups - 1)
 
-                # Read the row group
-                table = await asyncio.to_thread(
-                    pf_data["parquet"].read_row_group,
-                    group_index,
-                    columns=["text"],
-                    use_threads=True,
-                )
+                table = await asyncio.to_thread(_read_group)
 
                 # Adjust start_idx based on actual rows in the group
                 start_idx = shard_offset % rows_per_group

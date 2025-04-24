@@ -172,6 +172,10 @@ class Evaluator:
         self.hparams = tplr.load_hparams()
         self.wallet = bt.wallet(config=self.config)
 
+        self.version = getattr(
+            self.hparams, "checkpoint_init_version", tplr.__version__
+        )
+
         # Mock for the comms class
         self.uid = 1
 
@@ -229,7 +233,7 @@ class Evaluator:
             - checkpoint_window (int): Window number of checkpoint
             - global_step (int): Global training step
         """
-        result = await self.comms.get_latest_checkpoint()  # type: ignore
+        result = await self.comms.get_latest_checkpoint(version=self.version)
         if not result:
             tplr.logger.error(
                 f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket_name', 'unknown')}, "

@@ -13,10 +13,10 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from torchtitan.components.tokenizer import Tokenizer
-from torchtitan.config_manager import JobConfig
-from torchtitan.models.attention import build_attention, init_attention_mask
-from torchtitan.protocols.train_spec import BaseModelArgs, ModelProtocol
+from tplr.components.tokenizer import Tokenizer
+from tplr.config_manager import JobConfig
+from tplr.models.attention import build_attention, init_attention_mask
+from tplr.protocols.train_spec import BaseModelArgs, ModelProtocol
 
 
 @dataclass

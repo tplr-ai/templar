@@ -34,6 +34,9 @@ dependencies = [
     "uvloop>=0.21.0",
     "openskill>=6.0.2",
     "tiktoken>=0.9.0",
+    "torchdata>=0.11.0",
+    "torchao>=0.10.0",
+    "tyro>=0.9.19",
 ]
 
 [project.optional-dependencies]

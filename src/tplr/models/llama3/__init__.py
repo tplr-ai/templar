@@ -6,12 +6,12 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from torchtitan.components.loss import build_cross_entropy_loss
-from torchtitan.components.lr_scheduler import build_lr_schedulers
-from torchtitan.components.optimizer import build_optimizers
-from torchtitan.datasets.hf_datasets import build_hf_dataloader
-from torchtitan.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
-from torchtitan.protocols.train_spec import register_train_spec, TrainSpec
+from tplr.components.loss import build_cross_entropy_loss
+from tplr.components.lr_scheduler import build_lr_schedulers
+from tplr.components.optimizer import build_optimizers
+from tplr.datasets.hf_datasets import build_hf_dataloader
+from tplr.datasets.tokenizer.tiktoken import build_tiktoken_tokenizer
+from tplr.protocols.train_spec import register_train_spec, TrainSpec
 
 from .model import Transformer, TransformerModelArgs
 from .parallelize_llama import parallelize_llama

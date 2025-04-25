@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
-# Import the built-in models here so that the corresponding register_model_spec()
-# will be called.
-import tplr.models.llama3  # noqa: F401
+from tplr.distributed.parallel_dims import ParallelDims
+
+
+__all__ = ["ParallelDims"]

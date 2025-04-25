@@ -27,9 +27,9 @@ from torch.distributed.tensor.parallel import (
     SequenceParallel,
 )
 
-from torchtitan.config_manager import JobConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelDims
-from torchtitan.tools.logging import logger
+from tplr.config_manager import JobConfig, TORCH_DTYPE_MAP
+from tplr.distributed import ParallelDims
+from tplr.tools.logging import logger
 
 
 def parallelize_llama(
@@ -174,7 +174,7 @@ def apply_tp(
     # Apply tensor + sequence parallelism to every transformer block
     # NOTE: At the cost of model code change, we can accelerate Sequence Parallel
     #       by folding (and unfolding) the batch dimension and the sequence dimension.
-    #       Examples can be found at https://github.com/pytorch/torchtitan/pull/437
+    #       Examples can be found at https://github.com/pytorch/tplr/pull/437
     for transformer_block in model.layers.values():
         layer_plan = {
             "attention_norm": SequenceParallel(),

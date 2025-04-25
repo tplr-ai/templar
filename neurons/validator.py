@@ -961,35 +961,66 @@ class Validator:
             # Pre-load common random loader for all evaluated UIDs in this window.
             data_start_random = tplr.T()
 
-            # Start preloading the random loader as a task
-            dataloader_tasks = {}
-
-            # Start the random loader task using a high random seed
+            # Load the random loader directly
             random_seed = random.randint(
                 1000, 10000000
             )  # Using high seed number for random context
-            dataloader_tasks["random_loader"] = asyncio.create_task(
-                self.preload_dataloader(seed=random_seed)
-            )
             tplr.logger.info(
-                f"Started preloading common random dataloader with seed {random_seed}"
+                f"Loading common random dataloader with seed {random_seed}"
             )
+            try:
+                random_loader_data = await self.preload_dataloader(seed=random_seed)
+                if random_loader_data:
+                    common_loader_random = random_loader_data["loader"]
+                    tplr.logger.info(
+                        f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation."
+                    )
+                else:
+                    tplr.logger.error(
+                        "Random loader was None, cannot continue evaluation"
+                    )
+                    continue
+            except Exception as e:
+                tplr.logger.error(f"Error loading random loader: {str(e)}")
+                continue
 
-            # Start preloading all UID-specific dataloaders in parallel
-            for uid in evaluation_uids:
-                dataloader_tasks[uid] = asyncio.create_task(
-                    self.preload_dataloader(seed=uid)
+            # Setup for sliding window approach
+            evaluation_uids_queue = list(
+                evaluation_uids
+            )  # Create a copy of the list to work with
+            next_uid_dataloader_task = None
+            next_uid = None
+
+            # If we have at least one UID to evaluate, start loading the first one
+            if evaluation_uids_queue:
+                next_uid = evaluation_uids_queue.pop(0)
+                tplr.logger.info(f"Starting preload for first UID: {next_uid}")
+                next_uid_dataloader_task = asyncio.create_task(
+                    self.preload_dataloader(seed=next_uid)
                 )
-                tplr.logger.info(
-                    f"Started preloading dataloader for UID {uid} (as seed)"
-                )
 
-            # Process each UID evaluation, awaiting the preloaded data when needed
-            common_loader_random = None
+            # Process each UID with sliding window loading
+            while next_uid is not None:
+                eval_uid = next_uid
+                eval_uid_dataloader_task = next_uid_dataloader_task
 
-            for eval_uid in evaluation_uids:
-                tplr.logger.info(f"Evaluating uid: {eval_uid}")
+                if eval_uid_dataloader_task is None:
+                    tplr.logger.error(f"Error loading data for UID {eval_uid}")
+                    continue
 
+                # Start loading the next UID if there are more in the queue
+                next_uid = None
+                next_uid_dataloader_task = None
+                if evaluation_uids_queue:
+                    next_uid = evaluation_uids_queue.pop(0)
+                    tplr.logger.info(f"Starting preload for next UID: {next_uid}")
+                    next_uid_dataloader_task = asyncio.create_task(
+                        self.preload_dataloader(seed=next_uid)
+                    )
+
+                tplr.logger.info(f"Evaluating UID: {eval_uid}")
+
+                # Fetch gradient data for evaluation
                 eval_result = await self.comms.get(
                     uid=str(eval_uid),
                     window=self.sync_window,
@@ -1001,6 +1032,17 @@ class Validator:
                 )
 
                 scoring_start = tplr.T()
+
+                # Wait for the current UID's data to be loaded
+                data_start = tplr.T()
+                try:
+                    loader_data = await eval_uid_dataloader_task
+                except Exception as e:
+                    tplr.logger.error(
+                        f"Error loading data for UID {eval_uid}: {str(e)}"
+                    )
+                    loader_data = None
+
                 if (
                     eval_result is not None
                     and not (
@@ -1008,8 +1050,13 @@ class Validator:
                         and eval_result.get("__status") in ["TOO_LATE", "TOO_EARLY"]
                     )
                     and eval_result[0] is not None
+                    and loader_data is not None
                 ):
                     state_dict, _ = eval_result
+
+                    # Extract data from loader
+                    loader_own = loader_data["loader"]
+                    local_pages = loader_data["pages"]
 
                     # Pull miner-sent pages info from metadata
                     miner_pages = None
@@ -1023,36 +1070,10 @@ class Validator:
                             f"Missing pages info metadata from miner UID {eval_uid}"
                         )
 
-                    # Await the preloaded dataloader for this UID
-                    loader_data = None
-                    local_pages = None
-                    loader_own = None
-                    data_start = tplr.T()
-                    if eval_uid in dataloader_tasks:
-                        try:
-                            loader_data = await dataloader_tasks[eval_uid]
-                            if loader_data:
-                                loader_own = loader_data["loader"]
-                                local_pages = loader_data["pages"]
-                                tplr.logger.info(
-                                    f"Successfully awaited preloaded dataloader for UID {eval_uid}"
-                                )
-                            else:
-                                tplr.logger.warning(
-                                    f"Preloaded data for UID {eval_uid} was None, skipping"
-                                )
-                                continue
-                        except Exception as e:
-                            tplr.logger.error(
-                                f"Error awaiting preloaded data for UID {eval_uid}: {str(e)}"
-                            )
-                            loader_data = None
-                            continue
-                        finally:
-                            # Clean up the task reference
-                            del dataloader_tasks[eval_uid]
-
                     if local_pages is None or loader_own is None:
+                        tplr.logger.warning(
+                            f"Invalid loader data for UID {eval_uid}, skipping"
+                        )
                         continue
 
                     # Verify pages match if miner sent them
@@ -1253,7 +1274,13 @@ class Validator:
                     )
 
                     # Clean up stored batches
-                    del batches_own, local_pages, loader_own, model_own_data_eval
+                    del (
+                        batches_own,
+                        local_pages,
+                        loader_own,
+                        model_own_data_eval,
+                        loader_data,
+                    )
                     torch.cuda.empty_cache()
 
                     self.loss_after_per_batch_own = (
@@ -1284,29 +1311,6 @@ class Validator:
 
                     # 7. Use common random loader for evaluation
                     model_random_data_eval = copy.deepcopy(self.model)
-
-                    # Await the random loader task if this is the first time we're using it
-                    if (
-                        common_loader_random is None
-                        and "random_loader" in dataloader_tasks
-                    ):
-                        try:
-                            random_loader_data = await dataloader_tasks["random_loader"]
-                            if random_loader_data:
-                                common_loader_random = random_loader_data["loader"]
-                                tplr.logger.info(
-                                    f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation."
-                                )
-                            else:
-                                tplr.logger.error(
-                                    "Preloaded random loader was None, cannot continue evaluation"
-                                )
-                                continue
-                            # Clean up the task reference after we've used it
-                            del dataloader_tasks["random_loader"]
-                        except Exception as e:
-                            tplr.logger.error(f"Error loading random loader: {str(e)}")
-                            continue
 
                     loader_random = common_loader_random
 
@@ -1556,6 +1560,21 @@ class Validator:
                 tplr.logger.info(
                     f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
                 )
+
+            # Cancel any remaining preload task if exiting the loop early
+            if (
+                next_uid_dataloader_task is not None
+                and not next_uid_dataloader_task.done()
+            ):
+                next_uid_dataloader_task.cancel()
+                try:
+                    await next_uid_dataloader_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Clean up common random loader
+            del common_loader_random
+            torch.cuda.empty_cache()
 
             self.update_openskill_ratings()
             self.update_weights()
@@ -1857,17 +1876,6 @@ class Validator:
 
             # 18. Increment global step
             self.global_step += 1
-
-            # Clean up common random loader after evaluations for this window.
-            del common_loader_random
-            for _, task in dataloader_tasks.items():
-                if not task.done():
-                    task.cancel()
-                try:
-                    await task
-                except Exception:
-                    pass
-            dataloader_tasks.clear()
 
             torch.cuda.empty_cache()
 

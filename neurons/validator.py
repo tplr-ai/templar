@@ -495,7 +495,7 @@ class Validator:
                     rich_table.add_row(
                         str(rank),
                         str(uid),
-                        f"{self.current_window_scores[uid]:.4f}",
+                        f"{self.current_window_scores[uid]:.6f}",
                         f"{rating.mu:.4f}",
                         f"{rating.sigma:.4f}",
                         f"{ordinal_after:.4f}",
@@ -1952,7 +1952,7 @@ class Validator:
                     openscore_info = f"{rating.ordinal():.2f} (μ={rating.mu:.1f}, σ={rating.sigma:.1f})"
                 row = [
                     str(uid),
-                    f"{self.gradient_scores[uid]:.4f}",
+                    f"{self.gradient_scores[uid]:.6f}",
                     f"{self.binary_indicator_scores[uid]:.4f}",
                     f"{self.binary_moving_averages[uid]:.4f}",
                     f"{self.final_scores[uid]:.4f}",

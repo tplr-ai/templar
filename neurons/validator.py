@@ -412,8 +412,12 @@ class Validator:
                     * max(0, self.binary_moving_averages[uid].item())
                     * sync_score
                 )
-                tplr.logger.info(
-                    f"Computed Final Score for UID {uid}: {self.final_scores[uid]}"
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Computed Final Score for UID {uid}: {self.final_scores[uid]}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                    eval_uid=uid,
                 )
 
                 # Log to WandB
@@ -1138,6 +1142,7 @@ class Validator:
                         message=f"Error loading data for UID {eval_uid}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
                     continue
 
@@ -1161,6 +1166,7 @@ class Validator:
                     message=f"Evaluating UID: {eval_uid}",
                     sync_window=self.sync_window,
                     current_window=self.current_window,
+                    eval_uid=eval_uid,
                 )
 
                 # Fetch gradient data for evaluation
@@ -1186,6 +1192,7 @@ class Validator:
                         message=f"Error loading data for UID {eval_uid}: {str(e)}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
                     loader_data = None
 
@@ -1217,6 +1224,7 @@ class Validator:
                             message=f"Missing pages info metadata from miner UID {eval_uid}",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                     if local_pages is None or loader_own is None:
@@ -1225,6 +1233,7 @@ class Validator:
                             message=f"Invalid loader data for UID {eval_uid}, skipping",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
                         continue
 
@@ -1236,6 +1245,7 @@ class Validator:
                                 message=f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
+                                eval_uid=eval_uid,
                             )
                         else:
                             tplr.log_with_context(
@@ -1243,6 +1253,7 @@ class Validator:
                                 message=f"Pages verified for UID {eval_uid}: pages match.",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
+                                eval_uid=eval_uid,
                             )
                     else:
                         tplr.log_with_context(
@@ -1250,6 +1261,7 @@ class Validator:
                             message=f"Using local pages for UID {eval_uid} as miner metadata is missing.",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                     tplr.log_with_context(
@@ -1257,6 +1269,7 @@ class Validator:
                         message=f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     state_dict, _ = eval_result
@@ -1288,6 +1301,7 @@ class Validator:
                             message=f"Evaluating {sample_size_own}/{total_batches_own} batches ({self.hparams.validator_sample_rate * 100:.1f}%)",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                         loss_before_own, n_batches = self.evaluate_model_on_batches(
@@ -1303,6 +1317,7 @@ class Validator:
                         message=f"Loss before (own data): {self.loss_before_per_batch_own}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # 9. Apply gradient and compute loss after
@@ -1329,6 +1344,7 @@ class Validator:
                                         message=f"Missing totalk for parameter {n}, skipping peer {eval_uid}",
                                         sync_window=self.sync_window,
                                         current_window=self.current_window,
+                                        eval_uid=eval_uid,
                                     )
                                     raise ValueError(
                                         f"Invalid gradient data from peer {eval_uid}: Missing totalk for parameter {n}"
@@ -1349,6 +1365,7 @@ class Validator:
                                         message=f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {eval_uid}",
                                         sync_window=self.sync_window,
                                         current_window=self.current_window,
+                                        eval_uid=eval_uid,
                                     )
                                     raise ValueError(
                                         f"Invalid gradient data from peer {eval_uid}: NaN or Inf values in {vals_key}"
@@ -1382,6 +1399,7 @@ class Validator:
                                         message=f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}",
                                         sync_window=self.sync_window,
                                         current_window=self.current_window,
+                                        eval_uid=eval_uid,
                                     )
                                     raise ValueError(
                                         f"Invalid gradient from peer {eval_uid}: NaN or Inf in decompressed gradient for {n}"
@@ -1403,6 +1421,7 @@ class Validator:
                                 message=f"Set positive score of UID {eval_uid} from {old_score:.4f} to 0.0 - invalid gradient data",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
+                                eval_uid=eval_uid,
                             )
                         else:
                             # Negative score is worse than zero; keep it as-is.
@@ -1411,6 +1430,7 @@ class Validator:
                                 message=f"UID {eval_uid} had negative score {old_score:.4f}; retaining due to invalid gradient data",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
+                                eval_uid=eval_uid,
                             )
 
                         # Include in evaluated UIDs so it gets logged in metrics
@@ -1477,6 +1497,7 @@ class Validator:
                         message=f"Loss after (own data): {self.loss_after_per_batch_own}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # 11. Calculate improvements and update scores
@@ -1489,6 +1510,7 @@ class Validator:
                         message=f"Loss improvement (own data): {self.loss_improvement_own}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     self.relative_improvement_own = (
@@ -1501,6 +1523,7 @@ class Validator:
                         message=f"Relative improvement (own data): {self.relative_improvement_own:.4f}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # 7. Use common random loader for evaluation
@@ -1538,6 +1561,7 @@ class Validator:
                             message=f"Evaluating {sample_size_random}/{total_batches_random} batches ({self.hparams.validator_sample_rate * 100:.1f}%)",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                         loss_before_random, n_batches = self.evaluate_model_on_batches(
@@ -1557,6 +1581,7 @@ class Validator:
                         message=f"Loss before (random data): {self.loss_before_per_batch_random}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
                     # 9. Apply gradient and compute loss after
                     try:
@@ -1594,6 +1619,7 @@ class Validator:
                             message=f"Failed to apply gradient for UID {eval_uid}: {str(e)}",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
                         continue
 
@@ -1622,6 +1648,7 @@ class Validator:
                         message=f"Loss after (random data): {self.loss_after_per_batch_random}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # 11. Calculate improvements and update scores
@@ -1635,6 +1662,7 @@ class Validator:
                         message=f"Loss improvement (random data): {self.loss_improvement_random}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     self.relative_improvement_random = (
@@ -1647,6 +1675,7 @@ class Validator:
                         message=f"Relative improvement (random data): {self.relative_improvement_random}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # Calculate original performance score (gradient quality)
@@ -1658,6 +1687,7 @@ class Validator:
                         message=f"Gradient Score: {self.gradient_scores[eval_uid]}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # Initialize or update OpenSkill rating for this peer
@@ -1692,6 +1722,7 @@ class Validator:
                         message=f"Binary Indicator Score : {self.binary_indicator_scores[eval_uid]}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # Update binary moving average using exponential moving average formula:
@@ -1708,6 +1739,7 @@ class Validator:
                         message=f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     sync_result = await self.evaluate_miner_sync(eval_uid)
@@ -1728,6 +1760,7 @@ class Validator:
                         message=f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                 else:
@@ -1736,6 +1769,7 @@ class Validator:
                         message=f"No gradient received from UID {eval_uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
                     old_score = self.final_scores[eval_uid].item()
 
@@ -1751,6 +1785,7 @@ class Validator:
                             message=f"Reduced score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient.",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
                     else:
                         tplr.log_with_context(
@@ -1758,6 +1793,7 @@ class Validator:
                             message=f"Skipped reducing score of UID {eval_uid} (current score: {old_score:.4f}) due to negative or zero value.",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                     # Ensure the UID is included in evaluated_uids

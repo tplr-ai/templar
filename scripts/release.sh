@@ -11,6 +11,7 @@ BUMP_TYPE="patch"
 GITHUB_API="https://api.github.com"
 REMOTE=""
 MAIN_BRANCH="main"
+DEV_BRANCH="dev"
 VERBOSE=false
 SKIP_CONFIRM=false
 DRY_RUN=false
@@ -25,19 +26,20 @@ Usage: $SCRIPT_NAME [OPTIONS]
 Automate the release process:
 
 Options:
-  --major          Bump the major version instead of minor
-  --minor          Bump the minor version
-  --patch          Bump the patch version (default)
-  --version VER    Specify a custom version number (e.g., 1.2.3)
-  --remote NAME    Specify the git remote to use (default: origin or github)
-  --branch NAME    Specify the git branch (default: main)
-  --dry            Dry run mode - show what would be done without executing
-  -y, --yes        Skip confirmation prompt
-  -v, --verbose    Enable verbose output
-  -h, --help       Display this help message and exit
+  --major             Bump the major version instead of minor
+  --minor             Bump the minor version
+  --patch             Bump the patch version (default)
+  --version VER       Specify a custom version number (e.g., 1.2.3)
+  --remote NAME       Specify the git remote to use (default: origin or github)
+  --main-branch NAME  Specify the main branch (default: main)
+  --dev-branch NAME   Specify the development branch (default: dev)
+  --dry               Dry run mode - show what would be done without executing
+  -y, --yes           Skip confirmation prompt
+  -v, --verbose       Enable verbose output
+  -h, --help          Display this help message and exit
 
 Environment variables:
-  GITHUB_TOKEN     GitHub API token for creating releases (optional)
+  GITHUB_TOKEN        GitHub API token for creating releases (optional)
 
 EOF
 }
@@ -57,9 +59,6 @@ print_header() {
 '      `--'      `--'      `--'      `
 EOF
     echo -e "\033[0m"
-    echo "========================================"
-    echo "  Starting release process..."
-    echo "========================================"
     echo ""
 }
 
@@ -187,58 +186,13 @@ push_changes() {
     local version=$2
 
     if [[ "$DRY_RUN" == true ]]; then
-        echo "[DRY RUN] Would push changes to $remote/$MAIN_BRANCH with tags"
-        echo "[DRY RUN] Would check for dev branch and update if present"
+        echo "[DRY RUN] Would push changes to $remote/$DEV_BRANCH with tags"
         return 0
     fi
 
-    git push "$remote" HEAD:$MAIN_BRANCH --tags
+    git push "$remote" HEAD:$DEV_BRANCH --tags
 
-    log "Pushed changes to $remote/$MAIN_BRANCH with tags"
-
-    if git ls-remote --heads "$remote" dev | grep -q "refs/heads/dev"; then
-        log "Dev branch found in remote, merging changes to dev"
-
-        local current_branch=$(git rev-parse --abbrev-ref HEAD)
-
-        git fetch "$remote" dev
-
-        git checkout -B dev "$remote/dev"
-
-        if ! git merge --no-ff "v$version" -m "Merge release v$version into dev"; then
-            echo "Warning: Merge conflict occurred. Aborting dev branch update."
-            git merge --abort
-            git checkout "$current_branch"
-        else
-            git push "$remote" dev
-            git checkout "$current_branch"
-            log "Merged and pushed release v$version to $remote/dev"
-        fi
-    else
-        log "No dev branch found in remote, skipping push to dev"
-    fi
-}
-
-check_requirements() {
-    local missing_tools=()
-
-    if ! command -v git >/dev/null 2>&1; then
-        missing_tools+=("git")
-    fi
-
-    if [[ -n "${GITHUB_TOKEN:-}" ]] && ! command -v curl >/dev/null 2>&1; then
-        missing_tools+=("curl")
-    fi
-
-    if [[ -n "${GITHUB_TOKEN:-}" ]] && ! command -v jq >/dev/null 2>&1; then
-        missing_tools+=("jq")
-    fi
-
-    if [[ ${#missing_tools[@]} -gt 0 ]]; then
-        echo "Error: Required tools not found: ${missing_tools[*]}" >&2
-        echo "Please install these tools and try again" >&2
-        exit 1
-    fi
+    log "Pushed changes to $remote/$DEV_BRANCH with tags"
 }
 
 create_github_release() {
@@ -385,6 +339,68 @@ EOF
     echo "Created release $current_tag on GitHub with AI-generated notes"
 }
 
+create_pull_request() {
+    local version=$1
+    local token=$2
+    local repo_url
+
+    if [[ "$DRY_RUN" == true ]]; then
+        echo "[DRY RUN] Would create pull request from $DEV_BRANCH to $MAIN_BRANCH"
+        return 0
+    fi
+
+    if [[ -z "$token" ]]; then
+        echo "GITHUB_TOKEN not set, skipping pull request creation"
+        return 0
+    fi
+
+    log "Creating pull request from $DEV_BRANCH to $MAIN_BRANCH"
+
+    repo_url=$(git remote get-url "$REMOTE")
+
+    if [[ $repo_url =~ github\.com[:/]([^/]+)/([^/.]+) ]]; then
+        local owner="${BASH_REMATCH[1]}"
+        local repo="${BASH_REMATCH[2]}"
+        if [[ "$repo" == *.git ]]; then
+            repo="${repo%.git}"
+        fi
+    else
+        echo "Error: Could not parse GitHub repository information from URL: $repo_url" >&2
+        return 1
+    fi
+
+    local pr_data
+    pr_data=$(cat << EOF
+{
+  "title": "Release v$version",
+  "body": "Automated PR for release v$version",
+  "head": "$DEV_BRANCH",
+  "base": "$MAIN_BRANCH"
+}
+EOF
+)
+
+    local response
+    response=$(curl -s -X POST \
+        -H "Authorization: token $token" \
+        -H "Accept: application/vnd.github.v3+json" \
+        -d "$pr_data" \
+        "$GITHUB_API/repos/$owner/$repo/pulls")
+
+    if echo "$response" | jq -e '.errors' >/dev/null 2>&1; then
+        echo "Error creating pull request:" >&2
+        echo "$response" | jq '.errors' >&2
+        return 1
+    elif echo "$response" | jq -e '.message' >/dev/null 2>&1; then
+        echo "Error creating pull request:" >&2
+        echo "$response" | jq '.message' >&2
+        return 1
+    else
+        local pr_url=$(echo "$response" | jq -r '.html_url')
+        echo "Created pull request: $pr_url"
+    fi
+}
+
 confirm_action() {
     local message=$1
     local default=${2:-n}
@@ -421,12 +437,12 @@ save_current_branch() {
     log "Current branch is $ORIGINAL_BRANCH"
 }
 
-switch_to_main_branch() {
-    if [[ "$ORIGINAL_BRANCH" != "$MAIN_BRANCH" ]]; then
-        log "Switching from $ORIGINAL_BRANCH to $MAIN_BRANCH"
+switch_to_dev_branch() {
+    if [[ "$ORIGINAL_BRANCH" != "$DEV_BRANCH" ]]; then
+        log "Switching from $ORIGINAL_BRANCH to $DEV_BRANCH"
 
         if [[ "$DRY_RUN" == true ]]; then
-            echo "[DRY RUN] Would stash changes and switch to $MAIN_BRANCH"
+            echo "[DRY RUN] Would stash changes and switch to $DEV_BRANCH"
             return 0
         fi
 
@@ -436,25 +452,39 @@ switch_to_main_branch() {
             STASHED=true
         fi
 
-        git checkout "$MAIN_BRANCH"
+        if git show-ref --verify --quiet refs/heads/$DEV_BRANCH; then
+            git checkout "$DEV_BRANCH"
+        else
+            if git ls-remote --heads "$REMOTE" "$DEV_BRANCH" | grep -q "refs/heads/$DEV_BRANCH"; then
+                git checkout -b "$DEV_BRANCH" "$REMOTE/$DEV_BRANCH"
+            else
+                git checkout -b "$DEV_BRANCH" "$REMOTE/$MAIN_BRANCH"
+            fi
+        fi
 
-        git pull "$REMOTE" "$MAIN_BRANCH"
+        git pull "$REMOTE" "$DEV_BRANCH" || true
 
-        log "Now on branch $MAIN_BRANCH with latest changes"
+        log "Syncing $DEV_BRANCH with $MAIN_BRANCH"
+        git fetch "$REMOTE" "$MAIN_BRANCH"
+        git merge "$REMOTE/$MAIN_BRANCH" -m "Merge $MAIN_BRANCH into $DEV_BRANCH for release"
+
+        log "Now on branch $DEV_BRANCH with latest changes from $MAIN_BRANCH"
     else
-        log "Already on $MAIN_BRANCH branch"
+        log "Already on $DEV_BRANCH branch"
 
         if [[ "$DRY_RUN" == true ]]; then
-            echo "[DRY RUN] Would pull latest changes from $REMOTE/$MAIN_BRANCH"
+            echo "[DRY RUN] Would pull latest changes from $REMOTE/$DEV_BRANCH and $REMOTE/$MAIN_BRANCH"
             return 0
         fi
 
-        git pull "$REMOTE" "$MAIN_BRANCH"
+        git pull "$REMOTE" "$DEV_BRANCH"
+        git fetch "$REMOTE" "$MAIN_BRANCH"
+        git merge "$REMOTE/$MAIN_BRANCH" -m "Merge $MAIN_BRANCH into $DEV_BRANCH for release"
     fi
 }
 
 restore_original_branch() {
-    if [[ "$ORIGINAL_BRANCH" != "$MAIN_BRANCH" ]]; then
+    if [[ "$ORIGINAL_BRANCH" != "$DEV_BRANCH" ]]; then
         if [[ "$DRY_RUN" == true ]]; then
             echo "[DRY RUN] Would switch back to $ORIGINAL_BRANCH and apply any stashed changes"
             return 0
@@ -470,7 +500,7 @@ restore_original_branch() {
 
         log "Restored to original state on $ORIGINAL_BRANCH"
     else
-        log "No need to switch branches, already on $MAIN_BRANCH"
+        log "No need to switch branches, already on $DEV_BRANCH"
     fi
 }
 
@@ -521,14 +551,24 @@ main() {
                 REMOTE="$1"
                 shift
                 ;;
-            --branch)
+            --main-branch)
                 shift
                 if [[ $# -eq 0 ]]; then
-                    echo "Error: --branch requires an argument" >&2
+                    echo "Error: --main-branch requires an argument" >&2
                     show_help
                     exit 1
                 fi
                 MAIN_BRANCH="$1"
+                shift
+                ;;
+            --dev-branch)
+                shift
+                if [[ $# -eq 0 ]]; then
+                    echo "Error: --dev-branch requires an argument" >&2
+                    show_help
+                    exit 1
+                fi
+                DEV_BRANCH="$1"
                 shift
                 ;;
             --dry)
@@ -566,10 +606,10 @@ main() {
 
     if [[ "$DRY_RUN" == false ]]; then
         detect_git_remote
-        switch_to_main_branch
+        switch_to_dev_branch
 
         if ! git diff-index --quiet HEAD --; then
-            echo "Error: Working directory is not clean after switching to $MAIN_BRANCH." >&2
+            echo "Error: Working directory is not clean after switching to $DEV_BRANCH." >&2
             echo "This shouldn't happen as we stash changes. Please resolve manually." >&2
             exit 1
         fi
@@ -606,9 +646,10 @@ main() {
 
         if [[ -n "${GITHUB_TOKEN:-}" ]]; then
             create_github_release "$new_version" "$GITHUB_TOKEN"
+            create_pull_request "$new_version" "$GITHUB_TOKEN"
         else
-            echo "GITHUB_TOKEN not set, skipping GitHub release creation"
-            echo "To create a release, set the GITHUB_TOKEN environment variable and run again"
+            echo "GITHUB_TOKEN not set, skipping GitHub release and pull request creation"
+            echo "To create a release and PR, set the GITHUB_TOKEN environment variable and run again"
         fi
 
         echo "Release v$new_version completed successfully!"

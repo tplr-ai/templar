@@ -8,8 +8,14 @@ import importlib
 import os
 import sys
 
-from dataclasses import asdict, dataclass, field, fields, is_dataclass, make_dataclass
+from dataclasses import (
+    asdict,
+    dataclass,
+    field,
+)
 from typing import Any, Literal, Type
+from types import SimpleNamespace
+from pathlib import Path
 
 import torch
 import tyro
@@ -35,7 +41,7 @@ class Job:
     config_file: str | None = None
     """Job config file"""
 
-    dump_folder: str = "./torchtitan/outputs"
+    dump_folder: str = "./tplr/outputs"
     """Folder to dump job outputs"""
 
     description: str = "default job"
@@ -95,14 +101,9 @@ class Metrics:
 @dataclass
 class Model:
     name: str = "llama3"
-    """Which model to train"""
-
     flavor: str = "debugmodel"
-    """Which model config to train"""
-
-    tokenizer_path: str = "./torchtitan/datasets/tokenizer/tokenizer.model"
-    """Tokenizer path"""
-
+    train_config: str | None = None
+    tokenizer_name: str | None = "togethercomputer/LLaMA-2-7B-32K"
     converters: list[str] = field(default_factory=list)
     """
     Comma separated list of converters to apply to the model.
@@ -110,12 +111,20 @@ class Model:
     with `Float8Linear`. This feature requires you to install 'torchao'
     which can be found here: https://github.com/pytorch/ao
     """
-
     print_after_conversion: bool = False
     """
     If true, model definition will be printed to stdout after all model
     converters have been applied.
-    """
+    """    
+    dim: int | None = None
+    n_layers: int | None = None
+    n_heads: int | None = None
+    n_kv_heads: int | None = None
+    multiple_of: int | None = None
+    ffn_dim_multiplier: float | None = None
+    rope_theta: float | None = None
+    use_flex_attn: bool | None = None
+    attn_mask_type: str | None = None
 
 
 @dataclass
@@ -229,6 +238,61 @@ class Training:
 
     deterministic: bool = False
     """Use deterministic algorithms wherever possible, may be slower"""
+
+    pages_per_window: int = 2
+    """
+    Pages per window for the learning rate scheduler.
+    """
+
+    blocks_per_window: int = 2
+    """
+    Blocks per window for the learning rate scheduler.
+    """
+
+    windows_per_sync: int = 100
+    """
+    Windows per sync for the learning rate scheduler.
+    """
+
+    windows_per_weights: int = 10
+    """
+    Windows per weights for the learning rate scheduler.
+    """
+
+    learning_rate: float = 1e-3
+    """
+    Learning rate for the learning rate scheduler.
+    """
+
+    warmup_steps: int = 250
+    """
+    Warmup steps for the learning rate scheduler.
+    """
+
+    t_max: int = 20_000
+    """
+    T max for the learning rate scheduler.
+    """
+
+    topk_compression: int = 32
+    """
+    Topk compression for the learning rate scheduler.
+    """
+
+    target_chunk: int = 64
+    """
+    Target chunk for the learning rate scheduler.
+    """
+
+    momentum_decay: float = 0.999
+    """
+    Momentum decay for the learning rate scheduler.
+    """
+
+    checkpoint_frequency: int = 100
+    """
+    Checkpoint frequency for the learning rate scheduler.
+    """
 
 
 @dataclass
@@ -508,7 +572,7 @@ class Experimental:
     Currently, it only supports dotted import modules (e.g., some_package.model_x).
     It is the user's responsibility to ensure that the specified path can be
     successfully imported. One method to achieve this, you can place your module
-    inside the ``torchtitan/torchtitan`` folder and execute ``pip install -e .`` to
+    inside the ``tplr/tplr`` folder and execute ``pip install -e .`` to
     make it available for import.
     """
 
@@ -518,6 +582,51 @@ class Experimental:
     a user defined JobConfig dataclass. Similar to ``--experimental.custom_model_path``, the user
     needs to ensure that the path can be imported.
     """
+
+
+@dataclass
+class Hparams:
+    sequence_length: int = 2048
+    pages_per_window: int = 2
+    batch_size: int = 8
+    learning_rate: float = 1e-3
+    blocks_per_window: int = 2
+    windows_per_sync: int = 100
+    windows_per_weights: int = 10
+    momentum_decay: float = 0.999
+    topk_compression: int = 32
+    target_chunk: int = 64
+    warmup_steps: int = 250
+    t_max: int = 20_000
+    checkpoint_frequency: int = 100
+    gradient_score_ma_alpha: float = 0.6
+    binary_score_ma_alpha: float = 0.05
+    final_score_ma_alpha: float = 0.75
+    moving_average_window: int = 5
+    weight_decay: float = 0.0
+    alpha_f: float = 0.1
+    validator_offset: int = 2
+    topk_peers: int = 20
+    max_topk_peers: int = 15
+    minimum_peers: int = 5
+    peers_to_replace: int = 1
+    peer_replacement_frequency: int = 5
+    peer_list_window_margin: int = 2
+    active_check_interval: int = 60
+    recent_windows: int = 5
+    power_normalisation: float = 2.0
+    validator_sample_rate: float = 0.1
+    catch_up_threshold: int = 15
+    catch_up_batch_size: int = 5
+    catch_up_timeout: int = 300
+    uids_per_window: int = 4
+    time_window_delta_seconds: int = 10
+    reset_inactivity_windows: int = 25
+    sync_max_steps_behind: int = 3
+    eval_lr_factor: float = 0.2
+    openskill_beta: int = 20
+    openskill_tau: float = 0.1
+    checkpoint_init_version: str = "0.2.73"
 
 
 @dataclass
@@ -543,6 +652,7 @@ class JobConfig:
     memory_estimation: MemoryEstimation = field(default_factory=MemoryEstimation)
     fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
     experimental: Experimental = field(default_factory=Experimental)
+    hparams: Hparams = field(default_factory=Hparams)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -568,22 +678,18 @@ class ConfigManager:
         self.config: JobConfig = config_cls()
         self.register_tyro_rules(custom_registry)
 
-    def parse_args(self, args: list[str] = sys.argv[1:]) -> JobConfig:
-        toml_values = self._maybe_load_toml(args)
-        config_cls = self._maybe_add_custom_args(args, toml_values)
+    def parse_args(self, args: list[str] | None = None) -> JobConfig:
+        args = [] if args is None else args
+        self.config: JobConfig = tyro.cli(JobConfig, args=args, registry=custom_registry)
 
-        base_config = (
-            self._dict_to_dataclass(config_cls, toml_values)
-            if toml_values
-            else config_cls()
-        )
+        # build & stash TransformerModelArgs
+        self.config.model_args = self._build_model_args()
 
-        self.config = tyro.cli(
-            config_cls, args=args, default=base_config, registry=custom_registry
-        )
+        # legacy SimpleNamespace for miner/validator
+        self.config.hparams_ns = SimpleNamespace(**asdict(self.config.hparams))
+        self.config.hparams_ns.model_config = self.config.model_args
 
         self._validate_config()
-
         return self.config
 
     def _maybe_load_toml(self, args: list[str]) -> dict[str, Any] | None:
@@ -703,7 +809,7 @@ class ConfigManager:
                 f"Tokenizer path {self.config.model.tokenizer_path} does not exist!"
             )
             old_tokenizer_path = (
-                "torchtitan/datasets/tokenizer/original/tokenizer.model"
+                "tplr/datasets/tokenizer/original/tokenizer.model"
             )
             if os.path.exists(old_tokenizer_path):
                 self.config.model.tokenizer_path = old_tokenizer_path
@@ -726,3 +832,64 @@ class ConfigManager:
                 is_instance=lambda instance: all(isinstance(i, str) for i in instance),
                 str_from_instance=lambda instance: [",".join(instance)],
             )
+
+    @staticmethod
+    def load_hparams(config_file: str | None = None) -> SimpleNamespace:
+        """
+        Returns the SimpleNamespace that older modules (e.g. neurons/miner.py)
+        expect, but reads values from the `hparams` section in JobConfig.
+        """
+        mgr = ConfigManager()
+        cli_args = [] if config_file is None else [f"--job.config_file={config_file}"]
+        job_cfg = mgr.parse_args(cli_args)
+        return job_cfg.hparams_ns
+
+    def _build_model_args(self):
+        """
+        Pick a preset either from `model.train_config` (if given) or
+        from `model.flavor`, then apply any inline overrides.
+        """
+        from tplr.models.llama3.flavors import build_model_args, MODEL_OVERRIDE_KEYS
+
+        m = self.config.model
+
+        # 1. base: train_config toml (if provided) -------------------- #
+        if m.train_config:
+            cfg_file = self._locate_train_config(m.train_config)
+            with open(cfg_file, "rb") as fh:
+                import tomllib
+                toml_obj = tomllib.load(fh)
+            preset = toml_obj.get("model", {})
+            flavor = preset.get("flavor", m.flavor)
+            overrides = {k: preset.get(k) for k in MODEL_OVERRIDE_KEYS}
+        else:
+            flavor = m.flavor
+            overrides = {}
+
+        # 2. CLI / TOML `[model]` inline overrides trump everything --- #
+        for k in MODEL_OVERRIDE_KEYS:
+            v = getattr(m, k)
+            if v is not None:
+                overrides[k] = v
+
+        # 3. build final TransformerModelArgs ------------------------- #
+        model_args = build_model_args(flavor, overrides)
+        model_args.tokenizer_path = m.tokenizer_name
+        return model_args
+
+    def _locate_train_config(self, spec: str) -> Path:
+        """
+        • If `spec` ends with .toml → treat as path
+        • Else look under `tplr/models/**/train_configs/{spec}.toml`
+        """
+        p = Path(spec).expanduser()
+        if p.suffix == ".toml":
+            if not p.is_file():
+                raise FileNotFoundError(p)
+            return p
+
+        root = Path(__file__).resolve().parent / "models"
+        matches = list(root.rglob(f"train_configs/{spec}.toml"))
+        if not matches:
+            raise FileNotFoundError(f"Cannot find train_config '{spec}'")
+        return matches[0]

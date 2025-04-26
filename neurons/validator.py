@@ -112,6 +112,12 @@ class Validator:
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        parser.add_argument(
+            "--config-file",
+            type=str,
+            default=None,
+            help="Path to TOML config",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -128,7 +134,7 @@ class Validator:
 
         # Init config and load hparams
         self.config = Validator.config()
-        self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
+        self.hparams = tplr.load_hparams(config_file=self.config.config_file)
 
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)

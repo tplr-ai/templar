@@ -384,6 +384,17 @@ class Validator:
             # Get UIDs and scores
             window_uids = list(self.current_window_scores.keys())
 
+            # Store original ordinal values to calculate diff after update
+            original_ordinals = {}
+            for uid in window_uids:
+                if uid in self.openskill_ratings:
+                    original_ordinals[uid] = float(
+                        self.openskill_ratings[uid].ordinal()
+                    )
+                else:
+                    # For new peers without previous ratings
+                    original_ordinals[uid] = 0.0
+
             # Calculate ranks based on gradient scores (lower rank = better performance)
             # In OpenSkill, ranks start at 1 (best) and increase for worse performers
             scores = [self.current_window_scores[uid] for uid in window_uids]
@@ -443,6 +454,72 @@ class Validator:
                         "sigma": openskill_sigma,
                         "ordinal": openskill_ordinal,
                     },
+                )
+
+            # Create a ranking table to display current match rankings
+            try:
+                # Sort UIDs by current window gradient scores (descending)
+                sorted_uids = sorted(
+                    window_uids,
+                    key=lambda uid: self.current_window_scores[uid],
+                    reverse=True,
+                )
+
+                try:
+                    width = os.get_terminal_size().columns
+                except Exception:
+                    width = 0
+                os.environ["COLUMNS"] = str(max(200, width))
+
+                rich_table = Table(
+                    title=f"Current Match Rankings (Window {self.sync_window})"
+                )
+                rich_table.add_column("Match Rank")
+                rich_table.add_column("UID")
+                rich_table.add_column("Match Score")
+                rich_table.add_column("OpenSkill μ (After)")
+                rich_table.add_column("OpenSkill σ (After)")
+                rich_table.add_column("Ordinal (After)")
+                rich_table.add_column("Ordinal Δ")
+
+                # Add rows to table
+                for rank, uid in enumerate(sorted_uids, 1):
+                    rating = self.openskill_ratings[uid]
+                    ordinal_before = original_ordinals[uid]
+                    ordinal_after = rating.ordinal()
+                    ordinal_diff = ordinal_after - ordinal_before
+
+                    # Format the diff with color indicators
+                    diff_str = f"{ordinal_diff:+.4f}"
+
+                    rich_table.add_row(
+                        str(rank),
+                        str(uid),
+                        f"{self.current_window_scores[uid]:.4f}",
+                        f"{rating.mu:.4f}",
+                        f"{rating.sigma:.4f}",
+                        f"{ordinal_after:.4f}",
+                        diff_str,
+                    )
+
+                # Render table to string
+                sio = StringIO()
+                console = Console(file=sio, width=int(os.environ["COLUMNS"]))
+                console.print(rich_table)
+                table_str = sio.getvalue()
+
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Current Match Rankings (Window {self.sync_window}):\n{table_str}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+            except Exception as e:
+                tplr.log_with_context(
+                    level="warning",
+                    message=f"Failed to create OpenSkill rankings table: {str(e)}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
 
             tplr.log_with_context(

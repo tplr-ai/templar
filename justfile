@@ -31,3 +31,11 @@ bistro:
 cov:
     uv run pytest tests/ -v --cov=src --cov-report=xml --cov-report=term
 
+release:
+    ./scripts/release.sh --patch -y -v
+release-minor:
+    ./scripts/release.sh --minor -y -v
+release-major:
+    ./scripts/release.sh --major -y -v
+release-dry:
+    ./scripts/release.sh --dry -y -v

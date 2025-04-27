@@ -2008,7 +2008,7 @@ class Validator:
                 current_window=self.current_window,
             )
 
-            # Log WandB metrics per UID
+            should_downsample = len(self.evaluated_uids) > 8
             for uid in sorted(self.evaluated_uids):
                 # Extract primitive values from tensors for WandB
                 gradient_score = float(self.gradient_scores[uid].item())
@@ -2030,7 +2030,6 @@ class Validator:
                     step=self.global_step,
                 )
 
-                # Log to InfluxDB metrics per UID with primitive types
                 self.metrics_logger.log(
                     measurement="validator_scores",
                     tags={
@@ -2048,6 +2047,7 @@ class Validator:
                     },
                     with_system_metrics=True,
                     with_gpu_metrics=True,
+                    sample_rate=0.8 if should_downsample else 1.0,
                 )
 
             # 17. Set weights periodically

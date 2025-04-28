@@ -2249,6 +2249,7 @@ class Validator:
                     "start_window": self.start_window,
                     "current_window": self.current_window,
                     "sync_window": self.sync_window,
+                    "global_step": self.global_step,
                 }
                 asyncio.create_task(
                     self.comms.put(

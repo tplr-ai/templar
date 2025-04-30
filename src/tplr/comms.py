@@ -862,7 +862,8 @@ class Comms(ChainManager):
         """GET with retry operation."""
         start_time = time.time()
         end_time = start_time + timeout
-        tried_after_time_max = False  # Track if we've tried once after passing time_max
+        tried_after_time_max = False
+        time_max_grace_period = 3.0
 
         while True:
             # Check if we've timed out
@@ -870,16 +871,28 @@ class Comms(ChainManager):
                 tplr.logger.debug(f"GET {uid}/{window}/{key} timed out.")
                 return None
 
-            # Check if we're past time_max
+            # Check if we're past time_max with grace period
             now = datetime.now(timezone.utc)
-            past_time_max = time_max is not None and now > time_max
 
-            # If we're past time_max and already tried once, don't retry again
+            # Only consider it "past time_max" if we're 3 seconds beyond time_max
+            past_time_max = False
+            if time_max is not None and now > time_max:
+                seconds_past_time_max = (now - time_max).total_seconds()
+                past_time_max = seconds_past_time_max > time_max_grace_period
+
+            # If we're past time_max (with grace period) and already tried once, don't retry again
             if past_time_max and tried_after_time_max:
                 tplr.logger.debug(
-                    f"Already tried once after time_max for UID {uid}, window {window}. Stopping retries."
+                    f"Already tried once after time_max + {time_max_grace_period}s for UID {uid}, window {window}. Stopping retries."
                 )
                 return None
+
+            # If we're past time_max (with grace period), mark that we've tried once
+            if past_time_max:
+                tried_after_time_max = True
+                tplr.logger.debug(
+                    f"Past time_max + {time_max_grace_period}s for UID {uid}, window {window}. This is the final retry."
+                )
 
             # Make the request
             state_dict = await self.get(
@@ -908,13 +921,6 @@ class Comms(ChainManager):
             # If we got a result, return it
             if state_dict is not None:
                 return state_dict
-
-            # If we're past time_max, mark that we've tried once
-            if past_time_max:
-                tried_after_time_max = True
-                tplr.logger.debug(
-                    f"Past time_max for UID {uid}, window {window}. This is the final retry."
-                )
 
             # Short delay before retrying
             await asyncio.sleep(0.1)

@@ -19,6 +19,7 @@ import asyncio
 import concurrent.futures
 import logging
 import os
+import random
 import statistics
 import threading
 import time
@@ -187,6 +188,7 @@ class MetricsLogger:
         timestamp=None,
         with_system_metrics=False,
         with_gpu_metrics=False,
+        sample_rate: float = 1.0,
     ) -> None:
         """
         Logs metrics to InfluxDB.
@@ -198,7 +200,14 @@ class MetricsLogger:
             timestamp: Optional timestamp (nanoseconds)
             with_system_metrics: Whether to include system metrics
             with_gpu_metrics: Whether to include GPU metrics
+            sample_rate: Fraction of logs to actually write (0.0 to 1.0)
         """
+
+        if random.random() > sample_rate:
+            logger.debug(
+                f"Skipping logging for {measurement} due to sample rate: {sample_rate}"
+            )
+            return
 
         try:
             timestamp = timestamp or int(time.time_ns())

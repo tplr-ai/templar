@@ -299,6 +299,8 @@ class Validator:
         self.next_peers: tplr.comms.PeerArray | None = None
         self.peers_update_window = -1
 
+        self.peers_last_eval_window = {}
+
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
             self.final_scores[uid] = 0.0
@@ -1214,6 +1216,7 @@ class Validator:
             while next_uid is not None:
                 eval_uid = next_uid
                 eval_uid_dataloader_task = next_uid_dataloader_task
+                self.peers_last_eval_window[eval_uid] = self.sync_window
 
                 if eval_uid_dataloader_task is None:
                     tplr.log_with_context(
@@ -1938,6 +1941,7 @@ class Validator:
             # Log scores and metrics for evaluated UIDs as a table
             headers = [
                 "UID",
+                "Steps since eval",
                 "Gradient Score",
                 "Binary Indicator",
                 "Binary Moving Avg",
@@ -1954,6 +1958,7 @@ class Validator:
                     openscore_info = f"{rating.ordinal():.2f} (μ={rating.mu:.1f}, σ={rating.sigma:.1f})"
                 row = [
                     str(uid),
+                    f"{self.peers_last_eval_window[uid] - self.sync_window}",
                     f"{self.gradient_scores[uid]:.6f}",
                     f"{self.binary_indicator_scores[uid]:.4f}",
                     f"{self.binary_moving_averages[uid]:.4f}",

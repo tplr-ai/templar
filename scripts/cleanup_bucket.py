@@ -37,7 +37,6 @@ async def cleanup_bucket():
     # Validate required environment variables
     required_vars = [
         "R2_GRADIENTS_ACCOUNT_ID",
-        "R2_GRADIENTS_BUCKET_NAME",
         "R2_GRADIENTS_WRITE_ACCESS_KEY_ID",
         "R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY",
     ]
@@ -51,7 +50,6 @@ async def cleanup_bucket():
 
     # Get credentials from environment
     account_id = os.environ["R2_GRADIENTS_ACCOUNT_ID"]
-    bucket_name = os.environ["R2_GRADIENTS_BUCKET_NAME"]
     access_key_id = os.environ["R2_GRADIENTS_WRITE_ACCESS_KEY_ID"]
     secret_access_key = os.environ["R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"]
 
@@ -72,7 +70,7 @@ async def cleanup_bucket():
         objects_to_delete = []
 
         try:
-            async for page in paginator.paginate(Bucket=bucket_name):
+            async for page in paginator.paginate(Bucket=account_id):
                 if "Contents" in page:
                     # Filter objects that start with checkpoint, gradient, or start_window
                     filtered_objects = [
@@ -97,7 +95,7 @@ async def cleanup_bucket():
                 logger.info(f"Deleting batch of {len(batch)} objects...")
 
                 response = await client.delete_objects(
-                    Bucket=bucket_name, Delete={"Objects": batch}
+                    Bucket=account_id, Delete={"Objects": batch}
                 )
 
                 # Log any errors

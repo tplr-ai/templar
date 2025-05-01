@@ -134,6 +134,7 @@ class Validator:
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(self.config.netuid)
+        self.hotkeys = self.metagraph.hotkeys
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             tplr.logger.error(
                 f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
@@ -313,10 +314,11 @@ class Validator:
                 del self.openskill_ratings[uid]
             if uid in self.eval_peers:
                 del self.eval_peers[uid]
-            del self.inactive_scores[uid]
+            if uid in self.inactive_scores:
+                del self.inactive_scores[uid]
             tplr.log_with_context(
                 level="info",
-                message=f"UID {uid} fully reset after extended inactivity",
+                message=f"UID {uid} fully reset",
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
@@ -982,6 +984,28 @@ class Validator:
                 # Normal operation - update and filter peers
                 self.comms.update_peers_with_buckets()
                 self.eval_peers = self.comms.eval_peers
+
+            if self.metagraph.hotkeys != self.hotkeys:
+                # Reset scores for newly registered uids
+                newly_registered_uids = [
+                    i
+                    for i, (a, b) in enumerate(
+                        zip(self.hotkeys, self.metagraph.hotkeys)
+                    )
+                    if a != b
+                ]
+                newly_registered_uids.extend(
+                    range(len(self.hotkeys), len(self.metagraph.hotkeys))
+                )
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Newly registered uids: {newly_registered_uids}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+                for uid in newly_registered_uids:
+                    self.reset_peer(0, uid)
+                self.hotkeys = self.metagraph.hotkeys
 
             tplr.log_with_context(
                 level="info",

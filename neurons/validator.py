@@ -1393,7 +1393,6 @@ class Validator:
                     self.loss_before_per_batch_own = (
                         loss_before_own / n_batches if n_batches > 0 else 0
                     )
-                    avg_loss_before_per_batch_own += self.loss_before_per_batch_own
                     tplr.log_with_context(
                         level="debug",
                         message=f"Loss before (own data): {self.loss_before_per_batch_own}",
@@ -1573,6 +1572,7 @@ class Validator:
                     self.loss_after_per_batch_own = (
                         loss_after_own / n_batches if n_batches > 0 else 0
                     )
+                    avg_loss_before_per_batch_own += self.loss_before_per_batch_own
                     avg_loss_after_per_batch_own += self.loss_after_per_batch_own
                     tplr.log_with_context(
                         level="debug",
@@ -1655,9 +1655,6 @@ class Validator:
                     self.loss_before_per_batch_random = (
                         loss_before_random / n_batches if n_batches > 0 else 0
                     )
-                    avg_loss_before_per_batch_random += (
-                        self.loss_before_per_batch_random
-                    )
                     tplr.log_with_context(
                         level="debug",
                         message=f"Loss before (random data): {self.loss_before_per_batch_random}",
@@ -1724,7 +1721,10 @@ class Validator:
                     self.loss_after_per_batch_random = (
                         loss_after_random / n_batches if n_batches > 0 else 0
                     )
+
+                    avg_loss_before_per_batch_random += self.loss_before_per_batch_random
                     avg_loss_after_per_batch_random += self.loss_after_per_batch_random
+                    
                     tplr.log_with_context(
                         level="info",
                         message=f"Loss after (random data): {self.loss_after_per_batch_random}",

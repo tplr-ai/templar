@@ -1722,9 +1722,11 @@ class Validator:
                         loss_after_random / n_batches if n_batches > 0 else 0
                     )
 
-                    avg_loss_before_per_batch_random += self.loss_before_per_batch_random
+                    avg_loss_before_per_batch_random += (
+                        self.loss_before_per_batch_random
+                    )
                     avg_loss_after_per_batch_random += self.loss_after_per_batch_random
-                    
+
                     tplr.log_with_context(
                         level="info",
                         message=f"Loss after (random data): {self.loss_after_per_batch_random}",

@@ -296,7 +296,7 @@ class Validator:
         self.sync_score_slash_rate = 0.75
 
         # Initialize peer related attributes
-        self.next_peers: tplr.comms.PeerArray | None = None
+        self.next_peers: list[int] | None = None
         self.peers_update_window = -1
 
         self.peers_last_eval_window = {}
@@ -792,7 +792,7 @@ class Validator:
                 if selected_peers is not None:
                     self.last_peer_update_window = self.sync_window
                     await self.comms.post_peer_list(
-                        peers=selected_peers,
+                        peers=selected_peers.tolist(),
                         first_effective_window=self.current_window
                         + self.hparams.peer_list_window_margin,
                         sync_window=self.sync_window,

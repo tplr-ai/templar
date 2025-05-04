@@ -32,7 +32,6 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 import aiofiles
 import bittensor as bt
 import botocore
-import numpy as np
 import torch
 from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
@@ -56,9 +55,6 @@ LOCAL_TMP_DIR = "/tmp/local_store"
 PEERS_FILE_PREFIX = "peers_"
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
-
-# Types
-PeerArray = np.ndarray[Any, np.dtype[np.int64]]
 
 
 class Comms(ChainManager):

@@ -25,6 +25,8 @@ from pathlib import Path
 import pyarrow.parquet as pq
 from functools import lru_cache
 import threading
+import tplr.distrib as distrib
+from torch.utils.data.distributed import DistributedSampler
 
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
@@ -218,54 +220,64 @@ class R2DatasetLoader(DatasetLoader):
         offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
     ) -> list:
         """Get next n_pages random pages starting from offset."""
-        configs_data = await R2DatasetLoader.fetch_dataset_configs()
+        if distrib.is_rank0():
+            configs_data = await R2DatasetLoader.fetch_dataset_configs()
 
-        # Create RNG with same method as DatasetLoader
-        rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
-        rng.bit_generator.advance(offset)  # Skip ahead by offset
+            # Create RNG with same method as DatasetLoader
+            rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
+            rng.bit_generator.advance(offset)  # Skip ahead by offset
 
-        # Sort config keys for consistent ordering
-        sorted_keys = sorted(configs_data.keys())
+            # Sort config keys for consistent ordering
+            sorted_keys = sorted(configs_data.keys())
 
-        result = []
-        for _ in range(n_pages):
-            config = rng.choice(sorted_keys)
-            choice = rng.integers(
-                0, configs_data[config]["num_rows"] - 1 - num_rows_per_page
+            result = []
+            for _ in range(n_pages):
+                config = rng.choice(sorted_keys)
+                choice = rng.integers(
+                    0, configs_data[config]["num_rows"] - 1 - num_rows_per_page
+                )
+                result.append((str(config), int(choice), configs_data[config]["split"]))
+
+            return result
+        else:
+            return None
+
+    @classmethod
+    async def create(cls, batch_size, sequence_length, pages_info, tokenizer, **kwargs):
+        """Create a dataset loader with DDP support."""
+        # Create the base dataset
+        dataset = await cls._create_dataset(sequence_length, pages_info, tokenizer)
+        
+        # Check if we're in a distributed setting
+        if distrib.get_world_size() > 1:
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=distrib.get_world_size(),
+                rank=distrib.get_rank(),
+                shuffle=True,
+                drop_last=True
             )
-            result.append((str(config), int(choice), configs_data[config]["split"]))
-
-        return result
-
-    @staticmethod
-    async def create(
-        batch_size, sequence_length, pages_info, tokenizer, pack_samples=True
-    ):
-        """Create loader with proper initialization"""
-        loader = R2DatasetLoader(
-            batch_size=batch_size,
-            sequence_length=sequence_length,
-            tokenizer=tokenizer,
-            pack_samples=pack_samples,
-        )
-
-        # Initialize buffers
-        loader.buffer = []
-        loader.pages = pages_info.copy()
-
-        # Process all pages first
-        sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
-        tasks = [
-            asyncio.create_task(loader._process_page(page, sem)) for page in pages_info
-        ]
-
-        # Gather all tokens
-        results = await asyncio.gather(*tasks)
-        for tokens in results:
-            if tokens:
-                loader.buffer.extend(tokens)
-
-        return loader
+            
+            # Create dataloader with the distributed sampler
+            dataloader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=batch_size,
+                sampler=sampler,
+                **kwargs
+            )
+            
+            # Store the sampler for epoch updates
+            dataloader.sampler = sampler
+        else:
+            # Non-distributed dataloader
+            dataloader = torch.utils.data.DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                **kwargs
+            )
+        
+        return dataloader
 
     @staticmethod
     async def _load_r2_metadata():

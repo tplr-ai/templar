@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "0.2.79"
+__version__ = "dev-ghotwgeo"
 
 # Import package.
 from .chain import *
@@ -34,3 +34,4 @@ from .logging import *
 from .schemas import *
 from .wandb import initialize_wandb
 from .metrics import *
+from .distrib import *

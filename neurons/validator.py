@@ -39,6 +39,11 @@ import numpy as np
 # Third party
 import torch
 import uvloop
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+import torch.multiprocessing as mp
+import atexit
 from openskill.models import PlackettLuce
 from rich.console import Console
 from rich.table import Table
@@ -53,6 +58,7 @@ from transformers import LlamaForCausalLM
 
 # Local
 import tplr
+import tplr.distrib as distrib
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -122,6 +128,242 @@ class Validator:
             tplr.trace()
 
         return config
+
+    @classmethod
+    def run(cls, config, wallet, subtensor, metagraph, logging_dir):
+        """Main entry point for the validator."""
+        # Find a free port for DDP
+        port = distrib.find_free_port()
+        
+        # Set environment variables for DDP
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+        os.environ['MASTER_PORT'] = str(port)
+        
+        # Get number of GPUs
+        num_gpus = torch.cuda.device_count()
+        if num_gpus <= 0:
+            # Fall back to CPU if no GPUs
+            return cls._run_worker(0, 1, config, wallet, subtensor, metagraph, logging_dir)
+        
+        # Register cleanup
+        atexit.register(distrib.cleanup)
+        
+        # Launch multiple processes
+        try:
+            mp.spawn(
+                cls._run_worker,
+                args=(num_gpus, config, wallet, subtensor, metagraph, logging_dir),
+                nprocs=num_gpus,
+                join=True
+            )
+        finally:
+            # Ensure cleanup happens
+            atexit.unregister(distrib.cleanup)
+            distrib.cleanup()
+    
+    @classmethod
+    def _run_worker(cls, local_rank, world_size, config, wallet, subtensor, metagraph, logging_dir):
+        """Worker process function."""
+        # Initialize the distributed environment
+        distrib.ddp_init(local_rank, world_size)
+        
+        # Create and run the validator instance
+        validator = cls(config, wallet, subtensor, metagraph, logging_dir, local_rank)
+        validator.run_loop()
+    
+    def __init__(self, config, wallet, subtensor, metagraph, logging_dir, local_rank=0):
+        """Initialize the validator with DDP support."""
+        # ... existing initialization ...
+        
+        # Set up the model with DDP
+        self.local_rank = local_rank
+        self.world_size = distrib.get_world_size()
+        
+        # Move model to the appropriate device
+        self.model = self.model.to(self.local_rank)
+        
+        # Apply torch.compile if configured (before DDP wrapping)
+        if getattr(self.hparams, "use_compile", False):
+            self.model = torch.compile(self.model, dynamic=False)
+        
+        # Wrap the model with DDP
+        self.model = DDP(
+            self.model,
+            device_ids=[self.local_rank],
+            output_device=self.local_rank,
+            gradient_as_bucket_view=True,
+            find_unused_parameters=False
+        )
+        
+        # Set up distributed sampler for the dataset
+        if hasattr(self, 'dataset'):
+            self.sampler = DistributedSampler(
+                self.dataset,
+                num_replicas=self.world_size,
+                rank=self.local_rank,
+                shuffle=True,
+                drop_last=True
+            )
+            
+            # Update dataloader with the sampler
+            self.dataloader = torch.utils.data.DataLoader(
+                self.dataset,
+                batch_size=self.hparams.batch_size,
+                sampler=self.sampler,
+                num_workers=self.hparams.num_workers,
+                pin_memory=True,
+                drop_last=True
+            )
+    
+    def evaluate_miner(self, window, uid, gradient_dict):
+        """Evaluate a miner with DDP support."""
+        # Set the epoch for the sampler
+        if hasattr(self, 'sampler'):
+            self.sampler.set_epoch(window)
+        
+        # Compute loss_before in parallel
+        loss_before = self.compute_loss()
+        
+        # Only rank 0 processes the gradient
+        if distrib.is_rank0():
+            # Apply the miner's gradient
+            self.apply_gradient(gradient_dict)
+            
+            # Get the updated model state
+            model_state = self.model.module.state_dict()
+        else:
+            model_state = None
+        
+        # Broadcast the updated model state to all ranks
+        model_state = distrib.broadcast_object(model_state)
+        
+        # Non-rank-0 processes load the updated state
+        if not distrib.is_rank0():
+            self.model.module.load_state_dict(model_state)
+        
+        # Synchronize
+        distrib.barrier()
+        
+        # Compute loss_after in parallel
+        loss_after = self.compute_loss()
+        
+        # Only rank 0 computes the score
+        if distrib.is_rank0():
+            score = self.compute_score(loss_before, loss_after)
+            return score
+        return None
+    
+    def compute_loss(self):
+        """Compute loss across the validation dataset."""
+        total_loss = 0.0
+        num_batches = 0
+        
+        # Use no_sync for validation
+        with self.model.no_sync(), torch.no_grad():
+            for batch in self.dataloader:
+                # Move batch to the correct device
+                batch = {k: v.to(self.local_rank) if isinstance(v, torch.Tensor) else v 
+                         for k, v in batch.items()}
+                
+                # Forward pass
+                outputs = self.model(**batch)
+                loss = outputs.loss
+                
+                # Accumulate loss
+                total_loss += loss.item()
+                num_batches += 1
+        
+        # Aggregate loss across all GPUs
+        if self.world_size > 1:
+            tensor = torch.tensor([total_loss, num_batches], device=self.local_rank)
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+            total_loss, num_batches = tensor.tolist()
+        
+        # Return average loss
+        return total_loss / num_batches if num_batches > 0 else float('inf')
+    
+    def self_update(self, window):
+        """Update the validator's model (similar to miner's train_one_window)."""
+        # Set the epoch for the sampler
+        if hasattr(self, 'sampler'):
+            self.sampler.set_epoch(window)
+        
+        # Zero gradients once before the window
+        self.optimizer.zero_grad()
+        
+        # Use no_sync context manager for the entire window
+        with self.model.no_sync():
+            for batch in self.dataloader:
+                # Move batch to the correct device
+                batch = {k: v.to(self.local_rank) if isinstance(v, torch.Tensor) else v 
+                         for k, v in batch.items()}
+                
+                # Forward pass
+                outputs = self.model(**batch)
+                loss = outputs.loss
+                
+                # Backward pass
+                loss.backward()
+        
+        # Synchronize and average gradients across all local GPUs
+        grads = [p.grad for p in self.model.parameters() if p.grad is not None]
+        distrib.all_reduce_params(grads, op=dist.ReduceOp.AVG)
+        distrib.barrier()
+        
+        # Only rank 0 handles Templar gradient processing and R2 communication
+        if distrib.is_rank0():
+            # Gather gradients from peers/aggregator
+            gathered_grads = self.comms.gather()
+            
+            # Process gathered gradients
+            final_grad = self.process_gathered_gradients(gathered_grads)
+            
+            # Flatten for efficient broadcast
+            flat_grad, shapes, dtypes = distrib.flatten_grads(final_grad)
+        else:
+            flat_grad = torch.zeros(1, device=self.local_rank)
+            shapes = []
+            dtypes = []
+        
+        # Broadcast the shapes and dtypes
+        shapes = distrib.broadcast_object(shapes)
+        dtypes = distrib.broadcast_object(dtypes)
+        
+        # Broadcast the flattened gradient
+        if distrib.is_rank0():
+            dist.broadcast(flat_grad, src=0)
+        else:
+            size = distrib.broadcast_object(flat_grad.size(0))
+            flat_grad = torch.zeros(size, device=self.local_rank)
+            dist.broadcast(flat_grad, src=0)
+            
+            # Unflatten the gradient
+            final_grad = distrib.unflatten_grads(flat_grad, shapes, dtypes)
+        
+        # Apply the final gradient to all local models
+        for param, grad in zip(self.model.parameters(), final_grad):
+            if param.grad is not None:
+                param.grad.copy_(grad)
+        
+        # Synchronize before optimizer step
+        distrib.barrier()
+        
+        # All ranks perform optimizer step
+        self.optimizer.step()
+        
+        # All ranks perform scheduler step if applicable
+        if self.scheduler is not None:
+            self.scheduler.step()
+        
+        # Synchronize AMP scaler if using float16
+        if hasattr(self, 'scaler'):
+            scaler_state = distrib.broadcast_object(
+                self.scaler.state_dict() if distrib.is_rank0() else None
+            )
+            self.scaler.load_state_dict(scaler_state)
+        
+        # Final synchronization
+        distrib.barrier()
 
     def __init__(self):
         tplr.logger.debug("Starting initialization...")

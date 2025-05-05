@@ -383,6 +383,14 @@ class Miner:
                     tplr.logger.info("<Exhausted window>")
                     break
 
+            if n_batches > 0:
+                tplr.logger.info(
+                    f"Normalizing gradients by {n_batches} accumulation steps"
+                )
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        param.grad.div_(n_batches)
+
             # If training completes before the window is exhausted, wait until the window ends.
             if self.current_window == step_window:
                 tplr.logger.info(

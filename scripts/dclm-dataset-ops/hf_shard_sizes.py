@@ -736,7 +736,7 @@ async def analyze_dataset(
             if errors:
                 print(f"Encountered {len(errors)} errors:")
                 for i, error in enumerate(errors[:10]):
-                    print(f"  {i+1}. {error}")
+                    print(f"  {i + 1}. {error}")
 
                 if len(errors) > 10:
                     print(f"  ...and {len(errors) - 10} more errors")

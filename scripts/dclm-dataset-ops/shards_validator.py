@@ -252,7 +252,7 @@ async def compute_file_md5(
 
                     if debug and total_read % (10 * CHUNK_SIZE) == 0:
                         print(
-                            f"  Read {total_read}/{expected_size} bytes ({total_read/expected_size:.1%})"
+                            f"  Read {total_read}/{expected_size} bytes ({total_read / expected_size:.1%})"
                         )
             finally:
                 await loop.run_in_executor(executor, body.close)
@@ -499,17 +499,17 @@ def print_summary(results: List[ValidationResult]) -> None:
             for i, err in enumerate(errors_list[:max_samples]):
                 if category_name == "Missing files":
                     r2_path = normalize_r2_path(err.path)
-                    print(f"  {i+1}. {err.path} → {r2_path}")
+                    print(f"  {i + 1}. {err.path} → {r2_path}")
                 elif category_name == "Size mismatches":
                     print(
-                        f"  {i+1}. {err.path}: expected {err.expected_size} bytes, got {err.actual_size} bytes"
+                        f"  {i + 1}. {err.path}: expected {err.expected_size} bytes, got {err.actual_size} bytes"
                     )
                 elif category_name == "Hash mismatches":
                     print(
-                        f"  {i+1}. {err.path}: expected hash {err.expected_hash}, got {err.actual_hash}"
+                        f"  {i + 1}. {err.path}: expected hash {err.expected_hash}, got {err.actual_hash}"
                     )
                 else:
-                    print(f"  {i+1}. {err.path}: {err.error}")
+                    print(f"  {i + 1}. {err.path}: {err.error}")
 
         print_sample("Missing files", missing_files)
         print_sample("Size mismatches", size_mismatches)

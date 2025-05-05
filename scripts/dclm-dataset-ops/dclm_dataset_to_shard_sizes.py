@@ -92,7 +92,7 @@ def main():
     with open(OUTPUT_JSON, "w", encoding="utf-8") as out:
         json.dump(manifest, out, indent=2, ensure_ascii=False)
 
-    print(f"Written JSON manifest with {len(manifest)-1} shards to '{OUTPUT_JSON}'")
+    print(f"Written JSON manifest with {len(manifest) - 1} shards to '{OUTPUT_JSON}'")
 
 
 if __name__ == "__main__":

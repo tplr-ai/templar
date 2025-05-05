@@ -1,13 +1,13 @@
 services:
-  node:
+  miner:
     image: ghcr.io/tplr-ai/templar:latest
-    container_name: templar-${NODE_TYPE:-miner}-${WALLET_HOTKEY}
+    container_name: templar-miner
     restart: unless-stopped
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
     environment:
-      - NODE_TYPE=${NODE_TYPE:-miner}
+      - NODE_TYPE=miner
       - WALLET_NAME=${WALLET_NAME}
       - WALLET_HOTKEY=${WALLET_HOTKEY}
       - CUDA_DEVICE=${CUDA_DEVICE:-cuda:0}
@@ -15,9 +15,139 @@ services:
       - DEBUG=${DEBUG:-false}
       - NETUID=${NETUID:-268}
       - WANDB_API_KEY=${WANDB_API_KEY}
-      - HOST_CUDA_VERSION=12.6
+      - HOST_CUDA_VERSION=12.4
       - R2_GRADIENTS_ACCOUNT_ID=${R2_GRADIENTS_ACCOUNT_ID}
       - R2_GRADIENTS_BUCKET_NAME=${R2_GRADIENTS_BUCKET_NAME}
+      - R2_GRADIENTS_READ_ACCESS_KEY_ID=${R2_GRADIENTS_READ_ACCESS_KEY_ID}
+      - R2_GRADIENTS_READ_SECRET_ACCESS_KEY=${R2_GRADIENTS_READ_SECRET_ACCESS_KEY}
+      - R2_GRADIENTS_WRITE_ACCESS_KEY_ID=${R2_GRADIENTS_WRITE_ACCESS_KEY_ID}
+      - R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=${R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY}
+      - R2_DATASET_ACCOUNT_ID=${R2_DATASET_ACCOUNT_ID}
+      - R2_DATASET_BUCKET_NAME=${R2_DATASET_BUCKET_NAME}
+      - R2_DATASET_READ_ACCESS_KEY_ID=${R2_DATASET_READ_ACCESS_KEY_ID}
+      - R2_DATASET_READ_SECRET_ACCESS_KEY=${R2_DATASET_READ_SECRET_ACCESS_KEY}
+      - R2_DATASET_WRITE_ACCESS_KEY_ID=${R2_DATASET_WRITE_ACCESS_KEY_ID}
+      - R2_DATASET_WRITE_SECRET_ACCESS_KEY=${R2_DATASET_WRITE_SECRET_ACCESS_KEY}
+      - R2_DATASET_BUCKET_LIST=${R2_DATASET_BUCKET_LIST}
+      - R2_AGGREGATOR_ACCOUNT_ID=${R2_AGGREGATOR_ACCOUNT_ID}
+      - R2_AGGREGATOR_BUCKET_NAME=${R2_AGGREGATOR_BUCKET_NAME}
+      - R2_AGGREGATOR_READ_ACCESS_KEY_ID=${R2_AGGREGATOR_READ_ACCESS_KEY_ID}
+      - R2_AGGREGATOR_READ_SECRET_ACCESS_KEY=${R2_AGGREGATOR_READ_SECRET_ACCESS_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '0', '1', '2' ]
+              capabilities: [ gpu ]
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  validator:
+    image: ghcr.io/tplr-ai/templar:latest
+    container_name: templar-validator
+    restart: unless-stopped
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets
+      - ./logs:/app/logs
+    environment:
+      - NODE_TYPE=validator
+      - WALLET_NAME=${WALLET_NAME}
+      - WALLET_HOTKEY=${WALLET_HOTKEY}
+      - CUDA_DEVICE=${CUDA_DEVICE:-cuda:0}
+      - NETWORK=${NETWORK:-finney}
+      - DEBUG=${DEBUG:-false}
+      - NETUID=${NETUID:-268}
+      - WANDB_API_KEY=${WANDB_API_KEY}
+      - HOST_CUDA_VERSION=12.4
+      - R2_GRADIENTS_ACCOUNT_ID=${R2_GRADIENTS_ACCOUNT_ID}
+      - R2_GRADIENTS_BUCKET_NAME=${R2_GRADIENTS_BUCKET_NAME}
+      - R2_GRADIENTS_READ_ACCESS_KEY_ID=${R2_GRADIENTS_READ_ACCESS_KEY_ID}
+      - R2_GRADIENTS_READ_SECRET_ACCESS_KEY=${R2_GRADIENTS_READ_SECRET_ACCESS_KEY}
+      - R2_GRADIENTS_WRITE_ACCESS_KEY_ID=${R2_GRADIENTS_WRITE_ACCESS_KEY_ID}
+      - R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=${R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY}
+      - R2_DATASET_ACCOUNT_ID=${R2_DATASET_ACCOUNT_ID}
+      - R2_DATASET_BUCKET_NAME=${R2_DATASET_BUCKET_NAME}
+      - R2_DATASET_READ_ACCESS_KEY_ID=${R2_DATASET_READ_ACCESS_KEY_ID}
+      - R2_DATASET_READ_SECRET_ACCESS_KEY=${R2_DATASET_READ_SECRET_ACCESS_KEY}
+      - R2_DATASET_WRITE_ACCESS_KEY_ID=${R2_DATASET_WRITE_ACCESS_KEY_ID}
+      - R2_DATASET_WRITE_SECRET_ACCESS_KEY=${R2_DATASET_WRITE_SECRET_ACCESS_KEY}
+      - R2_DATASET_BUCKET_LIST=${R2_DATASET_BUCKET_LIST}
+      - R2_AGGREGATOR_ACCOUNT_ID=${R2_AGGREGATOR_ACCOUNT_ID}
+      - R2_AGGREGATOR_BUCKET_NAME=${R2_AGGREGATOR_BUCKET_NAME}
+      - R2_AGGREGATOR_READ_ACCESS_KEY_ID=${R2_AGGREGATOR_READ_ACCESS_KEY_ID}
+      - R2_AGGREGATOR_READ_SECRET_ACCESS_KEY=${R2_AGGREGATOR_READ_SECRET_ACCESS_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '0', '1', '2' ]
+              capabilities: [ gpu ]
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  aggregator:
+    image: ghcr.io/tplr-ai/templar:latest
+    container_name: templar-aggregator
+    restart: unless-stopped
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets
+      - ./logs:/app/logs
+    environment:
+      - NODE_TYPE=aggregator
+      - WALLET_NAME=${WALLET_NAME}
+      - WALLET_HOTKEY=${WALLET_HOTKEY}
+      - CUDA_DEVICE=${CUDA_DEVICE:-cuda:1}
+      - NETWORK=${NETWORK:-finney}
+      - DEBUG=${DEBUG:-false}
+      - NETUID=${NETUID:-268}
+      - WANDB_API_KEY=${WANDB_API_KEY}
+      - HOST_CUDA_VERSION=12.4
+      - R2_GRADIENTS_ACCOUNT_ID=${R2_GRADIENTS_ACCOUNT_ID}
+      - R2_GRADIENTS_BUCKET_NAME=${R2_GRADIENTS_BUCKET_NAME}
+      - R2_GRADIENTS_READ_ACCESS_KEY_ID=${R2_GRADIENTS_READ_ACCESS_KEY_ID}
+      - R2_GRADIENTS_READ_SECRET_ACCESS_KEY=${R2_GRADIENTS_READ_SECRET_ACCESS_KEY}
+      - R2_GRADIENTS_WRITE_ACCESS_KEY_ID=${R2_GRADIENTS_WRITE_ACCESS_KEY_ID}
+      - R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=${R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY}
+      - R2_DATASET_ACCOUNT_ID=${R2_DATASET_ACCOUNT_ID}
+      - R2_DATASET_BUCKET_NAME=${R2_DATASET_BUCKET_NAME}
+      - R2_DATASET_READ_ACCESS_KEY_ID=${R2_DATASET_READ_ACCESS_KEY_ID}
+      - R2_DATASET_READ_SECRET_ACCESS_KEY=${R2_DATASET_READ_SECRET_ACCESS_KEY}
+      - R2_DATASET_WRITE_ACCESS_KEY_ID=${R2_DATASET_WRITE_ACCESS_KEY_ID}
+      - R2_DATASET_WRITE_SECRET_ACCESS_KEY=${R2_DATASET_WRITE_SECRET_ACCESS_KEY}
+      - R2_DATASET_BUCKET_LIST=${R2_DATASET_BUCKET_LIST}
+      - R2_AGGREGATOR_ACCOUNT_ID=${R2_AGGREGATOR_ACCOUNT_ID}
+      - R2_AGGREGATOR_BUCKET_NAME=${R2_AGGREGATOR_BUCKET_NAME}
+      - R2_AGGREGATOR_READ_ACCESS_KEY_ID=${R2_AGGREGATOR_READ_ACCESS_KEY_ID}
+      - R2_AGGREGATOR_READ_SECRET_ACCESS_KEY=${R2_AGGREGATOR_READ_SECRET_ACCESS_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: [ '0', '1', '2' ]
+              capabilities: [ gpu ]
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  evaluator:
+    image: ghcr.io/tplr-ai/templar:latest
+    container_name: templar-evaluator
+    restart: unless-stopped
+    volumes:
+      - ~/.bittensor/wallets:/root/.bittensor/wallets
+      - ./logs:/app/logs
+    environment:
+      - NODE_TYPE=evaluator
+      - WALLET_NAME=${WALLET_NAME}
+      - WALLET_HOTKEY=${WALLET_HOTKEY}
+      - CUDA_DEVICE=${CUDA_DEVICE:-cuda:2}
+      - NETWORK=${NETWORK:-finney}
+      - DEBUG=${DEBUG:-false}
+      - NETUID=${NETUID:-268}
+      - WANDB_API_KEY=${WANDB_API_KEY}
+      - HOST_CUDA_VERSION=12.4
       - R2_GRADIENTS_READ_ACCESS_KEY_ID=${R2_GRADIENTS_READ_ACCESS_KEY_ID}
       - R2_GRADIENTS_READ_SECRET_ACCESS_KEY=${R2_GRADIENTS_READ_SECRET_ACCESS_KEY}
       - R2_GRADIENTS_WRITE_ACCESS_KEY_ID=${R2_GRADIENTS_WRITE_ACCESS_KEY_ID}

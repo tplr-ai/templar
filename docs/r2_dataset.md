@@ -75,6 +75,10 @@ go run main.go \
   --r2-bucket $DATABUCKET
 ```
 
+![image](https://github.com/user-attachments/assets/f9235ac7-9861-4253-a7aa-24feca5e96ef)
+
+![image](https://github.com/user-attachments/assets/a99737d1-259e-433d-9dcd-71e921c04e4c)
+
 ### 3. Validate the Dataset
 
 After completing the download, validate that your uploaded dataset matches the expected file sizes and hashes:
@@ -91,6 +95,8 @@ cd templar/scripts/dclm-dataset-ops
   --r2-access-key-id $R2_READ_ACCESS_KEY_ID \
   --r2-access-key-secret $R2_READ_SECRET_ACCESS_KEY
 ```
+
+![image](https://github.com/user-attachments/assets/0f68675f-d5b7-463b-b06e-318c1b0555c6)
 
 This validates that all shards have been properly uploaded with the correct sizes and hashes. Review the validation results to ensure your dataset is complete and correct.
 

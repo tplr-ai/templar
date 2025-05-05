@@ -5,13 +5,39 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "asyncio: mark test as requiring async")
 
 
+# Set up mock environment variables before imports
+import os
+
+# Mock R2 bucket access for testing
+os.environ.setdefault("R2_AGGREGATOR_ACCOUNT_ID", "mock-account-id")
+os.environ.setdefault("R2_AGGREGATOR_BUCKET_NAME", "mock-bucket-name")
+os.environ.setdefault("R2_AGGREGATOR_READ_ACCESS_KEY_ID", "mock-read-key-id")
+os.environ.setdefault("R2_AGGREGATOR_READ_SECRET_ACCESS_KEY", "mock-read-secret-key")
+
+# Also set other required variables from config.py
+os.environ.setdefault("R2_GRADIENTS_ACCOUNT_ID", "mock-gradients-account-id")
+os.environ.setdefault("R2_GRADIENTS_BUCKET_NAME", "mock-gradients-bucket-name")
+os.environ.setdefault("R2_GRADIENTS_READ_ACCESS_KEY_ID", "mock-gradients-read-key-id")
+os.environ.setdefault(
+    "R2_GRADIENTS_READ_SECRET_ACCESS_KEY", "mock-gradients-read-secret-key"
+)
+os.environ.setdefault("R2_GRADIENTS_WRITE_ACCESS_KEY_ID", "mock-gradients-write-key-id")
+os.environ.setdefault(
+    "R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY", "mock-gradients-write-secret-key"
+)
+os.environ.setdefault("R2_DATASET_ACCOUNT_ID", "mock-dataset-account-id")
+os.environ.setdefault("R2_DATASET_BUCKET_NAME", "mock-dataset-bucket-name")
+os.environ.setdefault("R2_DATASET_READ_ACCESS_KEY_ID", "mock-dataset-read-key-id")
+os.environ.setdefault(
+    "R2_DATASET_READ_SECRET_ACCESS_KEY", "mock-dataset-read-secret-key"
+)
+
 import pytest
 import torch
 import tplr.comms as comms_module
 import tplr.compress as compress
 from types import SimpleNamespace
 import tplr
-import os
 import sys
 import numpy as np
 import asyncio

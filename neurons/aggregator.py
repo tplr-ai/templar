@@ -156,7 +156,7 @@ class AggregationServer:
         self.iteration_counter = 0
 
         # Initialize peer related attributes
-        self.next_peers: tplr.comms.PeerArray | None = None
+        self.next_peers: list[int] | None = None
         self.peers_update_window = -1
 
     async def get_current_window(

@@ -222,7 +222,7 @@ class Miner:
         )
 
         # Initialize peer related attributes
-        self.next_peers: tplr.comms.PeerArray | None = None
+        self.next_peers: list[int] | None = None
         self.peers_update_window = -1
 
     # Main training loop.
@@ -706,11 +706,9 @@ class Miner:
                     "loss": loss_value,
                     "n_gather_peers": int(len(self.comms.peers)),
                     "gather_success_rate": gather_success_rate,
-                    "gather_peers": json.dumps(self.comms.peers.tolist()),
+                    "gather_peers": json.dumps(self.comms.peers),
                     "skipped_peers": json.dumps(
-                        np.array(gather_result.skipped_uids).tolist()
-                        if gather_result
-                        else []
+                        gather_result.skipped_uids if gather_result else []
                     ),
                     "window_total_time": window_total_time,
                     "peer_update_time": peer_update_time,

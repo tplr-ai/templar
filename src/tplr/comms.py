@@ -64,7 +64,7 @@ PeerArray = np.ndarray[Any, np.dtype[np.int64]]
 class Comms(ChainManager):
     def __init__(
         self,
-        wallet: "bt.wallet",
+        wallet: "bt.wallet | None",
         save_location: str = "/tmp",
         key_prefix: str = "model",
         config=None,
@@ -74,8 +74,8 @@ class Comms(ChainManager):
         uid=None,
         **kwargs,
     ):
-        self.wallet = wallet
         self.uid = uid
+        self.wallet = wallet
 
         # Create temp directory for this instance
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
@@ -93,9 +93,10 @@ class Comms(ChainManager):
         )
 
         # Use the hotkey directly in the save_location
-        hotkey = self.wallet.hotkey.ss58_address
-        self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
-        os.makedirs(self.save_location, exist_ok=True)
+        if self.wallet is not None:
+            hotkey = self.wallet.hotkey.ss58_address
+            self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
+            os.makedirs(self.save_location, exist_ok=True)
         self.key_prefix = key_prefix
 
         ## a single aiobotocore session and a dictionary of clients

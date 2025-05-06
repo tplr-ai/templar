@@ -88,6 +88,13 @@ After completing the download, validate that your uploaded dataset matches the e
 git clone git@github.com:tplr-ai/templar.git
 cd templar/scripts/dclm-dataset-ops
 
+# Create a local .env file for R2 account credentials
+tee .env << 'EOF'
+R2_ACCOUNT_ID=your_account_id
+R2_READ_ACCESS_KEY_ID=your_read_access_key
+R2_READ_SECRET_ACCESS_KEY=your_read_secret_key
+EOF
+
 # Run the validation script
 ./shards_validator.py "../../_shard_sizes.json" \
   --r2-bucket dataset \

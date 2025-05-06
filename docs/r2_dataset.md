@@ -32,6 +32,8 @@ You will need to make sure you have adequate bandwidth. The dataset will be tran
 ```bash
 # Configure dataset bucket name to use
 export DATABUCKET="dataset"
+# Gather CPU count to use for transfer
+export CPUCOUNT=$(grep -c '^processor' /proc/cpuinfo)
 
 # Clone the downloader repository
 git clone https://github.com/distributedstatemachine/HuggingFaceModelDownloader
@@ -63,7 +65,8 @@ go run main.go \
   --hf-prefix "filtered/OH_eli5_vs_rw_v2_bigram_200k_train/fasttext_openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train/processed_data" \
   --r2-subfolder "dclm-dataset" \
   --r2 --skip-local \
-  --r2-bucket $DATABUCKET
+  --r2-bucket $DATABUCKET \
+  -c $CPUCOUNT
 
 # After the first download completes, run it again to verify and download any missing files
 go run main.go \
@@ -72,7 +75,8 @@ go run main.go \
   --hf-prefix "filtered/OH_eli5_vs_rw_v2_bigram_200k_train/fasttext_openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train/processed_data" \
   --r2-subfolder "dclm-dataset" \
   --r2 --skip-local \
-  --r2-bucket $DATABUCKET
+  --r2-bucket $DATABUCKET \
+  -c $CPUCOUNT
 ```
 
 ![image](https://github.com/user-attachments/assets/f9235ac7-9861-4253-a7aa-24feca5e96ef)

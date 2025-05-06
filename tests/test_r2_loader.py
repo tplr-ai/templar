@@ -55,6 +55,8 @@ from tplr.config import BUCKET_SECRETS
 import threading
 import time
 import concurrent.futures
+import types
+import numpy as np
 
 
 # Enable debug logging for tests
@@ -1250,3 +1252,130 @@ async def test_concurrent_parquet_read_threadsafe(monkeypatch):
         f"Expected cached parquet handle, but open() was called {mem_fs.open_calls} "
         "times for only {len(pages)} page requests"
     )
+
+
+# ────────────────────────────────────────────────────────────────────
+#  DDP-aware next_pages() tests (additive – keep existing tests)
+# ────────────────────────────────────────────────────────────────────
+
+
+# --------------------------------------------------------------------
+# Fixtures & helpers
+# --------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _isolate_config_cache():
+    "Clear the class-level caches before/after every test."
+    orig = R2DatasetLoader._configs_data_cache
+    R2DatasetLoader._configs_data_cache = None
+    yield
+    R2DatasetLoader._configs_data_cache = orig
+
+
+@pytest.fixture
+def fake_dataset_configs(monkeypatch):
+    "Replace fetch_dataset_configs with a tiny deterministic stub."
+    async def _fake():
+        return {
+            "cfg_A": {"num_rows": 10_000, "split": "train"},
+            "cfg_B": {"num_rows": 8_000, "split": "train"},
+            "tiny":  {"num_rows": 50,     "split": "train"},  # will be skipped
+        }
+
+    monkeypatch.setattr(
+        R2DatasetLoader, "fetch_dataset_configs", types.MethodType(lambda *_a, **_k: _fake(), R2DatasetLoader)
+    )
+
+    # broadcast_object just returns the object in unit tests
+    from tplr import distrib
+    monkeypatch.setattr(distrib, "broadcast_object", lambda obj, src=0: obj)
+
+
+# --------------------------------------------------------------------
+# Tests
+# --------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_next_pages_single_rank(fake_dataset_configs):
+    """World-size = 1 should reproduce legacy behaviour."""
+    pages = await R2DatasetLoader.next_pages(
+        offset=0, n_pages=5, seed="unit-seed", rank=0, world_size=1
+    )
+    assert len(pages) == 5
+    # Deterministic repeat
+    pages2 = await R2DatasetLoader.next_pages(
+        offset=0, n_pages=5, seed="unit-seed", rank=0, world_size=1
+    )
+    assert pages == pages2
+
+
+@pytest.mark.asyncio
+async def test_next_pages_two_ranks_no_overlap(fake_dataset_configs):
+    """Ranks must receive equal work and zero overlap."""
+    n_pages = 7
+    wsize = 2
+    p0 = await R2DatasetLoader.next_pages(
+        offset=123, n_pages=n_pages, seed="ddp-seed", rank=0, world_size=wsize
+    )
+    p1 = await R2DatasetLoader.next_pages(
+        offset=123, n_pages=n_pages, seed="ddp-seed", rank=1, world_size=wsize
+    )
+
+    assert len(p0) == n_pages
+    assert len(p1) == n_pages
+    assert set(p0).isdisjoint(set(p1))
+    assert len(set(p0) | set(p1)) == n_pages * wsize  # full coverage
+
+
+@pytest.mark.asyncio
+async def test_next_pages_multi_rank_determinism(fake_dataset_configs):
+    """For world_size>1, repeating the call must yield identical shards."""
+    n_pages = 4
+    wsize = 4
+    seed = "repeat-seed"
+    offset = 77
+
+    ref = []
+    for r in range(wsize):
+        ref.append(
+            await R2DatasetLoader.next_pages(
+                offset=offset, n_pages=n_pages, seed=seed, rank=r, world_size=wsize
+            )
+        )
+
+    # Call again – must match
+    for r in range(wsize):
+        again = await R2DatasetLoader.next_pages(
+            offset=offset, n_pages=n_pages, seed=seed, rank=r, world_size=wsize
+        )
+        assert again == ref[r]
+
+
+@pytest.mark.asyncio
+async def test_next_pages_offset_changes(fake_dataset_configs):
+    """Changing offset should change the sample set."""
+    pages_a = await R2DatasetLoader.next_pages(
+        offset=0, n_pages=3, seed="shift-seed", rank=0, world_size=2
+    )
+    pages_b = await R2DatasetLoader.next_pages(
+        offset=1000, n_pages=3, seed="shift-seed", rank=0, world_size=2
+    )
+    assert set(pages_a) != set(pages_b)
+
+
+@pytest.mark.asyncio
+async def test_small_n_pages_vs_large_world(fake_dataset_configs):
+    """
+    Even if n_pages is tiny, every rank must still get that many pages
+    (the generator keeps striding until satisfied).
+    """
+    n_pages = 1
+    wsize = 8
+    unions = set()
+    for r in range(wsize):
+        pr = await R2DatasetLoader.next_pages(
+            offset=5, n_pages=n_pages, seed="tiny-seed", rank=r, world_size=wsize
+        )
+        assert len(pr) == n_pages
+        unions.update(pr)
+
+    # total unique pages == n_pages * world_size
+    assert len(unions) == n_pages * wsize

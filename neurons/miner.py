@@ -337,7 +337,7 @@ class Miner:
             # 2. Load training data for this window
             data_start = tplr.T()
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset=step_window * self.hparams.pages_per_window,
+                offset=step_window * self.hparams.pages_per_window * tplr.get_world_size(),
                 n_pages=self.hparams.pages_per_window,
                 seed=self.uid,  # type: ignore
             )

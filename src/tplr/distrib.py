@@ -170,4 +170,8 @@ def cleanup():
     """Clean up the distributed environment."""
     if dist.is_initialized():
         logger.info(f"Destroying process group for rank {dist.get_rank()}")
-        dist.destroy_process_group() 
+        dist.destroy_process_group()
+
+def rank_world() -> tuple[int, int]:
+    """Return (rank, world_size)."""
+    return get_rank(), get_world_size() 

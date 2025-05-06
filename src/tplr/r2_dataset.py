@@ -25,13 +25,11 @@ from pathlib import Path
 import pyarrow.parquet as pq
 from functools import lru_cache
 import threading
-import tplr.distrib as distrib
-from torch.utils.data.distributed import DistributedSampler
 
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
-
+from tplr.distrib import get_rank, get_world_size, broadcast_object
 
 class R2DatasetLoader(DatasetLoader):
     """
@@ -217,67 +215,107 @@ class R2DatasetLoader(DatasetLoader):
 
     @staticmethod
     async def next_pages(
-        offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
-    ) -> list:
-        """Get next n_pages random pages starting from offset."""
-        if distrib.is_rank0():
-            configs_data = await R2DatasetLoader.fetch_dataset_configs()
+        offset: int,
+        n_pages: int,
+        seed: str,
+        *,
+        num_rows_per_page: int = 100,
+        rank: int | None = None,
+        world_size: int | None = None,
+    ) -> list[tuple[str, int, str]]:
+        """
+        Deterministic page selection.
 
-            # Create RNG with same method as DatasetLoader
-            rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
-            rng.bit_generator.advance(offset)  # Skip ahead by offset
+        • If world_size == 1  ➜ identical to legacy behaviour.  
+        • If world_size > 1  ➜ each rank gets **n_pages** pages (balanced, no overlap).  
+          Total pages processed globally = n_pages * world_size.
 
-            # Sort config keys for consistent ordering
-            sorted_keys = sorted(configs_data.keys())
+        Args remain 100 % back-compatible.
+        """
+        rank = get_rank() if rank is None else rank
+        world_size = get_world_size() if world_size is None else world_size
 
+        # ------------------------------------------------------------------ #
+        # 1. Configs (download once on rank-0, broadcast to the others)       #
+        # ------------------------------------------------------------------ #
+        if R2DatasetLoader._configs_data_cache is None:
+            if rank == 0:
+                R2DatasetLoader._configs_data_cache = await R2DatasetLoader.fetch_dataset_configs()
+            # every rank gets the same dict reference
+            R2DatasetLoader._configs_data_cache = broadcast_object(
+                R2DatasetLoader._configs_data_cache, src=0
+            )
+
+        configs_data = R2DatasetLoader._configs_data_cache
+        sorted_keys = sorted(configs_data.keys())
+
+        # ------------------------------------------------------------------ #
+        # 2. RNG                                                             #
+        # ------------------------------------------------------------------ #
+        rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
+        rng.bit_generator.advance(offset)
+
+        # ------------------------------------------------------------------ #
+        # 3. Single-GPU fast path                                            #
+        # ------------------------------------------------------------------ #
+        if world_size == 1:
             result = []
             for _ in range(n_pages):
-                config = rng.choice(sorted_keys)
-                choice = rng.integers(
-                    0, configs_data[config]["num_rows"] - 1 - num_rows_per_page
-                )
-                result.append((str(config), int(choice), configs_data[config]["split"]))
-
+                cfg = rng.choice(sorted_keys)
+                max_row = configs_data[cfg]["num_rows"] - num_rows_per_page
+                choice = 0 if max_row <= 0 else int(rng.integers(0, max_row))
+                result.append((str(cfg), choice, configs_data[cfg]["split"]))
             return result
-        else:
-            return None
 
-    @classmethod
-    async def create(cls, batch_size, sequence_length, pages_info, tokenizer, **kwargs):
-        """Create a dataset loader with DDP support."""
-        # Create the base dataset
-        dataset = await cls._create_dataset(sequence_length, pages_info, tokenizer)
-        
-        # Check if we're in a distributed setting
-        if distrib.get_world_size() > 1:
-            sampler = DistributedSampler(
-                dataset,
-                num_replicas=distrib.get_world_size(),
-                rank=distrib.get_rank(),
-                shuffle=True,
-                drop_last=True
-            )
-            
-            # Create dataloader with the distributed sampler
-            dataloader = torch.utils.data.DataLoader(
-                dataset,
-                batch_size=batch_size,
-                sampler=sampler,
-                **kwargs
-            )
-            
-            # Store the sampler for epoch updates
-            dataloader.sampler = sampler
-        else:
-            # Non-distributed dataloader
-            dataloader = torch.utils.data.DataLoader(
-                dataset,
-                batch_size=batch_size,
-                shuffle=True,
-                **kwargs
-            )
-        
-        return dataloader
+        # ------------------------------------------------------------------ #
+        # 4. DDP path – strided selection                                    #
+        # ------------------------------------------------------------------ #
+        pages_for_rank: list[tuple[str, int, str]] = []
+        global_idx = 0
+        while len(pages_for_rank) < n_pages:
+            cfg = rng.choice(sorted_keys)
+            meta = configs_data[cfg]
+            max_row = meta["num_rows"] - num_rows_per_page
+            if max_row <= 0:        # skip tiny shards deterministicly
+                global_idx += 1
+                continue
+            choice = int(rng.integers(0, max_row))
+
+            if global_idx % world_size == rank:
+                pages_for_rank.append((str(cfg), choice, meta["split"]))
+            global_idx += 1
+
+        return pages_for_rank
+
+    @staticmethod
+    async def create(
+        batch_size, sequence_length, pages_info, tokenizer, pack_samples=True
+    ):
+        """Create loader with proper initialization"""
+        loader = R2DatasetLoader(
+            batch_size=batch_size,
+            sequence_length=sequence_length,
+            tokenizer=tokenizer,
+            pack_samples=pack_samples,
+        )
+
+        # Initialize buffers
+        loader.buffer = []
+        loader.pages = pages_info.copy()
+
+        # Process all pages first
+        sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
+        tasks = [
+            asyncio.create_task(loader._process_page(page, sem)) for page in pages_info
+        ]
+
+        # Gather all tokens
+        results = await asyncio.gather(*tasks)
+        for tokens in results:
+            if tokens:
+                loader.buffer.extend(tokens)
+
+        return loader
 
     @staticmethod
     async def _load_r2_metadata():

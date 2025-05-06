@@ -18,13 +18,14 @@
 # type: ignore
 
 # Global imports
+import asyncio
 import random
 import typing
-import asyncio
+
 import aiohttp
 import numpy as np
-from transformers import AutoTokenizer
 from torch.utils.data import IterableDataset
+from transformers import AutoTokenizer
 
 
 class SubsetLoader(IterableDataset):
@@ -186,7 +187,7 @@ class SubsetLoader(IterableDataset):
 
 
 class DatasetLoader(SubsetLoader):
-    name: str = "HuggingFaceFW/fineweb-edu-score-2"
+    name: str = "mlfoundations/dclm-baseline-1.0-parquet"
     rows_base_url: str = "https://datasets-server.huggingface.co/rows"
     size_base_url: str = "https://datasets-server.huggingface.co/size"
 

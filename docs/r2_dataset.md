@@ -104,7 +104,8 @@ EOF
   --r2-bucket dataset \
   --r2-account-id $R2_ACCOUNT_ID \
   --r2-access-key-id $R2_READ_ACCESS_KEY_ID \
-  --r2-access-key-secret $R2_READ_SECRET_ACCESS_KEY
+  --r2-access-key-secret $R2_READ_SECRET_ACCESS_KEY \
+  --original-prefix "filtered/OH_eli5_vs_rw_v2_bigram_200k_train/fasttext_openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train/processed_data"
 ```
 
 ![image](https://github.com/user-attachments/assets/0f68675f-d5b7-463b-b06e-318c1b0555c6)

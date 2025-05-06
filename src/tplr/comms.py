@@ -143,10 +143,6 @@ class Comms(ChainManager):
         Returns a persistent s3_client for the given bucket credentials.
         We create it if we haven't already, else reuse the existing client.
         """
-        if bucket is None:
-            tplr.logger.warning(f"[Rank {self.local_rank}] Attempted to get S3 client without a bucket.")
-            return None
-
         key = (bucket.access_key_id, bucket.secret_access_key, bucket.account_id)
         if key in self._s3_clients:
             return self._s3_clients[key]
@@ -416,131 +412,144 @@ class Comms(ChainManager):
     async def s3_get_object(
         self,
         key: str,
-        bucket: Bucket = None,
+        bucket: Bucket | None = None,
         timeout: int = 15,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
     ):
-        """Download object from S3 using asynchronous streaming.
-           Can be called by any rank if needed, but usually rank 0 fetches and broadcasts.
-           Requires the calling rank to have appropriate bucket credentials.
+        """
+        Download object from S3 using asynchronous streaming.
+
+        – Rank-0 normally fetches and later broadcasts, but any rank
+          can call this as long as it owns valid credentials (`bucket`).
+
+        – If `time_min` / `time_max` are given, the object's
+          Last-Modified must fall inside that window, otherwise special
+          dicts `{ "__status": "TOO_EARLY" | "TOO_LATE" }` are returned
+          (caller inspects and decides).
+
+        Returns: deserialized object or `None`.
         """
         import uuid
 
-        temp_file_path = os.path.join(
-            self.temp_dir, f"temp_{key}_{uuid.uuid4().hex}.pt"
+        # -------------------------------------------------------------
+        #  pick bucket
+        # -------------------------------------------------------------
+        target_bucket = bucket or self.bucket
+        if target_bucket is None:
+            tplr.logger.error(
+                f"[Rank {self.local_rank}] s3_get_object({key}) – no bucket specified."
+            )
+            return None
+
+        # -------------------------------------------------------------
+        #  temp file
+        # -------------------------------------------------------------
+        tmp_path = os.path.join(
+            self.temp_dir, f"tmp_{uuid.uuid4().hex}_{os.path.basename(key)}"
         )
 
-        target_bucket = bucket if bucket is not None else self.bucket
-        if target_bucket is None:
-            tplr.logger.error(f"[Rank {self.local_rank}] Attempted s3_get_object without a valid bucket for key {key}.")
+        # -------------------------------------------------------------
+        #  grab client
+        # -------------------------------------------------------------
+        s3 = await self._get_s3_client(target_bucket)
+        if s3 is None:
+            tplr.logger.error(
+                f"[Rank {self.local_rank}] s3_get_object({key}) – failed to obtain client."
+            )
             return None
 
-        s3_client = await self._get_s3_client(target_bucket)
-        if s3_client is None:
-            tplr.logger.error(f"[Rank {self.local_rank}] Failed to get S3 client for bucket {target_bucket.name} to get key {key}.")
-            return None
         try:
-            if time_min is not None and not time_min.tzinfo:
+            # ---------------------------------------------------------
+            #  timezone normalisation
+            # ---------------------------------------------------------
+            if time_min and not time_min.tzinfo:
                 time_min = time_min.replace(tzinfo=timezone.utc)
-            if time_max is not None and not time_max.tzinfo:
+            if time_max and not time_max.tzinfo:
                 time_max = time_max.replace(tzinfo=timezone.utc)
 
+            # ---------------------------------------------------------
+            #  HEAD (existence + timestamp sanity)
+            # ---------------------------------------------------------
             try:
-                response = await asyncio.wait_for(
-                    s3_client.head_object(Bucket=target_bucket.name, Key=key),
-                    timeout=timeout,
+                head = await asyncio.wait_for(
+                    s3.head_object(Bucket=target_bucket.name, Key=key), timeout=timeout
                 )
-                last_modified = response.get("LastModified")
-                if last_modified is None:
-                    tplr.logger.info(f"Object does not exist: {key}")
-                    return None
-
-                if time_min is not None and last_modified < time_min:
-                    time_diff = (time_min - last_modified).total_seconds()
-                    tplr.logger.info(
-                        f"Object {key} was uploaded {time_diff:.2f}s before time_min."
-                    )
-                    return {"__status": "TOO_EARLY"}
-
-                if time_max is not None and last_modified > time_max:
-                    time_diff = (last_modified - time_max).total_seconds()
-                    tplr.logger.info(
-                        f"Object {key} was uploaded {time_diff:.2f}s after time_max."
-                    )
-                    return {"__status": "TOO_LATE"}
-
             except asyncio.TimeoutError:
-                tplr.logger.debug(f"Timeout checking for {key}")
+                tplr.logger.debug(f"[Rank {self.local_rank}] head-timeout {key}")
                 return None
             except (ConnectionClosedError, ClientError) as e:
                 await self._purge_s3_client(target_bucket)
                 if "404" in str(e):
-                    tplr.logger.debug(f"Object {key} not found in bucket {target_bucket.name}")
                     return None
+                raise
 
-            file_size = response["ContentLength"]  # type: ignore
-            # Handle JSON files
-            # Otherwise, likely PyTorch files
-                # Simple upload for small files
-                # Multipart upload for large files
-            tplr.logger.error(f"Error uploading {key} to S3: {e}")
-        """Download object from S3 using asynchronous streaming."""
-        s3_client = await self._get_s3_client(bucket)
-            # Normalize timezone info
-            # HEAD the object
-                    s3_client.head_object(Bucket=bucket.name, Key=key),
-                await self._purge_s3_client(bucket)
-                    tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
-            # Download the object
-            if file_size <= 5 * 1024 * 1024 * 1024:  # 5GB
-                response = await asyncio.wait_for(
-                    s3_client.get_object(Bucket=bucket.name, Key=key),
-                    timeout=timeout,
+            last_mod = head.get("LastModified")
+            if last_mod is None:
+                return None
+
+            if time_min and last_mod < time_min:
+                return {"__status": "TOO_EARLY"}
+            if time_max and last_mod > time_max:
+                return {"__status": "TOO_LATE"}
+
+            size = head["ContentLength"]  # type: ignore[attr-defined]
+
+            # ---------------------------------------------------------
+            #  download
+            # ---------------------------------------------------------
+            SMALL_THRESHOLD = 5 * 1024 * 1024 * 1024  # 5 GB
+            if size <= SMALL_THRESHOLD:
+                # single-shot
+                obj = await asyncio.wait_for(
+                    s3.get_object(Bucket=target_bucket.name, Key=key), timeout=timeout
                 )
-                async with aiofiles.open(temp_file_path, "wb") as f:
-                    async with response["Body"] as stream:
-                        data = await asyncio.wait_for(stream.read(), timeout=timeout)
-                        await f.write(data)
+                async with aiofiles.open(tmp_path, "wb") as fh, obj["Body"] as body:  # type: ignore[arg-type]
+                    data = await asyncio.wait_for(body.read(), timeout=timeout)
+                    await fh.write(data)
             else:
-                success = await self.download_large_file(
-                    s3_client=s3_client,
-                    bucket=bucket,
+                ok = await self.download_large_file(
+                    s3_client=s3,
+                    bucket=target_bucket,
                     key=key,
-                    file_size=file_size,
-                    temp_file_path=temp_file_path,
+                    file_size=size,
+                    temp_file_path=tmp_path,
                 )
-                if not success:
+                if not ok:
                     return None
 
-
+            # ---------------------------------------------------------
+            #  deserialize
+            # ---------------------------------------------------------
             if key.endswith(".json") or "start_window" in key:
-                async with aiofiles.open(temp_file_path, "r") as f:
-                    data = await f.read()
-                    try:
-                        loaded_data = json.loads(data)
-                    except json.JSONDecodeError as e:
-                        tplr.logger.error(f"[Rank {self.local_rank}] Failed to decode JSON from {key}: {e}")
-                        loaded_data = None
+                async with aiofiles.open(tmp_path, "r") as fh:
+                    loaded = json.loads(await fh.read())
             else:
-                map_location = f'cuda:{self.local_rank}' if torch.cuda.is_available() else 'cpu'
-                loaded_data = torch.load(
-                    temp_file_path,
-                    map_location=map_location,
-                    weights_only=False,
+                map_loc = (
+                    f"cuda:{self.local_rank}"
+                    if torch.cuda.is_available()
+                    else "cpu"
                 )
+                loaded = torch.load(tmp_path, map_location=map_loc, weights_only=False)
 
-            return loaded_data
+            return loaded
 
         except asyncio.TimeoutError:
-            tplr.logger.debug(f"Timeout downloading {key}")
+            tplr.logger.debug(f"[Rank {self.local_rank}] get-timeout {key}")
+            return None
+        except (ConnectionClosedError, ClientError):
+            await self._purge_s3_client(target_bucket)
             return None
         except Exception as e:
-            tplr.logger.error(f"[Rank {self.local_rank}] Error in s3_get_object for {key}: {e}")
+            tplr.logger.error(
+                f"[Rank {self.local_rank}] s3_get_object({key}) failed: {e}",
+                exc_info=True,
+            )
             return None
         finally:
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
+            # clean tmp artefact
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     #  Large File Operations
     async def upload_large_file(self, file_path: str, key: str, s3_client):
@@ -841,78 +850,70 @@ class Comms(ChainManager):
         key: str,
         local: bool = True,
         stale_retention: int = 10,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
     ) -> Optional[tuple[dict, int]]:
         """
-        Retrieves data, typically gradients. Usually called by Rank 0.
-        If called by non-rank0, requires appropriate bucket/local access.
+        Retrieves gradients / checkpoints.
+
+        – Rank-0 normally calls this; any rank may call it if it has the
+          right creds and `local=False`.
         """
         if not distrib.is_rank0(self.local_rank):
             return None
 
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         tplr.logger.debug(f"[Rank 0] GET {filename} -->")
-        get_start = tplr.T()
+        get_start = tplr.T()                                   # ← now used later
 
         try:
+            # -------------------- local --------------------
             if local:
                 await self.cleanup_local_data(
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
-                local_path = os.path.join(
-                    LOCAL_TMP_DIR, str(uid), str(window), filename
-                )
+                local_path = os.path.join(LOCAL_TMP_DIR, str(uid), str(window), filename)
                 if not os.path.exists(local_path):
                     tplr.logger.debug(f"Local file not found: {local_path}")
                     return None
-                loaded_data = torch.load(local_path, weights_only=True)
-                if key == "checkpoint":
-                    return loaded_data, None
-                state_dict = loaded_data.get("state_dict")
-                global_step = loaded_data.get("global_step", 0)
-                return state_dict, global_step
 
-            # Remote storage logic
+                loaded = torch.load(local_path, weights_only=True)
+                return (loaded, None) if key == "checkpoint" else (
+                    loaded.get("state_dict"),
+                    loaded.get("global_step", 0),
+                )
+
+            # -------------------- remote -------------------
             peer_bucket = self.commitments.get(int(uid))
-            tplr.logger.debug(f"Peer bucket : {peer_bucket}")
             if not peer_bucket:
                 return None
 
-            loaded_data = await self.s3_get_object(
+            loaded = await self.s3_get_object(
                 key=filename,
                 bucket=peer_bucket,
                 time_min=time_min,
                 time_max=time_max,
             )
-
-            if loaded_data is None:
+            if loaded is None:
                 return None
 
-            # Check for TOO_LATE/TOO_EARLY marker
-            if isinstance(loaded_data, dict):
-                if loaded_data.get("__status") == "TOO_LATE":
-                    tplr.logger.info(
-                        f"Object for UID {uid}, window {window}, key {key} was uploaded too late. Skipping."
-                    )
-                    return {"__status": "TOO_LATE"}
-                elif loaded_data.get("__status") == "TOO_EARLY":
-                    tplr.logger.info(
-                        f"Object for UID {uid}, window {window}, key {key} was uploaded too early. Skipping."
-                    )
-                    return {"__status": "TOO_EARLY"}            
-            if key == "checkpoint":
-                return loaded_data, None
+            # time-window markers
+            if isinstance(loaded, dict) and loaded.get("__status") in ("TOO_LATE", "TOO_EARLY"):
+                return loaded
 
-            state_dict = loaded_data.get("state_dict")
-            global_step = loaded_data.get("global_step", 0)
-            return state_dict, global_step
+            return (loaded, None) if key == "checkpoint" else (
+                loaded.get("state_dict"),
+                loaded.get("global_step", 0),
+            )
 
         except Exception as e:
             tplr.logger.debug(f"[Rank 0] GET error {filename}: {e}")
             return None
         finally:
-            tplr.logger.debug(f"GET {filename} <--")
+            get_end = tplr.T()
+            tplr.logger.info(
+                f"[Rank 0] {tplr.P(window, get_end - get_start)} GET {filename} <--"
+            )
 
     async def get_with_retry(
         self,
@@ -922,10 +923,12 @@ class Comms(ChainManager):
         timeout: int,
         local: bool = True,
         stale_retention: int = 10,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
     ) -> Optional[dict]:
         """GET with retry operation."""
+        filename = f"{key}-{window}-{uid}-v{__version__}.pt"  # ← for logging                            
+
         start_time = time.time()
         end_time = start_time + timeout
         tried_after_time_max = False  # Track if we've tried once after passing time_max
@@ -984,7 +987,7 @@ class Comms(ChainManager):
 
             # Short delay before retrying
             await asyncio.sleep(0.1)            
-            tplr.logger.debug(f"[Rank 0] GET {filename} <--")
+            tplr.logger.debug(f"[Rank 0] RETRY GET {filename} <--")
 
     async def gather(
         self,
@@ -1579,101 +1582,121 @@ class Comms(ChainManager):
     async def get_peer_list(
         self, fetch_previous: bool = False
     ) -> tuple[PeerArray, int] | None:
-        """Get peer list from validator bucket. Rank 0 only."""
+        """
+        Fetch the current or (optionally) previous peer-list JSON from the
+        highest-staked validator's bucket. Rank-0 only.
+
+        – returns (np.ndarray peers, first_effective_window) or None
+        – retries forever (10 s back-off) unless a fatal/logic error occurs
+        """
         if not distrib.is_rank0(self.local_rank):
             return None
 
-        tplr.logger.info(
-            f"[Rank 0] Looking for a {'previous' if fetch_previous else 'current'} peer list on a validator bucket"
+        pat = re.compile(
+            rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{__version__}\.json$"
         )
+
+        tplr.logger.info(
+            f"[Rank 0] Looking for a "
+            f"{'previous' if fetch_previous else 'current'} peer list on a validator bucket"
+        )
+
         while True:
             try:
-                (
-                    validator_bucket,
-                    validator_uid,
-                ) = await self._get_highest_stake_validator_bucket()
-
+                validator_bucket, validator_uid = await self._get_highest_stake_validator_bucket()
                 if validator_bucket is None:
                     tplr.logger.warning(
-                        "[Rank 0] No highest staked validator bucket found. Retrying in 10 seconds."
+                        "[Rank 0] No highest-staked validator bucket found. Retrying in 10 s."
                     )
                     await asyncio.sleep(10)
                     continue
 
                 tplr.logger.info(
-                    f"[Rank 0] Attempting to fetch peer list from UID {validator_uid} bucket {validator_bucket.name}"
+                    f"[Rank 0] Fetching peer list from UID {validator_uid} – bucket {validator_bucket.name}"
                 )
 
-                s3_client = await self._get_s3_client(validator_bucket)
-                if s3_client is None:
-                    tplr.logger.error(f"[Rank 0] Failed to get S3 client for validator bucket {validator_bucket.name}.")
+                s3 = await self._get_s3_client(validator_bucket)
+                if s3 is None:
+                    tplr.logger.error(
+                        f"[Rank 0] Failed to get S3 client for {validator_bucket.name}. Retrying in 10 s."
+                    )
                     await asyncio.sleep(10)
                     continue
 
-                keys = []
-                continuation_token = None
+                # ---------- enumerate all peer-list files ----------
+                keys: list[str] = []
+                token = None
                 while True:
-                    list_args = {"Bucket": validator_bucket.name, "Prefix": PEERS_FILE_PREFIX, "MaxKeys": 1000}
-                    if continuation_token:
-                        list_args["ContinuationToken"] = continuation_token
+                    list_args = {
+                        "Bucket": validator_bucket.name,
+                        "Prefix": PEERS_FILE_PREFIX,
+                        "MaxKeys": 1000,
+                    }
+                    if token:
+                        list_args["ContinuationToken"] = token
 
-                    response = await s3_client.list_objects_v2(**list_args)
-                    contents = response.get("Contents", [])
-
-                    for obj in contents:
-                        if re.match(pattern, obj["Key"]):
+                    resp = await s3.list_objects_v2(**list_args)
+                    for obj in resp.get("Contents", []):
+                        if pat.match(obj["Key"]):
                             keys.append(obj["Key"])
 
-                    if response.get("IsTruncated"):
-                        continuation_token = response.get("NextContinuationToken")
+                    if resp.get("IsTruncated"):
+                        token = resp.get("NextContinuationToken")
                     else:
                         break
 
-                if len(keys) == 0:
-                    tplr.logger.info("[Rank 0] No peer list files found")
+                if not keys:
+                    tplr.logger.info("[Rank 0] No peer-list files found.")
                     return None
 
-                window_to_key = {}
-                for key in keys:
-                    match = re.match(pattern, key)
-                    if match:
-                        window = int(match.group(1))
-                        window_to_key[window] = key
+                # ---------- pick window ----------
+                window_to_key: dict[int, str] = {}
+                for k in keys:
+                    m = pat.match(k)
+                    if m:
+                        window_to_key[int(m.group("window"))] = k
 
                 if not window_to_key:
                     tplr.logger.error(
-                        f"[Rank 0] Failed to parse windows from peer list files. First "
-                        f"{len(keys[:5])} peer list files are {keys[:5]}"
+                        "[Rank 0] Failed to parse windows from peer-list filenames; "
+                        f"sample keys: {keys[:5]}"
                     )
                     return None
 
-                selected_window = max(window_to_key.keys())
-                selected_key = window_to_key[selected_window]
-
-                peers_data = await self.s3_get_object(
-                    key=selected_key, bucket=validator_bucket
-                )
-
-                if peers_data is None:
-                    tplr.logger.warning(f"[Rank 0] Failed to get peer list object for key {selected_key}")
-                    return None
-
-                if isinstance(peers_data, dict):
-                    peers_dict = peers_data
+                sorted_windows = sorted(window_to_key.keys(), reverse=True)
+                if fetch_previous:
+                    if len(sorted_windows) < 2:
+                        tplr.logger.info("[Rank 0] No previous peer-list window available.")
+                        return None
+                    selected_window = sorted_windows[1]
                 else:
-                    peers_dict = json.loads(peers_data.decode("utf-8"))
+                    selected_window = sorted_windows[0]
 
-                return np.array(peers_dict["peers"]), peers_dict[
-                    "first_effective_window"
-                ]
+                selected_key = window_to_key[selected_window]
+                tplr.logger.info(f"[Rank 0] Selected window {selected_window} – key {selected_key}")
+
+                # ---------- download & decode ----------
+                raw = await self.s3_get_object(key=selected_key, bucket=validator_bucket)
+                if raw is None:
+                    tplr.logger.warning(
+                        f"[Rank 0] Failed to download peer-list {selected_key}. Retrying in 10 s."
+                    )
+                    await asyncio.sleep(10)
+                    continue
+
+                peers_dict = raw if isinstance(raw, dict) else json.loads(raw.decode("utf-8"))
+                return np.array(peers_dict["peers"]), peers_dict["first_effective_window"]
 
             except (ConnectionClosedError, ClientError):
                 await self._purge_s3_client(validator_bucket)
-                tplr.logger.warning("[Rank 0] S3 connection error while fetching peer list. Retrying...")
+                tplr.logger.warning(
+                    "[Rank 0] S3 connection error while fetching peer list. Retrying in 5 s..."
+                )
                 await asyncio.sleep(5)
             except Exception as e:
                 tplr.logger.error(f"[Rank 0] Error fetching peer list: {e}", exc_info=True)
                 await asyncio.sleep(10)
+
 
     async def get_start_window(self, retries: int = -1) -> int | None:
         """Get start window from validator bucket. Rank 0 only."""
@@ -1854,13 +1877,22 @@ class Comms(ChainManager):
         scheduler: SequentialLR,
         transformer: TransformDCT,
         compressor: CompressDCT,
-        window: int,
-        global_step: int,
+        window: int,              
+        global_step: int,         
+        device: str | None = None,
     ) -> Tuple[bool, int]:
-        """Apply gathered gradients to model parameters. Rank 0 only."""
+        """Apply gathered gradients to model parameters. Rank-0 only."""
         if not distrib.is_rank0(self.local_rank):
             return False, global_step
-        
+
+        # ----------- device sanity -----------
+        if device is None:                                   # allow caller to omit
+            device = (
+                f"cuda:{self.local_rank}"
+                if torch.cuda.is_available()
+                else "cpu"
+            )
+
         try:
             if not gather_result or not gather_result.state_dict:
                 tplr.logger.warning(f"[Rank 0] No gathered result/state_dict to apply for window {window}.")
@@ -1879,21 +1911,16 @@ class Comms(ChainManager):
                 vals = getattr(gather_result.state_dict, vals_key, None)
 
                 if idxs is not None and vals is not None:
-                    if isinstance(idxs, (list, tuple)):
-                        idxs_tensor = torch.tensor(idxs, device=device)
-                    elif torch.is_tensor(idxs):
+                    # ensure LongTensor on correct device
+                    if torch.is_tensor(idxs):
                         idxs_tensor = idxs.to(device)
                     else:
-                        tplr.logger.error(f"[Rank 0] Unsupported type for idxs: {type(idxs)} for param {n}")
-                        continue
+                        idxs_tensor = torch.as_tensor(idxs, device=device, dtype=torch.long)
 
-                    if isinstance(vals, (list, tuple)):
-                        vals_tensor = torch.tensor(vals, device=device, dtype=p.dtype)
-                    elif torch.is_tensor(vals):
+                    if torch.is_tensor(vals):
                         vals_tensor = vals.to(device)
                     else:
-                        tplr.logger.error(f"[Rank 0] Unsupported type for vals: {type(vals)} for param {n}")
-                        continue
+                        vals_tensor = torch.as_tensor(vals, device=device, dtype=p.dtype)
 
                     new_grad = transformer.decode(
                         compressor.batch_decompress(
@@ -1940,26 +1967,74 @@ class Comms(ChainManager):
         """
         if allowed_topk is None:
             allowed_topk = self.hparams.topk_compression
+        # Only allow up to the maximum available columns.
         allowed_topk = min(allowed_topk, totalk)
 
         def validate_list(indices):
+            # Expected flat list length must equal allowed_topk.
             if len(indices) != allowed_topk:
                 raise ValueError(
-                    f"Invalid number of indices: got {len(indices)} but expected {allowed_topk}"
+                    f"[{param_name}] Invalid number of indices: got {len(indices)} but expected {allowed_topk}"
                 )
             for idx in indices:
-                if not (0 <= idx < totalk):
+                try:
+                    idx_int = int(idx)
+                except Exception as e:
                     raise ValueError(
-                        f"Index {idx} out of bounds (totalk = {totalk})"
+                        f"[{param_name}] Failed to convert index {idx} to int: {e}"
+                    )
+                if idx_int < 0 or idx_int >= totalk:
+                    raise ValueError(
+                        f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
                     )
 
+        # If idxs is a tensor:
         if torch.is_tensor(idxs):
             if idxs.ndim == 1:
-                validate_list(idxs.tolist())
+                # Flat tensor: expect exactly allowed_topk elements.
+                if idxs.size(0) != allowed_topk:
+                    raise ValueError(
+                        f"[{param_name}] Invalid number of indices: got {idxs.size(0)} but expected {allowed_topk}"
+                    )
+                for idx in idxs.tolist():
+                    if not (0 <= int(idx) < totalk):
+                        raise ValueError(
+                            f"[{param_name}] Index {int(idx)} out of bounds (totalk = {totalk})"
+                        )
             else:
-                validate_list(idxs.flatten().tolist())
+                # Multi-dimensional: check that the last dimension equals allowed_topk.
+                if idxs.size(-1) != allowed_topk:
+                    raise ValueError(
+                        f"[{param_name}] Last dimension size invalid: got {idxs.size(-1)} but expected {allowed_topk}"
+                    )
+                # Check all indices in the tensor.
+                for idx in idxs.flatten().tolist():
+                    if not (0 <= int(idx) < totalk):
+                        raise ValueError(
+                            f"[{param_name}] Index {int(idx)} out of bounds (totalk = {totalk})"
+                        )
+        # If idxs is a list or tuple
+        elif isinstance(idxs, (list, tuple)):
+            if idxs and isinstance(idxs[0], (list, tuple)):
+                # Nested structure: check each sub-list.
+                for sublist in idxs:
+                    validate_list(sublist)
+            else:
+                # Flat list.
+                validate_list(list(idxs))
         else:
-            validate_list(list(idxs))
+            # Single value provided.
+            try:
+                idx_int = int(idxs)
+            except Exception as e:
+                raise ValueError(
+                    f"[{param_name}] Failed to convert index {idxs} to int: {e}"
+                )
+            if idx_int < 0 or idx_int >= totalk:
+                raise ValueError(
+                    f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
+                )
+
 
     async def load_aggregation(self, window: int):
         """
@@ -2006,36 +2081,41 @@ class Comms(ChainManager):
         if not distrib.is_rank0(self.local_rank):
             return None
         
+        # -------------------------------------------------------------
+        #  discover bucket
+        # -------------------------------------------------------------
+        validator_bucket: Bucket | None = None   # for later purge
         try:
-            (
-                validator_bucket,
-                validator_uid,
-            ) = await self._get_highest_stake_validator_bucket()
-            if not validator_bucket or validator_uid is None:
-                tplr.logger.warning(
-                    "No validator bucket - cannot proceed with debug fetch"
-                )
+            validator_bucket, validator_uid = await self._get_highest_stake_validator_bucket()
+            if validator_bucket is None or validator_uid is None:
+                tplr.logger.warning("[Rank 0] No validator bucket – cannot fetch debug dict.")
                 return None
 
             key = f"debug-{window}-{validator_uid}-v{tplr.__version__}.pt"
             tplr.logger.info(
-                f"Attempting to retrieve debug dictionary for window {window} from validator {validator_uid}"
+                f"[Rank 0] Attempting debug-dict download: {key}  (window={window})"
             )
 
-            result = await self._get_bucket_checkpoint(bucket, validator_uid, __version__)
-            if result:
-                self.last_checkpoint_data = result[0]
-                return result[0], result[1]
+            debug_data = await self.s3_get_object(
+                key=key,
+                bucket=validator_bucket,
+                timeout=20,
+            )
 
-            tplr.logger.info("No suitable checkpoint found.")
-            return None
+            if debug_data is None:
+                tplr.logger.warning(f"[Rank 0] No debug dictionary found for window {window}")
+                return None
+
+            tplr.logger.info(f"[Rank 0] Successfully retrieved debug dictionary for window {window}")
+            return debug_data
 
         except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(bucket)
-            tplr.logger.warning("S3 connection error while getting latest checkpoint.")
+            if validator_bucket is not None:
+                await self._purge_s3_client(validator_bucket)
+            tplr.logger.warning("[Rank 0] S3 connection error while getting debug dict; returning None.")
             return None
         except Exception as e:
-            tplr.logger.error(f"Error getting latest checkpoint: {e}", exc_info=True)
+            tplr.logger.error(f"[Rank 0] Error getting debug dictionary for window {window}: {e}", exc_info=True)
             return None
 
     def weighted_random_sample_no_replacement(

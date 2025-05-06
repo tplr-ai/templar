@@ -16,6 +16,9 @@ import sys
 import numpy as np
 import asyncio
 import logging
+import tplr.distrib as _distrib
+import tplr.comms as _comms
+from pytest import MonkeyPatch
 
 # Get the project root directory (one level up from tests/)
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -196,3 +199,35 @@ def mock_validator(mocker, mock_metagraph, num_active_miners):
     validator.weights = np.zeros(256)
 
     return validator
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _force_rank0():
+    """
+    1) Pretend we are always rank-0
+    2) Make `ChainManager.__init__()` tolerant of the `local_rank=` kwarg that
+       the refactored Comms now forwards.
+    """
+    mp = MonkeyPatch()
+    import tplr.distrib as _distrib
+    import tplr.comms as _comms
+
+    # ---------- rank-0 shim ----------
+    mp.setattr(_distrib, "is_rank0", lambda *_, **__: True, raising=False)
+    mp.setattr(_comms.Comms, "local_rank", 0, raising=False)
+
+    # ---------- swallow local_rank kwarg in ChainManager ----------
+    # Comms subclasses ChainManager and now calls super().__init__(local_rank=…)
+    # Older ChainManager signature doesn't know that kwarg – wrap it.
+    ChainManager = getattr(_comms, "ChainManager", None)
+    if ChainManager is not None:
+        original_init = ChainManager.__init__
+
+        def patched_init(self, *args, local_rank=None, **kwargs):
+            # discard the extraneous kwarg and delegate
+            return original_init(self, *args, **kwargs)
+
+        mp.setattr(ChainManager, "__init__", patched_init, raising=False)
+
+    yield
+    mp.undo()

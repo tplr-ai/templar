@@ -12,13 +12,12 @@
 """
 R2StorageValidator - Validates files in Cloudflare R2 storage against a manifest file
 
-Efficiently validates file existence, sizes, and optionally MD5 hashes of files in R2 storage
-against a manifest JSON file, using concurrent processing for optimal performance.
+Efficiently validates file existence and sizes of files in R2 storage against a manifest JSON file,
+using concurrent processing for optimal performance.
 """
 
 import asyncio
 import csv
-import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -45,8 +44,7 @@ class ManifestFile:
     path: str
     num_rows: int
     byte_size: int
-    file_hash: str
-    global_shard: str
+    global_shard: str = ""
 
 
 @dataclass
@@ -56,11 +54,8 @@ class ValidationResult:
     path: str
     exists: bool
     size_match: bool
-    hash_match: bool
     expected_size: int
     actual_size: Optional[int]
-    expected_hash: str
-    actual_hash: Optional[str]
     error: Optional[str] = None
 
 
@@ -119,21 +114,37 @@ def parse_manifest(manifest_path: str) -> List[ManifestFile]:
         manifest = json.load(f)
 
     files = []
-    for global_shard, data in manifest.items():
-        if global_shard == "default":
-            continue
+    # Check if the manifest has the expected structure with global_shard keys
+    if any(key != "default" and isinstance(manifest[key], dict) for key in manifest):
+        # Standard format with global_shard keys
+        for global_shard, data in manifest.items():
+            if global_shard == "default":
+                continue
 
-        for shard in data.get("shards", []):
-            files.append(
-                ManifestFile(
-                    path=shard["path"],
-                    num_rows=shard["num_rows"],
-                    byte_size=shard["byte_size"],
-                    file_hash=shard["file_hash"],
-                    global_shard=global_shard,
+            for shard in data.get("shards", []):
+                files.append(
+                    ManifestFile(
+                        path=shard.get("path", ""),
+                        num_rows=shard.get("num_rows", 0),
+                        byte_size=shard.get("byte_size", 0),
+                        global_shard=global_shard,
+                    )
                 )
-            )
+    else:
+        # Alternative format: each key is a file path and value contains metadata
+        for path, metadata in manifest.items():
+            if isinstance(metadata, dict):
+                files.append(
+                    ManifestFile(
+                        path=path,
+                        num_rows=metadata.get("num_rows", 0), 
+                        byte_size=metadata.get("byte_size", 0)
+                    )
+                )
 
+    if not files:
+        print("Warning: No valid files found in manifest. Check the manifest format.")
+    
     return files
 
 
@@ -208,132 +219,11 @@ async def check_file_exists_and_size(
         return False, None
 
 
-def compute_file_hash(path: str, size: int) -> str:
-    """
-    Compute a unique hash for a file based on its path and size.
-
-    IMPORTANT: This is copied directly from hf_shard_sizes.py to ensure
-    exact hash compatibility. DO NOT MODIFY this function as it must match
-    the implementation in hf_shard_sizes.py exactly.
-
-    Args:
-        path: File path
-        size: File size in bytes
-
-    Returns:
-        MD5 hash string
-    """
-    hasher = hashlib.md5()
-    hasher.update(path.encode("utf-8"))
-    hasher.update(str(size).encode("utf-8"))
-    return hasher.hexdigest()
-
-
-async def compute_file_md5(
-    s3_client: Any,
-    bucket: str,
-    manifest_path: str,
-    expected_size: int,
-    debug: bool = False,
-) -> Optional[str]:
-    """
-    Compute MD5 hash of a file using the same method as in hf_shard_sizes.py.
-
-    IMPORTANT: This implementation uses compute_file_hash() which is copied
-    directly from hf_shard_sizes.py to ensure exact hash compatibility.
-
-    Args:
-        s3_client: Boto3 S3 client (unused but kept for API compatibility)
-        bucket: Bucket name (unused but kept for API compatibility)
-        manifest_path: Original path from the manifest file (NOT the normalized R2 path)
-        expected_size: File size in bytes
-        debug: Whether to print debug information
-
-    Returns:
-        MD5 hash as hexadecimal string, or None if an error occurs
-    """
-    if debug:
-        print(f"Computing hash for: {manifest_path} with size {expected_size}")
-
-    try:
-        # Use the same function directly copied from hf_shard_sizes.py
-        result = compute_file_hash(manifest_path, expected_size)
-
-        if debug:
-            print(f"  Computed hash (path+size): {result}")
-
-        return result
-    except Exception as e:
-        if debug:
-            print(f"Error computing hash for {manifest_path}: {e}")
-        return None
-
-
-def process_path_for_hash(
-    path: str,
-    original_prefix: str = None,
-    strip_dataset_prefix: bool = True,
-    debug: bool = False,
-) -> str:
-    """
-    Process the path to match how it was originally in HuggingFace before hash calculation.
-    This handles the complex patterns seen in the manifest file.
-
-    Args:
-        path: Path from the manifest
-        original_prefix: Original HuggingFace path prefix to add back
-        strip_dataset_prefix: Whether to strip dataset prefixes
-        debug: Whether to print debug information
-
-    Returns:
-        Path suitable for hash calculation to match hf_shard_sizes.py
-    """
-    result = path
-
-    # First try to strip prefixes if needed
-    if strip_dataset_prefix:
-        # Case 1: dataset/dclm-dataset/global-shard_XX/... pattern
-        if path.startswith("dataset/dclm-dataset/"):
-            result = path[len("dataset/dclm-dataset/") :]
-            if debug:
-                print(
-                    f"  Stripped prefix: {result} (from pattern: dataset/dclm-dataset/...)"
-                )
-
-        # Case 2: Just dataset/ prefix
-        elif path.startswith("dataset/"):
-            result = path[len("dataset/") :]
-            if debug:
-                print(f"  Stripped prefix: {result} (from pattern: dataset/...)")
-
-        # Case 3: Just dclm-dataset/ prefix
-        elif path.startswith("dclm-dataset/"):
-            result = path[len("dclm-dataset/") :]
-            if debug:
-                print(f"  Stripped prefix: {result} (from pattern: dclm-dataset/...)")
-
-    # Now add original prefix if provided
-    if original_prefix:
-        # Keep the entire path after stripping the prefixes, not just the filename
-        new_path = f"{original_prefix.rstrip('/')}/{result}"
-
-        if debug:
-            print(f"  After adding original prefix: {new_path}")
-
-        return new_path
-
-    # Default: return processed path
-    return result
-
-
 async def validate_file(
     s3_client: Any,
     bucket: str,
     file: ManifestFile,
-    validate_hash: bool = True,
     debug: bool = False,
-    strip_dataset_prefix: bool = True,
-    original_prefix: str = None,
 ) -> ValidationResult:
     """
     Validate a single file against the manifest.
@@ -342,10 +232,7 @@ async def validate_file(
         s3_client: Boto3 S3 client
         bucket: Bucket name
         file: ManifestFile object with expected metadata
-        validate_hash: Whether to validate file hash
         debug: Whether to print debug information
-        strip_dataset_prefix: Whether to strip the dataset/ prefix for hash calculation
-        original_prefix: Original path prefix from HuggingFace to add before hash calculation
 
     Returns:
         ValidationResult containing comparison results
@@ -370,74 +257,24 @@ async def validate_file(
                 path=manifest_path,
                 exists=False,
                 size_match=False,
-                hash_match=False,
                 expected_size=file.byte_size,
                 actual_size=None,
-                expected_hash=file.file_hash,
-                actual_hash=None,
                 error=f"File does not exist (R2 path: {r2_path})",
             )
 
         # Check size
         size_match = actual_size == file.byte_size
 
-        # Only check hash if size matches and validate_hash is True
-        hash_match = False
-        actual_hash = None
-
-        if size_match and validate_hash:
-            # Process the path according to the specified options
-            processed_path = process_path_for_hash(
-                manifest_path,
-                original_prefix=original_prefix,
-                strip_dataset_prefix=strip_dataset_prefix,
-                debug=debug,
-            )
-
-            # Calculate hash using the processed path
-            actual_hash = compute_file_hash(processed_path, file.byte_size)
-            hash_match = actual_hash.lower() == file.file_hash.lower()
-
-            if debug:
-                print(f"  Path used for hash: {processed_path}")
-                print(f"  Size used for hash: {file.byte_size}")
-                print(f"  Calculated hash: {actual_hash}")
-                print(f"  Expected hash: {file.file_hash}")
-                print(f"  Hash match: {hash_match}")
-
-                # If no match, try to provide more debug info
-                if not hash_match and original_prefix:
-                    # Try a few variations for debugging
-                    filename = manifest_path.split("/")[-1]
-                    just_filename_hash = compute_file_hash(filename, file.byte_size)
-                    hf_filename_hash = compute_file_hash(
-                        f"{original_prefix.rstrip('/')}/{filename}", file.byte_size
-                    )
-
-                    print(f"  Debug - Filename only hash: {just_filename_hash}")
-                    print(
-                        f"  Debug - Original prefix + filename hash: {hf_filename_hash}"
-                    )
-
-        elif not validate_hash:
-            hash_match = True  # Skip hash validation
-
         error = None
         if not size_match:
             error = f"Size mismatch: expected {file.byte_size}, got {actual_size}"
-        elif validate_hash and not hash_match:
-            # Provide detailed information in error for debugging
-            error = f"Hash mismatch: expected {file.file_hash}, got {actual_hash}"
 
         return ValidationResult(
             path=manifest_path,
             exists=True,
             size_match=size_match,
-            hash_match=hash_match,
             expected_size=file.byte_size,
             actual_size=actual_size,
-            expected_hash=file.file_hash,
-            actual_hash=actual_hash,
             error=error,
         )
     except Exception as e:
@@ -448,11 +285,8 @@ async def validate_file(
             path=file.path,
             exists=False,
             size_match=False,
-            hash_match=False,
             expected_size=file.byte_size,
             actual_size=None,
-            expected_hash=file.file_hash,
-            actual_hash=None,
             error=f"Validation error: {str(e)}",
         )
 
@@ -462,10 +296,7 @@ async def validate_files_batch(
     bucket: str,
     files: List[ManifestFile],
     progress_bar: Optional[tqdm] = None,
-    validate_hash: bool = True,
     debug: bool = False,
-    strip_dataset_prefix: bool = True,
-    original_prefix: str = None,
 ) -> List[ValidationResult]:
     """
     Validate a batch of files concurrently.
@@ -475,10 +306,7 @@ async def validate_files_batch(
         bucket: Bucket name
         files: List of files to validate
         progress_bar: Optional progress bar
-        validate_hash: Whether to validate file hashes
         debug: Whether to print debug information
-        strip_dataset_prefix: Whether to strip the dataset/ prefix for hash calculation
-        original_prefix: Original HuggingFace path prefix to add before hash calculation
 
     Returns:
         List of ValidationResult objects
@@ -492,10 +320,7 @@ async def validate_files_batch(
                 s3_client,
                 bucket,
                 file,
-                validate_hash,
                 debug,
-                strip_dataset_prefix,
-                original_prefix,
             )
             if progress_bar:
                 progress_bar.update(1)
@@ -530,11 +355,8 @@ async def save_results_to_csv(
                 "path",
                 "exists",
                 "size_match",
-                "hash_match",
                 "expected_size",
                 "actual_size",
-                "expected_hash",
-                "actual_hash",
                 "error",
             ]
         )
@@ -545,11 +367,8 @@ async def save_results_to_csv(
                     result.path,
                     result.exists,
                     result.size_match,
-                    result.hash_match,
                     result.expected_size,
                     result.actual_size if result.actual_size is not None else "",
-                    result.expected_hash,
-                    result.actual_hash if result.actual_hash is not None else "",
                     result.error if result.error is not None else "",
                 ]
             )
@@ -575,17 +394,11 @@ def print_summary(results: List[ValidationResult]) -> None:
         # Categorize errors
         missing_files = [r for r in errors if not r.exists]
         size_mismatches = [r for r in errors if r.exists and not r.size_match]
-        hash_mismatches = [
-            r for r in errors if r.exists and r.size_match and not r.hash_match
-        ]
-        other_errors = [
-            r for r in errors if r.exists and r.size_match and r.hash_match and r.error
-        ]
+        other_errors = [r for r in errors if r.exists and r.size_match and r.error]
 
         print("\nError breakdown:")
         print(f"  Missing files: {len(missing_files)}")
         print(f"  Size mismatches: {len(size_mismatches)}")
-        print(f"  Hash mismatches: {len(hash_mismatches)}")
         print(f"  Other errors: {len(other_errors)}")
 
         # Print sample errors from each category
@@ -608,16 +421,11 @@ def print_summary(results: List[ValidationResult]) -> None:
                     print(
                         f"  {i + 1}. {err.path}: expected {err.expected_size} bytes, got {err.actual_size} bytes"
                     )
-                elif category_name == "Hash mismatches":
-                    print(
-                        f"  {i + 1}. {err.path}: expected hash {err.expected_hash}, got {err.actual_hash}"
-                    )
                 else:
                     print(f"  {i + 1}. {err.path}: {err.error}")
 
         print_sample("Missing files", missing_files)
         print_sample("Size mismatches", size_mismatches)
-        print_sample("Hash mismatches", hash_mismatches)
         print_sample("Other errors", other_errors)
 
 
@@ -627,10 +435,7 @@ async def validate_r2_storage(
     output_path: str,
     batch_size: int = BATCH_SIZE,
     silent_mode: bool = False,
-    validate_hash: bool = True,
     debug: bool = False,
-    strip_dataset_prefix: bool = True,
-    original_prefix: str = None,
 ) -> None:
     """
     Validate R2 storage against a manifest file.
@@ -641,10 +446,7 @@ async def validate_r2_storage(
         output_path: Path to save the CSV results
         batch_size: Number of files to validate in each batch
         silent_mode: Whether to suppress progress display
-        validate_hash: Whether to validate file hashes
         debug: Whether to print debug information
-        strip_dataset_prefix: Whether to strip the dataset/ prefix for hash calculation
-        original_prefix: Original HuggingFace path prefix to add before hash calculation
     """
     # Parse manifest
     print(f"Parsing manifest file: {manifest_path}")
@@ -667,10 +469,6 @@ async def validate_r2_storage(
         print(f"  Bucket: {r2_config.bucket_name}")
         print(f"  Region: {r2_config.region}")
         print(f"  Endpoint: https://{r2_config.account_id}.r2.cloudflarestorage.com")
-        print("Hash calculation options:")
-        print(f"  Strip dataset prefix: {strip_dataset_prefix}")
-        if original_prefix:
-            print(f"  Using original HF prefix: {original_prefix}")
 
     # Create progress bar
     progress_bar = (
@@ -681,7 +479,7 @@ async def validate_r2_storage(
 
     # Process files in batches
     print(
-        f"Validating files in batches of {batch_size}, {'with' if validate_hash else 'without'} hash validation"
+        f"Validating files in batches of {batch_size}, checking only existence and file size"
     )
     all_results = []
 
@@ -696,10 +494,7 @@ async def validate_r2_storage(
             r2_config.bucket_name,
             batch,
             progress_bar,
-            validate_hash,
             debug,
-            strip_dataset_prefix,
-            original_prefix,
         )
         all_results.extend(results)
 
@@ -716,7 +511,7 @@ async def validate_r2_storage(
 
 async def main() -> None:
     """
-    Main entry point for the script.
+    Main entry point for the script that validates file existence and sizes.
     """
     import argparse
 
@@ -734,21 +529,7 @@ async def main() -> None:
         help="Number of files to validate in a batch",
     )
     parser.add_argument("--silent", action="store_true", help="Suppress progress bar")
-    parser.add_argument(
-        "--skip-hash", action="store_true", help="Skip hash validation (faster)"
-    )
     parser.add_argument("--debug", action="store_true", help="Enable debug output")
-
-    # Hash calculation options
-    parser.add_argument(
-        "--keep-prefix",
-        action="store_true",
-        help="Don't strip 'dataset/' prefix when calculating hashes. By default, the prefix is stripped to match how hf_shard_sizes.py calculates hashes.",
-    )
-    parser.add_argument(
-        "--original-prefix",
-        help="Original path prefix from HuggingFace that should be added before calculating hashes. For example: 'filtered/OH_eli5_vs_rw_v2_bigram_200k_train/fasttext_openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train/processed_data'",
-    )
 
     # R2 configuration
     parser.add_argument(
@@ -773,15 +554,8 @@ async def main() -> None:
         region=args.r2_region,
     )
 
-    strip_dataset_prefix = not args.keep_prefix
-    original_prefix = args.original_prefix
-
     print(f"Validating R2 storage against manifest: {args.manifest_path}")
-    print(f"Hash validation: {'disabled' if args.skip_hash else 'enabled'}")
     print(f"Debug mode: {'enabled' if args.debug else 'disabled'}")
-    print(f"Strip dataset prefix: {strip_dataset_prefix}")
-    if original_prefix:
-        print(f"Using original HF prefix: {original_prefix}")
 
     await validate_r2_storage(
         manifest_path=args.manifest_path,
@@ -789,10 +563,7 @@ async def main() -> None:
         output_path=args.output,
         batch_size=args.batch_size,
         silent_mode=args.silent,
-        validate_hash=not args.skip_hash,
         debug=args.debug,
-        strip_dataset_prefix=strip_dataset_prefix,
-        original_prefix=original_prefix,
     )
 
 

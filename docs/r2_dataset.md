@@ -61,22 +61,14 @@ go version
 # Start the download process
 go run main.go \
   -d "mlfoundations/dclm-baseline-1.0-parquet" \
-  --branch main \
-  --hf-prefix "filtered/OH_eli5_vs_rw_v2_bigram_200k_train/fasttext_openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train/processed_data" \
-  --r2-subfolder "dclm-dataset" \
-  --r2 --skip-local \
-  --r2-bucket $DATABUCKET \
-  -c $CPUCOUNT
+  --r2 --skip-local -c $CPUCOUNT \
+  --r2-bucket $DATABUCKET
 
 # After the first download completes, run it again to verify and download any missing files
 go run main.go \
   -d "mlfoundations/dclm-baseline-1.0-parquet" \
-  --branch main \
-  --hf-prefix "filtered/OH_eli5_vs_rw_v2_bigram_200k_train/fasttext_openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train/processed_data" \
-  --r2-subfolder "dclm-dataset" \
-  --r2 --skip-local \
-  --r2-bucket $DATABUCKET \
-  -c $CPUCOUNT
+  --r2 --skip-local -c $CPUCOUNT \
+  --r2-bucket $DATABUCKET
 ```
 
 ![image](https://github.com/user-attachments/assets/f9235ac7-9861-4253-a7aa-24feca5e96ef)
@@ -90,7 +82,7 @@ After completing the download, validate that your uploaded dataset matches the e
 ```bash
 # Clone the templar repository if you don't already have it
 git clone git@github.com:tplr-ai/templar.git
-cd templar/scripts/dclm-dataset-ops
+cd templar/scripts/mlfoundations-dclm-baseline-1.0-parquet-ops
 
 # Create a local .env file for R2 account credentials
 tee .env << 'EOF'
@@ -140,7 +132,7 @@ rm -rf ./.cache/tplr/*
 1. **Download Interruption**: If your download is interrupted or times out, simply rerun the command. The downloader is designed to resume from where it left off, verifying existing files and continuing the process.
 
 2. **Validation Failures**: If validation fails, check:
-   - Your R2 bucket structure (should have "dclm-dataset" subfolder)
+   - Your R2 bucket structure (should have "mlfoundations-dclm-baseline-1.0-parquet" subfolder)
    - Network connectivity during download
    - Cloudflare R2 permissions
 

@@ -58,7 +58,7 @@ class R2DatasetLoader(DatasetLoader):
     rows_base_url = None
     size_base_url = None
     _configs_data_cache = None
-    DATASET_SUBFOLDER = "dclm-dataset"
+    DATASET_SUBFOLDER = "mlfoundations-dclm-baseline-1.0-parquet"
     CF_REGION_NAME = "enam"
 
     # Cache for metadata

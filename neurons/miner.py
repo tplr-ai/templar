@@ -43,23 +43,29 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
+from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import LlamaForCausalLM
 
 # Local
 import tplr
+from tplr.distrib import (
+    ddp_init, get_rank, get_world_size,
+    is_rank0, barrier, broadcast_object,
+    rank_world
+)
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
 # GPU optimizations
 torch.manual_seed(42)
-torch.cuda.manual_seed_all(42)
+# torch.cuda.manual_seed_all(42)
 np.random.seed(42)
 random.seed(42)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
+# torch.backends.cuda.matmul.allow_tf32 = True
+# torch.backends.cudnn.allow_tf32 = True
 
 
 class Miner:
@@ -93,9 +99,16 @@ class Miner:
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        parser.add_argument(
+            "--gpus",
+            type=int,
+            default=None,
+            help="Sanity check against WORLD_SIZE (use torchrun to spawn)",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
+
         config = bt.config(parser)
         if config.debug:
             tplr.debug()
@@ -105,10 +118,29 @@ class Miner:
         return config
 
     def __init__(self):
-        tplr.logger.debug("Starting initialization...")
+        tplr.logger.debug("Starting initialization…")
+
+        # --------------------------------------------------------
+        # 1. DDP bootstrap (must precede any CUDA work)
+        # --------------------------------------------------------
+        self.config = Miner.config()                    # parse CLI early
+        world_size = int(os.getenv("WORLD_SIZE", "1"))
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        if self.config.gpus is not None:
+            assert self.config.gpus == world_size, (
+                f"--gpus={self.config.gpus} but WORLD_SIZE={world_size}"
+            )
+
+        ddp_init(local_rank, world_size)                # no-op if world_size==1
+        self.rank, self.world = get_rank(), get_world_size()
+
+        # set per-rank RNG *after* DDP init
+        torch.manual_seed(42 + self.rank)
+        torch.cuda.manual_seed_all(42 + self.rank)
+        np.random.seed(42 + self.rank)
+        random.seed(42 + self.rank)
 
         # Init config and load hparams
-        self.config = Miner.config()
         self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
 
         # Init bittensor objects
@@ -122,9 +154,18 @@ class Miner:
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
 
-        # Init model with hparams config
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)  # type: ignore
+        # --------------------------------------------------------
+        # 2.  Model + DDP wrapper
+        # --------------------------------------------------------
+        self.model = LlamaForCausalLM(self.hparams.model_config).to(self.config.device)
+
+        if self.world > 1:       # wrap only if multi-GPU
+            self.model = DDP(
+                self.model,
+                device_ids=[local_rank],
+                output_device=local_rank,
+                broadcast_buffers=False,
+            )
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
@@ -184,7 +225,6 @@ class Miner:
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
         self.comms.try_commit(self.wallet, self.bucket)
-        # self.comms.fetch_commitments()
 
         # Init state params
         self.stop_event = asyncio.Event()
@@ -202,24 +242,31 @@ class Miner:
         self.total_tokens_processed = 0
         self.batch_times = []  # For tracking processing speed
 
-        # Initialize WandB
-        self.wandb = tplr.initialize_wandb(
-            run_prefix="M",
-            uid=self.uid,
-            config=self.config,
-            group="miner",
-            job_type="mining",
-        )
+        # --------------------------------------------------------
+        # 3. Logging / WANDB only on rank-0
+        # --------------------------------------------------------
+        if is_rank0():
+            self.wandb = tplr.initialize_wandb(
+                run_prefix="M",
+                uid=self.uid,
+                config=self.config,
+                group="miner",
+                job_type="mining",
+            )
 
-        # Initialize metrics logger for InfluxDB
-        self.metrics_logger = tplr.metrics.MetricsLogger(
-            prefix="M",
-            uid=self.uid,
-            config=self.config,
-            role="miner",
-            group="miner",
-            job_type="mining",
-        )
+            # Initialize metrics logger for InfluxDB
+            self.metrics_logger = tplr.metrics.MetricsLogger(
+                prefix="M",
+                uid=self.uid,
+                config=self.config,
+                role="miner",
+                group="miner",
+                job_type="mining",
+            )
+        else:
+            tplr.logger.setLevel("WARNING")  # silence workers
+
+
 
         # Initialize peer related attributes
         self.next_peers: tplr.comms.PeerArray | None = None
@@ -336,10 +383,13 @@ class Miner:
 
             # 2. Load training data for this window
             data_start = tplr.T()
+            rank, world = rank_world()
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset=step_window * self.hparams.pages_per_window * tplr.get_world_size(),
+                offset=step_window * self.hparams.pages_per_window * world,
                 n_pages=self.hparams.pages_per_window,
-                seed=self.uid,  # type: ignore
+                seed=self.uid,
+                rank=rank,
+                world_size=world,
             )
             loader = await tplr.r2_dataset.R2DatasetLoader.create(
                 batch_size=self.hparams.batch_size,
@@ -397,6 +447,7 @@ class Miner:
             )
 
             compress_start = tplr.T()
+            # TODO: make rank 0 aware
             gradient, xshapes, totalks, _ = tplr.prepare_gradient_dict(
                 self, pages, step_window
             )
@@ -659,68 +710,69 @@ class Miner:
                 gather_result.success_rate * 100 if gather_result else 0.0
             )
 
-            # Log metrics to WandB
-            self.wandb.log(
-                {
-                    # Add timing metrics
-                    "miner/timing/window_total": window_total_time,
-                    "miner/timing/peer_update": peer_update_time,
-                    "miner/timing/data_loading": data_loading_time,
-                    "miner/timing/training": training_time,
-                    "miner/timing/compression": compression_time,
-                    "miner/timing/gather": gather_time,
-                    "miner/timing/put": put_completion_time,
-                    "miner/timing/model_update": model_update_time,
-                    # Existing metrics
-                    "miner/loss": loss_value,
-                    "miner/tokens_per_sec": tokens_per_sec,
-                    "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": window_tokens,
-                    "miner/global_step": self.global_step,
-                    "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                    / 1024**2,
-                    "miner/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,
-                    "miner/gather_peers": len(self.comms.peers),
-                    "miner/effective_batch_size": len(self.comms.peers)
-                    * self.hparams.batch_size,
-                    "miner/learning_rate": self.scheduler.get_last_lr()[0],
-                    "miner/mean_grad_norm": mean_grad_norm,
-                    "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
-                    "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                    "miner/grad_norm_std": grad_norm_std,
-                    "miner/mean_weight_norm": mean_weight_norm,
-                    "miner/mean_momentum_norm": mean_momentum_norm,
-                    # Added gather success rate in %
-                    "miner/gather/success_rate": gather_success_rate,
-                },
-                step=self.global_step,
-            )
+            # Log metrics to WandB - only for rank 0
+            if tplr.distrib.is_rank0(self.local_rank):
+                self.wandb.log(
+                    {
+                        # Add timing metrics
+                        "miner/timing/window_total": window_total_time,
+                        "miner/timing/peer_update": peer_update_time,
+                        "miner/timing/data_loading": data_loading_time,
+                        "miner/timing/training": training_time,
+                        "miner/timing/compression": compression_time,
+                        "miner/timing/gather": gather_time,
+                        "miner/timing/put": put_completion_time,
+                        "miner/timing/model_update": model_update_time,
+                        # Existing metrics
+                        "miner/loss": loss_value,
+                        "miner/tokens_per_sec": tokens_per_sec,
+                        "miner/total_tokens": self.total_tokens_processed,
+                        "miner/batch_tokens": window_tokens,
+                        "miner/global_step": self.global_step,
+                        "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
+                        / 1024**2,
+                        "miner/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,
+                        "miner/gather_peers": len(self.comms.peers),
+                        "miner/effective_batch_size": len(self.comms.peers)
+                        * self.hparams.batch_size,
+                        "miner/learning_rate": self.scheduler.get_last_lr()[0],
+                        "miner/mean_grad_norm": mean_grad_norm,
+                        "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
+                        "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
+                        "miner/grad_norm_std": grad_norm_std,
+                        "miner/mean_weight_norm": mean_weight_norm,
+                        "miner/mean_momentum_norm": mean_momentum_norm,
+                        # Added gather success rate in %
+                        "miner/gather/success_rate": gather_success_rate,
+                    },
+                    step=self.global_step,
+                )
 
-            self.metrics_logger.log(
-                measurement="training_step_v2",
-                tags={
-                    "window": self.current_window,
-                    "global_step": self.global_step,
-                },
-                fields={
-                    "loss": loss_value,
-                    "n_gather_peers": int(len(self.comms.peers)),
-                    "gather_success_rate": gather_success_rate,
-                    "gather_peers": json.dumps(self.comms.peers.tolist()),
-                    "skipped_peers": json.dumps(
-                        np.array(gather_result.skipped_uids).tolist()
-                        if gather_result
-                        else []
-                    ),
-                    "window_total_time": window_total_time,
-                    "peer_update_time": peer_update_time,
-                    "compression_time": compression_time,
-                    "gather_time": gather_time,
-                    "put_time": put_completion_time,
-                    "model_update_time": model_update_time,
-                    "tokens_per_sec": tokens_per_sec,
-                },
-            )
+                self.metrics_logger.log(
+                    measurement="training_step_v2",
+                    tags={
+                        "window": self.current_window,
+                        "global_step": self.global_step,
+                    },
+                    fields={
+                        "loss": loss_value,
+                        "n_gather_peers": int(len(self.comms.peers)),
+                        "gather_success_rate": gather_success_rate,
+                        "gather_peers": json.dumps(self.comms.peers.tolist()),
+                        "skipped_peers": json.dumps(
+                            np.array(gather_result.skipped_uids).tolist()
+                            if gather_result
+                            else []
+                        ),
+                        "window_total_time": window_total_time,
+                        "peer_update_time": peer_update_time,
+                        "compression_time": compression_time,
+                        "gather_time": gather_time,
+                        "put_time": put_completion_time,
+                        "model_update_time": model_update_time,
+                        "tokens_per_sec": tokens_per_sec,
+                    },
+                )
             tplr.logger.info("Finished metrics logging call for miner")
 
             self.global_step += 1

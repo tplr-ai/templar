@@ -111,6 +111,7 @@ class Comms(ChainManager):
         )  # Number of recent windows to check
 
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
+        self.gather_semaphore = asyncio.Semaphore(15)
 
         # keep a reference to the *whole* ckpt that was loaded once, so
         # miners / validators can consult keys such as `start_window`.
@@ -953,7 +954,7 @@ class Comms(ChainManager):
         skipped_uids = []  # Retain UIDs that are skipped.
         global_steps = []
 
-        async with self.client_semaphore:
+        async with self.gather_semaphore:
             batch_tasks = [
                 self.get_with_retry(
                     uid=uid,

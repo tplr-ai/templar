@@ -1943,7 +1943,7 @@ class Validator:
             # Log scores and metrics for evaluated UIDs as a table
             headers = [
                 "UID",
-                "Steps since eval",
+                "Last eval window",
                 "Gradient Score",
                 "Binary Indicator",
                 "Binary Moving Avg",
@@ -1960,7 +1960,7 @@ class Validator:
                     openscore_info = f"{rating.ordinal():.2f} (μ={rating.mu:.1f}, σ={rating.sigma:.1f})"
                 row = [
                     str(uid),
-                    f"{self.peers_last_eval_window[uid] - self.sync_window}",
+                    f"{self.peers_last_eval_window[uid]}",
                     f"{self.gradient_scores[uid]:.6f}",
                     f"{self.binary_indicator_scores[uid]:.4f}",
                     f"{self.binary_moving_averages[uid]:.4f}",

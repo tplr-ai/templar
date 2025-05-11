@@ -77,12 +77,14 @@ go run main.go \
 
 ### 3. Validate the Dataset
 
+**Note: to run the validation script, you need to have [uv installed](https://docs.astral.sh/uv/getting-started/installation/).**
+
 After completing the download, validate that your uploaded dataset matches the expected file sizes and hashes:
 
 ```bash
 # Clone the templar repository if you don't already have it
 git clone git@github.com:tplr-ai/templar.git
-cd templar/scripts/mlfoundations-dclm-baseline-1.0-parquet-ops
+cd templar/scripts/dclm-dataset-ops
 
 # Create a local .env file for R2 account credentials
 tee .env << 'EOF'
@@ -96,8 +98,7 @@ EOF
   --r2-bucket dataset \
   --r2-account-id $R2_ACCOUNT_ID \
   --r2-access-key-id $R2_READ_ACCESS_KEY_ID \
-  --r2-access-key-secret $R2_READ_SECRET_ACCESS_KEY \
-  --original-prefix "filtered/OH_eli5_vs_rw_v2_bigram_200k_train/fasttext_openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train/processed_data"
+  --r2-access-key-secret $R2_READ_SECRET_ACCESS_KEY
 ```
 
 ![image](https://github.com/user-attachments/assets/0f68675f-d5b7-463b-b06e-318c1b0555c6)

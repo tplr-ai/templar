@@ -1121,12 +1121,28 @@ class Validator:
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
 
-            # 6. Select peers to evaluate
-            candidate_uids = list(self.eval_peers.keys())
-            candidate_weights = [self.eval_peers[uid] for uid in candidate_uids]
-            k = min(self.hparams.uids_per_window, len(candidate_uids))
-            evaluation_uids = self.comms.weighted_random_sample_no_replacement(
-                candidate_uids, candidate_weights, k
+            # 6. Select peers to evaluate using bin rotation
+            tplr.log_with_context(
+                level="info",
+                message="Creating performance bins for peer evaluation",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
+            # Create performance bins
+            performance_bins = self.bin_evaluation_peers(
+                num_bins=self.hparams.num_evaluation_bins
+            )
+
+            # Select which bin to evaluate in this window
+            current_bin = self.select_next_bin_for_evaluation(
+                num_bins=self.hparams.num_evaluation_bins
+            )
+
+            # Select peers from the chosen bin using weighted sampling
+            evaluation_uids = self.select_evaluation_uids_from_bin(
+                performance_bins,
+                current_bin,
             )
 
             # Reset counters for chosen peers
@@ -1134,14 +1150,14 @@ class Validator:
                 self.eval_peers[uid] = 1
 
             # Increment counters for not chosen peers
-            for uid in candidate_uids:
+            for uid in self.eval_peers.keys():
                 if uid not in evaluation_uids:
                     self.eval_peers[uid] += 1
             self.comms.eval_peers = self.eval_peers
 
             tplr.log_with_context(
                 level="info",
-                message=f"Evaluating random subset of peers: {evaluation_uids}",
+                message=f"Evaluating peers from bin {current_bin}: {evaluation_uids}",
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
@@ -2823,6 +2839,165 @@ class Validator:
                 current_window=self.current_window,
             )
             return None
+
+    def bin_evaluation_peers(self, num_bins: int) -> dict[int, list[int]]:
+        """
+        Bins evaluation peers based on their performance metrics.
+        Peers are grouped into bins of similar performance.
+
+        Args:
+            num_bins (int): Number of bins to divide peers into
+
+        Returns:
+            dict: Dictionary mapping bin indices to lists of peer UIDs
+        """
+        # Get all active peers
+        active_peers = list(self.eval_peers.keys())
+
+        # If we don't have enough peers, return a single bin with all peers
+        if len(active_peers) < num_bins * self.hparams.uids_per_window:
+            tplr.log_with_context(
+                level="info",
+                message=f"Not enough active peers ({len(active_peers)}) for {num_bins} bins. Using single bin.",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            return {0: active_peers}
+
+        # Collect performance metrics for binning
+        peer_metrics = []
+        for uid in active_peers:
+            metric = (
+                float(self.final_scores[uid].item())
+                if uid < len(self.final_scores)
+                else 0.0
+            )
+            peer_metrics.append((uid, metric))
+
+        # Sort peers by metric (highest first)
+        peer_metrics.sort(key=lambda x: x[1], reverse=True)
+        sorted_peers = [uid for uid, _ in peer_metrics]
+
+        total_peers = len(sorted_peers)
+        peers_per_bin = total_peers // num_bins
+        remainder = total_peers % num_bins
+
+        # Create bins with all peers distributed
+        bins = {}
+        start_idx = 0
+
+        for i in range(num_bins):
+            # Add one extra peer to the first 'remainder' bins
+            bin_size = peers_per_bin + (1 if i < remainder else 0)
+            end_idx = start_idx + bin_size
+
+            # Skip empty bins
+            if start_idx >= len(sorted_peers):
+                continue
+
+            # Ensure we don't go beyond the array bounds
+            end_idx = min(end_idx, len(sorted_peers))
+
+            bins[i] = sorted_peers[start_idx:end_idx]
+            start_idx = end_idx
+
+        # Verify all peers are assigned
+        total_assigned = sum(len(peers) for peers in bins.values())
+        if total_assigned != total_peers:
+            tplr.log_with_context(
+                level="warning",
+                message=f"Bin assignment error: {total_assigned} peers assigned out of {total_peers}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
+        # Log the bins for debugging
+        for bin_idx, peer_list in bins.items():
+            tplr.log_with_context(
+                level="info",
+                message=f"Bin {bin_idx} (size {len(peer_list)}): {peer_list}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
+        return bins
+
+    def select_next_bin_for_evaluation(self, num_bins: int) -> int:
+        """
+        Determine which bin should be evaluated in the current window.
+        We rotate through bins sequentially, keeping track of the last evaluated bin.
+
+        Args:
+            num_bins (int): Total number of bins
+
+        Returns:
+            int: The bin index to evaluate in this window
+        """
+        # Initialize bin rotation tracking if not present
+        if not hasattr(self, "last_evaluated_bin"):
+            self.last_evaluated_bin = -1
+
+        # Rotate to the next bin
+        next_bin = (self.last_evaluated_bin + 1) % num_bins
+
+        # Update for next window
+        self.last_evaluated_bin = next_bin
+
+        tplr.log_with_context(
+            level="info",
+            message=f"Selected bin {next_bin} for evaluation in window {self.sync_window}",
+            sync_window=self.sync_window,
+            current_window=self.current_window,
+        )
+
+        return next_bin
+
+    def select_evaluation_uids_from_bin(
+        self, bins: dict[int, list[int]], bin_idx: int
+    ) -> list[int]:
+        """
+        Selects peers for evaluation from a specific bin using weighted sampling.
+
+        Args:
+            bins (dict): Dictionary mapping bin indices to lists of peer UIDs
+            bin_idx (int): The specific bin to select peers from
+
+        Returns:
+            list: Selected UIDs for evaluation
+        """
+        # Ensure the bin exists
+        if bin_idx not in bins:
+            tplr.log_with_context(
+                level="warning",
+                message=f"Bin {bin_idx} not found. Using bin 0 instead.",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            bin_idx = 0
+
+        # Get peers in the selected bin
+        bin_peers = bins[bin_idx]
+
+        # Get weights for weighted sampling
+        candidate_uids = list(bin_peers)
+        candidate_weights = [self.eval_peers[uid] for uid in candidate_uids]
+
+        # Determine how many peers to select (either all in the bin or uids_per_window)
+        k = min(self.hparams.uids_per_window, len(candidate_uids))
+
+        # Use weighted random sampling
+        selected_uids = self.comms.weighted_random_sample_no_replacement(
+            candidate_uids, candidate_weights, k
+        )
+
+        tplr.log_with_context(
+            level="info",
+            message=f"Selected {len(selected_uids)} evaluation UIDs from bin {bin_idx}",
+            sync_window=self.sync_window,
+            current_window=self.current_window,
+        )
+
+        return selected_uids
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

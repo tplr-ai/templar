@@ -137,14 +137,14 @@ def parse_manifest(manifest_path: str) -> List[ManifestFile]:
                 files.append(
                     ManifestFile(
                         path=path,
-                        num_rows=metadata.get("num_rows", 0), 
-                        byte_size=metadata.get("byte_size", 0)
+                        num_rows=metadata.get("num_rows", 0),
+                        byte_size=metadata.get("byte_size", 0),
                     )
                 )
 
     if not files:
         print("Warning: No valid files found in manifest. Check the manifest format.")
-    
+
     return files
 
 

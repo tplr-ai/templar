@@ -49,4 +49,5 @@
     "openskill_beta": 7,
     "openskill_tau": 0.1,
     "checkpoint_init_version": null
+    "num_evaluation_bins": 5
 }

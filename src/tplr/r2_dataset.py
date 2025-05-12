@@ -16,15 +16,16 @@
 # DEALINGS IN THE SOFTWARE.
 
 
-import json
-import yaml
-import s3fs
 import asyncio
-import numpy as np
-from pathlib import Path
-import pyarrow.parquet as pq
-from functools import lru_cache
+import json
 import threading
+from functools import lru_cache
+from pathlib import Path
+
+import numpy as np
+import pyarrow.parquet as pq
+import s3fs
+import yaml
 
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
@@ -57,7 +58,7 @@ class R2DatasetLoader(DatasetLoader):
     rows_base_url = None
     size_base_url = None
     _configs_data_cache = None
-    DATASET_SUBFOLDER = "HuggingFaceFW_fineweb-edu-score-2"
+    DATASET_SUBFOLDER = "mlfoundations-dclm-baseline-1.0-parquet"
     CF_REGION_NAME = "enam"
 
     # Cache for metadata

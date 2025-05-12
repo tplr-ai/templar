@@ -1208,9 +1208,7 @@ class Validator:
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                next_uid_dataloader_task = asyncio.create_task(
-                    self.preload_dataloader(seed=next_uid)
-                )
+                next_uid_dataloader_task = await self.preload_dataloader(seed=next_uid)
 
             # Process each UID with sliding window loading
             while next_uid is not None:

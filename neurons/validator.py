@@ -1099,6 +1099,7 @@ class Validator:
                             current_window=self.current_window,
                         )
                     self.evaluated_uids.add(uid)
+                    self.peers_last_eval_window[uid] = self.sync_window
                 else:
                     tplr.log_with_context(
                         level="info",

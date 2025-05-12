@@ -165,20 +165,21 @@ def file_batches(
         yield files[i : i + batch_size]
 
 
-def normalize_r2_path(path: str) -> str:
+def normalize_r2_path(path: str, bucket_name: str = "") -> str:
     """
     Normalize a path from the manifest for R2 storage access.
-    Explicitly handles the 'dataset/' prefix case.
+    Handles bucket name prefix in the path.
 
     Args:
         path: Original path from manifest
+        bucket_name: User-defined bucket name to check as prefix
 
     Returns:
         Normalized path suitable for R2 access
     """
-    # Directly handle the specific prefix case you mentioned
-    if path.startswith("dataset/"):
-        return path[len("dataset/") :]
+    # Handle the case where path starts with bucket name
+    if bucket_name and path.startswith(f"{bucket_name}/"):
+        return path[len(f"{bucket_name}/") :]
 
     return path
 
@@ -240,7 +241,7 @@ async def validate_file(
     try:
         # Extract the actual path for R2 access
         manifest_path = file.path
-        r2_path = normalize_r2_path(manifest_path)
+        r2_path = normalize_r2_path(manifest_path, bucket)
 
         if debug:
             print("\nProcessing file:")
@@ -374,12 +375,13 @@ async def save_results_to_csv(
             )
 
 
-def print_summary(results: List[ValidationResult]) -> None:
+def print_summary(results: List[ValidationResult], bucket_name: str = "") -> None:
     """
     Print a summary of validation results to the console.
 
     Args:
         results: List of validation results
+        bucket_name: Bucket name for path normalization
     """
     total = len(results)
     errors = [r for r in results if r.error is not None]
@@ -415,7 +417,7 @@ def print_summary(results: List[ValidationResult]) -> None:
             )
             for i, err in enumerate(errors_list[:max_samples]):
                 if category_name == "Missing files":
-                    r2_path = normalize_r2_path(err.path)
+                    r2_path = normalize_r2_path(err.path, bucket_name)
                     print(f"  {i + 1}. {err.path} → {r2_path}")
                 elif category_name == "Size mismatches":
                     print(
@@ -506,7 +508,7 @@ async def validate_r2_storage(
     await save_results_to_csv(all_results, output_path)
 
     # Print summary
-    print_summary(all_results)
+    print_summary(all_results, r2_config.bucket_name)
 
 
 async def main() -> None:

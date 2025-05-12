@@ -88,11 +88,11 @@ class Comms(ChainManager):
         os.makedirs(self.temp_dir, exist_ok=True)
 
         # Get the bucket directly (assuming rank 0 needs write access primarily)
-        access_type = "write" if distrib.is_rank0(self.local_rank) else "read"
+        access_type = "write" if distrib.is_rank0() else "read"
         try:
             self.bucket = self.get_own_bucket("gradients", access_type)
         except ValueError:
-            if distrib.is_rank0(self.local_rank):
+            if distrib.is_rank0():
                 self.bucket = self.get_own_bucket("gradients", "write")
             else:
                 self.bucket = None
@@ -113,7 +113,7 @@ class Comms(ChainManager):
         # Use the hotkey directly in the save_location
         hotkey = self.wallet.hotkey.ss58_address
         self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
-        if distrib.is_rank0(self.local_rank):
+        if distrib.is_rank0():
             os.makedirs(self.save_location, exist_ok=True)
         self.key_prefix = key_prefix
 
@@ -183,7 +183,7 @@ class Comms(ChainManager):
             del self._s3_clients[key]
 
     def start_background_tasks(self):
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             tplr.logger.debug(f"[Rank {self.local_rank}] Skipping background task startup.")
             return
 
@@ -250,7 +250,7 @@ class Comms(ChainManager):
 
     def delete_local_directory(self, path: str):
         """Safely remove a local directory and all its contents."""        
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             tplr.logger.warning(f"[Rank {self.local_rank}] Attempted to delete directory {path}. Should be Rank 0.")
             return
         if not os.path.exists(path):
@@ -267,7 +267,7 @@ class Comms(ChainManager):
         self, uid: str, current_window: int, stale_retention: int
     ):
         """Clean up stale local data for a given uid."""
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return
         tplr.logger.debug(f"[Rank 0] Running cleanup_local_data for UID {uid}")
         user_dir = os.path.join(LOCAL_TMP_DIR, str(uid))
@@ -292,7 +292,7 @@ class Comms(ChainManager):
         self, uid: str, current_window: int, stale_retention: int
     ):
         """Clean up stale S3 data for a given uid."""
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return
         tplr.logger.debug(f"[Rank 0] Running cleanup_s3_data for UID {uid}")
         try:
@@ -369,7 +369,7 @@ class Comms(ChainManager):
         Puts an object into S3 storage, handling different file types appropriately.
         Rank 0 only.
         """
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             tplr.logger.error(f"[Rank {self.local_rank}] Attempted s3_put_object for key {key}. Should be Rank 0.")
             raise RuntimeError("s3_put_object called by non-rank 0 process")
 
@@ -686,7 +686,7 @@ class Comms(ChainManager):
                 await f.truncate(file_size)
 
             pbar = None
-            if distrib.is_rank0(self.local_rank):
+            if distrib.is_rank0():
                 pbar = std_tqdm(
                     total=file_size,
                     unit="B",
@@ -789,7 +789,7 @@ class Comms(ChainManager):
         """
         Saves the data locally or uploads to S3, then cleans up stale files. Rank 0 only.
         """
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return None
         
         if key == "aggregator":
@@ -859,7 +859,7 @@ class Comms(ChainManager):
         – Rank-0 normally calls this; any rank may call it if it has the
           right creds and `local=False`.
         """
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return None
 
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
@@ -1004,7 +1004,7 @@ class Comms(ChainManager):
         time_max: datetime = None,
     ) -> Optional[SimpleNamespace]:
         """Gather gradients for multiple windows in parallel. Rank 0 only."""
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return None
         
         start_time = time.time()
@@ -1453,7 +1453,7 @@ class Comms(ChainManager):
             tuple: (load_success_on_rank0: bool, state_data_for_broadcast: dict, checkpoint_sync_window: int,
                     optimizer: Optimizer, scheduler: LRScheduler)
         """
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return False, {}, 0, optimizer, scheduler
 
         tplr.logger.info("[Rank 0] Attempting to load checkpoint...")
@@ -1468,13 +1468,36 @@ class Comms(ChainManager):
         checkpoint_data, checkpoint_window = result
         try:
             # 1) Load model and optimizer state
-            model.load_state_dict(
-                {
-                    k: v.to(device)
-                    for k, v in checkpoint_data["model_state_dict"].items()
-                }
-            )
-            model.to(device)
+            ckpt_sd: dict[str, torch.Tensor] = checkpoint_data["model_state_dict"]
+
+            # handle mismatched prefixes -------------------------------------------
+            is_wrapped = isinstance(model, torch.nn.parallel.DistributedDataParallel)
+            
+            # Get first key from checkpoint to determine its prefix structure
+            first_key = next(iter(ckpt_sd))
+            
+            # Remove any DDP prefix from checkpoint keys to match the actual model structure
+            if first_key.startswith("module.model."):
+                # Case: checkpoint has "module.model." prefix but model expects just "model."
+                if not is_wrapped:
+                    ckpt_sd = {k[len("module."):]: v for k, v in ckpt_sd.items()}
+                # If wrapped, need to keep "module." but remove the duplicate "model."
+                else:
+                    # This is tricky - need to carefully manage the prefix
+                    ckpt_sd = {k.replace("module.model.", "module."): v for k, v in ckpt_sd.items()}
+            elif first_key.startswith("module."):
+                # Standard case: checkpoint has "module." prefix
+                if not is_wrapped:
+                    ckpt_sd = {k[len("module."):]: v for k, v in ckpt_sd.items()}
+            elif not first_key.startswith("module.") and is_wrapped:
+                # Standard case: checkpoint has no prefix but model expects "module."
+                ckpt_sd = {f"module.{k}": v for k, v in ckpt_sd.items()}
+            
+            # Debug log to help diagnose prefix issues
+            tplr.logger.debug(f"First key after prefix adjustment: {next(iter(ckpt_sd))}")
+
+            target = model.module if is_wrapped else model
+            target.load_state_dict({k: v.to(device) for k, v in ckpt_sd.items()}, strict=True)
 
             for state in optimizer.state.values():
                 for k, v in state.items():
@@ -1505,8 +1528,6 @@ class Comms(ChainManager):
 
             return True, momentum, checkpoint_sync_window, optimizer, scheduler
 
-
-
         except KeyError as e:
             tplr.logger.error(f"[Rank 0] Invalid checkpoint format: missing key {e}")
             return False, {}, 0, optimizer, scheduler
@@ -1534,7 +1555,7 @@ class Comms(ChainManager):
         - initial selection: whether this peer list is the first one in the
           current run
         """
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return
         key = f"{PEERS_FILE_PREFIX}{first_effective_window}_v{__version__}.json"
         peers_and_weights = {
@@ -1560,7 +1581,7 @@ class Comms(ChainManager):
 
     async def post_start_window(self, start_window: int):
         """Upload the start window. Rank 0 only."""
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return
 
         key = f"start_window_v{__version__}.json"
@@ -1589,7 +1610,7 @@ class Comms(ChainManager):
         – returns (np.ndarray peers, first_effective_window) or None
         – retries forever (10 s back-off) unless a fatal/logic error occurs
         """
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return None
 
         pat = re.compile(
@@ -1700,7 +1721,7 @@ class Comms(ChainManager):
 
     async def get_start_window(self, retries: int = -1) -> int | None:
         """Get start window from validator bucket. Rank 0 only."""
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return None
 
         attempt = 0
@@ -1767,7 +1788,7 @@ class Comms(ChainManager):
         sync_window,
     ):
         """Save checkpoint to R2 and local storage. Rank 0 only."""
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return False
 
         tplr.logger.info(f"[Rank 0] Saving checkpoint for window {current_window} (sync_window: {sync_window})...")
@@ -1834,7 +1855,7 @@ class Comms(ChainManager):
         global_step: int,
     ) -> Dict[int, SimpleNamespace | None]:
         """Gather gradients for multiple windows in parallel. Rank 0 only."""
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return {w: None for w in batch_windows}
         
         try:
@@ -1882,7 +1903,7 @@ class Comms(ChainManager):
         device: str | None = None,
     ) -> Tuple[bool, int]:
         """Apply gathered gradients to model parameters. Rank-0 only."""
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return False, global_step
 
         # ----------- device sanity -----------
@@ -2040,7 +2061,7 @@ class Comms(ChainManager):
         """
         Load aggregated gradients for a specified window from the aggregation server. Rank 0 only.
         """
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return None
         
         try:
@@ -2078,7 +2099,7 @@ class Comms(ChainManager):
         """
         Get debug dictionary from validator bucket for a specific window. Rank 0 only.
         """
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return None
         
         # -------------------------------------------------------------
@@ -2124,7 +2145,7 @@ class Comms(ChainManager):
         """
         Perform a weighted random sample (without replacement) of size k. Rank 0 only.
         """
-        if not distrib.is_rank0(self.local_rank):
+        if not distrib.is_rank0():
             return []
         
         tplr.logger.debug("Starting weighted random sampling")

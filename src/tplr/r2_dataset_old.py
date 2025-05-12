@@ -21,7 +21,6 @@ import json
 import threading
 from functools import lru_cache
 from pathlib import Path
-from bisect import bisect_left
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -323,15 +322,6 @@ class R2DatasetLoader(DatasetLoader):
             with open(local_paths["metadata"]) as f:
                 R2DatasetLoader._metadata_config = yaml.safe_load(f)
 
-            # ------------------ NEW: build a fast shard index ------------------
-            for cfg, info in R2DatasetLoader._shard_sizes.items():
-                cumulative = 0
-                boundaries = []  # upper-exclusive row number of each shard
-                for shard in info["shards"]:
-                    cumulative += shard["num_rows"]
-                    boundaries.append(cumulative)
-                info["boundaries"] = boundaries  # we'll bisect on this later
-            # -------------------------------------------------------------------
             return (
                 R2DatasetLoader._shard_sizes,
                 R2DatasetLoader._metadata_config,
@@ -423,17 +413,24 @@ class R2DatasetLoader(DatasetLoader):
                     metadata = shard_sizes[config_name]
                     self._metadata_cache[config_name] = metadata
 
-                # ---------- O(log N) lookup using pre-built boundaries ----------
-                boundaries = metadata["boundaries"]
-                idx = bisect_left(boundaries, page_number + 1)
-                if idx >= len(boundaries):
-                    raise ValueError(
-                        f"Page {page_number} out of range for config {config_name}"
-                    )
-                chosen_shard = metadata["shards"][idx]
-                cumulative_before = 0 if idx == 0 else boundaries[idx - 1]
-                shard_offset = page_number - cumulative_before
-                # ----------------------------------------------------------------
+                # Find exact shard based on page_number
+                cumulative_rows = 0
+                chosen_shard = None
+                for shard in metadata["shards"]:
+                    if (
+                        cumulative_rows
+                        <= page_number
+                        < cumulative_rows + shard["num_rows"]
+                    ):
+                        chosen_shard = shard
+                        break
+                    cumulative_rows += shard["num_rows"]
+
+                if not chosen_shard:
+                    raise ValueError(f"Could not find shard for page {page_number}")
+
+                # Calculate offset within shard
+                shard_offset = page_number - cumulative_rows
 
                 # Read data from exact position
                 pf_data = self._parquet_cache.get(chosen_shard["path"])
@@ -457,14 +454,6 @@ class R2DatasetLoader(DatasetLoader):
                                 "file": f,
                                 "parquet": pf,
                                 "lock": threading.Lock(),
-                                # ------- cache row-group metadata --------------
-                                "num_row_groups": pf.num_row_groups,
-                                "rows_per_group": max(
-                                    1,
-                                    chosen_shard["num_rows"]
-                                    // max(pf.num_row_groups, 1),
-                                ),
-                                # ----------------------------------------------
                             }
                             self._parquet_cache[chosen_shard["path"]] = pf_data
                             break
@@ -480,16 +469,19 @@ class R2DatasetLoader(DatasetLoader):
                                 )
                                 raise
 
-                # Use cached row-group metadata
-                num_row_groups = pf_data["num_row_groups"]
-                rows_per_group = pf_data["rows_per_group"]
+                # Read the row group – protect the shared handle
+                def _read_group():
+                    with pf_data["lock"]:
+                        return pf_data["parquet"].read_row_group(
+                            group_index, columns=["text"], use_threads=True
+                        )
+
+                # Fix: Ensure row group index is within bounds
+                num_row_groups = pf_data["parquet"].num_row_groups
+                rows_per_group = chosen_shard["num_rows"] // num_row_groups
                 group_index = min(shard_offset // rows_per_group, num_row_groups - 1)
 
-                table = await asyncio.to_thread(
-                    lambda: pf_data["parquet"].read_row_group(
-                        group_index, columns=["text"], use_threads=True
-                    )
-                )
+                table = await asyncio.to_thread(_read_group)
 
                 # Adjust start_idx based on actual rows in the group
                 start_idx = shard_offset % rows_per_group

@@ -296,8 +296,10 @@ class Validator:
         self.sync_score_slash_rate = 0.75
 
         # Initialize peer related attributes
-        self.next_peers: tplr.comms.PeerArray | None = None
+        self.next_peers: list[int] | None = None
         self.peers_update_window = -1
+
+        self.peers_last_eval_window = {}
 
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
@@ -307,10 +309,17 @@ class Validator:
             self.binary_moving_averages[uid] = 0.0
             self.binary_indicator_scores[uid] = 0.0
             self.sync_scores[uid] = 0.0
+            if uid in self.openskill_ratings:
+                del self.openskill_ratings[uid]
             if uid in self.eval_peers:
                 del self.eval_peers[uid]
             del self.inactive_scores[uid]
-            tplr.logger.info(f"UID {uid} fully reset after extended inactivity")
+            tplr.log_with_context(
+                level="info",
+                message=f"UID {uid} fully reset after extended inactivity",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
             return True
         return False
 
@@ -379,6 +388,17 @@ class Validator:
             # Get UIDs and scores
             window_uids = list(self.current_window_scores.keys())
 
+            # Store original ordinal values to calculate diff after update
+            original_ordinals = {}
+            for uid in window_uids:
+                if uid in self.openskill_ratings:
+                    original_ordinals[uid] = float(
+                        self.openskill_ratings[uid].ordinal()
+                    )
+                else:
+                    # For new peers without previous ratings
+                    original_ordinals[uid] = 0.0
+
             # Calculate ranks based on gradient scores (lower rank = better performance)
             # In OpenSkill, ranks start at 1 (best) and increase for worse performers
             scores = [self.current_window_scores[uid] for uid in window_uids]
@@ -407,8 +427,12 @@ class Validator:
                     * max(0, self.binary_moving_averages[uid].item())
                     * sync_score
                 )
-                tplr.logger.info(
-                    f"Computed Final Score for UID {uid}: {self.final_scores[uid]}"
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Computed Final Score for UID {uid}: {self.final_scores[uid]}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                    eval_uid=uid,
                 )
 
                 # Log to WandB
@@ -436,8 +460,77 @@ class Validator:
                     },
                 )
 
-            tplr.logger.info(
-                f"Updated OpenSkill ratings for {len(window_uids)} peers based on gradient scores"
+            # Create a ranking table to display current match rankings
+            try:
+                # Sort UIDs by current window gradient scores (descending)
+                sorted_uids = sorted(
+                    window_uids,
+                    key=lambda uid: self.current_window_scores[uid],
+                    reverse=True,
+                )
+
+                try:
+                    width = os.get_terminal_size().columns
+                except Exception:
+                    width = 0
+                os.environ["COLUMNS"] = str(max(200, width))
+
+                rich_table = Table(
+                    title=f"Current Match Rankings (Window {self.sync_window})"
+                )
+                rich_table.add_column("Match Rank")
+                rich_table.add_column("UID")
+                rich_table.add_column("Match Score")
+                rich_table.add_column("OpenSkill μ (After)")
+                rich_table.add_column("OpenSkill σ (After)")
+                rich_table.add_column("Ordinal (After)")
+                rich_table.add_column("Ordinal Δ")
+
+                # Add rows to table
+                for rank, uid in enumerate(sorted_uids, 1):
+                    rating = self.openskill_ratings[uid]
+                    ordinal_before = original_ordinals[uid]
+                    ordinal_after = rating.ordinal()
+                    ordinal_diff = ordinal_after - ordinal_before
+
+                    # Format the diff with color indicators
+                    diff_str = f"{ordinal_diff:+.4f}"
+
+                    rich_table.add_row(
+                        str(rank),
+                        str(uid),
+                        f"{self.current_window_scores[uid]:.6f}",
+                        f"{rating.mu:.4f}",
+                        f"{rating.sigma:.4f}",
+                        f"{ordinal_after:.4f}",
+                        diff_str,
+                    )
+
+                # Render table to string
+                sio = StringIO()
+                console = Console(file=sio, width=int(os.environ["COLUMNS"]))
+                console.print(rich_table)
+                table_str = sio.getvalue()
+
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Current Match Rankings (Window {self.sync_window}):\n{table_str}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+            except Exception as e:
+                tplr.log_with_context(
+                    level="warning",
+                    message=f"Failed to create OpenSkill rankings table: {str(e)}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+
+            tplr.log_with_context(
+                level="info",
+                message=f"Updated OpenSkill ratings for {len(window_uids)} peers based on gradient scores",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
 
             # Clear the current window scores
@@ -475,15 +568,26 @@ class Validator:
             self.weights[positive_mask] = normalized_weights
 
             weight_sum = self.weights.sum().item()
-            tplr.logger.debug(f"Weight sum: {weight_sum}")
+            tplr.log_with_context(
+                level="debug",
+                message=f"Weight sum: {weight_sum}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
 
             if abs(weight_sum - 1.0) > 1e-6:
-                tplr.logger.warning(
-                    f"Weights sum to {weight_sum}, expected close to 1.0"
+                tplr.log_with_context(
+                    level="warning",
+                    message=f"Weights sum to {weight_sum}, expected close to 1.0",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
         else:
-            tplr.logger.warning(
-                "No positive scores found among evaluated peers. All weights set to zero."
+            tplr.log_with_context(
+                level="warning",
+                message="No positive scores found among evaluated peers. All weights set to zero.",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
 
     def evaluate_model_on_batches(
@@ -629,20 +733,29 @@ class Validator:
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
             ):
-                tplr.logger.info(
-                    f"Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}"
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
                 await asyncio.sleep(12)
 
             # 2. Increment sync window and update peer lists
             window_start = tplr.T()
             self.sync_window += 1
-            tplr.logger.info(
-                f"Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}"
+            tplr.log_with_context(
+                level="info",
+                message=f"Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
 
-            tplr.logger.info(
-                f"Processing window: {self.sync_window} current: {self.current_window}"
+            tplr.log_with_context(
+                level="info",
+                message=f"Processing window: {self.sync_window} current: {self.current_window}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
 
             # Save state
@@ -665,8 +778,11 @@ class Validator:
                     "self.hparams.peer_replacement_frequency"
                 )
 
-                tplr.logger.info(
-                    f"Time to create and post a new peer list because {reason}"
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Time to create and post a new peer list because {reason}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
                 if self.last_peer_update_window is None:
                     selected_peers = self.select_initial_peers()
@@ -691,16 +807,24 @@ class Validator:
             )
 
             self.eval_peers = self.comms.eval_peers
-            tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - eval:{len(self.eval_peers)}"
+            tplr.log_with_context(
+                level="info",
+                message=f"{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - eval:{len(self.eval_peers)}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
 
-            tplr.logger.info(f"Current gather peers: {self.comms.peers}")
-            tplr.logger.info(f"Current evaluation peers: {self.eval_peers}")
-
-            tplr.logger.info(f"Current gather peers: {self.comms.peers}")
-            tplr.logger.info(
-                f"Current evaluation peers: {list(self.eval_peers.keys())}"
+            tplr.log_with_context(
+                level="info",
+                message=f"Current gather peers: {self.comms.peers}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            tplr.log_with_context(
+                level="info",
+                message=f"Current evaluation peers: {self.eval_peers}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
 
             newly_inactive = self.comms.inactive_peers
@@ -713,8 +837,11 @@ class Validator:
                         current_window,
                         self.final_scores[uid].item(),
                     )
-                    tplr.logger.info(
-                        f"UID {uid} became inactive at window {current_window} with score {self.final_scores[uid].item():.4f}"
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"UID {uid} became inactive at window {current_window} with score {self.final_scores[uid].item():.4f}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
                     )
 
             # Apply penalties to all inactive peers
@@ -722,7 +849,12 @@ class Validator:
                 # If peer became active again, remove from inactive tracking
                 if uid in self.eval_peers.keys():
                     del self.inactive_scores[uid]
-                    tplr.logger.info(f"UID {uid} became active again")
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"UID {uid} became active again",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
                     continue
 
                 peer_reset = self.reset_peer(inactive_since, uid)
@@ -739,9 +871,11 @@ class Validator:
 
                     new_score = self.final_scores[uid].item()
 
-                    tplr.logger.info(
-                        f"UID {uid} penalized for inactivity: "
-                        f"{old_score:.4f} -> {new_score:.4f}"
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"UID {uid} penalized for inactivity: {old_score:.4f} -> {new_score:.4f}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
                     )
 
                 # Log slash metrics to WandB
@@ -784,13 +918,19 @@ class Validator:
                     ts_value = response.value / 1000  # convert ms to seconds
                     break
                 except Exception as e:
-                    tplr.logger.error(
-                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
+                    tplr.log_with_context(
+                        level="error",
+                        message=f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
                     )
                     retries += 1
                     if retries > max_retries:
-                        tplr.logger.error(
-                            "Exceeded maximum retries for timestamp query. Falling back to current system time."
+                        tplr.log_with_context(
+                            level="error",
+                            message="Exceeded maximum retries for timestamp query. Falling back to current system time.",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
                         )
                         ts_value = (
                             time.time()
@@ -804,15 +944,35 @@ class Validator:
             )
 
             # Log the time window we're using
-            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
-            tplr.logger.info(f"We are using peers {self.comms.peers}")
+            tplr.log_with_context(
+                level="info",
+                message=f"Using time window for gather: {time_min} to {time_max}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            tplr.log_with_context(
+                level="info",
+                message=f"We are using peers {self.comms.peers}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
 
             # Refresh peers explicitly before starting gather to avoid missing updated active peers.
-            tplr.logger.info("Refreshing eval peers before gather task in validator...")
+            tplr.log_with_context(
+                level="info",
+                message="Refreshing eval peers before gather task in validator...",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
 
             if self.config.test:
                 # In test mode, use all UIDs from metagraph except self
-                tplr.logger.info("Test mode active: Using all peers from metagraph.")
+                tplr.log_with_context(
+                    level="info",
+                    message="Test mode active: Using all peers from metagraph.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
                 all_uids = list(range(len(self.metagraph.S)))
                 self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
@@ -823,7 +983,12 @@ class Validator:
                 self.comms.update_peers_with_buckets()
                 self.eval_peers = self.comms.eval_peers
 
-            tplr.logger.info(f"Validator gather peers: {self.comms.peers}")
+            tplr.log_with_context(
+                level="info",
+                message=f"Validator gather peers: {self.comms.peers}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
 
             gather_start = tplr.T()
             skipped_uids: list[int] = []
@@ -845,8 +1010,11 @@ class Validator:
                 )
 
                 if gather_result is None:
-                    tplr.logger.error(
-                        "Failed to gather gradients from peers. Waiting for next window."
+                    tplr.log_with_context(
+                        level="error",
+                        message="Failed to gather gradients from peers. Waiting for next window.",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
                     )
                     self.global_step += 1
                     continue
@@ -859,8 +1027,11 @@ class Validator:
             gather_time = tplr.T() - gather_start
 
             from_aggregator = 1 if aggregation_result is not None else 0
-            tplr.logger.info(
-                f"Using gradient source: {'aggregator' if from_aggregator else 'gather'}"
+            tplr.log_with_context(
+                level="info",
+                message=f"Using gradient source: {'aggregator' if from_aggregator else 'gather'}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
 
             self.wandb.log(
@@ -870,7 +1041,12 @@ class Validator:
                 step=self.global_step,
             )
 
-            tplr.logger.info(f"Skipped UIDs: {skipped_uids}")
+            tplr.log_with_context(
+                level="info",
+                message=f"Skipped UIDs: {skipped_uids}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
 
             gather_sync_scores = await asyncio.gather(
                 *(self.evaluate_miner_sync(uid) for uid in self.comms.peers)
@@ -880,11 +1056,11 @@ class Validator:
                 avg_steps_behind = score_info.get("avg_steps_behind", 99.0)
                 success = score_info.get("success", False)
                 if not success or avg_steps_behind > self.hparams.sync_max_steps_behind:
-                    tplr.logger.info(
-                        "Slashing %s: avg_steps_behind=%.2f > max=%d",
-                        uid,
-                        avg_steps_behind,
-                        self.hparams.sync_max_steps_behind,
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Slashing {uid}: avg_steps_behind={avg_steps_behind:.2f} > max={self.hparams.sync_max_steps_behind}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
                     )
                     if self.final_scores[uid] > 0:
                         self.final_scores[uid] *= self.sync_score_slash_rate
@@ -892,8 +1068,11 @@ class Validator:
 
             # Slash peers failing to submit gradients
             for uid in skipped_uids:
-                tplr.logger.info(
-                    f"No gradient gathered from UID {uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}."
+                tplr.log_with_context(
+                    level="info",
+                    message=f"No gradient gathered from UID {uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
                 if 0 <= uid < self.final_scores.size(0):
                     old_score = self.final_scores[uid].item()
@@ -906,25 +1085,36 @@ class Validator:
                         )
 
                         new_score = self.final_scores[uid].item()
-                        tplr.logger.info(
-                            f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} "
-                            f"due to missing gradient in gather."
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient in gather.",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
                         )
                     else:
-                        tplr.logger.info(
-                            f"Skipped score of UID {uid} (current score: {old_score:.4f}) "
-                            f"due to negative or zero value."
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Skipped score of UID {uid} (current score: {old_score:.4f}) due to negative or zero value.",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
                         )
                     self.evaluated_uids.add(uid)
+                    self.peers_last_eval_window[uid] = self.sync_window
                 else:
-                    tplr.logger.info(
-                        f"UID {uid} not found in final_scores; skipping penalty."
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"UID {uid} not found in final_scores; skipping penalty.",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
                     )
 
             # Add check for empty peers (evaluating all peer uids)
             if len(self.comms.eval_peers) == 0:
-                tplr.logger.warning(
-                    f"No peers available for evaluation in window {self.sync_window}. Waiting for next window."
+                tplr.log_with_context(
+                    level="warning",
+                    message=f"No peers available for evaluation in window {self.sync_window}. Waiting for next window.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
                 self.global_step += 1
                 continue
@@ -932,12 +1122,28 @@ class Validator:
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
 
-            # 6. Select peers to evaluate
-            candidate_uids = list(self.eval_peers.keys())
-            candidate_weights = [self.eval_peers[uid] for uid in candidate_uids]
-            k = min(self.hparams.uids_per_window, len(candidate_uids))
-            evaluation_uids = self.comms.weighted_random_sample_no_replacement(
-                candidate_uids, candidate_weights, k
+            # 6. Select peers to evaluate using bin rotation
+            tplr.log_with_context(
+                level="info",
+                message="Creating performance bins for peer evaluation",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
+            # Create performance bins
+            performance_bins = self.bin_evaluation_peers(
+                num_bins=self.hparams.num_evaluation_bins
+            )
+
+            # Select which bin to evaluate in this window
+            current_bin = self.select_next_bin_for_evaluation(
+                num_bins=self.hparams.num_evaluation_bins
+            )
+
+            # Select peers from the chosen bin using weighted sampling
+            evaluation_uids = self.select_evaluation_uids_from_bin(
+                performance_bins,
+                current_bin,
             )
 
             # Reset counters for chosen peers
@@ -945,12 +1151,17 @@ class Validator:
                 self.eval_peers[uid] = 1
 
             # Increment counters for not chosen peers
-            for uid in candidate_uids:
+            for uid in self.eval_peers.keys():
                 if uid not in evaluation_uids:
                     self.eval_peers[uid] += 1
             self.comms.eval_peers = self.eval_peers
 
-            tplr.logger.info(f"Evaluating random subset of peers: {evaluation_uids}")
+            tplr.log_with_context(
+                level="info",
+                message=f"Evaluating peers from bin {current_bin}: {evaluation_uids}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
 
             avg_loss_before_per_batch_own = 0.0
             avg_loss_after_per_batch_own = 0.0
@@ -965,23 +1176,37 @@ class Validator:
             random_seed = random.randint(
                 1000, 10000000
             )  # Using high seed number for random context
-            tplr.logger.info(
-                f"Loading common random dataloader with seed {random_seed}"
+            tplr.log_with_context(
+                level="info",
+                message=f"Loading common random dataloader with seed {random_seed}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
             try:
                 random_loader_data = await self.preload_dataloader(seed=random_seed)
                 if random_loader_data:
                     common_loader_random = random_loader_data["loader"]
-                    tplr.logger.info(
-                        f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation."
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation.",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
                     )
                 else:
-                    tplr.logger.error(
-                        "Random loader was None, cannot continue evaluation"
+                    tplr.log_with_context(
+                        level="error",
+                        message="Random loader was None, cannot continue evaluation",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
                     )
                     continue
             except Exception as e:
-                tplr.logger.error(f"Error loading random loader: {str(e)}")
+                tplr.log_with_context(
+                    level="error",
+                    message=f"Error loading random loader: {str(e)}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
                 continue
 
             # Setup for sliding window approach
@@ -994,7 +1219,12 @@ class Validator:
             # If we have at least one UID to evaluate, start loading the first one
             if evaluation_uids_queue:
                 next_uid = evaluation_uids_queue.pop(0)
-                tplr.logger.info(f"Starting preload for first UID: {next_uid}")
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Starting preload for first UID: {next_uid}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
                 next_uid_dataloader_task = asyncio.create_task(
                     self.preload_dataloader(seed=next_uid)
                 )
@@ -1003,22 +1233,25 @@ class Validator:
             while next_uid is not None:
                 eval_uid = next_uid
                 eval_uid_dataloader_task = next_uid_dataloader_task
+                self.peers_last_eval_window[eval_uid] = self.sync_window
 
                 if eval_uid_dataloader_task is None:
-                    tplr.logger.error(f"Error loading data for UID {eval_uid}")
+                    tplr.log_with_context(
+                        level="error",
+                        message=f"Error loading data for UID {eval_uid}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
+                    )
                     continue
 
-                # Start loading the next UID if there are more in the queue
-                next_uid = None
-                next_uid_dataloader_task = None
-                if evaluation_uids_queue:
-                    next_uid = evaluation_uids_queue.pop(0)
-                    tplr.logger.info(f"Starting preload for next UID: {next_uid}")
-                    next_uid_dataloader_task = asyncio.create_task(
-                        self.preload_dataloader(seed=next_uid)
-                    )
-
-                tplr.logger.info(f"Evaluating UID: {eval_uid}")
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Evaluating UID: {eval_uid}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                    eval_uid=eval_uid,
+                )
 
                 # Fetch gradient data for evaluation
                 eval_result = await self.comms.get(
@@ -1037,9 +1270,27 @@ class Validator:
                 data_start = tplr.T()
                 try:
                     loader_data = await eval_uid_dataloader_task
+                    # Start loading the next UID if there are more in the queue
+                    next_uid = None
+                    next_uid_dataloader_task = None
+                    if evaluation_uids_queue:
+                        next_uid = evaluation_uids_queue.pop(0)
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Starting preload for next UID: {next_uid}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+                        next_uid_dataloader_task = asyncio.create_task(
+                            self.preload_dataloader(seed=next_uid)
+                        )
                 except Exception as e:
-                    tplr.logger.error(
-                        f"Error loading data for UID {eval_uid}: {str(e)}"
+                    tplr.log_with_context(
+                        level="error",
+                        message=f"Error loading data for UID {eval_uid}: {str(e)}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
                     loader_data = None
 
@@ -1066,33 +1317,57 @@ class Validator:
                     ):
                         miner_pages = state_dict["metadata"]["pages_info"]
                     else:
-                        tplr.logger.warning(
-                            f"Missing pages info metadata from miner UID {eval_uid}"
+                        tplr.log_with_context(
+                            level="warning",
+                            message=f"Missing pages info metadata from miner UID {eval_uid}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                     if local_pages is None or loader_own is None:
-                        tplr.logger.warning(
-                            f"Invalid loader data for UID {eval_uid}, skipping"
+                        tplr.log_with_context(
+                            level="warning",
+                            message=f"Invalid loader data for UID {eval_uid}, skipping",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
                         continue
 
                     # Verify pages match if miner sent them
                     if miner_pages is not None:
                         if local_pages != miner_pages:
-                            tplr.logger.warning(
-                                f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}"
+                            tplr.log_with_context(
+                                level="warning",
+                                message=f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=eval_uid,
                             )
                         else:
-                            tplr.logger.info(
-                                f"Pages verified for UID {eval_uid}: pages match."
+                            tplr.log_with_context(
+                                level="info",
+                                message=f"Pages verified for UID {eval_uid}: pages match.",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=eval_uid,
                             )
                     else:
-                        tplr.logger.info(
-                            f"Using local pages for UID {eval_uid} as miner metadata is missing."
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Using local pages for UID {eval_uid} as miner metadata is missing.",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
-                    tplr.logger.info(
-                        f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}"
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     state_dict, _ = eval_result
@@ -1119,8 +1394,12 @@ class Validator:
                             sampled_indices_own
                         )  # Sort for sequential access
 
-                        tplr.logger.info(
-                            f"Evaluating {sample_size_own}/{total_batches_own} batches ({self.hparams.validator_sample_rate * 100:.1f}%)"
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Evaluating {sample_size_own}/{total_batches_own} batches ({self.hparams.validator_sample_rate * 100:.1f}%)",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                         loss_before_own, n_batches = self.evaluate_model_on_batches(
@@ -1130,9 +1409,12 @@ class Validator:
                     self.loss_before_per_batch_own = (
                         loss_before_own / n_batches if n_batches > 0 else 0
                     )
-                    avg_loss_before_per_batch_own += self.loss_before_per_batch_own
-                    tplr.logger.debug(
-                        f"Loss before (own data): {self.loss_before_per_batch_own}"
+                    tplr.log_with_context(
+                        level="debug",
+                        message=f"Loss before (own data): {self.loss_before_per_batch_own}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # 9. Apply gradient and compute loss after
@@ -1154,8 +1436,12 @@ class Validator:
 
                                 # Validate indices are within bounds
                                 if self.totalks.get(n) is None:
-                                    tplr.logger.warning(
-                                        f"Missing totalk for parameter {n}, skipping peer {eval_uid}"
+                                    tplr.log_with_context(
+                                        level="warning",
+                                        message=f"Missing totalk for parameter {n}, skipping peer {eval_uid}",
+                                        sync_window=self.sync_window,
+                                        current_window=self.current_window,
+                                        eval_uid=eval_uid,
                                     )
                                     raise ValueError(
                                         f"Invalid gradient data from peer {eval_uid}: Missing totalk for parameter {n}"
@@ -1171,8 +1457,12 @@ class Validator:
 
                                 # Check for NaN or Inf values
                                 if torch.isnan(vals).any() or torch.isinf(vals).any():
-                                    tplr.logger.warning(
-                                        f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {eval_uid}"
+                                    tplr.log_with_context(
+                                        level="warning",
+                                        message=f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {eval_uid}",
+                                        sync_window=self.sync_window,
+                                        current_window=self.current_window,
+                                        eval_uid=eval_uid,
                                     )
                                     raise ValueError(
                                         f"Invalid gradient data from peer {eval_uid}: NaN or Inf values in {vals_key}"
@@ -1201,8 +1491,12 @@ class Validator:
 
                                 # Final safety check on the gradient itself
                                 if torch.isnan(grad).any() or torch.isinf(grad).any():
-                                    tplr.logger.warning(
-                                        f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}"
+                                    tplr.log_with_context(
+                                        level="warning",
+                                        message=f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}",
+                                        sync_window=self.sync_window,
+                                        current_window=self.current_window,
+                                        eval_uid=eval_uid,
                                     )
                                     raise ValueError(
                                         f"Invalid gradient from peer {eval_uid}: NaN or Inf in decompressed gradient for {n}"
@@ -1219,13 +1513,21 @@ class Validator:
                         if old_score > 0:
                             # Reset positive scores to zero explicitly
                             self.final_scores[eval_uid] = 0.0
-                            tplr.logger.warning(
-                                f"Set positive score of UID {eval_uid} from {old_score:.4f} to 0.0 - invalid gradient data"
+                            tplr.log_with_context(
+                                level="warning",
+                                message=f"Set positive score of UID {eval_uid} from {old_score:.4f} to 0.0 - invalid gradient data",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=eval_uid,
                             )
                         else:
                             # Negative score is worse than zero; keep it as-is.
-                            tplr.logger.warning(
-                                f"UID {eval_uid} had negative score {old_score:.4f}; retaining due to invalid gradient data"
+                            tplr.log_with_context(
+                                level="warning",
+                                message=f"UID {eval_uid} had negative score {old_score:.4f}; retaining due to invalid gradient data",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=eval_uid,
                             )
 
                         # Include in evaluated UIDs so it gets logged in metrics
@@ -1286,9 +1588,14 @@ class Validator:
                     self.loss_after_per_batch_own = (
                         loss_after_own / n_batches if n_batches > 0 else 0
                     )
+                    avg_loss_before_per_batch_own += self.loss_before_per_batch_own
                     avg_loss_after_per_batch_own += self.loss_after_per_batch_own
-                    tplr.logger.debug(
-                        f"Loss after (own data): {self.loss_after_per_batch_own}"
+                    tplr.log_with_context(
+                        level="debug",
+                        message=f"Loss after (own data): {self.loss_after_per_batch_own}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # 11. Calculate improvements and update scores
@@ -1296,8 +1603,12 @@ class Validator:
                     self.loss_improvement_own = (
                         self.loss_before_per_batch_own - self.loss_after_per_batch_own
                     )
-                    tplr.logger.debug(
-                        f"Loss improvement (own data): {self.loss_improvement_own}"
+                    tplr.log_with_context(
+                        level="debug",
+                        message=f"Loss improvement (own data): {self.loss_improvement_own}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     self.relative_improvement_own = (
@@ -1305,8 +1616,12 @@ class Validator:
                         if self.loss_before_per_batch_own > 0
                         else 0.0
                     )
-                    tplr.logger.debug(
-                        f"Relative improvement (own data): {self.relative_improvement_own:.4f}"
+                    tplr.log_with_context(
+                        level="debug",
+                        message=f"Relative improvement (own data): {self.relative_improvement_own:.4f}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # 7. Use common random loader for evaluation
@@ -1339,8 +1654,12 @@ class Validator:
                             sampled_indices_random
                         )  # Sort for sequential access
 
-                        tplr.logger.info(
-                            f"Evaluating {sample_size_random}/{total_batches_random} batches ({self.hparams.validator_sample_rate * 100:.1f}%)"
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Evaluating {sample_size_random}/{total_batches_random} batches ({self.hparams.validator_sample_rate * 100:.1f}%)",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                         loss_before_random, n_batches = self.evaluate_model_on_batches(
@@ -1352,11 +1671,12 @@ class Validator:
                     self.loss_before_per_batch_random = (
                         loss_before_random / n_batches if n_batches > 0 else 0
                     )
-                    avg_loss_before_per_batch_random += (
-                        self.loss_before_per_batch_random
-                    )
-                    tplr.logger.debug(
-                        f"Loss before (random data): {self.loss_before_per_batch_random}"
+                    tplr.log_with_context(
+                        level="debug",
+                        message=f"Loss before (random data): {self.loss_before_per_batch_random}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
                     # 9. Apply gradient and compute loss after
                     try:
@@ -1389,8 +1709,12 @@ class Validator:
                                     * self.hparams.eval_lr_factor,
                                 )
                     except Exception as e:
-                        tplr.logger.error(
-                            f"Failed to apply gradient for UID {eval_uid}: {str(e)}"
+                        tplr.log_with_context(
+                            level="error",
+                            message=f"Failed to apply gradient for UID {eval_uid}: {str(e)}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
                         continue
 
@@ -1413,9 +1737,18 @@ class Validator:
                     self.loss_after_per_batch_random = (
                         loss_after_random / n_batches if n_batches > 0 else 0
                     )
+
+                    avg_loss_before_per_batch_random += (
+                        self.loss_before_per_batch_random
+                    )
                     avg_loss_after_per_batch_random += self.loss_after_per_batch_random
-                    tplr.logger.info(
-                        f"Loss after (random data): {self.loss_after_per_batch_random}"
+
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Loss after (random data): {self.loss_after_per_batch_random}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # 11. Calculate improvements and update scores
@@ -1424,8 +1757,12 @@ class Validator:
                         self.loss_before_per_batch_random
                         - self.loss_after_per_batch_random
                     )
-                    tplr.logger.info(
-                        f"Loss improvement (random data): {self.loss_improvement_random}"
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Loss improvement (random data): {self.loss_improvement_random}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     self.relative_improvement_random = (
@@ -1433,16 +1770,24 @@ class Validator:
                         if self.loss_before_per_batch_random > 0
                         else 0.0
                     )
-                    tplr.logger.debug(
-                        f"Relative improvement (random data): {self.relative_improvement_random}"
+                    tplr.log_with_context(
+                        level="debug",
+                        message=f"Relative improvement (random data): {self.relative_improvement_random}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # Calculate original performance score (gradient quality)
                     self.gradient_scores[eval_uid] = (
                         loss_before_random - loss_after_random
                     ) / loss_before_random
-                    tplr.logger.debug(
-                        f"Gradient Score: {self.gradient_scores[eval_uid]}"
+                    tplr.log_with_context(
+                        level="debug",
+                        message=f"Gradient Score: {self.gradient_scores[eval_uid]}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # Initialize or update OpenSkill rating for this peer
@@ -1472,8 +1817,12 @@ class Validator:
                     self.binary_indicator_scores[eval_uid] = (
                         1 if improvement_own > improvement_random else -1
                     )
-                    tplr.logger.info(
-                        f"Binary Indicator Score : {self.binary_indicator_scores[eval_uid]}"
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Binary Indicator Score : {self.binary_indicator_scores[eval_uid]}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     # Update binary moving average using exponential moving average formula:
@@ -1485,8 +1834,12 @@ class Validator:
                         + self.hparams.binary_score_ma_alpha
                         * self.binary_indicator_scores[eval_uid]
                     )
-                    tplr.logger.debug(
-                        f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}"
+                    tplr.log_with_context(
+                        level="debug",
+                        message=f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                     sync_result = await self.evaluate_miner_sync(eval_uid)
@@ -1502,13 +1855,21 @@ class Validator:
                     self.evaluated_uids.add(eval_uid)
 
                     evaluated_peers += 1
-                    tplr.logger.info(
-                        f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
 
                 else:
-                    tplr.logger.info(
-                        f"No gradient received from UID {eval_uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}"
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"No gradient received from UID {eval_uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                        eval_uid=eval_uid,
                     )
                     old_score = self.final_scores[eval_uid].item()
 
@@ -1519,20 +1880,31 @@ class Validator:
                         )
 
                         new_score = self.final_scores[eval_uid].item()
-                        tplr.logger.info(
-                            f"Reduced score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient."
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Reduced score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient.",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
                     else:
-                        tplr.logger.info(
-                            f"Skipped reducing score of UID {eval_uid} (current score: {old_score:.4f}) due to negative or zero value."
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Skipped reducing score of UID {eval_uid} (current score: {old_score:.4f}) due to negative or zero value.",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                     # Ensure the UID is included in evaluated_uids
                     self.evaluated_uids.add(eval_uid)
 
                     # Log updated scores
-                    tplr.logger.info(
-                        "Updated scores for evaluated UIDs after slashing:"
+                    tplr.log_with_context(
+                        level="info",
+                        message="Updated scores for evaluated UIDs after slashing:",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
                     )
                     # Log evaluated UID scores (fixed join call)
                     line = " | ".join(
@@ -1553,12 +1925,18 @@ class Validator:
                         },
                         step=self.global_step,
                     )
-                    tplr.logger.info(
-                        f"{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights"
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
                     )
 
-                tplr.logger.info(
-                    f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation"
+                tplr.log_with_context(
+                    level="info",
+                    message=f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
 
             # Cancel any remaining preload task if exiting the loop early
@@ -1581,6 +1959,7 @@ class Validator:
             # Log scores and metrics for evaluated UIDs as a table
             headers = [
                 "UID",
+                "Last eval window",
                 "Gradient Score",
                 "Binary Indicator",
                 "Binary Moving Avg",
@@ -1597,7 +1976,8 @@ class Validator:
                     openscore_info = f"{rating.ordinal():.2f} (μ={rating.mu:.1f}, σ={rating.sigma:.1f})"
                 row = [
                     str(uid),
-                    f"{self.gradient_scores[uid]:.4f}",
+                    f"{self.peers_last_eval_window[uid]}",
+                    f"{self.gradient_scores[uid]:.6f}",
                     f"{self.binary_indicator_scores[uid]:.4f}",
                     f"{self.binary_moving_averages[uid]:.4f}",
                     f"{self.final_scores[uid]:.4f}",
@@ -1624,8 +2004,11 @@ class Validator:
                 console.print(rich_table)
                 table_str = sio.getvalue()
             except ImportError:
-                tplr.logger.warning(
-                    "rich module not found; falling back to basic formatting."
+                tplr.log_with_context(
+                    level="warning",
+                    message="rich module not found; falling back to basic formatting.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
                 col_widths = [
                     max(len(row[i]) for row in table) for i in range(len(headers))
@@ -1643,9 +2026,14 @@ class Validator:
                         lines.append(separator)
                 table_str = "\n".join(lines)
 
-            tplr.logger.info("Updated scores for evaluated UIDs:\n" + table_str)
+            tplr.log_with_context(
+                level="info",
+                message="Updated scores for evaluated UIDs:\n" + table_str,
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
 
-            # Log WandB metrics per UID
+            should_downsample = len(self.evaluated_uids) > 8
             for uid in sorted(self.evaluated_uids):
                 # Extract primitive values from tensors for WandB
                 gradient_score = float(self.gradient_scores[uid].item())
@@ -1667,7 +2055,6 @@ class Validator:
                     step=self.global_step,
                 )
 
-                # Log to InfluxDB metrics per UID with primitive types
                 self.metrics_logger.log(
                     measurement="validator_scores",
                     tags={
@@ -1685,6 +2072,7 @@ class Validator:
                     },
                     with_system_metrics=True,
                     with_gpu_metrics=True,
+                    sample_rate=0.8 if should_downsample else 1.0,
                 )
 
             # 17. Set weights periodically
@@ -1719,12 +2107,20 @@ class Validator:
             elif gather_result is not None and gather_result.state_dict is not None:
                 self.apply_gathered_gradients(gather_result=gather_result)
             else:
-                tplr.logger.warning("No gradients to apply.")
+                tplr.log_with_context(
+                    level="warning",
+                    message="No gradients to apply.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
                 self.scheduler.step()
                 torch.cuda.empty_cache()
 
-            tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - update_start)} Updated model"
+            tplr.log_with_context(
+                level="info",
+                message=f"{tplr.P(self.sync_window, tplr.T() - update_start)} Updated model",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
 
             # Add debug data including successfully gathered peers
@@ -1756,10 +2152,18 @@ class Validator:
                     local=False,
                 )
             )
-            tplr.logger.info(f"Stored debug values for window {self.current_window}")
+            tplr.log_with_context(
+                level="info",
+                message=f"Stored debug values for window {self.current_window}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
             # Log total window time and metrics
-            tplr.logger.info(
-                f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration"
+            tplr.log_with_context(
+                level="info",
+                message=f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
 
             if evaluated_peers == 0:
@@ -1837,15 +2241,23 @@ class Validator:
                 with_system_metrics=True,
                 with_gpu_metrics=True,
             )
-            tplr.logger.info("Finished metrics logging call for validator")
+            tplr.log_with_context(
+                level="info",
+                message="Finished metrics logging call for validator",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
 
             # 17. Create checkpoints periodically
             if (
                 self.global_step % self.hparams.checkpoint_frequency == 0
                 and self.global_step != 0
             ):
-                tplr.logger.info(
-                    f"Creating checkpoint at global_step {self.global_step}"
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Creating checkpoint at global_step {self.global_step}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
                 checkpoint_data = {
                     "model_state_dict": {
@@ -1879,294 +2291,139 @@ class Validator:
 
             torch.cuda.empty_cache()
 
-    def select_initial_peers(self) -> tplr.comms.PeerArray | None:
+    def select_initial_peers(self) -> list[int] | None:
+        """
+        Simple initial peer selection based on incentive.
+        1) Select peers with highest incentive
+        2) If needed, fill remaining slots with active peers
+        3) Ensure we have minimum number of peers
+        """
         try:
-            tplr.logger.info("Starting selection of initial gather peers")
-            # 1. Add top incentive peers
-            uid_to_non_zero_incentive = {
-                uid: incentive
-                for uid, incentive in zip(self.metagraph.uids, self.metagraph.I)
-                if incentive > 0 and uid in self.comms.active_peers
-            }
+            tplr.log_with_context(
+                level="info",
+                message="Starting selection of initial gather peers",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
+            # 1. Create a dictionary of active peers with non-zero incentive
+            uid_to_incentive = {}
+            for uid, incentive in zip(
+                self.metagraph.uids.tolist(), self.metagraph.I.tolist()
+            ):
+                if incentive > 0 and uid in self.comms.active_peers:
+                    uid_to_incentive[uid] = float(incentive)
+
+            # Sort by incentive (highest first) and take top peers
             top_incentive_peers = sorted(
-                uid_to_non_zero_incentive,
-                key=uid_to_non_zero_incentive.get,
+                uid_to_incentive.keys(),
+                key=lambda uid: uid_to_incentive[uid],
                 reverse=True,
             )[: self.hparams.max_topk_peers]
 
-            # Convert to list to ensure it's not a dict_keys object
-            top_incentive_peers = np.array(top_incentive_peers, dtype=np.int64)
-
-            assert len(top_incentive_peers) <= self.hparams.max_topk_peers
+            # If we have enough peers with incentive, return them
             if len(top_incentive_peers) == self.hparams.max_topk_peers:
-                tplr.logger.info(
-                    f"Selected {len(top_incentive_peers)} initial peers purely based "
-                    f"on incentive: {top_incentive_peers}"
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Selected {len(top_incentive_peers)} initial peers purely based on incentive",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
-                selected_peers = np.array(top_incentive_peers, dtype=np.int64)
-                selected_peers = np.unique(selected_peers)
-                return selected_peers
+                return top_incentive_peers
 
-            # 2. If needed, fill up with active peers
-            remaining_active_peers = np.array(
-                list(set(self.comms.active_peers) - set(top_incentive_peers))
+            # 2. If needed, fill up with active peers that don't have incentive
+            remaining_active_peers = [
+                int(peer)
+                for peer in self.comms.active_peers
+                if peer not in top_incentive_peers
+            ]
+
+            # Calculate how many more peers we need
+            needed_peers = self.hparams.max_topk_peers - len(top_incentive_peers)
+
+            # Randomly select from remaining active peers
+            additional_peers = random.sample(
+                remaining_active_peers, min(len(remaining_active_peers), needed_peers)
             )
-            top_incentive_and_active_peers = np.concatenate(
-                [top_incentive_peers, remaining_active_peers]
-            )[: self.hparams.max_topk_peers]
 
-            assert len(top_incentive_and_active_peers) <= self.hparams.max_topk_peers
-            if len(top_incentive_and_active_peers) >= self.hparams.minimum_peers:
-                tplr.logger.info(
-                    f"Selected {len(top_incentive_and_active_peers)} initial peers. "
-                    f"{len(top_incentive_peers)} with incentive: {top_incentive_peers} "
-                    f"and {len(top_incentive_and_active_peers) - len(top_incentive_peers)} without: "
-                    f"{remaining_active_peers[: len(top_incentive_and_active_peers) - len(top_incentive_peers)]}"
+            # Combine the lists
+            selected_peers = top_incentive_peers + additional_peers
+
+            # Ensure we have enough peers
+            if len(selected_peers) >= self.hparams.minimum_peers:
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Selected {len(selected_peers)} initial peers: "
+                    f"{len(top_incentive_peers)} with incentive and "
+                    f"{len(additional_peers)} without incentive",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
-                selected_peers = np.array(
-                    top_incentive_and_active_peers, dtype=np.int64
-                )
-                selected_peers = np.unique(selected_peers)
+                # No need to remove duplicates as we ensured lists don't overlap
                 return selected_peers
 
-            # 3. Give up
-            tplr.logger.info(
-                f"Failed to select at least {self.hparams.minimum_peers} initial gather "
-                f"peers. Found only {len(top_incentive_and_active_peers)} active "
-                f"peers, of which {len(top_incentive_peers)} had incentive and "
-                f"{len(top_incentive_and_active_peers) - len(top_incentive_peers)} "
-                f"were incentiveless active peers."
+            # 3. If we don't have enough peers, give up
+            tplr.log_with_context(
+                level="info",
+                message=f"Failed to select at least {self.hparams.minimum_peers} initial gather "
+                f"peers. Found only {len(selected_peers)} active peers, of which "
+                f"{len(top_incentive_peers)} had incentive and "
+                f"{len(additional_peers)} were incentiveless active peers.",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
             return None
 
         except Exception as e:
-            tplr.logger.error(f"Failed to create new peer list: {e}")
+            tplr.log_with_context(
+                level="error",
+                message=f"Failed to create new peer list: {e}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
             return None
 
-    @staticmethod
-    def _replace_peers(
-        old: tplr.comms.PeerArray,
-        ingoing: tplr.comms.PeerArray,
-        outgoing: tplr.comms.PeerArray,
-    ) -> tplr.comms.PeerArray:
-        """Removes `outgoing` and adds `ingoing` from `old`.
-
-        `ingoing` and `outgoing` don't need to be the same length.
+    def select_next_peers(self) -> list[int] | None:
         """
-        old_without_outgoing = np.setdiff1d(old, outgoing)
-        return np.concatenate([old_without_outgoing, ingoing])
-
-    def select_next_peers(self) -> tplr.comms.PeerArray | None:
+        Simple peer selection that prioritizes the highest weights.
+        1) Get all active peers
+        2) Sort them by weight (highest first)
+        3) Select up to max_topk_peers
+        4) If not enough high-weight peers, fill remaining with random active peers
         """
-        1) Drop inactive gather peers and fill up to max_topk_peers with active
-        ones. Use non-zero-weights if possible. Abort selection if there are
-        less than `minimum_peers` in total. Continue if there are still
-        candidates.
-        2) Replace peers with zero weight with ones with non-zero weight. Both
-        current gather peers and peers added in the previous step can be
-        dropped. Continue if there are still candidates.
-        3) Replace at least 1, at most peers_to_replace original gather peers.
-        Note that both the the outgoing and the ingoing peer(s) are guaranteed
-        to have non-zero weight due to the previous steps.
-        """
+        # Get all active peers as a list
+        active_peers = [int(peer) for peer in self.comms.active_peers]
 
-        old_peers = self.comms.peers
+        # Check if we have enough active peers
+        if len(active_peers) < self.hparams.minimum_peers:
+            tplr.log_with_context(
+                level="info",
+                message=f"Not enough active peers ({len(active_peers)}) to meet minimum requirement ({self.hparams.minimum_peers})",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            return None
 
-        # ----------------------------------------------------------------------
-        # 0. Identify candidate peers:
-        #    - active,
-        #    - non-zero weight,
-        #    - not already a gather peer
-        # ----------------------------------------------------------------------
-        non_zero_weight_uids = torch.nonzero(self.weights.cpu()).flatten().numpy()
-        active_non_zero_weight_uids = np.intersect1d(
-            list(self.comms.active_peers),
-            non_zero_weight_uids,
-        )
-        candidates = np.setdiff1d(active_non_zero_weight_uids, old_peers)
-        num_initial_candidates = len(candidates)
-        tplr.logger.info(
-            f"Starting off with {num_initial_candidates} initial candidates."
+        # Create list of (peer_id, weight) tuples
+        peer_weights = []
+        for peer_id in active_peers:
+            weight = float(self.weights.cpu()[peer_id])
+            peer_weights.append((peer_id, weight))
+
+        # Sort by weight (highest first)
+        peer_weights.sort(key=lambda x: x[1], reverse=True)
+
+        # Take peers with highest weights first
+        highest_weight_count = min(len(peer_weights), self.hparams.max_topk_peers)
+        selected_peers = [peer_id for peer_id, _ in peer_weights[:highest_weight_count]]
+
+        tplr.log_with_context(
+            level="info",
+            message=f"Selected {len(selected_peers)} peers based on highest weights",
+            sync_window=self.sync_window,
+            current_window=self.current_window,
         )
 
-        # ----------------------------------------------------------------------
-        # 1. Drop inactive gather peers, fill up with active peers
-        # ----------------------------------------------------------------------
-        active_gather_peers = np.intersect1d(old_peers, list(self.comms.active_peers))
-        inactive_gather_peers = np.setdiff1d(old_peers, active_gather_peers)
-        selected_peers = old_peers
-        if (
-            len(inactive_gather_peers) == 0
-            and len(selected_peers) == self.hparams.max_topk_peers
-        ):
-            if len(candidates) == 0:
-                tplr.logger.info(
-                    "Step 1: Peer list already full of active peers but there are no "
-                    "candidates, aborting selection"
-                )
-                return None
-            tplr.logger.info(
-                "Step 1: Peer list already full of active peers, continuing"
-            )
-        else:
-            # use random subset of candidates
-            if len(candidates) > self.hparams.max_topk_peers - len(active_gather_peers):
-                ingoing = np.random.choice(
-                    candidates,
-                    size=self.hparams.max_topk_peers - len(active_gather_peers),
-                    replace=False,
-                )
-            # use all candidates
-            elif (
-                len(active_gather_peers) + len(candidates)
-                >= self.hparams.max_topk_peers
-            ):
-                ingoing = candidates
-            # use all candidates plus some secondary candidates
-            # edge case: we need to use zero-weight peers to get max_topk_peers active peers
-            else:
-                secondary_candidates = np.setdiff1d(
-                    list(self.comms.active_peers), candidates
-                )
-                # even bigger edge case: we still can't reach minimum peers
-                if (
-                    len(active_gather_peers)
-                    + len(candidates)
-                    + len(secondary_candidates)
-                    < self.hparams.minimum_peers
-                ):
-                    tplr.logger.info(
-                        f"There are only {len(self.comms.active_peers)} active peers"
-                        f"in total, which is less than the minimum amount "
-                        f"{self.hparams.minimum_peers}, aborting selection"
-                    )
-                    return None
-                num_needed_secondary_candidates = (
-                    self.hparams.max_topk_peers
-                    - len(active_gather_peers)
-                    - len(candidates)
-                )
-                ingoing_secondary_candidates = (
-                    secondary_candidates
-                    if len(secondary_candidates) < num_needed_secondary_candidates
-                    else np.random.choice(
-                        secondary_candidates,
-                        size=num_needed_secondary_candidates,
-                        replace=False,
-                    )
-                )
-                ingoing = np.concatenate([candidates, ingoing_secondary_candidates])
-                tplr.logger.info(
-                    f"Using {len(candidates)} candidates and "
-                    f"{len(ingoing_secondary_candidates)} secondary candidates"
-                )
-            selected_peers = self._replace_peers(
-                old_peers, ingoing, inactive_gather_peers
-            )
-            # if we've used all candidates, we're done
-            if len(ingoing) >= len(candidates):
-                tplr.logger.info(
-                    f"Step 1: We've used all candidates, returning {len(selected_peers)} "
-                    "selected peers."
-                )
-                selected_peers = np.array(selected_peers, dtype=np.int64)
-                selected_peers = np.unique(selected_peers)
-                return selected_peers
-            # else, update the candidates
-            else:
-                tplr.logger.info(
-                    f"Finished step 1: Dropped {len(inactive_gather_peers)} inactive "
-                    f"peers and added {len(ingoing)} active ones. We now have "
-                    f"{len(selected_peers)} selected peers"
-                )
-                candidates = np.setdiff1d(candidates, ingoing)
-
-        # ----------------------------------------------------------------------
-        # 2. Drop zero-weight gather peers
-        # ----------------------------------------------------------------------
-        zero_weight_selected_peers = np.setdiff1d(selected_peers, non_zero_weight_uids)
-        original_peers_left = np.intersect1d(old_peers, selected_peers)
-        if len(zero_weight_selected_peers) == 0:
-            tplr.logger.info("Step 2: No zero-weight peers to drop, continuing")
-        else:
-            # if we have enough candidates to replace all zero-weight peers, do it
-            if len(candidates) >= len(zero_weight_selected_peers):
-                outgoing = zero_weight_selected_peers
-                ingoing = (
-                    candidates
-                    if len(candidates) == len(outgoing)
-                    else np.random.choice(
-                        candidates,
-                        size=len(outgoing),
-                        replace=False,
-                    )
-                )
-            # else replace as many as we have candidates
-            else:
-                ingoing = candidates
-                outgoing = np.random.choice(
-                    zero_weight_selected_peers,
-                    size=len(ingoing),
-                    replace=False,
-                )
-            selected_peers = self._replace_peers(selected_peers, ingoing, outgoing)
-            candidates = np.setdiff1d(candidates, ingoing)
-            original_peers_left = np.intersect1d(old_peers, selected_peers)
-            if (
-                # no more candidates
-                len(candidates) == 0
-                # all selected peers are new
-                or len(original_peers_left) == 0
-            ):
-                tplr.logger.info(
-                    f"Step 2: No more candidates, returning {len(selected_peers)} "
-                    "selected peers."
-                )
-                selected_peers = np.array(selected_peers, dtype=np.int64)
-                selected_peers = np.unique(selected_peers)
-                return selected_peers
-            tplr.logger.info(
-                "Finished step 2 (dropped zero-weight peers) and we now have "
-                f"{len(selected_peers)} selected peers"
-            )
-
-        # ----------------------------------------------------------------------
-        # 3. Replace at least 1, at most peers_to_replace original gather peers
-        # ----------------------------------------------------------------------
-        outgoing = (
-            original_peers_left
-            if len(original_peers_left) <= len(candidates)
-            and len(original_peers_left) <= self.hparams.peers_to_replace
-            else np.random.choice(
-                original_peers_left,
-                size=min(
-                    [
-                        len(candidates),
-                        self.hparams.peers_to_replace,
-                    ]
-                ),
-                replace=False,
-            )
-        )
-        ingoing = (
-            candidates
-            if len(candidates) == len(outgoing)
-            else np.random.choice(
-                candidates,
-                size=len(outgoing),
-                replace=False,
-            )
-        )
-        selected_peers = self._replace_peers(selected_peers, ingoing, outgoing)
-        tplr.logger.info(
-            f"Finished step 3 (replaced {len(outgoing)} peers with non-zero weight) "
-            f"and we now have {len(selected_peers)} selected peers"
-        )
-        tplr.logger.info(
-            f"Step 3: Done, returning {len(selected_peers)} selected peers."
-        )
-        selected_peers = np.array(selected_peers, dtype=np.int64)
-        selected_peers = np.unique(selected_peers)
         return selected_peers
 
     async def evaluate_miner_sync(
@@ -2251,7 +2508,12 @@ class Validator:
 
             state_dict = aggregation_result.get("state_dict")
             if state_dict is None:
-                tplr.logger.warning("No state_dict found in aggregation result")
+                tplr.log_with_context(
+                    level="warning",
+                    message="No state_dict found in aggregation result",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
                 return False
 
             tensors_applied = 0
@@ -2279,8 +2541,11 @@ class Validator:
                     tensors_applied += 1
 
             if tensors_applied > 0:
-                tplr.logger.info(
-                    f"Set gradients for {tensors_applied} tensors in {time.time() - update_start:.2f}s"
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Set gradients for {tensors_applied} tensors in {time.time() - update_start:.2f}s",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
 
                 # Update parameters with optimizer
@@ -2288,14 +2553,29 @@ class Validator:
                 self.scheduler.step()
                 torch.cuda.empty_cache()
 
-                tplr.logger.info("Successfully applied aggregation")
+                tplr.log_with_context(
+                    level="info",
+                    message="Successfully applied aggregation",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
                 return True
             else:
-                tplr.logger.warning("No tensors were applied during aggregation")
+                tplr.log_with_context(
+                    level="warning",
+                    message="No tensors were applied during aggregation",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
                 return False
 
         except Exception as e:
-            tplr.logger.error(f"Error applying aggregated gradients: {e}")
+            tplr.log_with_context(
+                level="error",
+                message=f"Error applying aggregated gradients: {e}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
             return False
 
     def apply_gathered_gradients(self, gather_result: SimpleNamespace):
@@ -2340,7 +2620,12 @@ class Validator:
                     p.grad.copy_(new_grad)
                 p.grad.sign_()
             else:
-                tplr.logger.info(f"Gradient data missing for parameter {n}, skipping.")
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Gradient data missing for parameter {n}, skipping.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
         self.optimizer.step()
         self.scheduler.step()
         torch.cuda.empty_cache()
@@ -2377,10 +2662,16 @@ class Validator:
         Exceptions during saving are caught and logged as warnings.
         """
         try:
-            tplr.logger.info("Saving validator state")
+            tplr.log_with_context(
+                level="info",
+                message="Saving validator state",
+            )
             torch.save(self._state_dict(), self.state_path)
         except Exception as e:
-            tplr.logger.warning(f"Failed to save validator state: {e}")
+            tplr.log_with_context(
+                level="warning",
+                message=f"Failed to save validator state: {e}",
+            )
 
     def load_state(self):
         """Loads the validator state from disk.
@@ -2475,7 +2766,12 @@ class Validator:
 
         try:
             # Generate pages based on seed
-            tplr.logger.info(f"Generating pages for {context_id}")
+            tplr.log_with_context(
+                level="info",
+                message=f"Generating pages for {context_id}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
             local_pages = await retry_call(
                 tplr.r2_dataset.R2DatasetLoader.next_pages,
                 offset=self.sync_window * self.hparams.pages_per_window,
@@ -2488,15 +2784,21 @@ class Validator:
             )
 
             if local_pages is None:
-                tplr.logger.error(
-                    f"Failed to load pages for {context_id}. Cannot preload dataloader."
+                tplr.log_with_context(
+                    level="error",
+                    message=f"Failed to load pages for {context_id}. Cannot preload dataloader.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
                 return None
 
             # Log which pages we're using
             page_ids = [p[1] for p in local_pages]
-            tplr.logger.info(
-                f"Creating dataloader for {context_id} using pages: {page_ids}"
+            tplr.log_with_context(
+                level="info",
+                message=f"Creating dataloader for {context_id} using pages: {page_ids}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
 
             # Create the evaluation loader using the generated pages
@@ -2513,19 +2815,189 @@ class Validator:
             )
 
             if loader is None:
-                tplr.logger.error(
-                    f"Failed to create loader for {context_id} with valid pages."
+                tplr.log_with_context(
+                    level="error",
+                    message=f"Failed to create loader for {context_id} with valid pages.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
                 )
                 return None
 
-            tplr.logger.info(
-                f"Successfully preloaded dataloader for {context_id} with pages: {page_ids}"
+            tplr.log_with_context(
+                level="info",
+                message=f"Successfully preloaded dataloader for {context_id} with pages: {page_ids}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
             )
 
             return {"loader": loader, "pages": local_pages, "is_random": is_random}
         except Exception as e:
-            tplr.logger.error(f"Error preloading data for {context_id}: {str(e)}")
+            tplr.log_with_context(
+                level="error",
+                message=f"Error preloading data for {context_id}: {str(e)}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
             return None
+
+    def bin_evaluation_peers(self, num_bins: int) -> dict[int, list[int]]:
+        """
+        Bins evaluation peers based on their performance metrics.
+        Peers are grouped into bins of similar performance.
+
+        Args:
+            num_bins (int): Number of bins to divide peers into
+
+        Returns:
+            dict: Dictionary mapping bin indices to lists of peer UIDs
+        """
+        # Get all active peers
+        active_peers = list(self.eval_peers.keys())
+
+        # If we don't have enough peers, return a single bin with all peers
+        if len(active_peers) < num_bins * self.hparams.uids_per_window:
+            tplr.log_with_context(
+                level="info",
+                message=f"Not enough active peers ({len(active_peers)}) for {num_bins} bins. Using single bin.",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            return {0: active_peers}
+
+        # Collect performance metrics for binning
+        peer_metrics = []
+        for uid in active_peers:
+            metric = (
+                float(self.final_scores[uid].item())
+                if uid < len(self.final_scores)
+                else 0.0
+            )
+            peer_metrics.append((uid, metric))
+
+        # Sort peers by metric (highest first)
+        peer_metrics.sort(key=lambda x: x[1], reverse=True)
+        sorted_peers = [uid for uid, _ in peer_metrics]
+
+        total_peers = len(sorted_peers)
+        peers_per_bin = total_peers // num_bins
+        remainder = total_peers % num_bins
+
+        # Create bins with all peers distributed
+        bins = {}
+        start_idx = 0
+
+        for i in range(num_bins):
+            # Add one extra peer to the first 'remainder' bins
+            bin_size = peers_per_bin + (1 if i < remainder else 0)
+            end_idx = start_idx + bin_size
+
+            # Skip empty bins
+            if start_idx >= len(sorted_peers):
+                continue
+
+            # Ensure we don't go beyond the array bounds
+            end_idx = min(end_idx, len(sorted_peers))
+
+            bins[i] = sorted_peers[start_idx:end_idx]
+            start_idx = end_idx
+
+        # Verify all peers are assigned
+        total_assigned = sum(len(peers) for peers in bins.values())
+        if total_assigned != total_peers:
+            tplr.log_with_context(
+                level="warning",
+                message=f"Bin assignment error: {total_assigned} peers assigned out of {total_peers}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
+        # Log the bins for debugging
+        for bin_idx, peer_list in bins.items():
+            tplr.log_with_context(
+                level="info",
+                message=f"Bin {bin_idx} (size {len(peer_list)}): {peer_list}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
+        return bins
+
+    def select_next_bin_for_evaluation(self, num_bins: int) -> int:
+        """
+        Determine which bin should be evaluated in the current window.
+        We rotate through bins sequentially, keeping track of the last evaluated bin.
+
+        Args:
+            num_bins (int): Total number of bins
+
+        Returns:
+            int: The bin index to evaluate in this window
+        """
+        # Initialize bin rotation tracking if not present
+        if not hasattr(self, "last_evaluated_bin"):
+            self.last_evaluated_bin = -1
+
+        # Rotate to the next bin
+        next_bin = (self.last_evaluated_bin + 1) % num_bins
+
+        # Update for next window
+        self.last_evaluated_bin = next_bin
+
+        tplr.log_with_context(
+            level="info",
+            message=f"Selected bin {next_bin} for evaluation in window {self.sync_window}",
+            sync_window=self.sync_window,
+            current_window=self.current_window,
+        )
+
+        return next_bin
+
+    def select_evaluation_uids_from_bin(
+        self, bins: dict[int, list[int]], bin_idx: int
+    ) -> list[int]:
+        """
+        Selects peers for evaluation from a specific bin using weighted sampling.
+
+        Args:
+            bins (dict): Dictionary mapping bin indices to lists of peer UIDs
+            bin_idx (int): The specific bin to select peers from
+
+        Returns:
+            list: Selected UIDs for evaluation
+        """
+        # Ensure the bin exists
+        if bin_idx not in bins:
+            tplr.log_with_context(
+                level="warning",
+                message=f"Bin {bin_idx} not found. Using bin 0 instead.",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            bin_idx = 0
+
+        # Get peers in the selected bin
+        bin_peers = bins[bin_idx]
+
+        # Get weights for weighted sampling
+        candidate_uids = list(bin_peers)
+        candidate_weights = [self.eval_peers[uid] for uid in candidate_uids]
+
+        # Determine how many peers to select (either all in the bin or uids_per_window)
+        k = min(self.hparams.uids_per_window, len(candidate_uids))
+
+        # Use weighted random sampling
+        selected_uids = self.comms.weighted_random_sample_no_replacement(
+            candidate_uids, candidate_weights, k
+        )
+
+        tplr.log_with_context(
+            level="info",
+            message=f"Selected {len(selected_uids)} evaluation UIDs from bin {bin_idx}",
+            sync_window=self.sync_window,
+            current_window=self.current_window,
+        )
+
+        return selected_uids
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):

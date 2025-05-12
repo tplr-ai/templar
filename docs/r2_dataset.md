@@ -105,7 +105,40 @@ EOF
 
 This validates that all shards have been properly uploaded with the correct sizes and hashes. Review the validation results to ensure your dataset is complete and correct.
 
-### 4. Configure Your Miner to Use the Dataset
+### 4. Update the _shard_sizes.json `path` values
+
+Before proceeding, you need to modify the `_shard_sizes.json` file to ensure it references your specific bucket name. By default, the paths in this file use `dataset/mlfoundations-dclm-baseline-1.0-parquet/...`, but you need to replace `dataset` with your actual bucket name.
+
+**Option 1: Using sed:**
+
+```bash
+# Replace "dataset" with your bucket name
+sed -i 's|"dataset/mlfoundations-dclm-baseline-1.0-parquet/|"'$DATABUCKET'/mlfoundations-dclm-baseline-1.0-parquet/|g' _shard_sizes.json
+```
+
+**Option 2: Using Python:**
+
+```python
+import json
+
+# Load the file
+with open("_shard_sizes.json", "r") as f:
+    data = json.load(f)
+
+# Replace paths (replace "dataset" with your actual bucket name)
+updated_data = {}
+for k, v in data.items():
+    new_key = k.replace("dataset/", f"{DATABUCKET}/")
+    updated_data[new_key] = v
+
+# Save back to file
+with open("_shard_sizes.json", "w") as f:
+    json.dump(updated_data, f, indent=2)
+```
+
+This step is critical to ensure that your miner can properly locate and load the dataset files from your specific bucket.
+
+### 5. Configure Your Miner to Use the Dataset
 
 Set these environment variables for your miner to connect to your Cloudflare R2 bucket:
 
@@ -118,9 +151,60 @@ export R2_DATASET_READ_SECRET_ACCESS_KEY=...
 
 **Note**: For security, create separate read-only API keys for your miner. Never use your write access keys for the miner.
 
-### 5. Clear Local Cache (if needed)
+### 6. Upload Metadata Files to Your R2 Bucket
 
-If you've run the miner previously with a different dataset configuration:
+You must upload the `_shard_sizes.json` and `_metadata.yaml` files to your R2 bucket in the `mlfoundations-dclm-baseline-1.0-parquet` directory. You can use one of the following methods:
+
+**Option 1: Using Python boto3:**
+
+```python
+import boto3
+import json
+import os
+
+s3 = boto3.client(
+    service_name="s3",
+    endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+    aws_access_key_id=os.getenv("R2_WRITE_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("R2_WRITE_SECRET_ACCESS_KEY"),
+    region_name="auto"
+)
+
+with open("_shard_sizes.json", "rb") as f:
+    s3.upload_fileobj(f, DATABUCKET, "mlfoundations-dclm-baseline-1.0-parquet/_shard_sizes.json")
+
+with open("_metadata.yaml", "rb") as f:
+    s3.upload_fileobj(f, DATABUCKET, "mlfoundations-dclm-baseline-1.0-parquet/_metadata.yaml")
+```
+
+**Option 2: Using rclone:**
+
+```bash
+# Configure rclone for your R2 if you haven't done already
+# example command to create a config file:
+# rclone config create r2 s3 \
+#   provider=Cloudflare \
+#   access_key_id=$R2_WRITE_ACCESS_KEY_ID \
+#   secret_access_key=$R2_WRITE_SECRET_ACCESS_KEY \
+#   endpoint=https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com
+
+# Upload files
+rclone copy _shard_sizes.json r2-dataset:$DATABUCKET/mlfoundations-dclm-baseline-1.0-parquet/
+rclone copy _metadata.yaml r2-dataset:$DATABUCKET/mlfoundations-dclm-baseline-1.0-parquet/
+```
+
+**Option 3: Manual Upload via Cloudflare Dashboard:**
+
+1. Log in to your Cloudflare dashboard
+2. Navigate to R2 > Your bucket (e.g., "dataset")
+3. Browse to the "mlfoundations-dclm-baseline-1.0-parquet" directory
+4. Drag & drop to upload both `_shard_sizes.json` and `_metadata.yaml` files
+
+This step is required to ensure your miner can properly access and use the dataset metadata.
+
+### 7. Clear Local Cache (Required)
+
+After uploading the metadata files, you must clear your local cache to force the miner to download the new metadata on its next run:
 
 ```bash
 rm -rf ./.cache/tplr/*

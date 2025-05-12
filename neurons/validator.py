@@ -3085,7 +3085,19 @@ async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
     """
     for attempt in range(attempts):
         try:
-            return await func(*args, **kwargs)
+            if asyncio.iscoroutinefunction(func):
+
+                def wrapper(*w_args, **w_kwargs):
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        return loop.run_until_complete(func(*w_args, **w_kwargs))
+                    finally:
+                        loop.close()
+
+                return await asyncio.to_thread(wrapper, *args, **kwargs)
+            else:
+                return await asyncio.to_thread(func, *args, **kwargs)
         except Exception as e:
             tplr.logger.error(
                 f"Attempt {attempt + 1}/{attempts} failed for {context}: {e}"

@@ -61,22 +61,14 @@ go version
 # Start the download process
 go run main.go \
   -d "mlfoundations/dclm-baseline-1.0-parquet" \
-  --branch main \
-  --hf-prefix "filtered/OH_eli5_vs_rw_v2_bigram_200k_train/fasttext_openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train/processed_data" \
-  --r2-subfolder "dclm-dataset" \
-  --r2 --skip-local \
-  --r2-bucket $DATABUCKET \
-  -c $CPUCOUNT
+  --r2 --skip-local -c $CPUCOUNT \
+  --r2-bucket $DATABUCKET
 
 # After the first download completes, run it again to verify and download any missing files
 go run main.go \
   -d "mlfoundations/dclm-baseline-1.0-parquet" \
-  --branch main \
-  --hf-prefix "filtered/OH_eli5_vs_rw_v2_bigram_200k_train/fasttext_openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train/processed_data" \
-  --r2-subfolder "dclm-dataset" \
-  --r2 --skip-local \
-  --r2-bucket $DATABUCKET \
-  -c $CPUCOUNT
+  --r2 --skip-local -c $CPUCOUNT \
+  --r2-bucket $DATABUCKET
 ```
 
 ![image](https://github.com/user-attachments/assets/f9235ac7-9861-4253-a7aa-24feca5e96ef)
@@ -84,6 +76,8 @@ go run main.go \
 ![image](https://github.com/user-attachments/assets/a99737d1-259e-433d-9dcd-71e921c04e4c)
 
 ### 3. Validate the Dataset
+
+**Note: to run the validation script, you need to have [uv installed](https://docs.astral.sh/uv/getting-started/installation/).**
 
 After completing the download, validate that your uploaded dataset matches the expected file sizes and hashes:
 
@@ -104,8 +98,7 @@ EOF
   --r2-bucket dataset \
   --r2-account-id $R2_ACCOUNT_ID \
   --r2-access-key-id $R2_READ_ACCESS_KEY_ID \
-  --r2-access-key-secret $R2_READ_SECRET_ACCESS_KEY \
-  --original-prefix "filtered/OH_eli5_vs_rw_v2_bigram_200k_train/fasttext_openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train/processed_data"
+  --r2-access-key-secret $R2_READ_SECRET_ACCESS_KEY
 ```
 
 ![image](https://github.com/user-attachments/assets/0f68675f-d5b7-463b-b06e-318c1b0555c6)
@@ -140,7 +133,7 @@ rm -rf ./.cache/tplr/*
 1. **Download Interruption**: If your download is interrupted or times out, simply rerun the command. The downloader is designed to resume from where it left off, verifying existing files and continuing the process.
 
 2. **Validation Failures**: If validation fails, check:
-   - Your R2 bucket structure (should have "dclm-dataset" subfolder)
+   - Your R2 bucket structure (should have "mlfoundations-dclm-baseline-1.0-parquet" subfolder)
    - Network connectivity during download
    - Cloudflare R2 permissions
 

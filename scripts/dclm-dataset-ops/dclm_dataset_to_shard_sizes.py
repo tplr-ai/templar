@@ -25,13 +25,13 @@ from collections import defaultdict
 from typing import Any, Dict, List
 
 # Path to your input CSV
-INPUT_CSV = "dclm-dataset.csv"
+INPUT_CSV = "mlfoundations-dclm-baseline-1.0-parquet.csv"
 
 # Path to write the JSON manifest
 OUTPUT_JSON = "_shard_sizes.json"
 
 # Fixed dataset root to prefix every shard path
-DATASET_ROOT = "dataset/dclm-dataset"
+DATASET_ROOT = "dataset/mlfoundations-dclm-baseline-1.0-parquet"
 
 
 def build_manifest(csv_path: str) -> Dict[str, Any]:

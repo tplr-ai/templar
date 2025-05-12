@@ -1224,7 +1224,9 @@ class Validator:
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                next_uid_dataloader_task = await self.preload_dataloader(seed=next_uid)
+                next_uid_dataloader_task = asyncio.create_task(
+                    self.preload_dataloader(seed=next_uid)
+                )
 
             # Process each UID with sliding window loading
             while next_uid is not None:
@@ -1241,21 +1243,6 @@ class Validator:
                         eval_uid=eval_uid,
                     )
                     continue
-
-                # Start loading the next UID if there are more in the queue
-                next_uid = None
-                next_uid_dataloader_task = None
-                if evaluation_uids_queue:
-                    next_uid = evaluation_uids_queue.pop(0)
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"Starting preload for next UID: {next_uid}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                    next_uid_dataloader_task = asyncio.create_task(
-                        self.preload_dataloader(seed=next_uid)
-                    )
 
                 tplr.log_with_context(
                     level="info",
@@ -1282,6 +1269,20 @@ class Validator:
                 data_start = tplr.T()
                 try:
                     loader_data = await eval_uid_dataloader_task
+                    # Start loading the next UID if there are more in the queue
+                    next_uid = None
+                    next_uid_dataloader_task = None
+                    if evaluation_uids_queue:
+                        next_uid = evaluation_uids_queue.pop(0)
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Starting preload for next UID: {next_uid}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+                        next_uid_dataloader_task = asyncio.create_task(
+                            self.preload_dataloader(seed=next_uid)
+                        )
                 except Exception as e:
                     tplr.log_with_context(
                         level="error",

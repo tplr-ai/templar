@@ -78,7 +78,7 @@ class R2DatasetLoader(DatasetLoader):
 
     # Static configuration
     PREFETCH_SIZE = 3  # Number of pages to prefetch
-    MAX_CONCURRENT_REQUESTS = 8  # Increased from 4
+    MAX_CONCURRENT_REQUESTS = 128  # Increased from 4
     BATCH_SIZE = 128  # Increased batch size for tokenization
     READ_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB read buffer
 

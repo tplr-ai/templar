@@ -187,7 +187,7 @@ class SubsetLoader(IterableDataset):
 
 
 class DatasetLoader(SubsetLoader):
-    name: str = "mlfoundations/dclm-baseline-1.0-parquet"
+    name: str = "HuggingFaceFW/fineweb-edu-score-2"
     rows_base_url: str = "https://datasets-server.huggingface.co/rows"
     size_base_url: str = "https://datasets-server.huggingface.co/size"
 

@@ -30,6 +30,7 @@ import yaml
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
+from tplr.shard_index import ShardIndex
 
 
 class R2DatasetLoader(DatasetLoader):
@@ -65,6 +66,8 @@ class R2DatasetLoader(DatasetLoader):
     _shard_sizes = None
     _metadata_config = None
     _local_cache_dir = Path(".cache/tplr")
+
+    _shard_index: ShardIndex = None
 
     # Add class-level caching for filesystem and tokenizer results
     _fs_instance = None
@@ -187,7 +190,7 @@ class R2DatasetLoader(DatasetLoader):
 
         try:
             # Use _load_r2_metadata to get both metadata and shard sizes
-            shard_sizes, metadata_config = await R2DatasetLoader._load_r2_metadata()
+            shard_sizes, metadata_config, _ = await R2DatasetLoader._load_r2_metadata()
 
             # Build configs data from both files
             configs_data = {}
@@ -285,6 +288,7 @@ class R2DatasetLoader(DatasetLoader):
             return (
                 R2DatasetLoader._shard_sizes,
                 R2DatasetLoader._metadata_config,
+                R2DatasetLoader._shard_index,
             )
 
         fs = R2DatasetLoader._get_fs()
@@ -322,9 +326,12 @@ class R2DatasetLoader(DatasetLoader):
             with open(local_paths["metadata"]) as f:
                 R2DatasetLoader._metadata_config = yaml.safe_load(f)
 
+            R2DatasetLoader._shard_index = ShardIndex(R2DatasetLoader._shard_sizes)
+
             return (
                 R2DatasetLoader._shard_sizes,
                 R2DatasetLoader._metadata_config,
+                R2DatasetLoader._shard_index,
             )
 
         except Exception as e:
@@ -409,28 +416,20 @@ class R2DatasetLoader(DatasetLoader):
 
                 metadata = self._metadata_cache.get(config_name)
                 if not metadata:
-                    shard_sizes, _ = await self._load_r2_metadata()
+                    shard_sizes, _, _ = await self._load_r2_metadata()
                     metadata = shard_sizes[config_name]
                     self._metadata_cache[config_name] = metadata
 
-                # Find exact shard based on page_number
-                cumulative_rows = 0
-                chosen_shard = None
-                for shard in metadata["shards"]:
-                    if (
-                        cumulative_rows
-                        <= page_number
-                        < cumulative_rows + shard["num_rows"]
-                    ):
-                        chosen_shard = shard
-                        break
-                    cumulative_rows += shard["num_rows"]
-
-                if not chosen_shard:
-                    raise ValueError(f"Could not find shard for page {page_number}")
-
-                # Calculate offset within shard
-                shard_offset = page_number - cumulative_rows
+                try:
+                    chosen_shard, shard_offset, _ = (
+                        R2DatasetLoader._shard_index.find_shard(
+                            config_name, page_number
+                        )
+                    )
+                except ValueError as e:
+                    raise ValueError(
+                        f"Could not find shard for page {page_number}: {e}"
+                    )
 
                 # Read data from exact position
                 pf_data = self._parquet_cache.get(chosen_shard["path"])

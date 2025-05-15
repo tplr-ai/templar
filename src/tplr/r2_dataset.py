@@ -18,11 +18,14 @@
 
 import asyncio
 import json
+import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
+import pyarrow
 import pyarrow.parquet as pq
 import s3fs
 import yaml
@@ -30,7 +33,12 @@ import yaml
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
+from tplr.profilers import get_shard_profiler, get_timer_profiler
 from tplr.shard_index import ShardIndex
+
+_timer_profiler = get_timer_profiler("R2DatasetLoader")
+
+pyarrow.set_io_thread_count(os.cpu_count())
 
 
 class R2DatasetLoader(DatasetLoader):
@@ -59,7 +67,7 @@ class R2DatasetLoader(DatasetLoader):
     rows_base_url = None
     size_base_url = None
     _configs_data_cache = None
-    DATASET_SUBFOLDER = "HuggingFaceFW_fineweb-edu-score-2"
+    DATASET_SUBFOLDER = "dclm-baseline-1.0-parquet-optimized-2"
     CF_REGION_NAME = "enam"
 
     # Cache for metadata
@@ -81,9 +89,9 @@ class R2DatasetLoader(DatasetLoader):
 
     # Static configuration
     PREFETCH_SIZE = 3  # Number of pages to prefetch
-    MAX_CONCURRENT_REQUESTS = 128  # Increased from 4
+    MAX_CONCURRENT_REQUESTS = 32  # Number of concurrent requests to R2
     BATCH_SIZE = 128  # Increased batch size for tokenization
-    READ_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB read buffer
+    READ_BUFFER_SIZE = 32 * 1024 * 1024  # 32MB read buffer
 
     # Class-level caches with size limits
     _metadata_cache = {}
@@ -95,6 +103,7 @@ class R2DatasetLoader(DatasetLoader):
     _round_robin_index = 0  # global counter for dataset round-robin selection
     _fs_cache = {}  # maps account_id to a cached s3fs.S3FileSystem
     _fs_lock = threading.Lock()  # lock for fs cache and round robin
+    _executor = None  # ThreadPoolExecutor for CPU-bound tasks
 
     def __init__(
         self,
@@ -131,6 +140,16 @@ class R2DatasetLoader(DatasetLoader):
         self._current_batch = None
         self._next_batch = None
         self._prefetch_queue = asyncio.Queue(maxsize=self.PREFETCH_SIZE)
+
+    @classmethod
+    def get_executor(cls):
+        """Get or create a shared ThreadPoolExecutor"""
+        if cls._executor is None:
+            cls._executor = ThreadPoolExecutor(
+                max_workers=cls.MAX_CONCURRENT_REQUESTS,
+                thread_name_prefix="R2DatasetLoader",
+            )
+        return cls._executor
 
     def _get_pad_size(self, input_ids):
         """
@@ -218,6 +237,7 @@ class R2DatasetLoader(DatasetLoader):
             raise
 
     @staticmethod
+    @_timer_profiler.profile("next_pages")
     async def next_pages(
         offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
     ) -> list:
@@ -242,6 +262,7 @@ class R2DatasetLoader(DatasetLoader):
         return result
 
     @staticmethod
+    @_timer_profiler.profile("create")
     async def create(
         batch_size, sequence_length, pages_info, tokenizer, pack_samples=True
     ):
@@ -253,25 +274,26 @@ class R2DatasetLoader(DatasetLoader):
             pack_samples=pack_samples,
         )
 
-        # Initialize buffers
         loader.buffer = []
         loader.pages = pages_info.copy()
 
-        # Process all pages first
-        sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
-        tasks = [
-            asyncio.create_task(loader._process_page(page, sem)) for page in pages_info
-        ]
+        await loader._load_r2_metadata()
 
-        # Gather all tokens
-        results = await asyncio.gather(*tasks)
-        for tokens in results:
-            if tokens:
-                loader.buffer.extend(tokens)
+        sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
+
+        tasks = [loader._process_page(page, sem) for page in loader.pages]
+        tasks_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in tasks_results:
+            if isinstance(result, list):
+                loader.buffer.extend(result)
+            elif isinstance(result, Exception):
+                logger.error(f"Page processing error: {result}")
 
         return loader
 
     @staticmethod
+    @_timer_profiler.profile("_load_r2_metadata")
     async def _load_r2_metadata():
         """
         Loads and caches metadata from R2 storage.
@@ -339,6 +361,7 @@ class R2DatasetLoader(DatasetLoader):
             raise
 
     @staticmethod
+    @_timer_profiler.profile("_get_fs")
     def _get_fs():
         dataset_config = BUCKET_SECRETS["dataset"]
         # For debugging: log the full dataset configuration to check if 'multiple' is present
@@ -364,6 +387,7 @@ class R2DatasetLoader(DatasetLoader):
             if fs_cache_key not in R2DatasetLoader._fs_cache:
                 read_credentials = selected_config["credentials"]["read"]
                 fs = s3fs.S3FileSystem(
+                    # asynchronous=True,
                     key=read_credentials["access_key_id"],
                     secret=read_credentials["secret_access_key"],
                     client_kwargs={
@@ -377,6 +401,7 @@ class R2DatasetLoader(DatasetLoader):
                         "read_timeout": 10,
                         "retries": {"max_attempts": 3},
                     },
+                    max_concurrency=R2DatasetLoader.MAX_CONCURRENT_REQUESTS,
                     use_listings_cache=True,
                     skip_instance_cache=False,
                     default_block_size=R2DatasetLoader.READ_BUFFER_SIZE,
@@ -398,12 +423,13 @@ class R2DatasetLoader(DatasetLoader):
                 page = await self._get_next_page()
                 if page is None:
                     break
-                await self._prefetch_queue.put(page)
+                await self._prefetch_queue.put(page)  # type: ignore
         except Exception as e:
             logger.error(f"Prefetch error: {e}")
         finally:
-            await self._prefetch_queue.put(None)  # Signal completion
+            await self._prefetch_queue.put(None)  # type: ignore # Signal completion
 
+    @_timer_profiler.profile("_process_page")
     async def _process_page(self, page, sem):
         """Process page with deterministic shard selection"""
         async with sem:
@@ -431,83 +457,18 @@ class R2DatasetLoader(DatasetLoader):
                         f"Could not find shard for page {page_number}: {e}"
                     )
 
-                # Read data from exact position
-                pf_data = self._parquet_cache.get(chosen_shard["path"])
-                if not pf_data:
-                    fs = self._get_fs()
-                    max_retries = 3
-                    for attempt in range(max_retries):
-                        try:
-                            f = fs.open(
-                                chosen_shard["path"],
-                                "rb",
-                                buffer_size=self.READ_BUFFER_SIZE,
-                            )
-                            pf = pq.ParquetFile(
-                                f, memory_map=False
-                            )  # Disable memory mapping
+                pf_data = await self._get_parquet(chosen_shard["path"])
 
-                            # one lock per file – guarantees that only one
-                            # thread touches the underlying handle at a time
-                            pf_data = {
-                                "file": f,
-                                "parquet": pf,
-                                "lock": threading.Lock(),
-                            }
-                            self._parquet_cache[chosen_shard["path"]] = pf_data
-                            break
-                        except Exception as e:
-                            if attempt < max_retries - 1:
-                                logger.warning(
-                                    f"Attempt {attempt + 1} failed to open parquet file {chosen_shard['path']} with error: {e}. Retrying..."
-                                )
-                                await asyncio.sleep(2**attempt)  # Exponential backoff
-                            else:
-                                logger.error(
-                                    f"Failed to open parquet file {chosen_shard['path']} after {max_retries} attempts: {e}"
-                                )
-                                raise
+                table = await self.read_row_group(pf_data, chosen_shard, shard_offset)
 
-                # Read the row group – protect the shared handle
-                def _read_group():
-                    with pf_data["lock"]:
-                        return pf_data["parquet"].read_row_group(
-                            group_index, columns=["text"], use_threads=True
-                        )
-
-                # Fix: Ensure row group index is within bounds
-                num_row_groups = pf_data["parquet"].num_row_groups
-                rows_per_group = chosen_shard["num_rows"] // num_row_groups
-                group_index = min(shard_offset // rows_per_group, num_row_groups - 1)
-
-                table = await asyncio.to_thread(_read_group)
-
-                # Adjust start_idx based on actual rows in the group
-                start_idx = shard_offset % rows_per_group
-                group_rows = len(table)  # Get actual rows in this group
-                start_idx = min(start_idx, max(0, group_rows - self.num_rows_per_page))
-
+                start_idx = shard_offset % (
+                    chosen_shard["num_rows"] // pf_data["parquet"].num_row_groups
+                )
                 texts = table["text"].to_pylist()[
                     start_idx : start_idx + self.num_rows_per_page
-                ]  # type: ignore
+                ]
 
-                # Process texts deterministically
-                all_tokens = []
-                for text in texts:
-                    tokens = await asyncio.to_thread(
-                        self.tokenizer,
-                        text,
-                        padding=False,
-                        truncation=True,
-                        max_length=self.sequence_length,
-                        return_tensors=None,
-                    )
-
-                    input_ids = tokens["input_ids"]  # type: ignore
-                    if input_ids:
-                        all_tokens.extend(input_ids)
-                        if input_ids[-1] != self.tokenizer.eos_token_id:
-                            all_tokens.append(self.tokenizer.eos_token_id)
+                all_tokens = await self._batch_tokenize(texts)
 
                 self._token_cache[cache_key] = all_tokens
                 return all_tokens
@@ -515,6 +476,123 @@ class R2DatasetLoader(DatasetLoader):
             except Exception as e:
                 logger.error(f"Error processing page {page}: {e}")
                 raise
+
+    @_timer_profiler.profile("_get_parquet")
+    async def _get_parquet(self, path: str) -> dict:
+        """fetch parquet file handling with connection pooling"""
+        pf_data = self._parquet_cache.get(path)
+        if pf_data:
+            # Check if the cached file is still valid
+            if pf_data["file"].closed:
+                logger.warning(
+                    f"Cached parquet file is closed for {path}, reopening..."
+                )
+                self._parquet_cache.pop(path, None)
+                pf_data = None
+            else:
+                return pf_data
+
+        try:
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    pf_data = R2DatasetLoader._get_parquet_file(path)
+                    self._parquet_cache[path] = pf_data
+                    return pf_data
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(
+                            f"Attempt {attempt + 1} failed to open parquet file {path} with error: {e}. Retrying..."
+                        )
+                        await asyncio.sleep(2**attempt)  # Exponential backoff
+                    else:
+                        logger.error(
+                            f"Failed to open parquet file {path} after {max_retries} attempts: {e}"
+                        )
+                        raise
+
+        except Exception as e:
+            logger.error(f"Failed to open parquet file {path}: {e}")
+            raise
+
+        raise ValueError(f"Failed to get parquet file for {path}")
+
+    @_timer_profiler.profile("read_row_group")
+    async def read_row_group(self, pf_data, chosen_shard, shard_offset):
+        """row group reading with detailed performance tracking"""
+        shard_path = chosen_shard["path"]
+        shard_profiler = get_shard_profiler()
+
+        timer_id = shard_profiler.start_read(shard_path, chosen_shard, pf_data)
+
+        def _read_group():
+            with pf_data["lock"]:
+                # Check if file is still open
+                if pf_data["file"].closed:
+                    raise IOError(f"Parquet file is closed: {shard_path}")
+
+                num_row_groups = pf_data["parquet"].num_row_groups
+                rows_per_group = chosen_shard["num_rows"] // num_row_groups
+                group_index = min(shard_offset // rows_per_group, num_row_groups - 1)
+
+                shard_profiler.log_read_details(
+                    shard_path,
+                    group_index,
+                    num_row_groups,
+                    shard_offset,
+                    rows_per_group,
+                )
+
+                return pf_data["parquet"].read_row_group(
+                    group_index,
+                    columns=["text"],
+                    use_threads=False,
+                    use_pandas_metadata=False,
+                )
+
+        executor = self.get_executor()
+        result = await asyncio.get_event_loop().run_in_executor(executor, _read_group)
+
+        elapsed = shard_profiler.end_read(
+            timer_id,
+            shard_path,
+            pf_data["parquet"].num_row_groups,
+            chosen_shard["num_rows"] // pf_data["parquet"].num_row_groups,
+        )
+
+        shard_profiler.log_read_complete(shard_path, elapsed)
+
+        return result
+
+    @_timer_profiler.profile("_batch_tokenize")
+    async def _batch_tokenize(self, texts):
+        """Batch tokenization for better performance"""
+
+        def _tokenize_batch():
+            all_tokens = []
+
+            chunk_size = 128
+            for i in range(0, len(texts), chunk_size):
+                chunk = texts[i : i + chunk_size]
+
+                batch_tokens = self.tokenizer(
+                    chunk,
+                    padding=False,
+                    truncation=True,
+                    max_length=self.sequence_length,
+                    return_tensors=None,
+                )  # type: ignore
+
+                for tokens in batch_tokens["input_ids"]:
+                    if tokens:
+                        all_tokens.extend(tokens)
+                        if tokens[-1] != self.tokenizer.eos_token_id:  # type: ignore
+                            all_tokens.append(self.tokenizer.eos_token_id)  # type: ignore
+
+            return all_tokens
+
+        executor = self.get_executor()
+        return await asyncio.get_event_loop().run_in_executor(executor, _tokenize_batch)
 
     def __iter__(self):
         """Reset buffers and prepare for iteration"""
@@ -571,24 +649,96 @@ class R2DatasetLoader(DatasetLoader):
             self._prefetch_task.cancel()
 
         for pf_data in self._parquet_cache.values():
-            try:
-                pf_data["file"].close()  # type: ignore
-            except Exception as e:
-                logger.debug(f"Error closing parquet file: {e}")
+            with pf_data["lock"]:
+                if pf_data["file"] and not pf_data["file"].closed:
+                    try:
+                        pf_data["file"].close()  # type: ignore
+                    except Exception as e:
+                        logger.debug(f"Error closing parquet file: {e}")
 
         self._parquet_cache.clear()
         self._token_cache.clear()
 
     @staticmethod
-    @lru_cache(maxsize=32)
-    def _get_parquet_file(shard_path: str):
-        """Cached parquet file access"""
+    @lru_cache(maxsize=2048)
+    @_timer_profiler.profile("_get_parquet_file")
+    def _get_parquet_file(shard_path: str) -> dict:
+        """Cached parquet file access with metadata"""
         fs = R2DatasetLoader._get_fs()
+        shard_profiler = get_shard_profiler()
+
+        try:
+            file_info = fs.info(shard_path)
+            file_size = file_info.get("Size", file_info.get("size", "unknown"))
+        except Exception as e:
+            logger.warning(f"Could not get file size for {shard_path}: {e}")
+            file_size = "unknown"
+
         f = fs.open(shard_path, "rb", buffer_size=R2DatasetLoader.READ_BUFFER_SIZE)
-        return {"file": f, "parquet": pq.ParquetFile(f, memory_map=True)}
+        pf = pq.ParquetFile(
+            f,
+            memory_map=False,
+            pre_buffer=True,
+            buffer_size=R2DatasetLoader.READ_BUFFER_SIZE,
+        )
+
+        # Use shard profiler for consistent logging
+        shard_profiler.log_parquet_metadata(
+            shard_path=shard_path,
+            file_size=file_size,
+            num_row_groups=pf.num_row_groups,
+            total_rows=pf.metadata.num_rows,
+        )
+
+        return {
+            "file": f,
+            "parquet": pf,
+            "lock": threading.Lock(),
+            "metadata": {
+                "path": shard_path,
+                "file_size": file_size,
+                "num_row_groups": pf.num_row_groups,
+                "total_rows": pf.metadata.num_rows,
+                "schema": str(pf.schema),
+            },
+        }
 
     @staticmethod
-    @lru_cache(maxsize=1024)
+    @lru_cache(maxsize=2048)
     def _get_tokenized_cache(cache_key: str):
         """Cached tokenization results"""
         return R2DatasetLoader._token_cache.get(cache_key)
+
+    @staticmethod
+    def get_profiling_stats():
+        """Get timing statistics from the profiler"""
+        return _timer_profiler.get_stats()
+
+    @staticmethod
+    def log_profiling_summary():
+        """Log a summary of all timing statistics"""
+        _timer_profiler.log_summary()
+        ShardIndex.log_profiling_summary()
+        get_shard_profiler().log_analysis()
+
+    @staticmethod
+    def reset_profiling_stats(func_name: str = ""):
+        """Reset profiling statistics"""
+        _timer_profiler.reset(func_name)
+
+    @staticmethod
+    def get_shard_performance_stats():
+        """Get detailed performance statistics for each shard file"""
+        return get_shard_profiler().get_stats()
+
+    @staticmethod
+    def log_shard_performance_analysis():
+        """Log detailed analysis of shard performance"""
+        get_shard_profiler().log_analysis()
+
+    @staticmethod
+    def export_shard_performance_data(
+        output_file: str = "shard_performance_report.json",
+    ):
+        """Export shard performance data to a JSON file for external analysis"""
+        get_shard_profiler().export_data(output_file)

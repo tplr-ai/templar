@@ -2286,7 +2286,12 @@ class Validator:
                     )
                 )
 
-            # 18. Increment global step
+            # 18. Log profiling summary every 10 windows
+            if self.sync_window % 10 == 0:
+                tplr.logger.info("Logging performance profiling summary...")
+                tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
+
+            # 19. Increment global step
             self.global_step += 1
 
             torch.cuda.empty_cache()

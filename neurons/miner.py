@@ -733,6 +733,11 @@ class Miner:
             self.window_step += 1
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
 
+            # Log profiling summary every 10 windows
+            if self.current_window % 10 == 0:
+                tplr.logger.info("Logging performance profiling summary...")
+                tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
+
             # Save checkpoint logic
             if self.global_step % self.hparams.checkpoint_frequency == 0:
                 tplr.logger.info(

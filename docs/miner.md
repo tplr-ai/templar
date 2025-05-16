@@ -43,7 +43,8 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 - **Docker** and **Docker Compose**
 - **Git**
 - **Cloudflare R2 Bucket Configuration**:
-  - **Bucket Setup**:
+  - **Dataset Setup**: You must set up your own dataset following the instructions in the [R2 Dataset Guide](./r2_dataset.md)
+  - **Gradient Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:
        - **Read Token**: Admin Read permissions.
@@ -53,6 +54,15 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 ---
 
 ## Installation
+
+### Using Ansible (Automated Setup)
+
+For automated deployment across multiple hosts or multi-GPU configurations, you can use our Ansible playbook. This method is particularly useful for:
+- Deploying to multiple servers
+- Managing multi-GPU setups
+- Automating the entire setup process
+
+See the [Ansible Setup Guide](./miner-setup-ansible.md) for detailed instructions.
 
 ### Using Docker Compose (Recommended)
 
@@ -125,10 +135,12 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    R2_GRADIENTS_WRITE_ACCESS_KEY_ID=<your_r2_write_access_key_id>
    R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=<your_r2_write_secret_access_key>
 
-   R2_DATASET_ACCOUNT_ID=dd08f378791881bf6bbb7f161c78a220
-   R2_DATASET_BUCKET_NAME=edu-dataset
-   R2_DATASET_READ_ACCESS_KEY_ID=7cadbe19f880785e46898b558ef70ce8
-   R2_DATASET_READ_SECRET_ACCESS_KEY=9787434d676b05dce69cc4e76c6af74d795b606feafd031944444780d5f72272
+   # Dataset R2 credentials - You must set up your own dataset
+   # See: ./r2_dataset.md for instructions
+   R2_DATASET_ACCOUNT_ID=<your_dataset_account_id>
+   R2_DATASET_BUCKET_NAME=<your_dataset_bucket_name>
+   R2_DATASET_READ_ACCESS_KEY_ID=<your_dataset_read_access_key_id>
+   R2_DATASET_READ_SECRET_ACCESS_KEY=<your_dataset_read_secret_access_key>
 
    R2_AGGREGATOR_ACCOUNT_ID="80f15715bb0b882c9e967c13e677ed7d"
    R2_AGGREGATOR_BUCKET_NAME="aggregator"
@@ -284,11 +296,12 @@ You should see a container named `templar-miner-<WALLET_HOTKEY>`.
    export R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
    export R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
 
-   # Dataset R2 credentials
-   export R2_DATASET_ACCOUNT_ID=dd08f378791881bf6bbb7f161c78a220
-   export R2_DATASET_BUCKET_NAME=edu-dataset
-   export R2_DATASET_READ_ACCESS_KEY_ID=7cadbe19f880785e46898b558ef70ce8
-   export R2_DATASET_READ_SECRET_ACCESS_KEY=9787434d676b05dce69cc4e76c6af74d795b606feafd031944444780d5f72272
+   # Dataset R2 credentials - You must set up your own dataset
+   # See docs/r2_dataset.md for instructions
+   export R2_DATASET_ACCOUNT_ID=your_dataset_account_id
+   export R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
+   export R2_DATASET_READ_ACCESS_KEY_ID=your_dataset_read_access_key_id
+   export R2_DATASET_READ_SECRET_ACCESS_KEY=your_dataset_read_secret_access_key
 
    # Aggregator R2 credentials
    export R2_AGGREGATOR_ACCOUNT_ID="80f15715bb0b882c9e967c13e677ed7d"

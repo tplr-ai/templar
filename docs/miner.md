@@ -7,12 +7,7 @@ This document provides a comprehensive guide on how to set up and run a miner us
 - [Miner Setup](#miner-setup)
   - [Introduction](#introduction)
   - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-    - [Using Docker Compose (Recommended)](#using-docker-compose-recommended)
-    - [Manual Installation](#manual-installation)
   - [Running the Miner](#running-the-miner)
-    - [Using Docker Compose](#using-docker-compose)
-    - [Running Without Docker](#running-without-docker)
   - [Configuration](#configuration)
     - [Environment Variables](#environment-variables)
     - [Hardware Requirements](#hardware-requirements)
@@ -40,7 +35,6 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 - **NVIDIA GPU** with CUDA support
   - Minimum H100 recommended
 - **Ubuntu** (or Ubuntu-based Linux distribution)
-- **Docker** and **Docker Compose**
 - **Git**
 - **Cloudflare R2 Bucket Configuration**:
   - **Dataset Setup**: You must set up your own dataset following the instructions in the [R2 Dataset Guide](./r2_dataset.md)
@@ -53,151 +47,18 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 
 ---
 
-## Installation
-
-### Using Ansible (Automated Setup)
-
-For automated deployment across multiple hosts or multi-GPU configurations, you can use our Ansible playbook. This method is particularly useful for:
-- Deploying to multiple servers
-- Managing multi-GPU setups
-- Automating the entire setup process
-
-See the [Ansible Setup Guide](./miner-setup-ansible.md) for detailed instructions.
-
-### Using Docker Compose (Recommended)
-
-1. **Install Docker and Docker Compose**:
-
-   ```bash
-   # Update package list
-   sudo apt-get update
-
-   # Install prerequisites
-   sudo apt-get install \
-     ca-certificates \
-     curl \
-     gnupg \
-     lsb-release
-
-   # Add Docker’s official GPG key
-   sudo mkdir -p /etc/apt/keyrings
-   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-
-   # Set up the repository
-   echo \
-     "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-     $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-   # Install Docker Engine
-   sudo apt-get update
-   sudo apt-get install docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-   # Install Docker Compose
-   sudo apt-get install docker-compose
-   ```
-
-2. **Clone the Repository**:
-
-   ```bash
-   git clone https://github.com/tplr-ai/templar.git
-   cd templar
-   ```
-
-3. **Navigate to the Docker Directory**:
-
-   ```bash
-   cd docker
-   ```
-
-4. **Create and Populate the `.env` File**:
-
-   Create a `.env` file in the `docker` directory by copying the `.env.example`:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-   Populate the `.env` file with your configuration. The variables that need to be set are:
-
-   ```dotenv:docker/.env
-   # Add your Weights & Biases API key
-   WANDB_API_KEY=<your_wandb_api_key>
-   INFLUXDB_TOKEN=your_influxdb_token
-
-
-   # Cloudflare R2 Credentials - Add your R2 credentials below
-   R2_GRADIENTS_ACCOUNT_ID=<your_r2_account_id>
-   R2_GRADIENTS_BUCKET_NAME=<your_r2_bucket_name>
-
-   R2_GRADIENTS_READ_ACCESS_KEY_ID=<your_r2_read_access_key_id>
-   R2_GRADIENTS_READ_SECRET_ACCESS_KEY=<your_r2_read_secret_access_key>
-
-   R2_GRADIENTS_WRITE_ACCESS_KEY_ID=<your_r2_write_access_key_id>
-   R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=<your_r2_write_secret_access_key>
-
-   # Dataset R2 credentials - You must set up your own dataset
-   # See: ./r2_dataset.md for instructions
-   R2_DATASET_ACCOUNT_ID=<your_dataset_account_id>
-   R2_DATASET_BUCKET_NAME=<your_dataset_bucket_name>
-   R2_DATASET_READ_ACCESS_KEY_ID=<your_dataset_read_access_key_id>
-   R2_DATASET_READ_SECRET_ACCESS_KEY=<your_dataset_read_secret_access_key>
-
-   R2_AGGREGATOR_ACCOUNT_ID="80f15715bb0b882c9e967c13e677ed7d"
-   R2_AGGREGATOR_BUCKET_NAME="aggregator"
-   R2_AGGREGATOR_READ_ACCESS_KEY_ID="aa7ea943895323963edba7323e4e12b9"
-   R2_AGGREGATOR_READ_SECRET_ACCESS_KEY="8557ba9fc49a5482fff35d591c808bbdf0ec306bf08d9524c2055736aca915d1"
-
-   # Wallet Configuration
-   WALLET_NAME=<your_wallet_name>
-   WALLET_HOTKEY=<your_wallet_hotkey>
-
-   # Network Configuration
-   NETWORK=finney
-   NETUID=3
-   # GPU Configuration
-   CUDA_DEVICE=cuda:0
-   # Node Type
-   NODE_TYPE=validator
-   # Additional Settings
-   DEBUG=false
-   ```
-   
-
-   Replace the placeholders with your actual values.
-
-5. **Update `docker-compose.yml`**:
-
-   Ensure that the `docker-compose.yml` file is correctly configured for your setup (usually no changes are needed).
-
-6. **Run Docker Compose**:
-
-   Start the miner using Docker Compose:
-
-   ```bash
-   docker compose -f docker/compose.yml up -d
-   ```
-
-   This will start the miner in detached mode.
-
-### Manual Installation
-
-If you prefer to run the miner without Docker, follow the instructions in the [Running Without Docker](#running-without-docker) section.
-
----
-
 ## Running the Miner
 
-### Using Docker Compose
+> Note: Using Ansible (Automated Setup)
+> 
+> For automated deployment across multiple hosts or multi-GPU configurations, you can use our Ansible playbook. This method is particularly useful for:
+> - Deploying to multiple servers
+> - Managing multi-GPU setups
+> - Automating the entire setup process
 
-Assuming you've completed the installation steps above, your miner should now be running. You can verify this by listing running containers:
+> See the [Ansible Setup Guide](./miner-setup-ansible.md) for detailed instructions.
 
-```bash
-docker ps
-```
-
-You should see a container named `templar-miner-<WALLET_HOTKEY>`.
-
-### Running Without Docker
+### Instructions
 
 1. **Install System Dependencies**:
 

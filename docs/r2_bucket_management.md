@@ -33,12 +33,14 @@ A Python utility to manage objects in Cloudflare R2 buckets with various deletio
 ## Installation
 
 1. Clone the repository:
+
    ```bash
    git clone https://github.com/tplr-ai/templar.git
    cd templar
    ```
 
 2. Install required Python packages:
+
    ```bash
    pip install uv
    uv python install 3.12
@@ -87,6 +89,7 @@ python ./scripts/s3_manager.py [--action] [--config-options]
 ## Examples
 
 ### Basic Usage
+
 ```bash
 # Delete all objects older than 12 hours in the default bucket
 python s3_manager.py --delete-old 12 --miner-bucket
@@ -100,6 +103,7 @@ python s3_manager.py --prefix "gradient" --bucket-name "my_gradient_bucket" \
 ```
 
 ### Custom Configuration
+
 ```bash
 # Delete objects ending with ".csv" in a custom bucket
 python s3_manager.py --suffix ".csv" --bucket-name "data_lake" \
@@ -108,6 +112,7 @@ python s3_manager.py --suffix ".csv" --bucket-name "data_lake" \
 ```
 
 ### Full Custom Setup
+
 ```bash
 # Delete all objects older than 24 hours with custom configuration
 python s3_manager.py --delete-old 24 --bucket-name "logs_bucket" \

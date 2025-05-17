@@ -42,8 +42,10 @@ This guide will help you set up and run a validator for **τemplar**. Validators
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Docker** and **Docker Compose**
 - **Git**
+- **Python 3.12+** (for manual installation)
 - **Cloudflare R2 Bucket Configuration**:
-  - **Bucket Setup**:
+  - **Dataset Setup**: You must set up your own dataset following the instructions in the [R2 Dataset Guide](./r2_dataset.md)
+  - **Gradient Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:
        - **Read Token**: Admin Read permissions.
@@ -63,7 +65,7 @@ This guide will help you set up and run a validator for **τemplar**. Validators
 2. **Enable Docker GPU Support**:
 
    Follow the official NVIDIA Container Toolkit installation guide:
-   
+
    ```bash
    # 1. Configure the production repository
    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
@@ -129,10 +131,12 @@ This guide will help you set up and run a validator for **τemplar**. Validators
    R2_GRADIENTS_WRITE_ACCESS_KEY_ID=<your_r2_write_access_key_id>
    R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=<your_r2_write_secret_access_key>
 
-   R2_DATASET_ACCOUNT_ID=dd08f378791881bf6bbb7f161c78a220
-   R2_DATASET_BUCKET_NAME=edu-dataset
-   R2_DATASET_READ_ACCESS_KEY_ID=7cadbe19f880785e46898b558ef70ce8
-   R2_DATASET_READ_SECRET_ACCESS_KEY=9787434d676b05dce69cc4e76c6af74d795b606feafd031944444780d5f72272
+   # Dataset R2 credentials - You must set up your own dataset
+   # See: ./r2_dataset.md for instructions
+   R2_DATASET_ACCOUNT_ID=<your_dataset_account_id>
+   R2_DATASET_BUCKET_NAME=<your_dataset_bucket_name>
+   R2_DATASET_READ_ACCESS_KEY_ID=<your_dataset_read_access_key_id>
+   R2_DATASET_READ_SECRET_ACCESS_KEY=<your_dataset_read_secret_access_key>
 
    # Wallet Configuration
    WALLET_NAME=<your_wallet_name>
@@ -218,11 +222,12 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
    export R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
    export R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
 
-   # Dataset R2 credentials
-   export R2_DATASET_ACCOUNT_ID=dd08f378791881bf6bbb7f161c78a220
-   export R2_DATASET_BUCKET_NAME=edu-dataset
-   export R2_DATASET_READ_ACCESS_KEY_ID=7cadbe19f880785e46898b558ef70ce8
-   export R2_DATASET_READ_SECRET_ACCESS_KEY=9787434d676b05dce69cc4e76c6af74d795b606feafd031944444780d5f72272
+   # Dataset R2 credentials - You must set up your own dataset
+   # See docs/r2_dataset.md for instructions
+   export R2_DATASET_ACCOUNT_ID=your_dataset_account_id
+   export R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
+   export R2_DATASET_READ_ACCESS_KEY_ID=your_dataset_read_access_key_id
+   export R2_DATASET_READ_SECRET_ACCESS_KEY=your_dataset_read_secret_access_key
    
    export GITHUB_USER=your_github_username
    ```
@@ -282,6 +287,23 @@ R2_READ_SECRET_ACCESS_KEY=your_r2_read_secret_access_key
 
 R2_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
 R2_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
+
+# Additional Gradient R2 credentials
+R2_GRADIENTS_ACCOUNT_ID=your_r2_gradients_account_id
+R2_GRADIENTS_BUCKET_NAME=your_r2_gradients_bucket_name
+
+R2_GRADIENTS_READ_ACCESS_KEY_ID=your_r2_gradients_read_access_key_id
+R2_GRADIENTS_READ_SECRET_ACCESS_KEY=your_r2_gradients_read_secret_access_key
+
+R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_gradients_write_access_key_id
+R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_gradients_write_secret_access_key
+
+# Dataset R2 credentials - You must set up your own dataset
+# See docs/r2_dataset.md for instructions
+R2_DATASET_ACCOUNT_ID=your_dataset_account_id
+R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
+R2_DATASET_READ_ACCESS_KEY_ID=your_dataset_read_access_key_id
+R2_DATASET_READ_SECRET_ACCESS_KEY=your_dataset_read_secret_access_key
 
 # Wallet Configuration
 WALLET_NAME=default

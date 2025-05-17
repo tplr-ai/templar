@@ -1,77 +1,47 @@
-## System Requirements
-> You will need to make sure you have adequate bandwidth. 17.51 TB of data (as of 2/6/2025) will be transferred through your machine but NOT be stored locally. The higher the internet speed and more workers/cores you can throw into the process, the faster the dataset will be finished. Consider that this process will take 12 or more hours, so use screen/tmux accordingly. Re-run the transfer command for the process to verify the files and pick up where it left off.
+# R2 Dataset Setup Overview
 
-Recommend workhorse:
-Network: 1gbps+
-Local Storage: 100gb
-RAM: 4 GB+ (this process is not memory intensive)
-Cores: 8+
-Estimated Download Time: 12–18 hours
+This document provides guidance on which dataset to use for Templar miners and links to the appropriate setup guides.
 
-Instructions
-r2 bucket dataset population
+## Current Dataset: FineWeb-edu
 
-```bash
-#!/bin/bash
+**The FineWeb-edu dataset is the current dataset used by Templar miners.**
 
-# Configure dataset bucket name to use.
-export DATABUCKET="dataset"
+To set up the FineWeb-edu dataset, please follow the detailed instructions in the [FineWeb-edu Dataset Setup Guide](./r2_dataset-fineweb-edu.md).
 
-# clone repo
-git clone https://github.com/distributedstatemachine/HuggingFaceModelDownloader
-cd HuggingFaceModelDownloader
+### Quick Facts about FineWeb-edu:
+- Based on [HuggingFaceFW/fineweb-edu-score-2](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu-score-2)
+- Size: ~17.51 TB (as of 2/6/2025)
+- Download time: 12-30 hours depending on network speed
+- Required storage: 100GB for temporary processing
 
-# create local .env file for R2 account creds
-tee .env << 'EOF'
-R2_ACCOUNT_ID=
-R2_WRITE_ACCESS_KEY_ID=
-R2_WRITE_SECRET_ACCESS_KEY=
-EOF
+## Future Dataset: DCLM
 
-# install go
-wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
-export PATH=$PATH:/usr/local/go/bin
+The DCLM (DataComp Language Model) dataset is planned for future releases but is **not currently in use**.
 
-# check go version
-go version
+Setup instructions for DCLM are available in the [DCLM Dataset Setup Guide](./r2_dataset-dclm.md) for reference, but miners should **not use this dataset yet**.
 
-# gather CPU count to use for transfer
-export CPUCOUNT=$(grep -c '^processor' /proc/cpuinfo)
+### Quick Facts about DCLM:
+- Based on [mlfoundations/dclm-baseline-1.0-parquet](https://huggingface.co/datasets/mlfoundations/dclm-baseline-1.0-parquet)
+- Will be activated in a future release
+- Setup process similar to FineWeb-edu but with different data
 
-export DATABUCKET="dataset"
-# Configure dataset bucket name to use.
+## Important Notes
 
-# start transfer
-go run main.go -d "HuggingFaceFW/fineweb-edu-score-2" --r2 --skip-local -c $CPUCOUNT  --branch v1.2.0 --r2-bucket $DATABUCKET
+1. **Always use FineWeb-edu for now**: Until officially announced, all miners should use the FineWeb-edu dataset.
 
-# check corrupted files
-go run main.go -d "HuggingFaceFW/fineweb-edu-score-2" --r2 --cleanup-corrupted --branch v1.2.0 --r2-bucket $DATABUCKET
+2. **Dataset transitions**: When we transition to DCLM or other datasets, it will be announced through official channels.
 
-# if needed, re-transfer
-go run main.go -d "HuggingFaceFW/fineweb-edu-score-2" --r2 --skip-local -c $CPUCOUNT --r2-bucket $DATABUCKET
-final config for shard and metadata files
-#!/bin/bash
-# Return to the templar repo
-cd ~/templar
+3. **Bucket naming**: You can name your R2 bucket anything you like, but `dataset` is recommended for consistency.
 
-# modify local _shard_sizes.json using the $DATABUCKET we configured previously
-sed -i 's|80f15715bb0b882c9e967c13e677ed7d/|{$DATABUCKET}/|g' _shard_sizes.json
+4. **Security**: Always use separate read-only credentials for your miner and write credentials for dataset uploads.
 
-# Finally clear any local cache from previous runs and prompt miner to request new data from the r2 dataset bucket on next run
-rm ./.cache/tplr/*
-You are now ready to use the dataset for your miner and set your own read only API keys for accessing the dataset bucket
+## Getting Started
 
-#!/bin/bash
+To begin setting up your dataset:
 
-export R2_DATASET_ACCOUNT_ID=$R2_ACCOUNT_ID
-export R2_DATASET_BUCKET_NAME=$DATABUCKET
-export R2_DATASET_READ_ACCESS_KEY_ID=
-export R2_DATASET_READ_SECRET_ACCESS_KEY=
-Reference images
-r2 Bucket view image
+1. Choose the current dataset: [FineWeb-edu Dataset Setup Guide](./r2_dataset-fineweb-edu.md)
+2. Follow the step-by-step instructions carefully
+3. Pay special attention to using the correct downloader version
+4. Ensure you have adequate bandwidth and storage
 
-dataset bucket top level view image
-
-dataset folder image
-```
+For any questions or issues, please contact the Templar team or open an issue on our GitHub repository.

@@ -2286,7 +2286,12 @@ class Validator:
                     )
                 )
 
-            # 18. Increment global step
+            # 18. Log profiling summary every 10 windows
+            if self.sync_window % 10 == 0:
+                tplr.logger.info("Logging performance profiling summary...")
+                tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
+
+            # 19. Increment global step
             self.global_step += 1
 
             torch.cuda.empty_cache()
@@ -3085,7 +3090,19 @@ async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
     """
     for attempt in range(attempts):
         try:
-            return await func(*args, **kwargs)
+            if asyncio.iscoroutinefunction(func):
+
+                def wrapper(*w_args, **w_kwargs):
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        return loop.run_until_complete(func(*w_args, **w_kwargs))
+                    finally:
+                        loop.close()
+
+                return await asyncio.to_thread(wrapper, *args, **kwargs)
+            else:
+                return await asyncio.to_thread(func, *args, **kwargs)
         except Exception as e:
             tplr.logger.error(
                 f"Attempt {attempt + 1}/{attempts} failed for {context}: {e}"

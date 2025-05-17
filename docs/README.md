@@ -1,4 +1,4 @@
-# Templar Documentation Index
+# Templar Documentation
 
 Welcome to the Templar documentation. This index provides an overview of all available documentation to help you navigate and find the information you need.
 

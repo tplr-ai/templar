@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 import torch
 import torch.nn as nn
 from torch._prims_common import DeviceLikeType
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 import tplr
 from tplr.logging import logger
@@ -37,91 +38,117 @@ if TYPE_CHECKING:
 NeuronT = TypeVar("NeuronT", "Miner", "Validator")
 
 
-def prepare_gradient_dict(miner, pages, step_window):
+def prepare_gradient_dict(self, pages_info_for_metadata: list, step_window: int):
     """
-    Prepares the gradient dictionary for sharing by compressing the
-    momentum for each parameter and attaching metadata.
+    Prepares the gradient dictionary for sharing.
+    This method should be called by ALL RANKS.
+    It updates model parameters (weight decay) and self.momentum consistently across ranks
+    using DDP-averaged gradients. The returned compressed gradient dict will be
+    identical on all ranks. Rank 0 will use its copy for uploading.
 
     Args:
-        miner (Miner): Instance of Miner containing model, scheduler, momentum, compressor, transformer and hparams.
-        pages (list): The pages information used for training data.
+        pages_info_for_metadata (list): The pages information from the CURRENT RANK for metadata.
+                                        If global pages info is needed in metadata, it must be aggregated
+                                        before calling put by rank 0.
         step_window (int): The current window number.
 
     Returns:
-        tuple: (gradient, xshapes, totalks, transmitted) where:
-            gradient (dict): Contains keys for each parameter's compressed gradients and metadata.
-            xshapes (dict): The computed shapes for each parameter.
-            totalks (dict): Total length information for each parameter.
-            transmitted (dict): The estimated transmitted gradients per parameter.
+        tuple: (gradient_dict, xshapes, totalks, transmitted_grads)
+                These will be identical across all ranks.
     """
-    gradient = {}
-    xshapes = {}
-    totalks = {}
-    transmitted = {}
-    lr = miner.scheduler.get_last_lr()[0]
+    gradient_output_dict = {}
+    xshapes_output = {}
+    totalks_output = {}
+    transmitted_grads_output = {}  # For rank 0 logging or diagnostics
 
-    # Use an internal iteration counter stored in miner if it doesn't exist already
-    if not hasattr(miner, "gradient_iteration_counter"):
-        miner.gradient_iteration_counter = 0
+    # Learning rate should be consistent as scheduler is stepped by all ranks
+    lr = self.scheduler.get_last_lr()[0]
 
-    # Increment the counter for this function call
-    miner.gradient_iteration_counter += 1
-
-    # Log the current iteration counter
-    logger.info(
-        f"Current gradient_iteration_counter: {miner.gradient_iteration_counter}"
+    self.gradient_iteration_counter += 1
+    logger.debug(  # Changed to debug for less noise from all ranks
+        f"[Rank {self.rank}] prepare_gradient_dict iter_count: {self.gradient_iteration_counter}"
     )
 
-    # Track if this is the first iteration
-    is_first_iteration = miner.gradient_iteration_counter == 1
-    # Check if we're in the first 5 iterations
-    is_early_iteration = miner.gradient_iteration_counter <= 5
+    is_first_iteration = self.gradient_iteration_counter == 1
+    is_early_iteration = self.gradient_iteration_counter <= 5
 
-    for n, p in miner.model.named_parameters():
-        # Apply weight decay.
-        p.data.mul_(1.0 - lr * miner.hparams.weight_decay)
-        # Apply momentum decay.
-        miner.momentum[n].mul_(miner.hparams.momentum_decay)
-        # Ensure the gradient is on the same device as the parameter.
-        grad = p.grad.to(p.device)
-        # Ensure the momentum tensor is on the same device.
-        if miner.momentum[n].device != p.device:
-            miner.momentum[n] = miner.momentum[n].to(p.device)
+    # Get the underlying model if DDP is used
+    model_to_access = self.model.module if isinstance(self.model, DDP) else self.model
 
-        # Change 1: In the first iteration, set momentum = grad instead of adding
+    for n, p in model_to_access.named_parameters():
+        if p.grad is None:
+            logger.warning(
+                f"[Rank {self.rank}] Param '{n}' has no gradient. Skipping in prepare_gradient_dict."
+            )
+            continue
+
+        # 1. Apply weight decay directly to parameters.
+        # This modification is done by all ranks identically, so parameters remain synced.
+        p.data.mul_(1.0 - lr * self.hparams.weight_decay)
+
+        # 2. Update custom momentum.
+        # Ensure momentum tensor is on the same device as the parameter.
+        if self.momentum[n].device != p.device:
+            self.momentum[n] = self.momentum[n].to(p.device)
+
+        self.momentum[n].mul_(self.hparams.momentum_decay)
+
+        # p.grad is already DDP-averaged.
+        # Ensure grad is on the correct device (should be by default from DDP).
+        current_grad = p.grad  # No .to(p.device) needed if DDP did its job
+
         if is_first_iteration:
-            # Set momentum directly to grad (multiplied by lr to maintain scale)
-            miner.momentum[n] = grad.clone() * lr
+            # Set momentum directly to grad (scaled by lr)
+            # Use .copy() or .clone() to avoid modifying p.grad if it's used elsewhere,
+            # though after this point, optimizer.zero_grad() is usually called.
+            self.momentum[n] = current_grad.clone() * lr
         else:
-            # Normal behavior for later iterations
-            miner.momentum[n].add_(grad, alpha=lr)
+            # Add DDP-averaged grad to momentum
+            self.momentum[n].add_(current_grad, alpha=lr)
 
-        # Compress momentum via DCT-based compression.
-        idxs, vals, xshape, totalk = miner.compressor.compress(
-            miner.transformer.encode(miner.momentum[n]), miner.hparams.topk_compression
-        )
-        # Estimate the transmitted gradient via decompression.
-        transmit_grad = miner.transformer.decode(
-            miner.compressor.decompress(p, idxs, vals, xshape, totalk)
+        # 3. Compress momentum for transmission.
+        # self.momentum[n] is now identical across ranks.
+        # transformer.encode and compressor.compress are deterministic.
+        encoded_momentum = self.transformer.encode(self.momentum[n])
+        idxs, vals, xshape, totalk = self.compressor.compress(
+            encoded_momentum, self.hparams.topk_compression
         )
 
-        # Change 2: Skip subtracting transmitted gradient in the first 5 iterations
+        # 4. Estimate transmitted gradient and adjust momentum.
+        # This step also happens identically on all ranks.
+        # Note: `p` passed to decompress is for shape/dtype reference.
+        # The actual parameter `p` has already had weight decay applied.
+        decompressed_momentum_estimate = self.transformer.decode(
+            self.compressor.decompress(p, idxs, vals, xshape, totalk)
+        )
+
         if not is_early_iteration:
-            # Only subtract transmitted gradient after the first 5 iterations
-            miner.momentum[n].sub_(transmit_grad)
+            self.momentum[n].sub_(decompressed_momentum_estimate)
 
-        # Save compressed gradient information.
-        gradient[n + "idxs"] = idxs
-        gradient[n + "vals"] = vals
-        xshapes[n] = xshape
-        totalks[n] = totalk
-        transmitted[n] = transmit_grad
+        # Store compressed representation (will be identical on all ranks)
+        gradient_output_dict[n + "idxs"] = idxs
+        gradient_output_dict[n + "vals"] = vals
+        xshapes_output[n] = xshape
+        totalks_output[n] = totalk
+        transmitted_grads_output[n] = decompressed_momentum_estimate  # For diagnostics
 
-    # Attach metadata for pages info and window.
-    gradient["metadata"] = {"pages_info": pages, "window": step_window}
-    logger.info(f"Attached metadata to gradient: {gradient['metadata']}")
+    # Attach metadata (specific to this rank's pages_info initially)
+    # If rank 0 needs global pages_info, it must gather it separately before PUT.
+    gradient_output_dict["metadata"] = {
+        "pages_info": pages_info_for_metadata,  # This rank's pages
+        "window": step_window,
+        "rank": self.rank,  # Could be useful for debugging metadata source
+    }
+    logger.debug(
+        f"[Rank {self.rank}] Attached metadata to gradient: {gradient_output_dict['metadata']}"
+    )
 
-    return gradient, xshapes, totalks, transmitted
+    return (
+        gradient_output_dict,
+        xshapes_output,
+        totalks_output,
+        transmitted_grads_output,
+    )
 
 
 async def update_peers(

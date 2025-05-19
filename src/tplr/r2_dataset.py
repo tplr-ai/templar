@@ -29,7 +29,8 @@ import threading
 from tplr import logger
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
-from tplr.distrib import get_rank, get_world_size, broadcast_object
+from tplr.distrib import get_rank, get_world_size, broadcast_object, all_gather_object
+
 
 class R2DatasetLoader(DatasetLoader):
     """
@@ -224,74 +225,77 @@ class R2DatasetLoader(DatasetLoader):
         world_size: int | None = None,
     ) -> list[tuple[str, int, str]]:
         """
-        Deterministic page selection.
+        Deterministically sample **n_pages** per rank, no duplicates
+        across ranks, works for any world_size.
 
-        • If world_size == 1  ➜ identical to legacy behaviour.  
-        • If world_size > 1  ➜ each rank gets **n_pages** pages (balanced, no overlap).  
-          Total pages processed globally = n_pages * world_size.
-
-        Args remain 100 % back-compatible.
+        Returned tuples: (config_name, row_idx, split)
         """
         rank = get_rank() if rank is None else rank
         world_size = get_world_size() if world_size is None else world_size
 
-        # ------------------------------------------------------------------ #
-        # 1. Configs (download once on rank-0, broadcast to the others)       #
-        # ------------------------------------------------------------------ #
+        # 1) configs (broadcast once)
         if R2DatasetLoader._configs_data_cache is None:
             if rank == 0:
-                R2DatasetLoader._configs_data_cache = await R2DatasetLoader.fetch_dataset_configs()
-            # every rank gets the same dict reference
+                R2DatasetLoader._configs_data_cache = (
+                    await R2DatasetLoader.fetch_dataset_configs()
+                )
             R2DatasetLoader._configs_data_cache = broadcast_object(
                 R2DatasetLoader._configs_data_cache, src=0
             )
-
         configs_data = R2DatasetLoader._configs_data_cache
         sorted_keys = sorted(configs_data.keys())
 
-        # ------------------------------------------------------------------ #
-        # 2. RNG                                                             #
-        # ------------------------------------------------------------------ #
+        # 2) RNG (same on every rank)
         rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
         rng.bit_generator.advance(offset)
 
-        # ------------------------------------------------------------------ #
-        # 3. Single-GPU fast path                                            #
-        # ------------------------------------------------------------------ #
+        # ───────────────────────── single-GPU fast-path ───────────────────── #
         if world_size == 1:
-            result = []
+            out = []
             for _ in range(n_pages):
                 cfg = rng.choice(sorted_keys)
-                max_row = configs_data[cfg]["num_rows"] - num_rows_per_page
-                choice = 0 if max_row <= 0 else int(rng.integers(0, max_row))
-                result.append((str(cfg), choice, configs_data[cfg]["split"]))
-            return result
+                meta = configs_data[cfg]
+                max_row = meta["num_rows"] - num_rows_per_page
+                row = 0 if max_row <= 0 else int(rng.integers(0, max_row))
+                out.append((str(cfg), row, meta["split"]))
+            return out
+        # ───────────────────────── multi-GPU path ─────────────────────────── #
 
-        # ------------------------------------------------------------------ #
-        # 4. DDP path – strided selection                                    #
-        # ------------------------------------------------------------------ #
-        pages_for_rank: list[tuple[str, int, str]] = []
-        global_idx = 0
-        while len(pages_for_rank) < n_pages:
+        global_needed = n_pages * world_size
+        seen: set[tuple[str, int, str]] = set()
+        all_pages: list[tuple[str, int, str]] = []
+
+        # keep drawing pages until we have enough unique ones
+        while len(all_pages) < global_needed:
             cfg = rng.choice(sorted_keys)
             meta = configs_data[cfg]
             max_row = meta["num_rows"] - num_rows_per_page
-            if max_row <= 0:        # skip tiny shards deterministicly
-                global_idx += 1
+            if max_row <= 0:  # skip shards that are too small
                 continue
-            choice = int(rng.integers(0, max_row))
+            row = int(rng.integers(0, max_row))
+            pg = (str(cfg), row, meta["split"])
+            if pg not in seen:  # de-dupe globally
+                seen.add(pg)
+                all_pages.append(pg)
 
-            if global_idx % world_size == rank:
-                pages_for_rank.append((str(cfg), choice, meta["split"]))
-            global_idx += 1
+        # stride assignment → rank-k gets indices k, k+world_size, …
+        pages_for_rank = all_pages[rank::world_size][:n_pages]
 
+        # LOG (helps debugging determinism)
+        from tplr import logger as _log
+
+        _log.info(
+            f"[R2DatasetLoader] rank={rank}/{world_size - 1} → "  # 0-based upper-bound
+            f"{len(pages_for_rank)} pages "
+            f"{[f'{c}:{r}' for c, r, _ in pages_for_rank]}"
+        )
         return pages_for_rank
 
     @staticmethod
     async def create(
         batch_size, sequence_length, pages_info, tokenizer, pack_samples=True
     ):
-        """Create loader with proper initialization"""
+        """Create loader with proper initialization and batch alignment"""
         loader = R2DatasetLoader(
             batch_size=batch_size,
             sequence_length=sequence_length,
@@ -299,21 +303,54 @@ class R2DatasetLoader(DatasetLoader):
             pack_samples=pack_samples,
         )
 
-        # Initialize buffers
+        # ------------------------------------------------------------------ #
+        # 1. Pull pages                                                      #
+        # ------------------------------------------------------------------ #
         loader.buffer = []
         loader.pages = pages_info.copy()
 
-        # Process all pages first
         sem = asyncio.Semaphore(loader.MAX_CONCURRENT_REQUESTS)
-        tasks = [
-            asyncio.create_task(loader._process_page(page, sem)) for page in pages_info
-        ]
-
-        # Gather all tokens
-        results = await asyncio.gather(*tasks)
-        for tokens in results:
+        tasks = [asyncio.create_task(loader._process_page(p, sem)) for p in pages_info]
+        for tokens in await asyncio.gather(*tasks):
             if tokens:
                 loader.buffer.extend(tokens)
+
+        # ------------------------------------------------------------------ #
+        # 2. Determine how many *full* batches each rank can supply          #
+        # ------------------------------------------------------------------ #
+        tokens_per_batch = batch_size * sequence_length
+        local_batches = len(loader.buffer) // tokens_per_batch
+        global_batches_l = all_gather_object(local_batches)  # list[int]
+        common_batches = min(global_batches_l)
+
+        if common_batches == 0:
+            raise RuntimeError(
+                f"[R2DatasetLoader] rank={get_rank()} – some rank has 0 full "
+                f"batches (local={local_batches}, all={global_batches_l}). "
+                "Either increase pages_per_window or lower batch_size."
+            )
+
+        target_tokens = common_batches * tokens_per_batch
+
+        # ------------------------------------------------------------------ #
+        # 3. Trim / pad so every rank has `target_tokens` exactly            #
+        # ------------------------------------------------------------------ #
+        if len(loader.buffer) >= target_tokens:
+            loader.buffer = loader.buffer[:target_tokens]  # trim excess
+        else:  # unlikely
+            pad_eos = [loader.tokenizer.eos_token_id] * (
+                target_tokens - len(loader.buffer)
+            )
+            loader.buffer.extend(pad_eos)
+
+        # Diagnostic (rank-0 only)
+        if get_rank() == 0:
+            from tplr import logger
+
+            logger.info(
+                f"[R2DatasetLoader] aligned_batches={common_batches} "
+                f"(tokens/rank={target_tokens}, world={get_world_size()})"
+            )
 
         return loader
 

@@ -7,7 +7,7 @@ module.exports = {
         {
             name: "TM1",
             script: "/home/templar/templar/.venv/bin/python3",
-            args: "-m torch.distributed.run --standalone --nproc_per_node=4 neurons/miner.py --gpus 4 --project templar --subtensor.network local --netuid 2 --wallet.name templar_test --wallet.hotkey M1",
+            args: `-m torch.distributed.run --standalone --nproc_per_node=4 neurons/miner.py --gpus 4 --project templar --subtensor.network local --netuid 2 --wallet.name templar_test --wallet.hotkey M1 --project "${PROJECT_NAME}"`,
             interpreter: null,
             env: {
                 ...process.env,
@@ -52,7 +52,7 @@ module.exports = {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
-            args: `--netuid 2 --device cuda:7 --project "${PROJECT_NAME}"`
+            args: `--netuid 2 --device cuda:7 --project "${PROJECT_NAME}" --subtensor.network local`
         }
     ]
 }

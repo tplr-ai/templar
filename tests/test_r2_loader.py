@@ -1274,19 +1274,23 @@ def _isolate_config_cache():
 @pytest.fixture
 def fake_dataset_configs(monkeypatch):
     "Replace fetch_dataset_configs with a tiny deterministic stub."
+
     async def _fake():
         return {
             "cfg_A": {"num_rows": 10_000, "split": "train"},
             "cfg_B": {"num_rows": 8_000, "split": "train"},
-            "tiny":  {"num_rows": 50,     "split": "train"},  # will be skipped
+            "tiny": {"num_rows": 50, "split": "train"},  # will be skipped
         }
 
     monkeypatch.setattr(
-        R2DatasetLoader, "fetch_dataset_configs", types.MethodType(lambda *_a, **_k: _fake(), R2DatasetLoader)
+        R2DatasetLoader,
+        "fetch_dataset_configs",
+        types.MethodType(lambda *_a, **_k: _fake(), R2DatasetLoader),
     )
 
     # broadcast_object just returns the object in unit tests
     from tplr import distrib
+
     monkeypatch.setattr(distrib, "broadcast_object", lambda obj, src=0: obj)
 
 

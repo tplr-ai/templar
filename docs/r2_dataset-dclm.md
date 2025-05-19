@@ -27,37 +27,61 @@ You will need to make sure you have adequate bandwidth. The dataset will be tran
    - A set of keys with write access (for uploading the dataset)
    - A set of read-only keys (for your miner to access the data)
 
-### 2. Install and Run the Dataset Downloader
+### 2. Clone the Correct Downloader Version
+
+> ⚠️ **CRITICAL**: You must use the specific commit version of the downloader. Using the main branch will download the wrong dataset!
+
+```bash
+# Clone the repository at the specific commit
+git clone https://github.com/distributedstatemachine/HuggingFaceModelDownloader
+cd HuggingFaceModelDownloader
+
+# IMPORTANT: Checkout the specific commit for DCLM dataset
+git checkout 70b0ce8061ec70af5738fdfbf5ac9e0ae02bdffc
+```
+
+### 3. Configure Environment Variables
 
 ```bash
 # Configure dataset bucket name to use
 export DATABUCKET="dataset"
+
 # Gather CPU count to use for transfer
 export CPUCOUNT=$(grep -c '^processor' /proc/cpuinfo)
 
-# Clone the downloader repository
-git clone https://github.com/distributedstatemachine/HuggingFaceModelDownloader
-cd HuggingFaceModelDownloader
+```
 
-# Create local .env file for R2 account credentials
+### 4. Set Up R2 Credentials
+
+Create a local `.env` file with your R2 write credentials:
+
+```bash
 tee .env << 'EOF'
 R2_ACCOUNT_ID=your_account_id
 R2_WRITE_ACCESS_KEY_ID=your_write_access_key
 R2_WRITE_SECRET_ACCESS_KEY=your_write_secret_key
 EOF
+```
 
-# Install Go (if not already installed)
+### 5. Install Go (if not already installed)
+
+```bash
+# Download and install Go
 wget https://go.dev/dl/go1.23.5.linux-amd64.tar.gz
 sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.23.5.linux-amd64.tar.gz
 export PATH=$PATH:/usr/local/go/bin
 
-# To make the PATH change permanent, add it to your .bashrc or .profile:
+# Make the PATH change permanent
 echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
 source ~/.bashrc
 
 # Verify Go installation
 go version
+```
 
+### 6. Start the Dataset Transfer
+
+```bash
 # Start the download process
 go run main.go \
   -d "mlfoundations/dclm-baseline-1.0-parquet" \
@@ -75,7 +99,7 @@ go run main.go \
 
 ![image](https://github.com/user-attachments/assets/a99737d1-259e-433d-9dcd-71e921c04e4c)
 
-### 3. Validate the Dataset
+### 7. Validate the Dataset
 
 **Note: to run the validation script, you need to have [uv installed](https://docs.astral.sh/uv/getting-started/installation/).**
 
@@ -105,7 +129,7 @@ EOF
 
 This validates that all shards have been properly uploaded with the correct sizes and hashes. Review the validation results to ensure your dataset is complete and correct.
 
-### 4. Update the _shard_sizes.json `path` values
+### 8. Update the _shard_sizes.json `path` values
 
 Before proceeding, you need to modify the `_shard_sizes.json` file to ensure it references your specific bucket name. By default, the paths in this file use `dataset/mlfoundations-dclm-baseline-1.0-parquet/...`, but you need to replace `dataset` with your actual bucket name.
 
@@ -138,7 +162,7 @@ with open("_shard_sizes.json", "w") as f:
 
 This step is critical to ensure that your miner can properly locate and load the dataset files from your specific bucket.
 
-### 5. Configure Your Miner to Use the Dataset
+### 9. Configure Your Miner to Use the Dataset
 
 Set these environment variables for your miner to connect to your Cloudflare R2 bucket:
 
@@ -151,7 +175,7 @@ export R2_DATASET_READ_SECRET_ACCESS_KEY=...
 
 **Note**: For security, create separate read-only API keys for your miner. Never use your write access keys for the miner.
 
-### 6. Upload Metadata Files to Your R2 Bucket
+### 10. Upload Metadata Files to Your R2 Bucket
 
 You must upload the `_shard_sizes.json` and `_metadata.yaml` files to your R2 bucket in the `mlfoundations-dclm-baseline-1.0-parquet` directory. You can use one of the following methods:
 
@@ -202,7 +226,7 @@ rclone copy _metadata.yaml r2-dataset:$DATABUCKET/mlfoundations-dclm-baseline-1.
 
 This step is required to ensure your miner can properly access and use the dataset metadata.
 
-### 7. Clear Local Cache (Required)
+### 11. Clear Local Cache (Required)
 
 After uploading the metadata files, you must clear your local cache to force the miner to download the new metadata on its next run:
 

@@ -74,6 +74,12 @@ class Miner:
             "--project", type=str, default="templar", help="Wandb project."
         )
         parser.add_argument(
+            "--actual-batch-size",
+            type=int,
+            default=None,
+            help="Override the batch size defined in hparams.",
+        )
+        parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
         )
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -110,6 +116,12 @@ class Miner:
         # Init config and load hparams
         self.config = Miner.config()
         self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
+
+        if self.config.actual_batch_size is not None:
+            tplr.logger.info(
+                f"Overriding hparams batch size: {self.hparams.batch_size} -> {self.config.actual_batch_size}"
+            )
+            self.hparams.batch_size = self.config.actual_batch_size
 
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)

@@ -278,9 +278,54 @@ class ShardProfiler:
             self._active_timers.clear()
 
 
-_shard_profiler = ShardProfiler()
+# Dummy profiler implementation for when profiling is disabled
+class DummyShardProfiler:
+    """No-op implementation of ShardProfiler when profiling is disabled"""
+
+    def __init__(self, name: str = "DummyShardProfiler"):
+        self.name = name
+
+    def start_read(self, *args, **kwargs) -> str:
+        return "dummy_timer"
+
+    def end_read(self, *args, **kwargs) -> float:
+        return 0.0
+
+    def log_read_details(self, *args, **kwargs) -> None:
+        pass
+
+    def log_parquet_metadata(self, *args, **kwargs) -> None:
+        pass
+
+    def log_read_complete(self, *args, **kwargs) -> None:
+        pass
+
+    def get_stats(self) -> Dict:
+        return {}
+
+    def log_analysis(self) -> None:
+        pass
+
+    def export_data(self, *args, **kwargs) -> None:
+        pass
+
+    def reset(self, *args, **kwargs) -> None:
+        pass
+
+
+# Global singleton instance
+_shard_profiler: Optional[ShardProfiler] = None
+_dummy_profiler = DummyShardProfiler()
 
 
 def get_profiler() -> ShardProfiler:
-    """Get the global shard profiler instance"""
+    """Get the global shard profiler instance or a dummy profiler if disabled"""
+    from . import ENABLE_SHARD_PROFILER
+
+    if not ENABLE_SHARD_PROFILER:
+        return _dummy_profiler  # type: ignore
+
+    global _shard_profiler
+    if _shard_profiler is None:
+        _shard_profiler = ShardProfiler()
     return _shard_profiler

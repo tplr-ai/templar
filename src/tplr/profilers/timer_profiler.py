@@ -18,8 +18,13 @@ class TimerProfiler:
 
     def profile(self, func_name: str = "") -> Callable[..., Any]:
         """Decorator to profile function execution time"""
+        from . import ENABLE_TIMER_PROFILER
 
         def decorator(func):
+            # If profiling is disabled, return the original function unchanged
+            if not ENABLE_TIMER_PROFILER:
+                return func
+
             @wraps(func)
             async def async_wrapper(*args, **kwargs):
                 name = func_name or func.__name__
@@ -137,20 +142,55 @@ class TimerProfiler:
                 )
 
 
-# Global singleton instance
+# Dummy profiler implementation for when profiling is disabled
+class DummyTimerProfiler:
+    """No-op implementation of TimerProfiler when profiling is disabled"""
+
+    def __init__(self, name: str = "DummyTimerProfiler"):
+        self.name = name
+
+    def profile(self, func_name: str = "") -> Callable[..., Any]:
+        """No-op decorator that returns the original function unchanged"""
+
+        def decorator(func):
+            return func
+
+        return decorator
+
+    def _record_timing(self, *args, **kwargs) -> None:
+        pass
+
+    def get_stats(self, *args, **kwargs) -> Dict:
+        return {}
+
+    def reset(self, *args, **kwargs) -> None:
+        pass
+
+    def log_summary(self) -> None:
+        pass
+
+
+# Global singleton instances
 _timer_profiler: Optional[TimerProfiler] = None
+_dummy_profiler = DummyTimerProfiler()
 
 
 def get_timer_profiler(name: str = "TimerProfiler") -> TimerProfiler:
     """
     Get or create a named timer profiler instance.
+    Returns a dummy profiler if profiling is disabled.
 
     Args:
         name: Name for the profiler instance
 
     Returns:
-        TimerProfiler instance
+        TimerProfiler instance (or dummy instance if disabled)
     """
+    from . import ENABLE_TIMER_PROFILER
+
+    if not ENABLE_TIMER_PROFILER:
+        return _dummy_profiler  # type: ignore
+
     global _timer_profiler
     if _timer_profiler is None or _timer_profiler.name != name:
         _timer_profiler = TimerProfiler(name)

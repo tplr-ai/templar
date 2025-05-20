@@ -49,5 +49,5 @@
     "eval_lr_factor": 0.2,
     "openskill_beta": 20,
     "openskill_tau": 0.1,
-    "checkpoint_init_version": "0.2.73"
+    "checkpoint_init_version": null
 }

@@ -78,14 +78,22 @@ def optimize_parquet_file(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Optimize a Parquet file for efficient reading.")
+    parser = argparse.ArgumentParser(
+        description="Optimize a Parquet file for efficient reading."
+    )
     parser.add_argument("input_file", help="Input Parquet file path")
     parser.add_argument("output_file", help="Output optimized Parquet file path")
     parser.add_argument(
-        "--compression_level", type=int, default=3, help="ZSTD compression level (default: 3)"
+        "--compression_level",
+        type=int,
+        default=3,
+        help="ZSTD compression level (default: 3)",
     )
     parser.add_argument(
-        "--row_group_size", type=int, default=1000, help="Rows per row group (default: 1000)"
+        "--row_group_size",
+        type=int,
+        default=1000,
+        help="Rows per row group (default: 1000)",
     )
 
     args = parser.parse_args()

@@ -2596,8 +2596,11 @@ class Validator:
         for n, p in self.model.named_parameters():
             idxs_key = n + "idxs"
             vals_key = n + "vals"
+            quant_key = n + "quant_params"
+
             idxs = getattr(gather_result.state_dict, idxs_key, None)
             vals = getattr(gather_result.state_dict, vals_key, None)
+            quant_params = getattr(gather_result.state_dict, quant_key, None)
             if idxs is not None and vals is not None:
                 if not isinstance(idxs, (list, tuple)):
                     idxs = [idxs]
@@ -2610,6 +2613,7 @@ class Validator:
                         vals,
                         self.xshapes[n],
                         self.totalks[n],
+                        quant_params,
                     )
                 )
                 # Store pre-sign gradient in momentum

@@ -297,9 +297,11 @@ class AggregationServer:
             for name, param in self.model.named_parameters():
                 idxs_key = name + "idxs"
                 vals_key = name + "vals"
+                quant_key = name + "quant_params"
 
                 idxs = getattr(gather_result.state_dict, idxs_key, None)
                 vals = getattr(gather_result.state_dict, vals_key, None)
+                quant_params = getattr(gather_result.state_dict, quant_key, None)
 
                 if idxs is not None and vals is not None:
                     # Ensure idx and val are lists of tensors
@@ -315,6 +317,7 @@ class AggregationServer:
                         vals,
                         self.param_shapes[name],
                         self.param_totalks[name],
+                        quant_params
                     )
 
                     # Pack the decompressed gradient

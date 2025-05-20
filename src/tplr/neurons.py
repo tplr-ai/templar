@@ -97,12 +97,12 @@ def prepare_gradient_dict(miner, pages, step_window):
             miner.momentum[n].add_(grad, alpha=lr)
 
         # Compress momentum via DCT-based compression.
-        idxs, vals, xshape, totalk = miner.compressor.compress(
+        idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
             miner.transformer.encode(miner.momentum[n]), miner.hparams.topk_compression
         )
         # Estimate the transmitted gradient via decompression.
         transmit_grad = miner.transformer.decode(
-            miner.compressor.decompress(p, idxs, vals, xshape, totalk)
+            miner.compressor.decompress(p, idxs, vals, xshape, totalk, quant_params)
         )
 
         # Change 2: Skip subtracting transmitted gradient in the first 5 iterations
@@ -113,6 +113,7 @@ def prepare_gradient_dict(miner, pages, step_window):
         # Save compressed gradient information.
         gradient[n + "idxs"] = idxs
         gradient[n + "vals"] = vals
+        gradient[n + "quant_params"] = quant_params
         xshapes[n] = xshape
         totalks[n] = totalk
         transmitted[n] = transmit_grad

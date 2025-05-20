@@ -168,7 +168,7 @@ class Validator:
         self.totalks = {}
         for n, p in self.model.named_parameters():
             self.momentum[n] = torch.zeros_like(p)
-            _, _, xshape, totalk = self.compressor.compress(
+            _, _, xshape, totalk, quant_params = self.compressor.compress(
                 self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
             )
             self.xshapes[n] = xshape

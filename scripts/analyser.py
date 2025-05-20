@@ -84,7 +84,7 @@ class Analyzer:
                 self.model,
                 target_chunk=self.hparams.target_chunk,
             )
-            self.compressor = tplr.compress.CompressDCT()
+            self.compressor = tplr.compress.CompressDCT(use_quantization=True)
 
             # Initialize shapes for each parameter (like in miner/validator)
             self.xshapes = {}

@@ -159,7 +159,7 @@ class Validator:
         self.transformer = tplr.compress.TransformDCT(
             self.model, target_chunk=self.hparams.target_chunk
         )
-        self.compressor = tplr.compress.CompressDCT()
+        self.compressor = tplr.compress.CompressDCT(use_quantization=True)
 
         # Init optimizer and momentum
         self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)

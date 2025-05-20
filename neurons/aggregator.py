@@ -104,14 +104,14 @@ class AggregationServer:
         self.transformer = tplr.compress.TransformDCT(
             self.model, target_chunk=self.hparams.target_chunk
         )
-        self.compressor = tplr.compress.CompressDCT()
+        self.compressor = tplr.compress.CompressDCT(use_quantization=True)
 
         # Pre-calculate shapes and totalks for all parameters
         self.param_shapes = {}
         self.param_totalks = {}
         tplr.logger.info("Pre-calculating compression parameters...")
         for name, param in self.model.named_parameters():
-            _, _, shape, totalk = self.compressor.compress(
+            _, _, shape, totalk, _ = self.compressor.compress(
                 self.transformer.encode(param.data), topk=self.hparams.topk_compression
             )
             self.param_shapes[name] = shape

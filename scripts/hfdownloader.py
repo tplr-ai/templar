@@ -44,14 +44,14 @@ from botocore.config import Config
 from requests.adapters import HTTPAdapter, Retry
 from tqdm import tqdm
 
-STREAM_BUFFER_SIZE = 256 * 1024 * 1024  # 256MB buffer
-MULTIPART_THRESHOLD = 1024 * 1024 * 1024  # 1GB threshold
-CHUNK_SIZE = 256 * 1024 * 1024  # 256MB chunks
+STREAM_BUFFER_SIZE = 128 * 1024 * 1024  # 128MB buffer
+MULTIPART_THRESHOLD = 512 * 1024 * 1024  # 512MB threshold
+CHUNK_SIZE = 128 * 1024 * 1024  # 128MB chunks
 MAX_CONCURRENT = 16  # 16 concurrent files
-MAX_PARTS_PER_FILE = 32  # 32 concurrent chunks per file
-BUFFER_SIZE = 128 * 1024 * 1024  # 128MB buffer
-MAX_RETRIES = 3  # Retries for failures
-RETRY_DELAY = 0.5  # Base delay in seconds
+MAX_PARTS_PER_FILE = 16  # 16 concurrent chunks per file
+BUFFER_SIZE = 64 * 1024 * 1024  # 64MB buffer
+MAX_RETRIES = 5  # Retries for failures
+RETRY_DELAY = 1.0  # Base delay in seconds
 
 AGREEMENT_MODEL_URL = "https://huggingface.co/{}"
 AGREEMENT_DATASET_URL = "https://huggingface.co/datasets/{}"
@@ -315,6 +315,7 @@ class WorkerManager:
 
     def _monitor_workers(self):
         """Monitor worker threads and handle timeouts."""
+        monitor_interval = 5
         while not self.shutdown_event.is_set():
             current_time = time.time()
             timed_out_tasks = []
@@ -327,45 +328,77 @@ class WorkerManager:
                     ):
                         timed_out_tasks.append((task_id, future))
 
+            if timed_out_tasks:
+                print(f"Found {len(timed_out_tasks)} timed out tasks to cancel")
+
             for task_id, future in timed_out_tasks:
-                print(f"Task {task_id} timed out after {self.task_timeout}s")
-                future.cancel()
+                try:
+                    task_age = (
+                        current_time
+                        - self.active_tasks.get(task_id, (None, current_time))[1]
+                    )
+                    print(
+                        f"Task {task_id} timed out after {task_age:.1f}s (limit: {self.task_timeout}s)"
+                    )
 
-                # Remove from active tasks
-                with self._lock:
-                    self.active_tasks.pop(task_id, None)
+                    if not future.done() and not future.cancelled():
+                        future.cancel()
 
-            time.sleep(10)  # Check every 10 seconds
+                    with self._lock:
+                        self.active_tasks.pop(task_id, None)
+                except Exception as e:
+                    print(f"Error cancelling task {task_id}: {e}")
+
+            sleep_time = max(1, monitor_interval if not timed_out_tasks else 2)
+            time.sleep(sleep_time)
 
     def wait_all_with_timeout(
         self,
         futures: List[concurrent.futures.Future],
         timeout: int = None,  # type: ignore
     ) -> Tuple[List[Any], int]:
-        """Wait for all futures with individual timeout handling.
+        """Wait for all futures with proper concurrent timeout handling.
 
         Returns:
             Tuple of (results, failure_count)
         """
-        results = []
+        if not futures:
+            return [], 0
+
+        results = [None] * len(futures)
         failure_count = 0
 
-        for i, future in enumerate(futures):
-            try:
-                result = future.result(timeout=timeout)
-                results.append(result)
-            except concurrent.futures.TimeoutError:
-                print(f"Future {i} timed out after {timeout}s")
-                future.cancel()
-                results.append(None)
-                failure_count += 1
-            except Exception as e:
-                print(f"Future {i} failed with error: {e}")
-                import traceback
+        batch_size = 1000
+        for batch_start in range(0, len(futures), batch_size):
+            batch_end = min(batch_start + batch_size, len(futures))
+            batch = futures[batch_start:batch_end]
 
-                traceback.print_exc()
-                results.append(None)
-                failure_count += 1
+            done, not_done = concurrent.futures.wait(
+                batch, timeout=timeout, return_when=concurrent.futures.ALL_COMPLETED
+            )
+
+            for i, future in enumerate(batch):
+                idx = batch_start + i
+                try:
+                    if future in done:
+                        try:
+                            results[idx] = future.result(timeout=0)
+                        except Exception as e:
+                            print(f"Future {idx} failed with error: {e}")
+                            import traceback
+
+                            traceback.print_exc()
+                            results[idx] = None
+                            failure_count += 1
+                    else:
+                        print(f"Future {idx} timed out after {timeout}s")
+                        future.cancel()
+                        results[idx] = None
+                        failure_count += 1
+                except concurrent.futures.CancelledError:
+                    print(f"Future {idx} was cancelled")
+                    results[idx] = None
+                    failure_count += 1
 
         return results, failure_count
 
@@ -795,6 +828,7 @@ def optimize_parquet_file(
     output_file: str,
     compression_level: int = 3,
     row_group_size: int = 1000,
+    chunk_size: int = 100000,
 ) -> None:
     """Optimize a parquet file with ZSTD compression and custom row group size.
 
@@ -803,24 +837,72 @@ def optimize_parquet_file(
         output_file: Path to output optimized parquet file
         compression_level: ZSTD compression level (1-22, default: 3)
         row_group_size: Number of rows per row group (default: 1000)
+        chunk_size: Number of rows to process at once (default: 100000)
     """
     print(f"Optimizing parquet file: {input_file}")
 
-    # Read the original parquet file
-    table = pq.read_table(input_file)
+    file_info = pq.ParquetFile(input_file)
+    total_rows = file_info.metadata.num_rows
+    file_size_mb = os.path.getsize(input_file) / (1024 * 1024)
 
-    # Write optimized parquet file with ZSTD compression
-    pq.write_table(
-        table,
-        output_file,
-        compression="ZSTD",
-        compression_level=compression_level,
-        use_dictionary=True,  # Enable dictionary encoding
-        data_page_size=4 * 1024 * 1024,  # 4MB data pages
-        row_group_size=row_group_size,
-        version="2.6",  # Modern Parquet format
-        use_deprecated_int96_timestamps=False,
-    )
+    print(f"Parquet file contains {total_rows:,} rows, size: {file_size_mb:.2f} MB")
+
+    if total_rows <= chunk_size or file_size_mb < 100:
+        table = pq.read_table(input_file)
+
+        # Write optimized parquet file with ZSTD compression
+        pq.write_table(
+            table,
+            output_file,
+            compression="ZSTD",
+            compression_level=compression_level,
+            use_dictionary=True,  # Enable dictionary encoding
+            data_page_size=4 * 1024 * 1024,  # 4MB data pages
+            row_group_size=row_group_size,
+            version="2.6",  # Modern Parquet format
+            use_deprecated_int96_timestamps=False,
+        )
+    else:
+        # For large files, process in chunks to avoid memory issues
+        print(f"Processing large file in chunks of {chunk_size:,} rows")
+
+        # Create a writer for the output file with desired properties
+        writer = None
+
+        # Process in chunks
+        for i in range(0, total_rows, chunk_size):
+            end = min(i + chunk_size, total_rows)
+            print(f"Processing rows {i:,}-{end:,} of {total_rows:,}")
+
+            # Read a chunk of the file
+            table_chunk = pq.read_table(input_file, rows=slice(i, end))
+
+            if writer is None:
+                # Initialize the writer with the first chunk
+                writer = pq.ParquetWriter(
+                    output_file,
+                    table_chunk.schema,
+                    compression="ZSTD",
+                    compression_level=compression_level,
+                    use_dictionary=True,
+                    data_page_size=4 * 1024 * 1024,
+                    row_group_size=row_group_size,
+                    version="2.6",
+                    use_deprecated_int96_timestamps=False,
+                )
+
+            # Write the chunk
+            writer.write_table(table_chunk)
+
+            # Explicitly delete to free memory
+            del table_chunk
+            import gc
+
+            gc.collect()
+
+        # Close the writer to finalize the file
+        if writer:
+            writer.close()
 
     # Report optimization results
     original_size = os.path.getsize(input_file) / (1024 * 1024)
@@ -1052,21 +1134,51 @@ def stream_multipart_to_r2(
         end_byte = min(i * part_size, actual_content_length)
         part_info.append((i, start_byte, end_byte))
 
-    # Use ThreadPoolExecutor to upload parts in parallel
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(upload_part, part_num, start, end)
-            for part_num, start, end in part_info
-        ]
+    part_upload_failures = 0
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
 
-        # Wait for all uploads to complete
-        for future in futures:
-            if not future.result():
-                # Abort on failure
-                client.abort_multipart_upload(
-                    Bucket=r2cfg.bucket_name, Key=key, UploadId=upload_id
-                )
-                raise Exception(f"Failed to upload parts for {key}")
+            for part_num, start, end in part_info:
+                futures.append(executor.submit(upload_part, part_num, start, end))
+
+            done, not_done = concurrent.futures.wait(
+                futures, timeout=60 * 60, return_when=concurrent.futures.ALL_COMPLETED
+            )
+
+            for future in not_done:
+                future.cancel()
+                part_upload_failures += 1
+                print(f"Part upload timed out for {key} and was cancelled")
+
+            for future in done:
+                try:
+                    if not future.result():
+                        part_upload_failures += 1
+                except Exception as e:
+                    part_upload_failures += 1
+                    print(f"Part upload failed for {key}: {e}")
+
+        if part_upload_failures > 0:
+            print(
+                f"Failed to upload {part_upload_failures} parts for {key}, aborting upload"
+            )
+            client.abort_multipart_upload(
+                Bucket=r2cfg.bucket_name, Key=key, UploadId=upload_id
+            )
+            raise Exception(
+                f"Failed to upload parts for {key} ({part_upload_failures} part failures)"
+            )
+    except Exception as e:
+        print(f"Exception during multipart upload: {e}")
+        # Clean up the multipart upload
+        try:
+            client.abort_multipart_upload(
+                Bucket=r2cfg.bucket_name, Key=key, UploadId=upload_id
+            )
+        except Exception:
+            pass
+        raise
 
     # Sort completed parts by part number
     completed_parts.sort(key=lambda p: p["PartNumber"])
@@ -1247,10 +1359,10 @@ def download_model(
             f"💾 Previously completed: {completed_count}/{download_state.total_files} files"
         )
 
-    # Initialize enhanced components
-    cache = R2FileCache()  # Use enhanced cache
-    recovery_manager = CorruptionRecoveryManager(max_retries=3)
-    worker_manager = WorkerManager(max_workers=max_workers, task_timeout=3600)
+    # Initialize components
+    cache = R2FileCache()
+    recovery_manager = CorruptionRecoveryManager(max_retries=5)
+    worker_manager = WorkerManager(max_workers=max_workers, task_timeout=14400)
 
     # Build initial cache from R2
     r2_cache = build_r2_cache(r2cfg, f"{r2cfg.subfolder}/")
@@ -1319,21 +1431,55 @@ def download_model(
             # Setup progress bar
             progress = ProgressTracker(file.size, os.path.basename(file.path))
 
-            # Download file with retry logic
             def download_operation():
-                # Stream download to file with progress reporting
+                download_chunk_size = 1024 * 1024  # 1MB chunks
+                connect_timeout = 60
+                read_timeout = max(3600, file.size // (50 * 1024))
+
+                print(
+                    f"[Worker {worker_id}] Downloading {file.path} with timeout ({connect_timeout}, {read_timeout})"
+                )
+
                 with open(temp_file, "wb") as f:
                     with session.get(
-                        download_url, stream=True, timeout=(30, 1800)
+                        download_url,
+                        stream=True,
+                        timeout=(connect_timeout, read_timeout),
                     ) as response:
                         response.raise_for_status()
-                        for chunk in response.iter_content(chunk_size=8192):
+
+                        last_update_time = time.time()
+                        bytes_received = 0
+
+                        for chunk in response.iter_content(
+                            chunk_size=download_chunk_size
+                        ):
                             if chunk:
+                                current_time = time.time()
                                 f.write(chunk)
-                                progress.update(len(chunk))
+                                chunk_size = len(chunk)
+                                progress.update(chunk_size)
+                                bytes_received += chunk_size
+
+                                if current_time - last_update_time > 300:
+                                    raise Exception(
+                                        "Download stalled - no progress for 5 minutes"
+                                    )
+
+                                last_update_time = current_time
+
+                actual_size = os.path.getsize(temp_file)
+                if actual_size != file.size:
+                    raise Exception(
+                        f"Size mismatch - expected: {file.size}, downloaded: {actual_size}"
+                    )
+
+                print(
+                    f"[Worker {worker_id}] Successfully downloaded {file.path} ({format_size(file.size)})"
+                )
 
             retry_with_backoff(
-                download_operation, max_retries=5, initial_backoff=1.0, max_backoff=30.0
+                download_operation, max_retries=7, initial_backoff=2.0, max_backoff=60.0
             )
 
             # Update state to uploading
@@ -1387,6 +1533,24 @@ def download_model(
             print(f"[Worker {worker_id}] Successfully completed {r2_key}")
             return True
 
+        except concurrent.futures.CancelledError:
+            # Explicit handling for task cancellation
+            print(f"[Worker {worker_id}] Task for {file.path} was cancelled")
+
+            # Mark as failed but with special error message
+            download_state.file_progress[file.path].status = FileStatus.FAILED
+            download_state.file_progress[
+                file.path
+            ].error_message = "Task cancelled by system"
+
+            # Add to retry queue if it's appropriate (not a timeout)
+            if recovery_manager.add_corrupted_file(file.path, file):
+                print(
+                    f"[Worker {worker_id}] Added cancelled task {file.path} to retry queue"
+                )
+
+            return False
+
         except Exception as e:
             error_msg = str(e)
 
@@ -1399,6 +1563,7 @@ def download_model(
 
                 traceback.print_exc()
 
+            # Handle different error types appropriately
             if "corrupt" in error_msg.lower() or "invalid parquet" in error_msg.lower():
                 # Handle corruption
                 download_state.file_progress[file.path].status = FileStatus.CORRUPTED
@@ -1411,6 +1576,18 @@ def download_model(
                     )
                 else:
                     print(f"[Worker {worker_id}] File {file.path} exceeded retry limit")
+            elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+                # Handle timeout specifically
+                print(
+                    f"[Worker {worker_id}] Request timed out for {file.path}, will retry"
+                )
+                download_state.file_progress[file.path].status = FileStatus.FAILED
+                download_state.file_progress[file.path].error_message = error_msg
+
+                if recovery_manager.add_corrupted_file(file.path, file):
+                    print(
+                        f"[Worker {worker_id}] Added timed out file {file.path} to retry queue"
+                    )
             else:
                 # Other errors
                 download_state.file_progress[file.path].status = FileStatus.FAILED
@@ -1560,13 +1737,28 @@ def download_model(
             session,
         )
 
-        # Wait for all futures with timeout
-        results, failure_count = worker_manager.wait_all_with_timeout(
-            futures, timeout=7200
-        )
+        # Process futures in manageable batches to prevent memory buildup
+        batch_size = 250
+        total_futures = len(futures)
+        total_failure_count = 0
 
-        if failure_count > 0:
-            print(f"⚠️ {failure_count} tasks failed during processing")
+        print(f"Processing {total_futures} total futures in batches of {batch_size}")
+
+        for i in range(0, total_futures, batch_size):
+            end_idx = min(i + batch_size, total_futures)
+            batch_futures = futures[i:end_idx]
+            print(
+                f"Processing batch {i // batch_size + 1}/{(total_futures + batch_size - 1) // batch_size}: futures {i}-{end_idx - 1}"
+            )
+
+            _, batch_failure_count = worker_manager.wait_all_with_timeout(
+                batch_futures, timeout=14400
+            )
+
+            total_failure_count += batch_failure_count
+
+        if total_failure_count > 0:
+            print(f"⚠️ {total_failure_count} tasks failed during processing")
 
         # Wait for retry queue to empty
         print("Waiting for retry queue to complete...")

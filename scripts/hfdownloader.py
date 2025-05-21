@@ -20,7 +20,6 @@ from Hugging Face to Cloudflare R2 storage with optimized throughput and reliabi
 
 import concurrent.futures
 import json
-import math
 import os
 import queue
 import random
@@ -44,12 +43,8 @@ from botocore.config import Config
 from requests.adapters import HTTPAdapter, Retry
 from tqdm import tqdm
 
-STREAM_BUFFER_SIZE = 128 * 1024 * 1024  # 128MB buffer
-MULTIPART_THRESHOLD = 512 * 1024 * 1024  # 512MB threshold
-CHUNK_SIZE = 128 * 1024 * 1024  # 128MB chunks
-MAX_CONCURRENT = 16  # 16 concurrent files
-MAX_PARTS_PER_FILE = 16  # 16 concurrent chunks per file
 BUFFER_SIZE = 64 * 1024 * 1024  # 64MB buffer
+MAX_CONCURRENT = 16  # 16 concurrent files
 MAX_RETRIES = 5  # Retries for failures
 RETRY_DELAY = 1.0  # Base delay in seconds
 
@@ -169,20 +164,19 @@ class R2FileCache:
     def exists_with_size_atomic(
         self, key: str, expected_size: int
     ) -> Tuple[bool, bool]:
-        """Check existence and claim in one atomic operation.
-        Returns: (exists_with_correct_size, successfully_claimed)
+        """Check existence and claim in one atomic operation, ignoring size.
+        Returns: (exists, successfully_claimed)
         """
         with self._lock:
             if key in self._processing_files:
                 return False, False
 
-            size = self.files.get(key)
-            exists_with_size = size is not None and size == expected_size
+            exists = key in self.files
 
-            if not exists_with_size:
+            if not exists:
                 self._processing_files.add(key)
 
-            return exists_with_size, not exists_with_size
+            return exists, not exists
 
     def update_file(self, key: str, size: int) -> None:
         """Update file in cache."""
@@ -196,10 +190,9 @@ class R2FileCache:
             return key in self.files
 
     def exists_with_size(self, key: str, expected_size: int) -> bool:
-        """Check if a file exists with the expected size."""
+        """Check if a file exists, ignoring size."""
         with self._lock:
-            size = self.files.get(key)
-            return size is not None and size == expected_size
+            return key in self.files
 
     def get_size(self, key: str) -> Tuple[int, bool]:
         """Get the file size and existence boolean."""
@@ -373,32 +366,56 @@ class WorkerManager:
             batch_end = min(batch_start + batch_size, len(futures))
             batch = futures[batch_start:batch_end]
 
-            done, not_done = concurrent.futures.wait(
-                batch, timeout=timeout, return_when=concurrent.futures.ALL_COMPLETED
-            )
+            try:
+                done, not_done = concurrent.futures.wait(
+                    batch, timeout=timeout, return_when=concurrent.futures.ALL_COMPLETED
+                )
 
-            for i, future in enumerate(batch):
-                idx = batch_start + i
-                try:
-                    if future in done:
-                        try:
-                            results[idx] = future.result(timeout=0)
-                        except Exception as e:
-                            print(f"Future {idx} failed with error: {e}")
-                            import traceback
+                # Process results for completed futures
+                for i, future in enumerate(batch):
+                    idx = batch_start + i
+                    try:
+                        if future in done:
+                            try:
+                                results[idx] = future.result(timeout=timeout)
+                            except concurrent.futures.CancelledError:
+                                print(f"Future {idx} was cancelled during processing")
+                                results[idx] = None
+                                failure_count += 1
+                            except Exception as e:
+                                print(f"Future {idx} failed with error: {e}")
+                                import traceback
 
-                            traceback.print_exc()
+                                traceback.print_exc()
+                                results[idx] = None
+                                failure_count += 1
+                        else:
+                            print(f"Future {idx} timed out after {timeout}s")
+                            # Cancel incomplete futures
+                            if not future.done() and not future.cancelled():
+                                future.cancel()
                             results[idx] = None
                             failure_count += 1
-                    else:
-                        print(f"Future {idx} timed out after {timeout}s")
-                        future.cancel()
+                    except concurrent.futures.CancelledError:
+                        print(f"Future {idx} was already cancelled")
                         results[idx] = None
                         failure_count += 1
-                except concurrent.futures.CancelledError:
-                    print(f"Future {idx} was cancelled")
-                    results[idx] = None
-                    failure_count += 1
+                    except Exception as e:
+                        print(f"Error processing future {idx}: {e}")
+                        results[idx] = None
+                        failure_count += 1
+
+            except Exception as e:
+                print(
+                    f"Error in wait operation for batch {batch_start}-{batch_end}: {e}"
+                )
+                # Handle any futures that might have been missed
+                for i, future in enumerate(batch):
+                    idx = batch_start + i
+                    if results[idx] is None:
+                        if not future.done() and not future.cancelled():
+                            future.cancel()
+                        failure_count += 1
 
         return results, failure_count
 
@@ -736,15 +753,15 @@ def fetch_file_list(url: str, session: requests.Session) -> List[HFModel]:
 
 
 def verify_parquet_file(
-    client: BaseClient, bucket: str, key: str, expected_size: int
+    client: BaseClient, bucket: str, key: str, expected_size: int = None
 ) -> bool:
-    """Verify a parquet file in R2 by checking magic numbers.
+    """Verify a parquet file in R2 by checking magic numbers only, ignoring size.
 
     Args:
         client: R2 client
         bucket: Bucket name
         key: Object key
-        expected_size: Expected file size
+        expected_size: Expected file size (ignored, kept for API compatibility)
 
     Returns:
         True if file is valid
@@ -752,7 +769,7 @@ def verify_parquet_file(
     Raises:
         Exception: If verification fails
     """
-    # First, get the actual file size from R2
+    # Get the actual file size from R2
     try:
         head_obj = client.head_object(Bucket=bucket, Key=key)
         actual_size = head_obj["ContentLength"]
@@ -763,12 +780,6 @@ def verify_parquet_file(
     if actual_size < 8:
         raise Exception(
             f"File too small to be a valid parquet file (size: {actual_size})"
-        )
-
-    # Check if expected size matches actual size
-    if expected_size != actual_size:
-        raise Exception(
-            f"Size mismatch - expected: {expected_size}, actual: {actual_size}"
         )
 
     # Get first 4 bytes (header)
@@ -828,7 +839,6 @@ def optimize_parquet_file(
     output_file: str,
     compression_level: int = 3,
     row_group_size: int = 1000,
-    chunk_size: int = 100000,
 ) -> None:
     """Optimize a parquet file with ZSTD compression and custom row group size.
 
@@ -837,17 +847,10 @@ def optimize_parquet_file(
         output_file: Path to output optimized parquet file
         compression_level: ZSTD compression level (1-22, default: 3)
         row_group_size: Number of rows per row group (default: 1000)
-        chunk_size: Number of rows to process at once (default: 100000)
     """
     print(f"Optimizing parquet file: {input_file}")
-
-    file_info = pq.ParquetFile(input_file)
-    total_rows = file_info.metadata.num_rows
-    file_size_mb = os.path.getsize(input_file) / (1024 * 1024)
-
-    print(f"Parquet file contains {total_rows:,} rows, size: {file_size_mb:.2f} MB")
-
-    if total_rows <= chunk_size or file_size_mb < 100:
+    try:
+        # Simple approach: read the entire file and write with optimization
         table = pq.read_table(input_file)
 
         # Write optimized parquet file with ZSTD compression
@@ -856,65 +859,29 @@ def optimize_parquet_file(
             output_file,
             compression="ZSTD",
             compression_level=compression_level,
-            use_dictionary=True,  # Enable dictionary encoding
-            data_page_size=4 * 1024 * 1024,  # 4MB data pages
+            use_dictionary=True,
+            data_page_size=4 * 1024 * 1024,
             row_group_size=row_group_size,
-            version="2.6",  # Modern Parquet format
+            version="2.6",
             use_deprecated_int96_timestamps=False,
         )
-    else:
-        # For large files, process in chunks to avoid memory issues
-        print(f"Processing large file in chunks of {chunk_size:,} rows")
 
-        # Create a writer for the output file with desired properties
-        writer = None
+        # Report optimization results
+        original_size = os.path.getsize(input_file) / (1024 * 1024)
+        optimized_size = os.path.getsize(output_file) / (1024 * 1024)
 
-        # Process in chunks
-        for i in range(0, total_rows, chunk_size):
-            end = min(i + chunk_size, total_rows)
-            print(f"Processing rows {i:,}-{end:,} of {total_rows:,}")
-
-            # Read a chunk of the file
-            table_chunk = pq.read_table(input_file, rows=slice(i, end))
-
-            if writer is None:
-                # Initialize the writer with the first chunk
-                writer = pq.ParquetWriter(
-                    output_file,
-                    table_chunk.schema,
-                    compression="ZSTD",
-                    compression_level=compression_level,
-                    use_dictionary=True,
-                    data_page_size=4 * 1024 * 1024,
-                    row_group_size=row_group_size,
-                    version="2.6",
-                    use_deprecated_int96_timestamps=False,
-                )
-
-            # Write the chunk
-            writer.write_table(table_chunk)
-
-            # Explicitly delete to free memory
-            del table_chunk
-            import gc
-
-            gc.collect()
-
-        # Close the writer to finalize the file
-        if writer:
-            writer.close()
-
-    # Report optimization results
-    original_size = os.path.getsize(input_file) / (1024 * 1024)
-    optimized_size = os.path.getsize(output_file) / (1024 * 1024)
-
-    print("Optimization complete:")
-    print(f"  Original size: {original_size:.2f} MB")
-    print(f"  Optimized size: {optimized_size:.2f} MB")
-    print(f"  Compression ratio: {(1 - optimized_size / original_size) * 100:.1f}%")
+        print("Optimization complete:")
+        print(f"  Original size: {original_size:.2f} MB")
+        print(f"  Optimized size: {optimized_size:.2f} MB")
+        print(f"  Compression ratio: {(1 - optimized_size / original_size) * 100:.1f}%")
+    except Exception as e:
+        print(f"Error optimizing file: {e}")
+        if os.path.exists(output_file):
+            os.remove(output_file)
+        raise
 
 
-def stream_simple_to_r2(
+def upload_to_r2(
     r2cfg: R2Config,
     local_file: str,
     key: str,
@@ -923,7 +890,7 @@ def stream_simple_to_r2(
     compression_level: Optional[int] = None,
     row_group_size: Optional[int] = None,
 ) -> None:
-    """Upload a file to R2 in a single operation.
+    """Upload a file to R2.
 
     Args:
         r2cfg: R2 configuration
@@ -944,7 +911,6 @@ def stream_simple_to_r2(
 
         # Optimize if compression level or row group size specified
         if compression_level is not None or row_group_size is not None:
-            # Create a temporary optimized file
             optimized_file = local_file + ".optimized"
             try:
                 # Use defaults if not specified
@@ -963,25 +929,23 @@ def stream_simple_to_r2(
     if progress is None:
         progress = ProgressTracker(actual_content_length, os.path.basename(key))
 
-    # Create a custom callback to track progress
     def progress_callback(bytes_transferred):
         progress.update(bytes_transferred)
 
     try:
-        # Upload the file
+        # Use the client's standard configuration - don't pass a Config object
         client.upload_file(
-            upload_file, r2cfg.bucket_name, key, Callback=progress_callback
+            upload_file,
+            r2cfg.bucket_name,
+            key,
+            Callback=progress_callback
         )
 
         # Verify after upload for parquet files
         if key.endswith(".parquet"):
-            # Use expected size for verification since file was optimized
-            verify_size = (
-                actual_content_length if upload_file != local_file else content_length
-            )
-            verify_parquet_file(client, r2cfg.bucket_name, key, verify_size)
+            verify_parquet_file(client, r2cfg.bucket_name, key)
+
     except Exception as e:
-        # Delete the failed upload
         try:
             client.delete_object(Bucket=r2cfg.bucket_name, Key=key)
         except Exception:
@@ -991,225 +955,6 @@ def stream_simple_to_r2(
         # Clean up optimized file if it was created
         if upload_file != local_file and os.path.exists(upload_file):
             os.unlink(upload_file)
-
-
-def stream_multipart_to_r2(
-    r2cfg: R2Config,
-    local_file: str,
-    key: str,
-    content_length: int,
-    progress: Optional[ProgressTracker] = None,
-    max_workers: int = MAX_PARTS_PER_FILE,
-    compression_level: Optional[int] = None,
-    row_group_size: Optional[int] = None,
-) -> None:
-    """Upload a large file to R2 using multipart upload.
-
-    Args:
-        r2cfg: R2 configuration
-        local_file: Path to local file
-        key: Destination key in R2
-        content_length: File size
-        progress: Progress tracker
-        max_workers: Maximum concurrent part uploads
-        compression_level: ZSTD compression level for parquet files
-        row_group_size: Row group size for parquet files
-    """
-    client = create_r2_client(r2cfg)
-    upload_file = local_file
-    actual_content_length = content_length
-
-    # For parquet files, verify and optionally optimize
-    if key.endswith(".parquet"):
-        verify_local_parquet(local_file)
-
-        # Optimize if compression level or row group size specified
-        if compression_level is not None or row_group_size is not None:
-            # Create a temporary optimized file
-            optimized_file = local_file + ".optimized"
-            try:
-                # Use defaults if not specified
-                comp_level = compression_level if compression_level is not None else 3
-                rg_size = row_group_size if row_group_size is not None else 1000
-
-                optimize_parquet_file(local_file, optimized_file, comp_level, rg_size)
-                upload_file = optimized_file
-                actual_content_length = os.path.getsize(optimized_file)
-            except Exception as e:
-                # Clean up on error
-                if os.path.exists(optimized_file):
-                    os.unlink(optimized_file)
-                raise Exception(f"Failed to optimize parquet file: {e}")
-
-    # Check for existing multipart uploads
-    existing_uploads = client.list_multipart_uploads(
-        Bucket=r2cfg.bucket_name, Prefix=key
-    )
-
-    upload_id = None
-    if "Uploads" in existing_uploads:
-        for upload in existing_uploads["Uploads"]:
-            if upload["Key"] == key:
-                upload_id = upload["UploadId"]
-                print(f"Found existing multipart upload for {key} (ID: {upload_id})")
-
-                # Get existing parts to potentially resume from
-                existing_parts = client.list_parts(
-                    Bucket=r2cfg.bucket_name, Key=key, UploadId=upload_id
-                )
-
-                if "Parts" in existing_parts and existing_parts["Parts"]:
-                    print(
-                        f"Found {len(existing_parts['Parts'])} previously uploaded parts"
-                    )
-
-                break
-
-    # Start a new multipart upload if we didn't find one to resume
-    if not upload_id:
-        # Abort any existing uploads for this key
-        if "Uploads" in existing_uploads:
-            for upload in existing_uploads["Uploads"]:
-                if upload["Key"] == key:
-                    try:
-                        client.abort_multipart_upload(
-                            Bucket=r2cfg.bucket_name,
-                            Key=upload["Key"],
-                            UploadId=upload["UploadId"],
-                        )
-                    except Exception as e:
-                        print(f"Warning: Failed to abort incomplete upload: {e}")
-
-        # Create new multipart upload
-        upload = client.create_multipart_upload(Bucket=r2cfg.bucket_name, Key=key)
-        upload_id = upload["UploadId"]
-        print(f"Created new multipart upload for {key} (ID: {upload_id})")
-
-    # Calculate optimal part size (minimum 5MB, maximum 5GB)
-    part_size = max(
-        min(actual_content_length // max_workers, 5 * 1024 * 1024 * 1024),
-        5 * 1024 * 1024,
-    )
-
-    if progress is None:
-        progress = ProgressTracker(actual_content_length, os.path.basename(key))
-
-    # Track completed parts
-    completed_parts = []
-    lock = threading.Lock()
-
-    # Worker function to upload a single part
-    def upload_part(part_number, start_byte, end_byte):
-        try:
-            # Upload the part (use the correct file)
-            with open(upload_file, "rb") as f:
-                f.seek(start_byte)
-                data = f.read(end_byte - start_byte)
-
-            response = client.upload_part(
-                Bucket=r2cfg.bucket_name,
-                Key=key,
-                UploadId=upload_id,
-                PartNumber=part_number,
-                Body=data,
-            )
-
-            with lock:
-                completed_parts.append(
-                    {"PartNumber": part_number, "ETag": response["ETag"]}
-                )
-                progress.update(end_byte - start_byte)
-
-            return True
-        except Exception as e:
-            print(f"Error uploading part {part_number}: {e}")
-            return False
-
-    # Generate part information
-    part_info = []
-    total_parts = math.ceil(actual_content_length / part_size)
-
-    for i in range(1, total_parts + 1):
-        start_byte = (i - 1) * part_size
-        end_byte = min(i * part_size, actual_content_length)
-        part_info.append((i, start_byte, end_byte))
-
-    part_upload_failures = 0
-    try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-
-            for part_num, start, end in part_info:
-                futures.append(executor.submit(upload_part, part_num, start, end))
-
-            done, not_done = concurrent.futures.wait(
-                futures, timeout=60 * 60, return_when=concurrent.futures.ALL_COMPLETED
-            )
-
-            for future in not_done:
-                future.cancel()
-                part_upload_failures += 1
-                print(f"Part upload timed out for {key} and was cancelled")
-
-            for future in done:
-                try:
-                    if not future.result():
-                        part_upload_failures += 1
-                except Exception as e:
-                    part_upload_failures += 1
-                    print(f"Part upload failed for {key}: {e}")
-
-        if part_upload_failures > 0:
-            print(
-                f"Failed to upload {part_upload_failures} parts for {key}, aborting upload"
-            )
-            client.abort_multipart_upload(
-                Bucket=r2cfg.bucket_name, Key=key, UploadId=upload_id
-            )
-            raise Exception(
-                f"Failed to upload parts for {key} ({part_upload_failures} part failures)"
-            )
-    except Exception as e:
-        print(f"Exception during multipart upload: {e}")
-        # Clean up the multipart upload
-        try:
-            client.abort_multipart_upload(
-                Bucket=r2cfg.bucket_name, Key=key, UploadId=upload_id
-            )
-        except Exception:
-            pass
-        raise
-
-    # Sort completed parts by part number
-    completed_parts.sort(key=lambda p: p["PartNumber"])
-
-    # Complete the multipart upload
-    client.complete_multipart_upload(
-        Bucket=r2cfg.bucket_name,
-        Key=key,
-        UploadId=upload_id,
-        MultipartUpload={"Parts": completed_parts},
-    )
-
-    # Verify the upload for parquet files
-    if key.endswith(".parquet"):
-        try:
-            # Use expected size for verification since file was optimized
-            verify_size = (
-                actual_content_length if upload_file != local_file else content_length
-            )
-            verify_parquet_file(client, r2cfg.bucket_name, key, verify_size)
-        except Exception as e:
-            # Delete the failed upload
-            client.delete_object(Bucket=r2cfg.bucket_name, Key=key)
-            # Clean up optimized file if it was created
-            if upload_file != local_file and os.path.exists(upload_file):
-                os.unlink(upload_file)
-            raise Exception(f"Post-upload verification failed: {e}")
-
-    # Clean up optimized file if it was created
-    if upload_file != local_file and os.path.exists(upload_file):
-        os.unlink(upload_file)
 
 
 def process_hf_folder_tree(
@@ -1359,41 +1104,34 @@ def download_model(
             f"💾 Previously completed: {completed_count}/{download_state.total_files} files"
         )
 
-    # Initialize components
     cache = R2FileCache()
     recovery_manager = CorruptionRecoveryManager(max_retries=5)
     worker_manager = WorkerManager(max_workers=max_workers, task_timeout=14400)
 
-    # Build initial cache from R2
     r2_cache = build_r2_cache(r2cfg, f"{r2cfg.subfolder}/")
     for key, size in r2_cache.files.items():
         cache.files[key] = size
 
-    # Use the provided maxWorkers parameter
     if max_workers <= 0:
         max_workers = 16  # Default
     print(f"Using {max_workers} worker threads for parallel downloads")
 
-    # Create the session
     session = create_optimized_session()
 
-    # Start worker manager
     worker_manager.start()
     futures = []
 
-    # Stop event for threads
     stop_processing = threading.Event()
 
     def process_file_enhanced(file: HFModel, worker_id: int) -> bool:
         """Enhanced file processing with proper state tracking and recovery."""
-        # Remove the prefix properly - ensure we only remove exact prefix
+
         if file.path.startswith(hf_prefix):
             path_without_prefix = file.path[len(hf_prefix) :].lstrip("/")
         else:
             path_without_prefix = file.path
         r2_key = f"{r2cfg.subfolder}/{path_without_prefix}"
 
-        # Try to claim the file atomically
         exists_with_size, claimed = cache.exists_with_size_atomic(r2_key, file.size)
 
         if exists_with_size:
@@ -1412,67 +1150,87 @@ def download_model(
             return True
 
         try:
-            # Update state to downloading
             download_state.file_progress[file.path] = FileProgress(
                 status=FileStatus.DOWNLOADING
             )
             download_state.processing_files[file.path] = worker_id
             save_download_state(download_state, model_dataset_name)
 
-            # Download file
             download_url = file.download_link or LFS_DATASET_RESOLVER_URL.format(
                 model_dataset_name, model_branch, file.path
             )
 
-            # Create temporary file
             with tempfile.NamedTemporaryFile(delete=False) as temp:
                 temp_file = temp.name
 
-            # Setup progress bar
             progress = ProgressTracker(file.size, os.path.basename(file.path))
 
             def download_operation():
-                download_chunk_size = 1024 * 1024  # 1MB chunks
+                if file.size > 1024 * 1024 * 1024:  # > 1GB
+                    download_chunk_size = (
+                        16 * 1024 * 1024
+                    )  # 16MB chunks for very large files
+                elif file.size > 256 * 1024 * 1024:  # > 256MB
+                    download_chunk_size = 8 * 1024 * 1024  # 8MB chunks for large files
+                else:
+                    download_chunk_size = (
+                        4 * 1024 * 1024
+                    )  # 4MB chunks for smaller files
+
                 connect_timeout = 60
-                read_timeout = max(3600, file.size // (50 * 1024))
+                read_timeout = max(7200, file.size // (25 * 1024))  # At least 2 hours
 
                 print(
-                    f"[Worker {worker_id}] Downloading {file.path} with timeout ({connect_timeout}, {read_timeout})"
+                    f"[Worker {worker_id}] Downloading {file.path} ({format_size(file.size)}) "
+                    f"with {format_size(download_chunk_size)} chunks and timeout ({connect_timeout}, {read_timeout})"
                 )
 
                 with open(temp_file, "wb") as f:
-                    with session.get(
-                        download_url,
-                        stream=True,
-                        timeout=(connect_timeout, read_timeout),
-                    ) as response:
-                        response.raise_for_status()
+                    try:
+                        with session.get(
+                            download_url,
+                            stream=True,
+                            timeout=(connect_timeout, read_timeout),
+                        ) as response:
+                            response.raise_for_status()
 
-                        last_update_time = time.time()
-                        bytes_received = 0
+                            last_update_time = time.time()
+                            bytes_received = 0
+                            stall_threshold = 300  # 5 minutes with no progress
 
-                        for chunk in response.iter_content(
-                            chunk_size=download_chunk_size
-                        ):
-                            if chunk:
-                                current_time = time.time()
-                                f.write(chunk)
-                                chunk_size = len(chunk)
-                                progress.update(chunk_size)
-                                bytes_received += chunk_size
+                            for chunk in response.iter_content(
+                                chunk_size=download_chunk_size
+                            ):
+                                if chunk:
+                                    current_time = time.time()
+                                    f.write(chunk)
+                                    chunk_size = len(chunk)
+                                    progress.update(chunk_size)
+                                    bytes_received += chunk_size
 
-                                if current_time - last_update_time > 300:
-                                    raise Exception(
-                                        "Download stalled - no progress for 5 minutes"
-                                    )
+                                    if (
+                                        current_time - last_update_time
+                                        > stall_threshold
+                                    ):
+                                        raise Exception(
+                                            f"Download stalled - no progress for {stall_threshold} seconds"
+                                        )
 
-                                last_update_time = current_time
+                                    last_update_time = current_time
+                    except Exception as e:
+                        f.flush()
+                        raise e
 
                 actual_size = os.path.getsize(temp_file)
-                if actual_size != file.size:
-                    raise Exception(
-                        f"Size mismatch - expected: {file.size}, downloaded: {actual_size}"
-                    )
+                if actual_size < 8:  # Only verify it's not empty or too small
+                    raise Exception(f"Downloaded file too small: {actual_size} bytes")
+
+                # For parquet files, verify they have the magic header
+                if file.path.endswith(".parquet"):
+                    try:
+                        verify_local_parquet(temp_file)
+                    except Exception as e:
+                        raise Exception(f"Downloaded parquet file is corrupted: {e}")
 
                 print(
                     f"[Worker {worker_id}] Successfully downloaded {file.path} ({format_size(file.size)})"
@@ -1482,68 +1240,44 @@ def download_model(
                 download_operation, max_retries=7, initial_backoff=2.0, max_backoff=60.0
             )
 
-            # Update state to uploading
             download_state.file_progress[file.path].status = FileStatus.UPLOADING
             save_download_state(download_state, model_dataset_name)
 
-            # Upload to R2
-            if file.size > MULTIPART_THRESHOLD:
-                stream_multipart_to_r2(
-                    r2cfg,
-                    temp_file,
-                    r2_key,
-                    file.size,
-                    progress,
-                    compression_level=compression_level,
-                    row_group_size=row_group_size,
-                )
-            else:
-                stream_simple_to_r2(
-                    r2cfg,
-                    temp_file,
-                    r2_key,
-                    file.size,
-                    progress,
-                    compression_level=compression_level,
-                    row_group_size=row_group_size,
-                )
+            upload_to_r2(
+                r2cfg,
+                temp_file,
+                r2_key,
+                file.size,
+                progress,
+                compression_level=compression_level,
+                row_group_size=row_group_size,
+            )
 
-            # Verify if parquet
             if r2_key.endswith(".parquet"):
                 client = create_r2_client(r2cfg)
-                # Get actual file size from r2 for verification
                 try:
-                    head_obj = client.head_object(Bucket=r2cfg.bucket_name, Key=r2_key)
-                    actual_uploaded_size = head_obj["ContentLength"]
-                    verify_parquet_file(
-                        client, r2cfg.bucket_name, r2_key, actual_uploaded_size
-                    )
+                    verify_parquet_file(client, r2cfg.bucket_name, r2_key)
                 except Exception as e:
                     print(
                         f"[Worker {worker_id}] Warning: Failed to verify parquet file: {e}"
                     )
 
-            # Mark as completed
             download_state.file_progress[file.path].status = FileStatus.COMPLETED
             cache.update_file(r2_key, file.size)
 
-            # Close progress bar
             progress.close()
 
             print(f"[Worker {worker_id}] Successfully completed {r2_key}")
             return True
 
         except concurrent.futures.CancelledError:
-            # Explicit handling for task cancellation
             print(f"[Worker {worker_id}] Task for {file.path} was cancelled")
 
-            # Mark as failed but with special error message
             download_state.file_progress[file.path].status = FileStatus.FAILED
             download_state.file_progress[
                 file.path
             ].error_message = "Task cancelled by system"
 
-            # Add to retry queue if it's appropriate (not a timeout)
             if recovery_manager.add_corrupted_file(file.path, file):
                 print(
                     f"[Worker {worker_id}] Added cancelled task {file.path} to retry queue"
@@ -1554,7 +1288,6 @@ def download_model(
         except Exception as e:
             error_msg = str(e)
 
-            # Print detailed error information
             print(
                 f"[Worker {worker_id}] Error processing {file.path}: {type(e).__name__}: {e}"
             )
@@ -1563,13 +1296,10 @@ def download_model(
 
                 traceback.print_exc()
 
-            # Handle different error types appropriately
             if "corrupt" in error_msg.lower() or "invalid parquet" in error_msg.lower():
-                # Handle corruption
                 download_state.file_progress[file.path].status = FileStatus.CORRUPTED
                 download_state.corrupted_files.append(file.path)
 
-                # Add to retry queue
                 if recovery_manager.add_corrupted_file(file.path, file):
                     print(
                         f"[Worker {worker_id}] Added corrupted file {file.path} to retry queue"
@@ -1577,7 +1307,6 @@ def download_model(
                 else:
                     print(f"[Worker {worker_id}] File {file.path} exceeded retry limit")
             elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
-                # Handle timeout specifically
                 print(
                     f"[Worker {worker_id}] Request timed out for {file.path}, will retry"
                 )
@@ -1589,26 +1318,22 @@ def download_model(
                         f"[Worker {worker_id}] Added timed out file {file.path} to retry queue"
                     )
             else:
-                # Other errors
                 download_state.file_progress[file.path].status = FileStatus.FAILED
                 download_state.file_progress[file.path].error_message = error_msg
 
             return False
 
         finally:
-            # Clean up
             cache.release_file(r2_key)
             download_state.processing_files.pop(file.path, None)
             save_download_state(download_state, model_dataset_name)
 
-            # Clean up temp file
             if "temp_file" in locals() and os.path.exists(temp_file):
                 try:
                     os.unlink(temp_file)
                 except:  # noqa: E722
                     pass
 
-    # Setup file processor callback
     def process_files_callback(files: List[HFModel]) -> None:
         """Process a batch of files."""
         pending_files = []
@@ -1616,7 +1341,6 @@ def download_model(
         skipped_size = 0
         skipped_count = 0
 
-        # Update total file count in download state
         file_count = 0
         for file in files:
             if not file.is_directory and not file.filter_skip and file.size > 0:
@@ -1627,16 +1351,13 @@ def download_model(
         else:
             download_state.total_files += file_count
 
-        # Save state
         try:
             save_download_state(download_state, model_dataset_name)
         except Exception as e:
             print(f"Warning: Failed to save download state: {e}")
 
-        # First, filter files that need to be processed
         for file in files:
             if not file.is_directory and not file.filter_skip and file.size > 0:
-                # Remove the prefix properly - ensure we only remove exact prefix
                 if file.path.startswith(hf_prefix):
                     path_without_prefix = file.path[len(hf_prefix) :].lstrip("/")
                 else:
@@ -1644,7 +1365,6 @@ def download_model(
                 r2_key = f"{r2cfg.subfolder}/{path_without_prefix}"
                 total_size += file.size
 
-                # Check if file is already completed
                 if file.path in download_state.file_progress:
                     status = download_state.file_progress[file.path].status
                     if status == FileStatus.COMPLETED:
@@ -1655,12 +1375,10 @@ def download_model(
                         skipped_count += 1
                         continue
                     elif status == FileStatus.CORRUPTED:
-                        # Add corrupted files to retry queue
                         recovery_manager.add_corrupted_file(file.path, file)
                         continue
 
                 if cache.exists_with_size(r2_key, file.size):
-                    # File exists in R2 with correct size - mark as completed
                     download_state.file_progress[file.path] = FileProgress(
                         status=FileStatus.COMPLETED
                     )
@@ -1670,7 +1388,6 @@ def download_model(
                 else:
                     existing_size, exists = cache.get_size(r2_key)
                     if exists:
-                        # File exists but with incorrect size
                         print(
                             f"File {r2_key} exists with incorrect size (expected: {format_size(file.size)}, "
                             + f"actual: {format_size(existing_size)}). Will be deleted and reuploaded."
@@ -1678,7 +1395,6 @@ def download_model(
 
                 pending_files.append(file)
 
-        # Print summary
         if not silent_mode:
             print("\n=== Processing Summary ===")
             print(f"Total files found: {len(files)}")
@@ -1688,7 +1404,6 @@ def download_model(
             print(f"Skipped size: {format_size(skipped_size)}")
             print(f"Remaining size: {format_size(total_size - skipped_size)}\n")
 
-        # Submit jobs to worker manager
         for file in pending_files:
             if not silent_mode:
                 print(f"Queueing: {file.path} ({format_size(file.size)})")
@@ -1701,7 +1416,6 @@ def download_model(
             )
             futures.append(future)
 
-    # Add retry processing thread
     def process_retry_queue():
         """Process files from the retry queue."""
         while not stop_processing.is_set() or recovery_manager.has_pending_retries():
@@ -1724,7 +1438,6 @@ def download_model(
     retry_thread.start()
 
     try:
-        # Start processing
         process_hf_folder_tree(
             is_dataset,
             model_dataset_name,
@@ -1737,7 +1450,6 @@ def download_model(
             session,
         )
 
-        # Process futures in manageable batches to prevent memory buildup
         batch_size = 250
         total_futures = len(futures)
         total_failure_count = 0
@@ -1760,7 +1472,6 @@ def download_model(
         if total_failure_count > 0:
             print(f"⚠️ {total_failure_count} tasks failed during processing")
 
-        # Wait for retry queue to empty
         print("Waiting for retry queue to complete...")
         retry_attempts = 0
         while (
@@ -1772,11 +1483,9 @@ def download_model(
         if recovery_manager.has_pending_retries():
             print("⚠️ Some files are still pending retry after timeout")
 
-        # Stop retry thread
         stop_processing.set()
         retry_thread.join(timeout=5)
 
-        # Check final status
         failed_files = []
         corrupted_files = []
         for path, progress in download_state.file_progress.items():
@@ -1802,21 +1511,16 @@ def download_model(
 
     except Exception as e:
         print(f"Error during processing: {e}")
-        # Save state before returning error
         save_download_state(download_state, model_dataset_name)
         raise
     finally:
-        # Stop processing
         stop_processing.set()
 
-        # Stop retry thread if still running
         if retry_thread.is_alive():
             retry_thread.join(timeout=5)
 
-        # Shutdown worker manager
         worker_manager.shutdown()
 
-    # Save final state
     print("💾 Saving final download state")
     save_download_state(download_state, model_dataset_name)
     print("✅ Download and upload complete!")
@@ -1847,11 +1551,9 @@ def cleanup_corrupted_files(r2cfg: R2Config, prefix: str, concurrency: int) -> N
     total_files = 0
     corrupted_files = 0
 
-    # Use ThreadPoolExecutor for parallel verification
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = []
 
-        # Function to verify a single file
         def verify_file(obj):
             nonlocal total_files, corrupted_files
 
@@ -1867,8 +1569,7 @@ def cleanup_corrupted_files(r2cfg: R2Config, prefix: str, concurrency: int) -> N
             )
 
             try:
-                # Check parquet file integrity
-                verify_parquet_file(client, r2cfg.bucket_name, key, size)
+                verify_parquet_file(client, r2cfg.bucket_name, key)
                 print(f"[Worker {worker_id}] ✅ Valid parquet file: {key}")
             except Exception as e:
                 print(f"[Worker {worker_id}] ❌ Corrupted file: {key}, error: {e}")
@@ -1888,7 +1589,6 @@ def cleanup_corrupted_files(r2cfg: R2Config, prefix: str, concurrency: int) -> N
             with threading.Lock():
                 total_files += 1
 
-        # List objects from R2
         paginator = client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=r2cfg.bucket_name, Prefix=prefix):
             if "Contents" not in page:
@@ -1899,7 +1599,6 @@ def cleanup_corrupted_files(r2cfg: R2Config, prefix: str, concurrency: int) -> N
             for obj in page["Contents"]:
                 futures.append(executor.submit(verify_file, obj))
 
-        # Wait for all verifications to complete
         for future in futures:
             future.result()
 

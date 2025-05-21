@@ -935,10 +935,7 @@ def upload_to_r2(
     try:
         # Use the client's standard configuration - don't pass a Config object
         client.upload_file(
-            upload_file,
-            r2cfg.bucket_name,
-            key,
-            Callback=progress_callback
+            upload_file, r2cfg.bucket_name, key, Callback=progress_callback
         )
 
         # Verify after upload for parquet files

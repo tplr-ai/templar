@@ -1049,19 +1049,15 @@ class Comms(ChainManager):
                     # Process tensors (with normalization on 'vals' keys).
                     for param_name, tensor in state_dict_resp.items():
                         if isinstance(tensor, torch.Tensor):
-                            if param_name.endswith("vals"):
-                                tensor = tensor.to(device)
-                                norm = torch.norm(tensor)
-                                normalized = tensor / (norm + 1e-8)
-                                aggregated_state_dict.setdefault(param_name, []).append(
-                                    normalized
-                                )
-                            else:
-                                aggregated_state_dict.setdefault(param_name, []).append(
-                                    tensor.to(device)
-                                )
+                            aggregated_state_dict.setdefault(param_name, []).append(
+                                tensor.to(device)
+                            )
                             metrics["download_bytes"] += (
                                 tensor.element_size() * tensor.nelement()
+                            )
+                        elif param_name.endswith("quant_params"):
+                            aggregated_state_dict.setdefault(param_name, []).append(
+                                tensor
                             )
 
                     valid_uids.append(uid)

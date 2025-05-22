@@ -185,7 +185,9 @@ class CompressDCT:
         return x
 
     @torch.no_grad()
-    def batch_decompress(self, p, idx, val, xshape, totalk, quantize_params=None):
+    def batch_decompress(
+        self, p, idx, val, xshape, totalk, quantize_params=None, normalise=True
+    ):
         """
         Decompress multiple tensors in batch mode.
         """
@@ -208,6 +210,21 @@ class CompressDCT:
             # Dequantize if we have quantization parameters
             if self.use_quantization and quantize_params and i < len(quantize_params):
                 v = self._dequantize_values(v, quantize_params[i])
+
+            # Apply L2 normalization to this individual tensor's values
+            # Normalize along the last dimension (where top-k was selected)
+            if normalise:
+                eps = 1e-8
+                if len(v.shape) == 3:  # 2D weights
+                    l2_norm = torch.norm(v, p=2, dim=2, keepdim=True)
+                    v = v / (l2_norm + eps)
+                elif len(v.shape) == 2:  # 1D weights (biases)
+                    l2_norm = torch.norm(v, p=2, dim=1, keepdim=True)
+                    v = v / (l2_norm + eps)
+                elif len(v.shape) == 1:  # Single values
+                    l2_norm = torch.norm(v, p=2)
+                    if l2_norm > eps:
+                        v = v / l2_norm
 
             processed_vals.append(v)
 

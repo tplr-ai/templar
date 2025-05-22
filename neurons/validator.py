@@ -1426,10 +1426,16 @@ class Validator:
                         for n, p in model_own_data_eval.named_parameters():
                             idxs_key = n + "idxs"
                             vals_key = n + "vals"
+                            quant_key = n + "quant_params"
                             idxs = state_dict.get(idxs_key, None)
                             vals = state_dict.get(vals_key, None)
+                            quant_params = state_dict.get(quant_key, None)
 
-                            if idxs is not None and vals is not None:
+                            if (
+                                idxs is not None
+                                and vals is not None
+                                and quant_params is not None
+                            ):
                                 # Move tensors to device
                                 idxs = idxs.to(self.config.device)
                                 vals = vals.to(self.config.device)
@@ -1472,10 +1478,16 @@ class Validator:
                         for n, p in model_own_data_eval.named_parameters():
                             idxs_key = n + "idxs"
                             vals_key = n + "vals"
+                            quant_key = n + "quant_params"
                             idxs = state_dict.get(idxs_key, None)
                             vals = state_dict.get(vals_key, None)
+                            quant_params = state_dict.get(quant_key, None)
 
-                            if idxs is not None and vals is not None:
+                            if (
+                                idxs is not None
+                                and vals is not None
+                                and quant_params is not None
+                            ):
                                 idxs = idxs.to(self.config.device)
                                 vals = vals.to(self.config.device)
 
@@ -1486,6 +1498,7 @@ class Validator:
                                         vals,
                                         self.xshapes[n],
                                         self.totalks[n],
+                                        quant_params,
                                     )
                                 ).to(self.config.device)
 
@@ -1686,10 +1699,16 @@ class Validator:
                         for n, p in model_random_data_eval.named_parameters():
                             idxs_key = n + "idxs"
                             vals_key = n + "vals"
+                            quant_key = n + "quant_params"
                             idxs = state_dict.get(idxs_key, None)
                             vals = state_dict.get(vals_key, None)
+                            quant_params = state_dict.get(quant_key, None)
 
-                            if idxs is not None and vals is not None:
+                            if (
+                                idxs is not None
+                                and vals is not None
+                                and quant_params is not None
+                            ):
                                 idxs = idxs.to(self.config.device)
                                 vals = vals.to(self.config.device)
 
@@ -1700,6 +1719,7 @@ class Validator:
                                         vals,
                                         self.xshapes[n],
                                         self.totalks[n],
+                                        quant_params,
                                     )
                                 ).to(self.config.device)
 

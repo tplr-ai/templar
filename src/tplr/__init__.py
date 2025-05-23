@@ -34,3 +34,4 @@ from .logging import *
 from .schemas import *
 from .wandb import initialize_wandb
 from .metrics import *
+from .shard_index import ShardIndex

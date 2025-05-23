@@ -489,6 +489,9 @@ async def test_gather_complex_normalization(comms_instance):
         totalks={"0.weight": totalk_value},
     )
     assert result is not None
+    assert hasattr(result.state_dict, "0.weightvals")
+    vals = result.state_dict.__dict__["0.weightvals"][0]
+    assert torch.allclose(vals, torch.tensor([0.3, 0.4, 0.5]))
 
 
 #  TODO: Move to analyser when refactored
@@ -663,34 +666,28 @@ async def test_gather_complex_normalization(comms_instance):
     )
 
     assert result is not None
-    # Get all normalized tensors from the aggregated state dictionary.
-    normalized_tensors = getattr(result.state_dict, "layer.vals")
-    actual_vals = torch.stack(normalized_tensors).mean(dim=0)
+    # Get all tensors from the aggregated state dictionary (no longer normalized in gather).
+    tensors = getattr(result.state_dict, "layer.vals")
+    actual_vals = torch.stack(tensors).mean(dim=0)
 
-    # Calculate expected normalized values.
-    eps = 1e-8  # Small epsilon to avoid division by zero.
-    norm1 = torch.norm(peer1_response[0]["layer.vals"])
-    norm2 = torch.norm(peer2_response[0]["layer.vals"])
-    norm3 = torch.norm(peer3_response[0]["layer.vals"])
+    # Calculate expected values (raw values without normalization).
+    expected_vals = torch.stack(
+        [
+            peer1_response[0]["layer.vals"],
+            peer2_response[0]["layer.vals"],
+            peer3_response[0]["layer.vals"],
+        ]
+    ).mean(dim=0)
 
-    normalized1 = peer1_response[0]["layer.vals"] / (norm1 + eps)
-    normalized2 = peer2_response[0]["layer.vals"] / (norm2 + eps)
-    normalized3 = peer3_response[0]["layer.vals"] / (norm3 + eps)
-    expected_vals = torch.stack([normalized1, normalized2, normalized3]).mean(dim=0)
-
-    # Debug prints (optional)
-    print(f"Peer 1 normalized: {normalized1}")
-    print(f"Peer 2 normalized: {normalized2}")
-    print(f"Peer 3 normalized: {normalized3}")
+    print(f"Peer 1 vals: {peer1_response[0]['layer.vals']}")
+    print(f"Peer 2 vals: {peer2_response[0]['layer.vals']}")
+    print(f"Peer 3 vals: {peer3_response[0]['layer.vals']}")
     print(f"Expected average: {expected_vals}")
     print(f"Actual result: {actual_vals}")
 
     # Floating point comparisons with tolerances.
     assert torch.allclose(actual_vals, expected_vals, rtol=1e-3, atol=1e-3)
     # Additional assertions to verify that all peers were processed.
-    assert len(normalized_tensors) == 3, (
-        f"Expected 3 normalized tensors, got {len(normalized_tensors)}"
-    )
     assert len(result.uids) == 3, f"Expected 3 valid UIDs, got {len(result.uids)}"
 
 
@@ -1580,12 +1577,7 @@ async def test_missing_idxs_key(comms_instance, model):
         assert len(tensor_list) == 2, (
             f"Expected 2 tensors in {key_vals}, got {len(tensor_list)}"
         )
-        # Verify each tensor gets normalized (norm approx. 1).
-        for tensor in tensor_list:
-            norm = torch.norm(tensor)
-            assert torch.isclose(norm, torch.tensor(1.0, device=device), atol=1e-5), (
-                f"Tensor in {key_vals} is not normalized: norm = {norm}"
-            )
+        pass
 
     # Confirm the download_bytes metric is computed.
     assert result.download_bytes > 0, "Expected download_bytes to be > 0"

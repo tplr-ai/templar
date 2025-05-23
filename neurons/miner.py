@@ -143,7 +143,11 @@ class Miner:
         self.transformer = tplr.compress.TransformDCT(
             self.model, target_chunk=self.hparams.target_chunk
         )
-        self.compressor = tplr.compress.CompressDCT()
+        self.compressor = tplr.compress.CompressDCT(
+            use_quantization=True,
+            quantization_bins=self.hparams.quantization_bins,
+            quantization_range=self.hparams.quantization_range,
+        )
 
         # Init optimizer and momentum
         self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
@@ -152,7 +156,7 @@ class Miner:
         self.totalks = {}
         for n, p in self.model.named_parameters():
             self.momentum[n] = torch.zeros_like(p)
-            _, _, xshape, totalk = self.compressor.compress(
+            _, _, xshape, totalk, quant_params = self.compressor.compress(
                 self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
             )
             self.xshapes[n] = xshape
@@ -584,8 +588,11 @@ class Miner:
                 for n, p in self.model.named_parameters():
                     idxs_key = n + "idxs"
                     vals_key = n + "vals"
+                    quant_key = n + "quant_params"
+
                     idxs = getattr(gather_result.state_dict, idxs_key, None)
                     vals = getattr(gather_result.state_dict, vals_key, None)
+                    quant_params = getattr(gather_result.state_dict, quant_key, None)
                     if idxs is not None and vals is not None:
                         if not isinstance(idxs, (list, tuple)):
                             idxs = [idxs]
@@ -598,6 +605,7 @@ class Miner:
                                 vals,
                                 xshapes[n],
                                 totalks[n],
+                                quant_params,
                             )
                         )
 

@@ -159,7 +159,11 @@ class Validator:
         self.transformer = tplr.compress.TransformDCT(
             self.model, target_chunk=self.hparams.target_chunk
         )
-        self.compressor = tplr.compress.CompressDCT()
+        self.compressor = tplr.compress.CompressDCT(
+            use_quantization=True,
+            quantization_bins=self.hparams.quantization_bins,
+            quantization_range=self.hparams.quantization_range,
+        )
 
         # Init optimizer and momentum
         self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
@@ -168,7 +172,7 @@ class Validator:
         self.totalks = {}
         for n, p in self.model.named_parameters():
             self.momentum[n] = torch.zeros_like(p)
-            _, _, xshape, totalk = self.compressor.compress(
+            _, _, xshape, totalk, quant_params = self.compressor.compress(
                 self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
             )
             self.xshapes[n] = xshape
@@ -1426,10 +1430,16 @@ class Validator:
                         for n, p in model_own_data_eval.named_parameters():
                             idxs_key = n + "idxs"
                             vals_key = n + "vals"
+                            quant_key = n + "quant_params"
                             idxs = state_dict.get(idxs_key, None)
                             vals = state_dict.get(vals_key, None)
+                            quant_params = state_dict.get(quant_key, None)
 
-                            if idxs is not None and vals is not None:
+                            if (
+                                idxs is not None
+                                and vals is not None
+                                and quant_params is not None
+                            ):
                                 # Move tensors to device
                                 idxs = idxs.to(self.config.device)
                                 vals = vals.to(self.config.device)
@@ -1472,10 +1482,16 @@ class Validator:
                         for n, p in model_own_data_eval.named_parameters():
                             idxs_key = n + "idxs"
                             vals_key = n + "vals"
+                            quant_key = n + "quant_params"
                             idxs = state_dict.get(idxs_key, None)
                             vals = state_dict.get(vals_key, None)
+                            quant_params = state_dict.get(quant_key, None)
 
-                            if idxs is not None and vals is not None:
+                            if (
+                                idxs is not None
+                                and vals is not None
+                                and quant_params is not None
+                            ):
                                 idxs = idxs.to(self.config.device)
                                 vals = vals.to(self.config.device)
 
@@ -1486,6 +1502,7 @@ class Validator:
                                         vals,
                                         self.xshapes[n],
                                         self.totalks[n],
+                                        quant_params,
                                     )
                                 ).to(self.config.device)
 
@@ -1686,10 +1703,16 @@ class Validator:
                         for n, p in model_random_data_eval.named_parameters():
                             idxs_key = n + "idxs"
                             vals_key = n + "vals"
+                            quant_key = n + "quant_params"
                             idxs = state_dict.get(idxs_key, None)
                             vals = state_dict.get(vals_key, None)
+                            quant_params = state_dict.get(quant_key, None)
 
-                            if idxs is not None and vals is not None:
+                            if (
+                                idxs is not None
+                                and vals is not None
+                                and quant_params is not None
+                            ):
                                 idxs = idxs.to(self.config.device)
                                 vals = vals.to(self.config.device)
 
@@ -1700,6 +1723,7 @@ class Validator:
                                         vals,
                                         self.xshapes[n],
                                         self.totalks[n],
+                                        quant_params,
                                     )
                                 ).to(self.config.device)
 
@@ -2601,8 +2625,11 @@ class Validator:
         for n, p in self.model.named_parameters():
             idxs_key = n + "idxs"
             vals_key = n + "vals"
+            quant_key = n + "quant_params"
+
             idxs = getattr(gather_result.state_dict, idxs_key, None)
             vals = getattr(gather_result.state_dict, vals_key, None)
+            quant_params = getattr(gather_result.state_dict, quant_key, None)
             if idxs is not None and vals is not None:
                 if not isinstance(idxs, (list, tuple)):
                     idxs = [idxs]
@@ -2615,6 +2642,7 @@ class Validator:
                         vals,
                         self.xshapes[n],
                         self.totalks[n],
+                        quant_params,
                     )
                 )
                 # Store pre-sign gradient in momentum

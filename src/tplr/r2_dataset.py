@@ -30,9 +30,10 @@ import pyarrow.parquet as pq
 import s3fs
 import yaml
 
-from tplr import logger
+from tplr import logger as _log
 from tplr.config import BUCKET_SECRETS
 from tplr.dataset import DatasetLoader
+from tplr.distrib import all_gather_object, broadcast_object, get_rank, get_world_size
 from tplr.profilers import get_shard_profiler, get_timer_profiler
 from tplr.shard_index import ShardIndex
 
@@ -233,40 +234,90 @@ class R2DatasetLoader(DatasetLoader):
             return configs_data
 
         except Exception as e:
-            logger.error(f"Error loading dataset configs: {e}")
+            _log.error(f"Error loading dataset configs: {e}")
             raise
 
     @staticmethod
     @_timer_profiler.profile("next_pages")
     async def next_pages(
-        offset: int, n_pages: int, seed: str, num_rows_per_page: int = 100
-    ) -> list:
-        """Get next n_pages random pages starting from offset."""
-        configs_data = await R2DatasetLoader.fetch_dataset_configs()
+        offset: int,
+        n_pages: int,
+        seed: str,
+        *,
+        num_rows_per_page: int = 100,
+        rank: int | None = None,
+        world_size: int | None = None,
+    ) -> list[tuple[str, int, str]]:
+        """
+        Deterministically sample **n_pages** per rank, no duplicates
+        across ranks, works for any world_size.
 
-        # Create RNG with same method as DatasetLoader
-        rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
-        rng.bit_generator.advance(offset)  # Skip ahead by offset
+        Returned tuples: (config_name, row_idx, split)
+        """
+        rank = get_rank() if rank is None else rank
+        world_size = get_world_size() if world_size is None else world_size
 
-        # Sort config keys for consistent ordering
+        # 1) configs (broadcast once)
+        if R2DatasetLoader._configs_data_cache is None:
+            if rank == 0:
+                R2DatasetLoader._configs_data_cache = (
+                    await R2DatasetLoader.fetch_dataset_configs()
+                )
+            R2DatasetLoader._configs_data_cache = broadcast_object(
+                R2DatasetLoader._configs_data_cache, src=0
+            )
+        configs_data = R2DatasetLoader._configs_data_cache
         sorted_keys = sorted(configs_data.keys())
 
-        result = []
-        for _ in range(n_pages):
-            config = rng.choice(sorted_keys)
-            choice = rng.integers(
-                0, configs_data[config]["num_rows"] - 1 - num_rows_per_page
-            )
-            result.append((str(config), int(choice), configs_data[config]["split"]))
+        # 2) RNG (same on every rank)
+        rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
+        rng.bit_generator.advance(offset)
 
-        return result
+        # ───────────────────────── single-GPU fast-path ───────────────────── #
+        if world_size == 1:
+            out = []
+            for _ in range(n_pages):
+                cfg = rng.choice(sorted_keys)
+                meta = configs_data[cfg]
+                max_row = meta["num_rows"] - num_rows_per_page
+                row = 0 if max_row <= 0 else int(rng.integers(0, max_row))
+                out.append((str(cfg), row, meta["split"]))
+            return out
+        # ───────────────────────── multi-GPU path ─────────────────────────── #
+
+        global_needed = n_pages * world_size
+        seen: set[tuple[str, int, str]] = set()
+        all_pages: list[tuple[str, int, str]] = []
+
+        # keep drawing pages until we have enough unique ones
+        while len(all_pages) < global_needed:
+            cfg = rng.choice(sorted_keys)
+            meta = configs_data[cfg]
+            max_row = meta["num_rows"] - num_rows_per_page
+            if max_row <= 0:  # skip shards that are too small
+                continue
+            row = int(rng.integers(0, max_row))
+            pg = (str(cfg), row, meta["split"])
+            if pg not in seen:  # de-dupe globally
+                seen.add(pg)
+                all_pages.append(pg)
+
+        # stride assignment → rank-k gets indices k, k+world_size, …
+        pages_for_rank = all_pages[rank::world_size][:n_pages]
+
+        _log.info(
+            f"[R2DatasetLoader] rank={rank}/{world_size - 1} → "  # 0-based upper-bound
+            f"{len(pages_for_rank)} pages "
+            f"{[f'{c}:{r}' for c, r, _ in pages_for_rank]}"
+        )
+        return pages_for_rank
 
     @staticmethod
     @_timer_profiler.profile("create")
     async def create(
         batch_size, sequence_length, pages_info, tokenizer, pack_samples=True
     ):
-        """Create loader with proper initialization"""
+        """Create loader with proper initialization and batch alignment"""
         loader = R2DatasetLoader(
             batch_size=batch_size,
             sequence_length=sequence_length,
@@ -288,7 +339,42 @@ class R2DatasetLoader(DatasetLoader):
             if isinstance(result, list):
                 loader.buffer.extend(result)
             elif isinstance(result, Exception):
-                logger.error(f"Page processing error: {result}")
+                _log.error(f"Page processing error: {result}")
+
+        # ------------------------------------------------------------------ #
+        # 2. Determine how many *full* batches each rank can supply          #
+        # ------------------------------------------------------------------ #
+        tokens_per_batch = batch_size * sequence_length
+        local_batches = len(loader.buffer) // tokens_per_batch
+        global_batches_l = all_gather_object(local_batches)  # list[int]
+        common_batches = min(global_batches_l)
+
+        if common_batches == 0:
+            raise RuntimeError(
+                f"[R2DatasetLoader] rank={get_rank()} – some rank has 0 full "
+                f"batches (local={local_batches}, all={global_batches_l}). "
+                "Either increase pages_per_window or lower batch_size."
+            )
+
+        target_tokens = common_batches * tokens_per_batch
+
+        # ------------------------------------------------------------------ #
+        # 3. Trim / pad so every rank has `target_tokens` exactly            #
+        # ------------------------------------------------------------------ #
+        if len(loader.buffer) >= target_tokens:
+            loader.buffer = loader.buffer[:target_tokens]  # trim excess
+        else:  # unlikely
+            pad_eos = [loader.tokenizer.eos_token_id] * (
+                target_tokens - len(loader.buffer)
+            )
+            loader.buffer.extend(pad_eos)
+
+        # Diagnostic (rank-0 only)
+        if get_rank() == 0:
+            _log.info(
+                f"[R2DatasetLoader] aligned_batches={common_batches} "
+                f"(tokens/rank={target_tokens}, world={get_world_size()})"
+            )
 
         return loader
 
@@ -336,14 +422,14 @@ class R2DatasetLoader(DatasetLoader):
         try:
             # Download and load shard sizes
             if not local_paths["shard_sizes"].exists():
-                logger.info("Downloading shard sizes from R2...")
+                _log.info("Downloading shard sizes from R2...")
                 fs.get(r2_paths["shard_sizes"], str(local_paths["shard_sizes"]))
             with open(local_paths["shard_sizes"]) as f:
                 R2DatasetLoader._shard_sizes = json.load(f)
 
             # Download and load metadata config
             if not local_paths["metadata"].exists():
-                logger.info("Downloading metadata config from R2...")
+                _log.info("Downloading metadata config from R2...")
                 fs.get(r2_paths["metadata"], str(local_paths["metadata"]))
             with open(local_paths["metadata"]) as f:
                 R2DatasetLoader._metadata_config = yaml.safe_load(f)
@@ -357,7 +443,7 @@ class R2DatasetLoader(DatasetLoader):
             )
 
         except Exception as e:
-            logger.error(f"Failed to load R2 metadata: {e}")
+            _log.error(f"Failed to load R2 metadata: {e}")
             raise
 
     @staticmethod
@@ -365,7 +451,7 @@ class R2DatasetLoader(DatasetLoader):
     def _get_fs():
         dataset_config = BUCKET_SECRETS["dataset"]
         # For debugging: log the full dataset configuration to check if 'multiple' is present
-        logger.debug(f"Dataset config loaded: {dataset_config}")
+        _log.debug(f"Dataset config loaded: {dataset_config}")
 
         with R2DatasetLoader._fs_lock:
             # Pick config in round robin if multiple endpoints are supplied
@@ -378,7 +464,7 @@ class R2DatasetLoader(DatasetLoader):
                 selected_config = dataset_config
 
             # Log the selected bucket name for round robin tracing (should show e.g. "dataset-bucket-1" then "dataset-bucket-2")
-            logger.debug(
+            _log.debug(
                 f"Using dataset bucket: {selected_config.get('name', 'default')}"
             )
 
@@ -425,7 +511,7 @@ class R2DatasetLoader(DatasetLoader):
                     break
                 await self._prefetch_queue.put(page)  # type: ignore
         except Exception as e:
-            logger.error(f"Prefetch error: {e}")
+            _log.error(f"Prefetch error: {e}")
         finally:
             await self._prefetch_queue.put(None)  # type: ignore # Signal completion
 
@@ -474,7 +560,7 @@ class R2DatasetLoader(DatasetLoader):
                 return all_tokens
 
             except Exception as e:
-                logger.error(f"Error processing page {page}: {e}")
+                _log.error(f"Error processing page {page}: {e}")
                 raise
 
     @_timer_profiler.profile("_get_parquet")
@@ -484,9 +570,7 @@ class R2DatasetLoader(DatasetLoader):
         if pf_data:
             # Check if the cached file is still valid
             if pf_data["file"].closed:
-                logger.warning(
-                    f"Cached parquet file is closed for {path}, reopening..."
-                )
+                _log.warning(f"Cached parquet file is closed for {path}, reopening...")
                 self._parquet_cache.pop(path, None)
                 pf_data = None
             else:
@@ -501,18 +585,18 @@ class R2DatasetLoader(DatasetLoader):
                     return pf_data
                 except Exception as e:
                     if attempt < max_retries - 1:
-                        logger.warning(
+                        _log.warning(
                             f"Attempt {attempt + 1} failed to open parquet file {path} with error: {e}. Retrying..."
                         )
                         await asyncio.sleep(2**attempt)  # Exponential backoff
                     else:
-                        logger.error(
+                        _log.error(
                             f"Failed to open parquet file {path} after {max_retries} attempts: {e}"
                         )
                         raise
 
         except Exception as e:
-            logger.error(f"Failed to open parquet file {path}: {e}")
+            _log.error(f"Failed to open parquet file {path}: {e}")
             raise
 
         raise ValueError(f"Failed to get parquet file for {path}")
@@ -654,7 +738,7 @@ class R2DatasetLoader(DatasetLoader):
                     try:
                         pf_data["file"].close()  # type: ignore
                     except Exception as e:
-                        logger.debug(f"Error closing parquet file: {e}")
+                        _log.debug(f"Error closing parquet file: {e}")
 
         self._parquet_cache.clear()
         self._token_cache.clear()
@@ -671,7 +755,7 @@ class R2DatasetLoader(DatasetLoader):
             file_info = fs.info(shard_path)
             file_size = file_info.get("Size", file_info.get("size", "unknown"))
         except Exception as e:
-            logger.warning(f"Could not get file size for {shard_path}: {e}")
+            _log.warning(f"Could not get file size for {shard_path}: {e}")
             file_size = "unknown"
 
         f = fs.open(shard_path, "rb", buffer_size=R2DatasetLoader.READ_BUFFER_SIZE)

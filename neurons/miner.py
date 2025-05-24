@@ -21,49 +21,44 @@ import argparse
 import asyncio
 import concurrent.futures
 import json
+import logging  # ← NEW
 import os
 import random
 import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import cast
+from typing import Any, Dict, List, Optional, cast
 
 import bittensor as bt
+import bittensor.core.subtensor as bt_subtensor
 import numpy as np
 import torch
-import uvloop
+import torch.optim as optim
 
-# Third party
-from bittensor.core.subtensor import ScaleObj
+# Local
+import tplr
+import tplr.distrib as distrib  # Using the provided distrib.py content
+import uvloop
+import websockets
 from torch import autocast
-from torch.optim import SGD
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
     LinearLR,
     SequentialLR,
 )
+from tplr.distrib import (
+    ddp_init,
+    # rank_world is already available as distrib.rank_world
+)
 from transformers import LlamaForCausalLM
-
-# Local
-import tplr
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
-# GPU optimizations
-torch.manual_seed(42)
-torch.cuda.manual_seed_all(42)
-np.random.seed(42)
-random.seed(42)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-
 
 class Miner:
-    # Command line config items.
     @staticmethod
     def config():
         parser = argparse.ArgumentParser(description="Miner script")
@@ -80,29 +75,47 @@ class Miner:
             help="Override the batch size defined in hparams.",
         )
         parser.add_argument(
-            "--device", type=str, default="cuda", help="Device to use for training"
+            "--device",
+            type=str,
+            default="cuda",
+            help="Device to use for training (will be rank-specific).",
         )
-        parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-        parser.add_argument("--trace", action="store_true", help="Enable trace logging")
+        parser.add_argument(
+            "--debug", action="store_true", help="Enable debug logging."
+        )
+        parser.add_argument(
+            "--trace", action="store_true", help="Enable trace logging."
+        )
         parser.add_argument(
             "--store-gathers",
             action="store_true",
-            help="Store gathered gradients in R2",
+            help="Store gathered gradients in R2.",
         )
         parser.add_argument(
             "--test",
             action="store_true",
-            help="Test mode - use all peers without filtering",
+            help="Test mode - use all peers without filtering.",
         )
         parser.add_argument(
             "--local",
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        parser.add_argument(
+            "--gpus",
+            type=int,
+            default=None,
+            help="Sanity check against WORLD_SIZE (use torchrun to spawn).",
+        )
+        # Add any other peer-related configs if necessary
+        parser.add_argument(
+            "--peers", nargs="*", type=int, help="Fixed list of peer UIDs to use."
+        )
+
         bt.subtensor.add_args(parser)
-        bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
-        config = bt.config(parser)
+
+        config = bt.config(parser)  # All ranks parse config initially
         if config.debug:
             tplr.debug()
         if config.trace:
@@ -111,11 +124,14 @@ class Miner:
         return config
 
     def __init__(self):
-        tplr.logger.debug("Starting initialization...")
+        tplr.logger.info(
+            "Starting initialization…"
+        )  # This will log from all ranks initially
 
-        # Init config and load hparams
-        self.config = Miner.config()
-        self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
+        # --------------------------------------------------------
+        # 1. DDP bootstrap (must precede any CUDA work on a specific device)
+        # --------------------------------------------------------
+        self.config = Miner.config()  # All ranks parse CLI
 
         if self.config.actual_batch_size is not None:
             tplr.logger.info(
@@ -124,24 +140,114 @@ class Miner:
             self.hparams.batch_size = self.config.actual_batch_size
 
         # Init bittensor objects
+        # WORLD_SIZE and LOCAL_RANK should be set by torchrun
+        world_size = int(os.getenv("WORLD_SIZE", "1"))
+        # LOCAL_RANK is the rank of the process on the current node.
+        # RANK is the global rank across all nodes. For single-node, RANK == LOCAL_RANK.
+        # ddp_init will use RANK.
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))  # This is the device index
+
+        if self.config.gpus is not None:
+            assert self.config.gpus == world_size, (
+                f"--gpus={self.config.gpus} but WORLD_SIZE={world_size}"
+            )
+
+        # Pass local_rank for torch.cuda.set_device, global_rank for dist.init_process_group
+        ddp_init(local_rank, world_size)  # Initializes DDP, sets device to local_rank
+
+        self.rank = distrib.get_rank()  # Global rank
+        self.world_size = distrib.get_world_size()
+        self.device = (
+            f"cuda:{local_rank}"
+            if torch.cuda.is_available() and self.config.device == "cuda"
+            else "cpu"
+        )
+
+        # Configure logging: Rank 0 full, others warning (after DDP init)
+        if not distrib.is_rank0():
+            tplr.logger.setLevel("WARNING")
+        tplr.logger.info(
+            f"[Rank {self.rank}/{self.world_size}] DDP initialized. Device: {self.device}"
+        )
+
+        # Set per-rank RNG *after* DDP init and device setting
+        torch.manual_seed(42 + self.rank)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(
+                42 + self.rank
+            )  # Seeds all GPUs, but current device is set
+        np.random.seed(42 + self.rank)
+        random.seed(42 + self.rank)
+
+        # HParams: Rank 0 loads, then broadcasts
+        if distrib.is_rank0():
+            self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
+        else:
+            self.hparams = None  # Placeholder for non-rank0
+        self.hparams = distrib.broadcast_object(self.hparams, src=0)
+        tplr.logger.info(f"[Rank {self.rank}] HParams synchronized.")
+
+        # Bittensor objects
+        # Wallet and Subtensor can be initialized by all ranks
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
+
+        # Metagraph: fetch on every rank ( cheap ) and only broadcast the UID
         self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
-        if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
+
+        # Rank-0 validates registration
+        if (
+            distrib.is_rank0()
+            and self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys
+        ):
             tplr.logger.error(
-                f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
+                f"[Rank 0] Wallet {self.wallet} not registered on subnet {self.metagraph.netuid}"
             )
-            sys.exit()
-        self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+            distrib.broadcast_object({"error": "Wallet not registered"}, src=0)
+            sys.exit(1)
 
-        # Init model with hparams config
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)  # type: ignore
-        self.tokenizer = self.hparams.tokenizer
+        # Compute / broadcast UID so that all ranks are consistent
+        uid_local = (
+            self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+            if self.wallet.hotkey.ss58_address in self.metagraph.hotkeys
+            else -1
+        )
+        self.uid = distrib.broadcast_object(uid_local, src=0)
 
-        # Init compression
+        # React to broadcasted error from rank-0 (if any)
+        if self.uid == -1:
+            tplr.logger.error(f"[Rank {self.rank}] Wallet not registered – exiting.")
+            sys.exit(1)
+
+        tplr.logger.info(
+            f"[Rank {self.rank}] Metagraph and UID {self.uid} synchronized."
+        )
+
+        # --------------------------------------------------------
+        # 2.  Model + DDP wrapper
+        # --------------------------------------------------------
+        # All ranks create the model instance. DDP will synchronize rank 0's weights.
+        self.model = LlamaForCausalLM(self.hparams.model_config).to(self.device)
+        tplr.logger.info(f"[Rank {self.rank}] Model created on {self.device}.")
+
+        if self.world_size > 1:
+            self.model = DDP(
+                self.model,
+                device_ids=[local_rank] if self.device.startswith("cuda") else None,
+                output_device=local_rank if self.device.startswith("cuda") else None,
+                broadcast_buffers=False,
+                find_unused_parameters=False,
+            )
+            tplr.logger.info(f"[Rank {self.rank}] Model wrapped with DDP.")
+
+        # Tokenizer should be loaded consistently. Assuming hparams provide necessary info.
+        self.tokenizer = self.hparams.tokenizer  # Assuming this is lightweight
+
+        # Init compression (all ranks, based on common hparams and model structure)
+        # Ensure transformer uses the correct model (self.model.module if DDP)
+        model_to_transform = self.model.module if self.world_size > 1 else self.model
         self.transformer = tplr.compress.TransformDCT(
-            self.model, target_chunk=self.hparams.target_chunk
+            model_to_transform, target_chunk=self.hparams.target_chunk
         )
         self.compressor = tplr.compress.CompressDCT(
             use_quantization=True,
@@ -149,24 +255,37 @@ class Miner:
             quantization_range=self.hparams.quantization_range,
         )
 
-        # Init optimizer and momentum
-        self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
-        self.momentum = {}
-        self.xshapes = {}
-        self.totalks = {}
-        for n, p in self.model.named_parameters():
-            self.momentum[n] = torch.zeros_like(p)
+        # Optimizer (all ranks)
+        self.optimizer = optim.SGD(
+            self.model.parameters(), lr=self.hparams.learning_rate
+        )
+
+        # Momentum, xshapes, totalks (all ranks, derived from model parameters)
+        self.momentum: Dict[str, torch.Tensor] = {}
+        self.xshapes: Dict[str, Any] = {}
+        self.totalks: Dict[str, Any] = {}
+        self.quant_params: Dict[str, Any] = {}
+
+        # Use self.model.module.named_parameters() if DDP wrapped, else self.model.named_parameters()
+        named_params_iter = (
+            self.model.module if self.world_size > 1 else self.model
+        ).named_parameters()  # type: ignore
+        for n, p in named_params_iter:
+            self.momentum[n] = torch.zeros_like(
+                p, device=self.device
+            )  # Ensure momentum is on correct device
+            # Encode with model.module if DDP
+            encoded_param = self.transformer.encode(self.momentum[n])
             _, _, xshape, totalk, quant_params = self.compressor.compress(
-                self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
+                encoded_param, self.hparams.topk_compression
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
-        # Set up scheduler
+            self.quant_params[n] = quant_params
+
+        # Scheduler (all ranks)
         warmup_scheduler = LinearLR(
-            self.optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=250,
+            self.optimizer, start_factor=0.1, end_factor=1.0, total_iters=250
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
@@ -182,11 +301,11 @@ class Miner:
 
         self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
         tplr.logger.info(
-            f"[Miner] code_version={tplr.__version__} "
+            f"[Rank {self.rank}] Miner code_version={tplr.__version__} "
             f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
         )
 
-        # Init comms
+        # Init comms (all ranks, config might be used by rank 0 for setup)
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",
@@ -198,165 +317,384 @@ class Miner:
             uid=self.uid,
         )
 
-        self.bucket = self.comms.get_own_bucket("gradients", "read")
-        self.comms.try_commit(self.wallet, self.bucket)
-        # self.comms.fetch_commitments()
+        if distrib.is_rank0():  # Bucket operations by rank 0
+            self.bucket = self.comms.get_own_bucket("gradients", "read")
+            self.comms.try_commit(self.wallet, self.bucket)
+        distrib.barrier()  # Ensure rank 0 completes before others might proceed if dependent
 
-        # Init state params
-        self.stop_event = asyncio.Event()
-        self.current_block = self.subtensor.block
-        self.current_window = int(self.current_block / self.hparams.blocks_per_window)
-        self.start_window = self.current_window  # Record the start window
-        self.global_step = 0  # Initialize global_step to zero
-        self.comms.current_window = self.current_window
+        # Init state params (all ranks)
+        self.stop_event = (
+            asyncio.Event()
+        )  # For async tasks, typically managed by rank 0 actions
+        self.current_block = 0  # Will be updated by listener or broadcast
+        self.current_window = 0  # Will be updated
+        # start_window will be determined and synced in run()
+        self.global_step = 0
+        # self.comms.current_window needs to be updated based on synced current_window
         self.step_counter = 0
-
-        # Add step tracking
         self.window_step = 0
-
-        # Track additional metrics
         self.total_tokens_processed = 0
-        self.batch_times = []  # For tracking processing speed
+        self.batch_times: List[float] = []
+        self.gradient_iteration_counter = 0
 
-        # Initialize WandB
-        self.wandb = tplr.initialize_wandb(
-            run_prefix="M",
-            uid=self.uid,
-            config=self.config,
-            group="miner",
-            job_type="mining",
+        # --------------------------------------------------------
+        # 3. Logging / WANDB only on rank-0
+        # --------------------------------------------------------
+        self.wandb = None
+        self.metrics_logger = None
+        if distrib.is_rank0():
+            self.wandb = tplr.initialize_wandb(
+                run_prefix="M",
+                uid=self.uid,
+                config=self.config,
+                group="miner",
+                job_type="mining",
+            )
+
+            if self.wandb:
+                tplr.logger.info(
+                    f"[Rank 0 W&B] Run initialized: {self.wandb.url or 'local run'}"
+                )
+            else:
+                tplr.logger.warning("[Rank 0 W&B] WandB initialization failed.")
+
+            self.metrics_logger = tplr.metrics.MetricsLogger(
+                prefix="M",
+                uid=self.uid,
+                config=self.config,
+                role="miner",
+                group="miner",
+                job_type="mining",
+            )
+
+        distrib.barrier()  # Ensure rank 0 logging is set up before proceeding
+
+        self.next_peers: Optional[tplr.comms.PeerArray] = (
+            None  # Will be determined by rank 0 and broadcast
         )
-
-        # Initialize metrics logger for InfluxDB
-        self.metrics_logger = tplr.metrics.MetricsLogger(
-            prefix="M",
-            uid=self.uid,
-            config=self.config,
-            role="miner",
-            group="miner",
-            job_type="mining",
-        )
-
-        # Initialize peer related attributes
-        self.next_peers: list[int] | None = None
         self.peers_update_window = -1
+        tplr.logger.info(f"[Rank {self.rank}] Initialization complete.")
 
-    # Main training loop.
+        # let EVERY rank chat at INFO for the dataset loader
+        from tplr.logging import enable_all_rank_logging
+
+        enable_all_rank_logging("tplr.r2_dataset", level=logging.INFO)
+
+    async def _load_checkpoint_and_sync(self, start_window: int):
+        """Rank 0 loads checkpoint, broadcasts states to all ranks."""
+        checkpoint_window_buffer = 5
+        has_new_checkpoint_opportunity = (
+            self.global_step
+            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
+        )
+
+        loaded_model_state_dict = None
+        loaded_optimizer_state_dict = None
+        loaded_scheduler_state_dict = None
+        loaded_momentum_dict = None  # This is self.momentum
+        loaded_checkpoint_window_val = 0
+        load_success = False
+
+        if distrib.is_rank0():
+            tplr.logger.info(
+                f"[Rank 0] Attempting to load checkpoint for current_window: {self.current_window}"
+            )
+            model_to_load = self.model.module if self.world_size > 1 else self.model
+            (
+                success,
+                _loaded_momentum,
+                _loaded_checkpoint_window,
+                _loaded_optimizer,
+                _loaded_scheduler,
+                _loaded_model_state_dict,  # Assuming load_checkpoint can return model_state_dict
+            ) = await self.comms.load_checkpoint(
+                model=model_to_load,  # Pass the actual model module for rank 0 to load into
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+                current_window=self.current_window,
+                device="cpu",  # Load to CPU first for broadcasting
+                init_version=tplr.__version__
+                if has_new_checkpoint_opportunity
+                else self.bootstrap_version,
+            )
+            if success:
+                load_success = True
+                loaded_model_state_dict = (
+                    _loaded_model_state_dict  # This should be a state_dict
+                )
+                loaded_optimizer_state_dict = (
+                    _loaded_optimizer.state_dict() if _loaded_optimizer else None
+                )
+                loaded_scheduler_state_dict = (
+                    _loaded_scheduler.state_dict() if _loaded_scheduler else None
+                )
+                loaded_momentum_dict = _loaded_momentum  # This is self.momentum
+                loaded_checkpoint_window_val = _loaded_checkpoint_window
+                tplr.logger.info(
+                    f"[Rank 0] Checkpoint loaded successfully. Window: {loaded_checkpoint_window_val}"
+                )
+            else:
+                tplr.logger.info("[Rank 0] No checkpoint found or load failed.")
+
+        # Broadcast results
+        # Use broadcast_object for simplicity, for very large states, consider dist.broadcast for tensors
+        load_results_list = [
+            load_success,
+            loaded_model_state_dict,
+            loaded_optimizer_state_dict,
+            loaded_scheduler_state_dict,
+            loaded_momentum_dict,
+            loaded_checkpoint_window_val,
+        ]
+
+        # All ranks participate in broadcast_object_list
+        if distrib.is_rank0():
+            distrib.broadcast_object_list(load_results_list, src=0)
+        else:
+            # Create placeholders for receiving objects
+            placeholders = [None] * len(load_results_list)
+            distrib.broadcast_object_list(placeholders, src=0)
+            load_results_list = placeholders
+
+        (
+            load_success,
+            loaded_model_state_dict,
+            loaded_optimizer_state_dict,
+            loaded_scheduler_state_dict,
+            loaded_momentum_dict,
+            loaded_checkpoint_window_val,
+        ) = load_results_list
+
+        if load_success:
+            tplr.logger.info(
+                f"[Rank {self.rank}] Received checkpoint data. Applying..."
+            )
+            # All ranks load the broadcasted states
+            model_to_load_into = (
+                self.model.module if self.world_size > 1 else self.model
+            )
+            if loaded_model_state_dict:
+                # Ensure keys match, especially if DDP wrapper adds 'module.' prefix
+                if self.world_size > 1 and not all(
+                    k.startswith("module.") for k in loaded_model_state_dict.keys()
+                ):
+                    # If model was saved as model.module.state_dict(), it's fine.
+                    # If saved as DDP(model).state_dict(), it might have 'module.' prefix. Adjust if necessary.
+                    # Here, we assume load_checkpoint returns a state_dict compatible with model_to_load_into
+                    pass  # Add key adjustment logic if needed based on how checkpoint is saved
+                model_to_load_into.load_state_dict(
+                    {k: v.to(self.device) for k, v in loaded_model_state_dict.items()}
+                )
+
+            if loaded_optimizer_state_dict:
+                self.optimizer.load_state_dict(
+                    {
+                        k: (v.to(self.device) if isinstance(v, torch.Tensor) else v)
+                        for k, v in loaded_optimizer_state_dict.items()
+                    }
+                )  # Optimizer states might need device transfer
+
+            if loaded_scheduler_state_dict:
+                self.scheduler.load_state_dict(loaded_scheduler_state_dict)
+
+            if loaded_momentum_dict:  # self.momentum
+                self.momentum = {
+                    k: v.to(self.device) for k, v in loaded_momentum_dict.items()
+                }
+
+            tplr.logger.info(
+                f"[Rank {self.rank}] Loaded checkpoint. Global Step: {self.global_step}, "
+                f"Optimizer Step: {self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
+                f"Scheduler Step: {self.scheduler.last_epoch}"
+            )
+
+            # Catchup logic (coordinated or rank 0 leads)
+            if (
+                loaded_checkpoint_window_val < self.current_window
+                and self.global_step > checkpoint_window_buffer
+            ):
+                tplr.logger.info(
+                    f"[Rank {self.rank}] Checkpoint window {loaded_checkpoint_window_val} is behind current {self.current_window}. Catching up..."
+                )
+                # Ensure catchup_with_aggregation_server is DDP aware or its effects are broadcast
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, max(loaded_checkpoint_window_val, start_window)
+                )  # self here refers to the Miner instance
+            else:
+                tplr.logger.info(
+                    f"[Rank {self.rank}] Checkpoint up-to-date or no catchup needed."
+                )
+        else:
+            tplr.logger.info(
+                f"[Rank {self.rank}] No checkpoint found or load failed. Initializing model from scratch or proceeding with current state."
+            )
+            # Ensure model is on the correct device (already done in __init__)
+            # self.model.to(self.device) # Redundant if already done and DDP handles sync
+
+            # Re-initialize momentum if not loaded
+            self.momentum = {}
+            named_params_iter = (
+                self.model.module if self.world_size > 1 else self.model
+            ).named_parameters()
+            for n, p in named_params_iter:
+                self.momentum[n] = torch.zeros_like(p, device=self.device)
+
+            tplr.logger.info(
+                f"[Rank {self.rank}] Starting catchup from start window {start_window} to current {self.current_window}..."
+            )
+            await tplr.neurons.catchup_with_aggregation_server(self, start_window)
+
+        distrib.barrier()  # Ensure all ranks are done with checkpoint loading/catchup
+
     async def run(self):
-        # Start background block listener
+        # Start background block listener (all ranks run their own listener for now)
+        # For strict window synchronization, rank 0 could listen and broadcast window updates.
         self.loop = asyncio.get_running_loop()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
         self.loop.set_default_executor(self.executor)
 
         self.listener = threading.Thread(
-            target=self.block_listener,
-            args=(self.loop,),
-            daemon=True,
+            target=self.block_listener, args=(self.loop,), daemon=True
         )
-        self.listener.start()  #
+        self.listener.start()
 
-        # Use config peers if provided
-        if self.config.peers:
-            self.comms.peers = self.config.peers
+        # Commitments: Rank 0 gets, broadcasts
+        if distrib.is_rank0():
+            initial_commitments = await self.comms.get_commitments()
+            tplr.logger.info("[Rank 0] Loaded initial commitments.")
+        else:
+            initial_commitments = None
+        self.comms.commitments = distrib.broadcast_object(initial_commitments, src=0)
+        tplr.logger.info(f"[Rank {self.rank}] Initial commitments synchronized.")
 
-        self.comms.commitments = await self.comms.get_commitments()
-        tplr.logger.info("Loaded commitments")
+        # --------------------------------------------------------
+        # Determine start window – ask highest-stake validator once
+        # --------------------------------------------------------
+        if distrib.is_rank0():
+            start_window = await self.comms.get_start_window()
+            if start_window is None:
+                raise RuntimeError(
+                    "Could not find a valid start window. This should not be possible."
+                )
+            tplr.logger.info(f"[Rank 0] Using start_window: {start_window}")
+        else:
+            start_window = None  # placeholder
+        start_window = distrib.broadcast_object(start_window, src=0)
+        self.start_window = start_window  # Store it
 
-        # Fetch start_window from highest stake validator
-        self.start_window = await self.comms.get_start_window()
-        if self.start_window is None:
-            raise RuntimeError(
-                "Could not find a valid start window. This should not be possible."
+        # Sync current_block and current_window initially after start_window is known
+        # Block listener might take time to get first block. Rank 0 can get current block & broadcast.
+        if distrib.is_rank0():
+            self.current_block = self.subtensor.block  # Get latest block on rank 0
+            self.current_window = int(
+                self.current_block / self.hparams.blocks_per_window
             )
+            block_window_payload = {
+                "block": self.current_block,
+                "window": self.current_window,
+            }
+        else:
+            block_window_payload = None
 
-        tplr.logger.info(f"Using start_window: {self.start_window}")
+        synced_bw_payload = distrib.broadcast_object(block_window_payload, src=0)
+        self.current_block = synced_bw_payload["block"]
+        self.current_window = synced_bw_payload["window"]
+        self.comms.current_window = self.current_window  # Update comms attribute
 
         self.global_step = self.current_window - self.start_window
-        tplr.logger.info(f"starting at Global Step : {self.global_step}")
-
-        checkpoint_window_buffer = 5
-        has_new_checkpoint = (
-            self.global_step
-            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
+        tplr.logger.info(
+            f"[Rank {self.rank}] Starting at Global Step: {self.global_step}, Current Window: {self.current_window}"
         )
-        # Proceed to load checkpoint
-        (
-            success,
-            loaded_momentum,
-            loaded_checkpoint_window,
-            loaded_optimizer,
-            loaded_scheduler,
-        ) = await self.comms.load_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
-            current_window=self.current_window,
-            device=cast(str, self.config.device),
-            init_version=tplr.__version__
-            if has_new_checkpoint
-            else self.bootstrap_version,
-        )
-        if success:
-            self.momentum = loaded_momentum
-            self.optimizer = loaded_optimizer
-            self.scheduler = loaded_scheduler
-            tplr.logger.info(
-                f"Loaded checkpoint with global_step={self.global_step}, "
-                f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
-                f"scheduler_step={self.scheduler.last_epoch}"
-            )
-            # Only catch up if we're behind
-            if (
-                loaded_checkpoint_window < self.current_window
-                and self.global_step > checkpoint_window_buffer
-            ):
-                tplr.logger.info(
-                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
-                )
-                await tplr.neurons.catchup_with_aggregation_server(
-                    self, max(loaded_checkpoint_window, self.start_window)
-                )
-            else:
-                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
-        else:
-            tplr.logger.info("No checkpoint found, initializing model from scratch")
-            self.momentum = {
-                n: torch.zeros_like(p) for n, p in self.model.named_parameters()
-            }
-            self.model.to(self.config.device)  # type: ignore
 
-            # Catch up with aggregation server from start window.
-            tplr.logger.info(
-                f"Starting catchup from start window {self.start_window} to current window {self.current_window})..."
-            )
-            await tplr.neurons.catchup_with_aggregation_server(self, self.start_window)
+        # # Load checkpoint and synchronize across ranks
+        # await self._load_checkpoint_and_sync(self.start_window)
 
-        self.comms.start_commitment_fetcher()
+        if distrib.is_rank0():  # Commitment fetcher only on rank 0
+            self.comms.start_commitment_fetcher()
 
+        distrib.barrier()
+
+        # Main loop
         while True:
-            # 1. Initialize window and update peers
-            window_start = tplr.T()
-            # Start the gather in the background:
-            step_window = self.current_window
+            window_start_time = tplr.T()  # Timer T
+
+            # Sync current window at the beginning of each loop iteration from Rank 0 via listener
+            # This ensures all ranks operate on the same window deterministically
+            if distrib.is_rank0():
+                # Rank 0's listener updates self.current_window. Broadcast it.
+                window_to_process_payload = {"window": self.current_window}
+            else:
+                window_to_process_payload = None
+
+            synced_window_payload = distrib.broadcast_object(
+                window_to_process_payload, src=0
+            )
+            step_window = synced_window_payload["window"]
+
             self.global_step = (
-                self.current_window - self.start_window
-            )  # Update global_step
+                step_window - self.start_window
+            )  # Update global_step based on synced window
             tplr.logger.info(
-                f"\n{'-' * 40} Window: {step_window} (Global Step: {self.global_step}) {'-' * 40}"
+                f"\n{'-' * 40} [Rank {self.rank}] Window: {step_window} (Global Step: {self.global_step}) {'-' * 40}"
             )
 
-            peer_start = tplr.T()
-            await tplr.neurons.update_peers(
-                instance=self, window=step_window, peer_start=peer_start
+            peer_update_start_time = tplr.T()
+            # Peer update: Rank 0 decides, broadcasts
+            if distrib.is_rank0():
+                await tplr.neurons.update_peers(
+                    instance=self, window=step_window, peer_start=peer_update_start_time
+                )
+                # self.comms.peers should be updated by update_peers
+                peers_to_broadcast = self.comms.peers
+            else:
+                peers_to_broadcast = None
+            self.comms.peers = distrib.broadcast_object(peers_to_broadcast, src=0)
+            if self.comms.peers is None:
+                self.comms.peers = []  # Ensure it's a list
+            tplr.logger.info(
+                f"[Rank {self.rank}] {tplr.P(step_window, tplr.T() - peer_update_start_time)} Peers for window {step_window} synchronized: {self.comms.peers}"
             )
 
-            # 2. Load training data for this window
-            data_start = tplr.T()
+            data_load_start_time = tplr.T()
+            # Data loading: Each rank loads its own shard (DDP standard)
+            # rank_world() from distrib is fine
+            current_rank, world_size_for_data = distrib.rank_world()
+
+            base = (
+                self.hparams.pages_per_window // world_size_for_data
+            )  # minimum pages / rank
+            remainder = (
+                self.hparams.pages_per_window % world_size_for_data
+            )  # first "remainder" ranks get +1
+
+            pages_per_rank = base + (current_rank < remainder)
+
+            # guarantee ≥1 page if world_size > pages_per_window (will oversample in that edge-case)
+            if pages_per_rank == 0:
+                pages_per_rank = 1
+
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
                 offset=step_window * self.hparams.pages_per_window,
-                n_pages=self.hparams.pages_per_window,
-                seed=self.uid,  # type: ignore
+                n_pages=pages_per_rank,
+                seed=self.uid,
+                rank=current_rank,
+                world_size=world_size_for_data,
             )
+            debug_pages = distrib.all_gather_object(
+                pages
+            )  # list[ list[tuple] ] from every rank
+            if distrib.is_rank0():
+                flat = [tuple(p) for sub in debug_pages for p in sub]
+                dups = set(x for x in flat if flat.count(x) > 1)
+                if dups:
+                    tplr.logger.warning(
+                        f"Page overlap across ranks: {sorted(dups)[:10]} …"
+                    )
+                else:
+                    tplr.logger.info(
+                        f"Page split OK • total={len(flat)} • per-rank={[len(x) for x in debug_pages]}"
+                    )
+
             loader = await tplr.r2_dataset.R2DatasetLoader.create(
                 batch_size=self.hparams.batch_size,
                 sequence_length=self.hparams.sequence_length,
@@ -364,468 +702,695 @@ class Miner:
                 tokenizer=self.tokenizer,
             )
             tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - data_start)} Loaded training data"
+                f"{tplr.P(step_window, tplr.T() - data_load_start_time)} [Rank {self.rank}] Loaded training data. "
+                f"Pages: {[p[1] for p in pages] if pages else 'No pages'}"
             )
-            tplr.logger.info(
-                f"Pages: {[p[1] for p in pages]} for  Window: {step_window}"
-            )  # type: ignore
 
-            # 3. Accumulate gradients over batches
-            train_start = tplr.T()
-            tplr.logger.info("Start accumulating...")
+            training_start_time = tplr.T()
+            tplr.logger.info(
+                f"[Rank {self.rank}] Start accumulating gradients for window {step_window}..."
+            )
+
+            # Zero gradients before training loop for the window
             self.optimizer.zero_grad()
-            self.model.zero_grad()
-            total_loss = 0.0
-            n_batches = 0
-            window_tokens = 0  # Initialize token count for this window
+
+            total_loss_this_window = 0.0
+            num_batches_this_window = 0
+            tokens_this_window = 0
+
+            self.model.train()  # Set model to train mode
 
             for i, batch in enumerate(loader):
-                input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
-                tokens_this_batch = input_ids.numel()  # Tokens in current batch
-                window_tokens += tokens_this_batch  # Accumulate tokens
+                input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
+                tokens_this_batch = input_ids.numel()
+                tokens_this_window += tokens_this_batch
                 labels = input_ids.clone()
                 labels = torch.where(
                     labels == self.tokenizer.pad_token_id, -100, labels
                 )
 
-                with autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
+                with autocast(
+                    device_type=self.device.split(":")[0],
+                    dtype=torch.bfloat16,
+                    enabled=self.device.startswith("cuda"),
+                ):
                     outputs = self.model(input_ids=input_ids, labels=labels)
 
-                total_loss += outputs.loss.item()
-                outputs.loss.backward()
-                n_batches += 1
-                tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {i + 1}]")
-                if self.current_window != step_window:
-                    tplr.logger.info("<Exhausted window>")
-                    break
+                # full loss, no gradient accumulation
+                loss = outputs.loss
+                total_loss_this_window += loss.item()
 
-            if n_batches > 0:
+            if num_batches_this_window > 0:
                 tplr.logger.info(
-                    f"Normalizing gradients by {n_batches} accumulation steps"
+                    f"Normalizing gradients by {num_batches_this_window} accumulation steps"
                 )
                 for param in self.model.parameters():
                     if param.grad is not None:
-                        param.grad.div_(n_batches)
+                        param.grad.div_(num_batches_this_window)
 
-            # If training completes before the window is exhausted, wait until the window ends.
-            if self.current_window == step_window:
-                tplr.logger.info(
-                    "Training complete; waiting for window to be exhausted..."
+                loss.backward()  # ← DDP syncs grads right here
+                num_batches_this_window += 1
+
+                tplr.logger.debug(
+                    f"[Rank {self.rank}] Loss: {outputs.loss.item()} [Window {step_window}, Batch {i + 1}]"
                 )
+
+            tplr.logger.info(
+                f"{tplr.P(step_window, tplr.T() - training_start_time)} "
+                f"[Rank {self.rank}] Completed local gradient accumulation. "
+                f"Batches: {num_batches_this_window}"
+            )
+
+            if distrib.is_rank0():  # only rank-0 polls chain
                 while self.current_window == step_window:
-                    await asyncio.sleep(
-                        0.1
-                    )  # TODO: Consider adding a timeout safeguard here.
-            tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - train_start)} Completed training"
-            )
+                    await asyncio.sleep(0.1)
+                rolled_window = self.current_window  # new window number
+            else:
+                rolled_window = None  # placeholder
 
-            compress_start = tplr.T()
-            gradient, xshapes, totalks, _ = tplr.prepare_gradient_dict(
-                self, pages, step_window
-            )
-            tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - compress_start)} Compressed local gradients"
-            )
-            tplr.logger.debug(f"Putting own state dict for UID {self.uid}")
+            # rank-0 tells everybody the new window; others just block here
+            rolled_window = distrib.broadcast_object(rolled_window, src=0)
+            self.current_window = rolled_window  # keep local view in-sync
+            distrib.barrier()  # all ranks aligned
+            # ----------------------------------------------------------------------
 
-            # Move everything to CPU before upload
-            processed_state_dict = {}
-            for k, v in gradient.items():
-                if isinstance(v, torch.Tensor):
-                    processed_state_dict[k] = v.to("cpu")
-                else:
-                    processed_state_dict[k] = v
+            compression_start_time = tplr.T()
+            put_completion_duration = 0.0
+            upload_data_size_bytes = 0
 
-            # Launch the put operation as a background task
-            put_completion_time = await self.comms.put(
-                state_dict=processed_state_dict,
-                uid=str(self.uid),
-                window=step_window,
-                key="gradient",
-                global_step=self.global_step,
-                local=False,
-                stale_retention=100,
-            )
-            tplr.logger.info("Put task completed!")
+            if distrib.is_rank0():
+                # tplr.prepare_gradient_dict should take this model_ref_for_grads and extract .grad
+                gradient_to_put, _, _, _ = tplr.prepare_gradient_dict(
+                    self, pages, step_window
+                )  # type: ignore
+                tplr.logger.info(
+                    f"{tplr.P(step_window, tplr.T() - compression_start_time)} [Rank 0] Compressed local DDP-synced gradients for upload."
+                )
 
-            upload_size = sum(
-                tensor.element_size() * tensor.nelement()
-                for tensor in processed_state_dict.values()
-                if isinstance(tensor, torch.Tensor)
-            )
-            tplr.logger.info(
-                f"Uploading {upload_size} bytes of own state for UID: {self.uid}"
-            )
-
-            tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
-
-            sync_block = self.current_window * self.hparams.blocks_per_window
-            retries = 0
-            delay = 1
-            max_retries = 5
-            max_delay = 60
-            while True:
-                try:
-                    response = self.subtensor.query_module(
-                        "Timestamp", "Now", block=sync_block
-                    )
-                    if response is None or not isinstance(response, ScaleObj):
-                        raise ValueError(f"Could not query timestamp for {sync_block}")
-                    ts_value = (
-                        cast(int, response.value) / 1000
-                    )  # convert milliseconds to seconds
-                    break
-                except Exception as e:
-                    tplr.logger.error(
-                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
-                    )
-                    retries += 1
-                    if retries > max_retries:
-                        tplr.logger.error(
-                            "Exceeded maximum retries for timestamp query."
+                processed_state_dict_to_put = {}
+                for (
+                    k,
+                    v_tensor,
+                ) in (
+                    gradient_to_put.items()
+                ):  # Assuming gradient_to_put is a dict of tensors
+                    if isinstance(v_tensor, torch.Tensor):
+                        processed_state_dict_to_put[k] = (
+                            v_tensor.cpu()
+                        )  # Move to CPU for upload
+                        upload_data_size_bytes += (
+                            v_tensor.element_size() * v_tensor.nelement()
                         )
-                        raise e
-                    time.sleep(delay)
-                    delay = min(delay * 2, max_delay)
+                    else:  # Handle other types if any
+                        processed_state_dict_to_put[k] = v_tensor
 
-            time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
-            time_max = time_min + timedelta(
-                seconds=self.hparams.time_window_delta_seconds
+                tplr.logger.info(
+                    f"[Rank 0] Uploading {upload_data_size_bytes / (1024 * 1024):.2f} MB of own state for UID: {self.uid}, Window: {step_window}"
+                )
+                _put_start_time = tplr.T()
+                await self.comms.put(
+                    state_dict=processed_state_dict_to_put,
+                    uid=str(self.uid),
+                    window=step_window,
+                    key="gradient",
+                    global_step=self.global_step,
+                    local=self.config.local,  # Use config.local
+                    stale_retention=100,
+                )
+                put_completion_duration = tplr.T() - _put_start_time
+                tplr.logger.info(
+                    f"[Rank 0] Put task completed in {put_completion_duration:.2f}s."
+                )
+
+            distrib.barrier()  # Ensure rank 0 put completes if others depend or for timing consistency
+
+            # Now, self.total_tokens_processed is consistent across all ranks and holds the global sum.
+
+            # Update global counters (all ranks, consistently)
+            # self.global_step is already updated based on step_window
+
+            # # Checkpoint Saving (Rank 0 Only)
+            # if distrib.is_rank0() and (self.global_step % self.hparams.checkpoint_frequency == 0):
+            #     tplr.logger.info(f"[Rank 0] Creating checkpoint at global_step {self.global_step}")
+            #     # Ensure momentum is current if it's part of SGD and not explicitly self.momentum
+            #     # If self.momentum is custom, it should be passed.
+            #     # Optimizer state will contain its own momentum if applicable.
+            #     asyncio.create_task(
+            #         self.comms.save_checkpoint(
+            #             model=(self.model.module if self.world_size > 1 else self.model), # Save the underlying model
+            #             optimizer=self.optimizer,
+            #             scheduler=self.scheduler,
+            #             momentum=self.momentum, # Pass the custom momentum dict
+            #             global_step=self.global_step,
+            #             sync_window=step_window, # Use the window that was just processed
+            #             start_window=self.start_window
+            #         )
+            #     )
+
+            # Timestamp for Gather: Rank 0 queries, broadcasts
+            time_min_gather, time_max_gather = None, None
+            if distrib.is_rank0():
+                sync_block = self.current_window * self.hparams.blocks_per_window
+                retries = 0
+                delay = 1
+                max_retries = 5
+                max_delay = 60
+                while True:
+                    try:
+                        response = self.subtensor.query_module(
+                            "Timestamp", "Now", block=sync_block
+                        )
+                        if response is None or not isinstance(
+                            response, bt_subtensor.ScaleObj
+                        ):
+                            raise ValueError(
+                                f"Could not query timestamp for {sync_block}"
+                            )
+                        ts_value = (
+                            cast(int, response.value) / 1000
+                        )  # convert milliseconds to seconds
+                        break
+                    except Exception as e:
+                        tplr.logger.error(
+                            f"[Rank 0] Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
+                        )
+                        retries += 1
+                        if retries > max_retries:
+                            tplr.logger.error(
+                                "[Rank 0] Exceeded maximum retries for timestamp query."
+                            )
+                            raise e
+                        time.sleep(delay)
+                        delay = min(delay * 2, max_delay)
+
+                time_min_gather = datetime.fromtimestamp(ts_value, tz=timezone.utc)
+                time_max_gather = time_min_gather + timedelta(
+                    seconds=self.hparams.time_window_delta_seconds
+                )
+                tplr.logger.info(
+                    f"[Rank 0] Using time window for gather: {time_min_gather} to {time_max_gather}"
+                )
+
+            time_window_payload = distrib.broadcast_object(
+                [time_min_gather, time_max_gather], src=0
+            )
+            time_min_gather, time_max_gather = (
+                time_window_payload[0],
+                time_window_payload[1],
+            )
+            # All ranks now have the same time_min_gather, time_max_gather (or None if rank 0 failed)
+
+            # Gather Gradients: Rank 0 gathers, broadcasts the state_dict for application
+            gather_start_time = tplr.T()
+            gathered_state_dict_for_apply = None
+            gather_success_rate = 0.0
+            skipped_uids_gather: List[int] = []
+
+            if distrib.is_rank0():
+                tplr.logger.info(
+                    f"[Rank 0] Starting gather task with peers: {self.comms.peers}"
+                )
+                # Ensure self.totalks and self.xshapes are based on the non-DDP model structure if needed by comms.gather
+                # They were initialized based on self.model before DDP wrapping, which is usually fine.
+                gather_result = await self.comms.gather(
+                    my_uid=self.uid,
+                    uids=self.comms.peers,
+                    window=step_window,
+                    key="gradient",
+                    timeout=35,
+                    device="cpu",
+                    local=self.config.local,
+                    stale_retention=100,
+                    totalks=self.totalks,  # Pass xshapes here if gather needs it
+                    time_min=time_min_gather,
+                    time_max=time_max_gather,
+                )
+                if gather_result and gather_result.state_dict:
+                    gathered_state_dict_for_apply = (
+                        gather_result.state_dict
+                    )  # This is the object with .idxs_key, .vals_key attrs
+                    gather_success_rate = gather_result.success_rate * 100
+                    skipped_uids_gather = gather_result.skipped_uids
+                    tplr.logger.info(
+                        f"[Rank 0] Gather task completed. Success rate: {gather_success_rate:.2f}%"
+                    )
+                else:
+                    tplr.logger.warning(
+                        "[Rank 0] Gather task failed or returned no state_dict."
+                    )
+
+            # Broadcast the gathered state_dict and related info
+            # This object might be complex, ensure it's picklable
+            gathered_payload = distrib.broadcast_object(
+                [
+                    gathered_state_dict_for_apply,
+                    gather_success_rate,
+                    skipped_uids_gather,
+                ],
+                src=0,
+            )
+            gathered_state_dict_for_apply, gather_success_rate, skipped_uids_gather = (
+                gathered_payload
             )
 
-            # Log the time window we're using
-            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
-
-            # Refresh the peers list immediately before gathering
-            tplr.logger.info("Refreshing peers before gather task...")
-
-            if self.config.test:
-                # In test mode, use all UIDs from metagraph except self
-                tplr.logger.info("Test mode active: Using all peers from metagraph.")
-                all_uids = list(range(len(self.metagraph.S)))
-                self.comms.peers = [uid for uid in all_uids if uid != self.uid]
-
-            tplr.logger.info(f"Final peers for gather: {self.comms.peers}")
-
-            gather_start = tplr.T()
-            tplr.logger.info("Waiting on gather task...")
-            gather_result = await self.comms.gather(
-                my_uid=self.uid,
-                uids=self.comms.peers,
-                window=step_window,
-                key="gradient",
-                timeout=35,
-                device="cpu",
-                local=False,
-                stale_retention=100,
-                totalks=self.totalks,
-                time_min=time_min,
-                time_max=time_max,
-            )
-            tplr.logger.info("Gather task completed!")
-            gather_time = tplr.T() - gather_start
-
-            # 5. Calculate and log metrics
-            duration = time.time() - train_start
-            self.batch_times.append(duration)
-            self.total_tokens_processed += window_tokens
-            tokens_per_sec = window_tokens / duration
-
-            grad_norms = [
-                p.grad.norm().item()
-                for p in self.model.parameters()
-                if p.grad is not None
-            ]
-            weight_norms = [p.norm().item() for p in self.model.parameters()]
-            momentum_norms = [m.norm().item() for m in self.momentum.values()]
-            self.wandb.log(
-                {
-                    # Training metrics
-                    "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
-                    "miner/tokens_per_sec": tokens_per_sec,
-                    "miner/batch_duration": duration,
-                    "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": window_tokens,
-                    "miner/global_step": self.global_step,
-                    # Resource metrics
-                    "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                    / 1024**2,  # MB
-                    "miner/gpu_memory_cached": torch.cuda.memory_reserved()
-                    / 1024**2,  # MB
-                    # Network metrics
-                    "miner/gather_peers": len(self.comms.peers),
-                    "miner/effective_batch_size": len(self.comms.peers)
-                    * self.hparams.batch_size,
-                    # Optimization metrics
-                    "miner/learning_rate": self.scheduler.get_last_lr()[0],
-                    # Gradient statistics as points
-                    "miner/mean_grad_norm": sum(grad_norms) / len(grad_norms)
-                    if grad_norms
-                    else 0,
-                    "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
-                    "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                    "miner/grad_norm_std": torch.tensor(grad_norms).std().item()
-                    if grad_norms
-                    else 0,
-                    "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
-                    "miner/mean_momentum_norm": sum(momentum_norms)
-                    / len(momentum_norms),
-                },
-                step=self.global_step,
+            gather_duration = tplr.T() - gather_start_time
+            tplr.logger.info(
+                f"[Rank {self.rank}] Gather synchronization complete. Duration: {gather_duration:.2f}s"
             )
 
-            # ---------------------------------------------------------------------
-            # 6. Await both gather
-            # ---------------------------------------------------------------------
+            # Apply Gathered Gradients and Optimizer Step
+            model_update_start_time = tplr.T()
+            model_ref_for_update = (
+                self.model.module if self.world_size > 1 else self.model
+            )
 
-            # 8. Apply gathered gradients
-            update_start = tplr.T()
-            self.model.train()
-            self.optimizer.zero_grad()
+            # CRITICAL: The original code overwrites p.grad with gathered gradients.
+            # This means DDP-synced local gradients are discarded unless they were part of the "put"
+            # and then re-incorporated via the "gather" mechanism (e.g. from an aggregation server).
+            # We need to zero_grad() before setting new grads from gathered results.
+            self.optimizer.zero_grad()  # Clear any existing grads (e.g. DDP-synced local grads)
 
-            if gather_result is not None and gather_result.state_dict is not None:
-                for n, p in self.model.named_parameters():
+            if gathered_state_dict_for_apply:
+                num_params_updated = 0
+                for n, p in model_ref_for_update.named_parameters():
+                    if not p.requires_grad:
+                        continue
+
                     idxs_key = n + "idxs"
                     vals_key = n + "vals"
                     quant_key = n + "quant_params"
 
-                    idxs = getattr(gather_result.state_dict, idxs_key, None)
-                    vals = getattr(gather_result.state_dict, vals_key, None)
-                    quant_params = getattr(gather_result.state_dict, quant_key, None)
+                    # gathered_state_dict_for_apply is the custom object, not a PyTorch state_dict
+                    idxs = getattr(gathered_state_dict_for_apply, idxs_key, None)
+                    vals = getattr(gathered_state_dict_for_apply, vals_key, None)
+                    quant_params = getattr(
+                        gathered_state_dict_for_apply, quant_key, None
+                    )
+
                     if idxs is not None and vals is not None:
                         if not isinstance(idxs, (list, tuple)):
                             idxs = [idxs]
                         if not isinstance(vals, (list, tuple)):
                             vals = [vals]
-                        new_grad = self.transformer.decode(
+
+                        # Decompress on the correct device
+                        # Ensure p is on self.device. self.transformer/compressor should handle device placement or expect inputs on device.
+                        # Ensure xshapes and totalks are correctly sourced (from __init__)
+                        new_grad_val = self.transformer.decode(
                             self.compressor.batch_decompress(
-                                p.to(self.config.device),
-                                idxs,
-                                vals,
-                                xshapes[n],
-                                totalks[n],
+                                p.to(
+                                    self.device
+                                ),  # Ensure p is on device for decompression shape reference
+                                [
+                                    i.to(self.device) for i in idxs
+                                ],  # Ensure idxs/vals tensors are on device
+                                [v.to(self.device) for v in vals],
+                                self.xshapes[n],
+                                self.totalks[n],
                                 quant_params,
                             )
                         )
 
-                        if p.grad is None:
-                            p.grad = new_grad
-                        else:
-                            p.grad.copy_(new_grad)
-                        p.grad.sign_()
+                        # Assign to p.grad
+                        p.grad = (
+                            new_grad_val.sign_()
+                        )  # Apply sign operation as in original
+                        num_params_updated += 1
                     else:
-                        tplr.logger.info(
-                            f"Gradient data missing for parameter {n}, skipping."
+                        # If a param has no gathered gradient, its .grad will be None (due to optimizer.zero_grad())
+                        # This means it won't be updated by optimizer.step(). This might be intended.
+                        tplr.logger.debug(
+                            f"[Rank {self.rank}] Param '{n}' missing idx/val in gathered_state_dict – grad will be None."
                         )
-
-                tplr.logger.info(
-                    f"{tplr.P(self.start_window, tplr.T() - update_start)} Updated model"
-                )
-
-                self.optimizer.step()
-                self.scheduler.step()
-                torch.cuda.empty_cache()
-
-                # Log total window time and add timing metrics to existing wandb logging
-                tplr.logger.info(
-                    f"{tplr.P(step_window, tplr.T() - window_start)} Completed window iteration"
-                )
-
-            # Add debug data including successfully gathered peers
-            debug_dict = {}
-
-            # Add model parameters debug info
-            for name, param in self.model.named_parameters():
-                if (
-                    param is not None and param.numel() >= 2
-                ):  # Check if tensor has at least 2 elements
-                    debug_dict[name + "_debug"] = (
-                        param.flatten()[10:12].detach().cpu().tolist()
+                if num_params_updated > 0:
+                    self.optimizer.step()  # Apply updates from gathered (and signed) gradients
+                    self.scheduler.step()  # Step scheduler after optimizer
+                    tplr.logger.info(
+                        f"{tplr.P(step_window, tplr.T() - model_update_start_time)} [Rank {self.rank}] Updated model using gathered gradients for {num_params_updated} params."
+                    )
+                else:
+                    tplr.logger.warning(
+                        f"{tplr.P(step_window, tplr.T() - model_update_start_time)} [Rank {self.rank}] No parameters updated from gathered gradients (all grads were None). Optimizer step skipped."
                     )
 
-            # Add successful peers information
-            if gather_result is not None:
-                debug_dict["successful_peers"] = sorted(
-                    list(set(self.comms.peers) - set(gather_result.skipped_uids))
+            else:
+                tplr.logger.info(
+                    f"{tplr.P(step_window, tplr.T() - model_update_start_time)} [Rank {self.rank}] No gathered gradients to apply. Optimizer step skipped."
                 )
-                debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
 
-            # Store the debug dictionary
-            asyncio.create_task(
-                self.comms.put(
-                    state_dict=debug_dict,
-                    uid=str(self.uid),
-                    window=step_window,
-                    key="debug",
-                    local=False,
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            model_update_duration = tplr.T() - model_update_start_time
+            distrib.barrier()  # Ensure all ranks finish window processing before starting next
+
+            # ──────────────────────────────────────────────────────────────
+            # Metrics (all ranks → gather → aggregate on rank-0)
+            # ──────────────────────────────────────────────────────────────
+
+            # --- local stats ------------------------------------------------
+            local_stats = {
+                "loss_sum": total_loss_this_window,
+                "batches": num_batches_this_window,
+                "tokens": tokens_this_window,
+                "train_time": tplr.T() - training_start_time,
+                "data_time": tplr.T() - data_load_start_time,
+                "comp_time": tplr.T() - compression_start_time,
+                "put_time": put_completion_duration,
+                "gather_time": gather_duration,
+                "model_update_time": model_update_duration,
+                "grad_norms": [
+                    p.grad.norm().item()
+                    for p in model_ref_for_update.parameters()
+                    if p.grad is not None
+                ],
+                "weight_norms": [
+                    p.norm().item() for p in model_ref_for_update.parameters()
+                ],
+                "momentum_norms": [
+                    m.norm().item() for m in self.momentum.values() if m is not None
+                ],
+            }
+
+            gathered_stats = distrib.all_gather_object(
+                local_stats
+            )  # list[dict] (len = world_size)
+
+            if distrib.is_rank0():
+                # --- aggregate ---------------------------------------------
+                agg = {
+                    "loss_sum": sum(s["loss_sum"] for s in gathered_stats),
+                    "batches": sum(s["batches"] for s in gathered_stats),
+                    "tokens": sum(s["tokens"] for s in gathered_stats),
+                    "train_time": max(
+                        s["train_time"] for s in gathered_stats
+                    ),  # wall-clock
+                    "data_time": max(s["data_time"] for s in gathered_stats),
+                    "comp_time": max(s["comp_time"] for s in gathered_stats),
+                    "put_time": max(s["put_time"] for s in gathered_stats),
+                    "gather_time": max(s["gather_time"] for s in gathered_stats),
+                    "model_update_time": max(
+                        s["model_update_time"] for s in gathered_stats
+                    ),
+                }
+                # concatenate & compute means/stds
+                all_grad_norms = [x for s in gathered_stats for x in s["grad_norms"]]
+                all_weight_norms = [
+                    x for s in gathered_stats for x in s["weight_norms"]
+                ]
+                all_momentum_norms = [
+                    x for s in gathered_stats for x in s["momentum_norms"]
+                ]
+
+                avg_loss_this_window = float(agg["loss_sum"] / max(1, agg["batches"]))
+                tokens_per_sec_cluster = float(
+                    agg["tokens"] / max(1e-6, agg["train_time"])
                 )
-            )
-            tplr.logger.info(f"Stored debug values for window {self.current_window}")
-            # Log total window time and metrics
-            tplr.logger.info(
-                f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"
-            )
+                mean_grad_norm = (
+                    sum(all_grad_norms) / len(all_grad_norms) if all_grad_norms else 0.0
+                )
 
-            # Calculate common metrics values
-            loss_value = total_loss / n_batches if n_batches > 0 else 0
-            mean_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0
-            grad_norm_std = torch.tensor(grad_norms).std().item() if grad_norms else 0
-            mean_weight_norm = (
-                sum(weight_norms) / len(weight_norms) if weight_norms else 0
-            )
-            mean_momentum_norm = (
-                sum(momentum_norms) / len(momentum_norms) if momentum_norms else 0
-            )
-            window_total_time = tplr.T() - window_start
-            peer_update_time = tplr.T() - peer_start
-            data_loading_time = tplr.T() - data_start
-            training_time = tplr.T() - train_start
-            compression_time = tplr.T() - compress_start
-            model_update_time = tplr.T() - update_start
-            gather_success_rate = (
-                gather_result.success_rate * 100 if gather_result else 0.0
-            )
+                # Calculate grad_norm_std and ensure it's explicitly a Python float.
+                # The .item() from std() on a float tensor should be float, and 0.0 is float.
+                grad_norm_std_value = 0.0
+                if len(all_grad_norms) > 1:
+                    grad_norm_std_value = float(
+                        torch.tensor(all_grad_norms).std().item()
+                    )
+                # else, it remains 0.0, which is already a float.
 
-            # Log metrics to WandB
-            self.wandb.log(
-                {
-                    # Add timing metrics
-                    "miner/timing/window_total": window_total_time,
-                    "miner/timing/peer_update": peer_update_time,
-                    "miner/timing/data_loading": data_loading_time,
-                    "miner/timing/training": training_time,
-                    "miner/timing/compression": compression_time,
-                    "miner/timing/gather": gather_time,
-                    "miner/timing/put": put_completion_time,
-                    "miner/timing/model_update": model_update_time,
-                    # Existing metrics
-                    "miner/loss": loss_value,
-                    "miner/tokens_per_sec": tokens_per_sec,
-                    "miner/total_tokens": self.total_tokens_processed,
-                    "miner/batch_tokens": window_tokens,
+                mean_weight_norm = (
+                    sum(all_weight_norms) / len(all_weight_norms)
+                    if all_weight_norms
+                    else 0.0
+                )
+                mean_momentum_norm = (
+                    sum(all_momentum_norms) / len(all_momentum_norms)
+                    if all_momentum_norms
+                    else 0.0
+                )
+
+                window_total_duration = tplr.T() - window_start_time
+
+                current_window_global_tokens = agg["tokens"]
+                new_global_total_tokens = (
+                    self.total_tokens_processed + current_window_global_tokens
+                )
+
+                log_payload = {
+                    "miner/loss": avg_loss_this_window,
+                    "miner/tokens_per_sec": tokens_per_sec_cluster,
+                    "miner/total_tokens": new_global_total_tokens,
+                    "miner/batch_tokens": current_window_global_tokens,
                     "miner/global_step": self.global_step,
-                    "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                    / 1024**2,
-                    "miner/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,
-                    "miner/gather_peers": len(self.comms.peers),
-                    "miner/effective_batch_size": len(self.comms.peers)
-                    * self.hparams.batch_size,
                     "miner/learning_rate": self.scheduler.get_last_lr()[0],
                     "miner/mean_grad_norm": mean_grad_norm,
-                    "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
-                    "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                    "miner/grad_norm_std": grad_norm_std,
+                    "miner/grad_norm_std_float": grad_norm_std_value,
                     "miner/mean_weight_norm": mean_weight_norm,
                     "miner/mean_momentum_norm": mean_momentum_norm,
-                    # Added gather success rate in %
                     "miner/gather/success_rate": gather_success_rate,
-                },
-                step=self.global_step,
-            )
+                    "miner/gather/num_peers": len(self.comms.peers),
+                    "miner/gather/skipped_peers_count": len(skipped_uids_gather),
+                    "timing/window_total_duration": window_total_duration,
+                    "timing/data_loading_duration": agg["data_time"],
+                    "timing/training_duration": agg["train_time"],
+                    "timing/compression_duration": agg["comp_time"],
+                    "timing/put_duration": agg["put_time"],
+                    "timing/gather_duration": agg["gather_time"],
+                    "timing/model_update_duration": agg["model_update_time"],
+                }
+                if torch.cuda.is_available():
+                    log_payload["miner/gpu_memory_allocated_mb"] = (
+                        torch.cuda.memory_allocated(self.device) / 1024**2
+                    )
+                    log_payload["miner/gpu_memory_reserved_mb"] = (
+                        torch.cuda.memory_reserved(self.device) / 1024**2
+                    )
 
-            self.metrics_logger.log(
-                measurement="training_step_v2",
-                tags={
-                    "window": self.current_window,
-                    "global_step": self.global_step,
-                },
-                fields={
-                    "loss": loss_value,
-                    "n_gather_peers": int(len(self.comms.peers)),
-                    "gather_success_rate": gather_success_rate,
-                    "gather_peers": json.dumps(self.comms.peers),
-                    "skipped_peers": json.dumps(
-                        gather_result.skipped_uids if gather_result else []
-                    ),
-                    "window_total_time": window_total_time,
-                    "peer_update_time": peer_update_time,
-                    "compression_time": compression_time,
-                    "gather_time": gather_time,
-                    "put_time": put_completion_time,
-                    "model_update_time": model_update_time,
-                    "tokens_per_sec": tokens_per_sec,
-                },
-            )
-            tplr.logger.info("Finished metrics logging call for miner")
+                if self.wandb:
+                    try:
+                        self.wandb.log(log_payload, step=self.global_step)
+                    except Exception as e:
+                        tplr.logger.warning(f"[Rank 0 W&B] Log failed: {e}")
 
-            self.global_step += 1
-            self.window_step += 1
-            tplr.logger.info(f"Total optimization steps: {self.global_step}")
+                if self.metrics_logger:
+                    # Adapt fields for InfluxDB
+                    # The key "miner/grad_norm_std_float" will become "grad_norm_std_float" in InfluxDB
+                    influx_fields = {
+                        k.replace("miner/", "").replace("timing/", "time_"): _safe_json(
+                            v
+                        )
+                        for k, v in log_payload.items()
+                    }
 
-            # Log profiling summary every 10 windows
-            if self.current_window % 10 == 0:
-                tplr.logger.info("Logging performance profiling summary...")
-                tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
+                    # Log profiling summary every 10 windows
+                    if self.current_window % 10 == 0:
+                        tplr.logger.info("Logging performance profiling summary...")
+                        tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
 
-            # Save checkpoint logic
-            if self.global_step % self.hparams.checkpoint_frequency == 0:
+                    # Ensure all numeric values are explicitly converted to the same type (float)
+                    # to avoid type conflicts with InfluxDB
+                    for key in influx_fields:
+                        if isinstance(
+                            influx_fields[key], (int, float, np.integer, np.floating)
+                        ):
+                            influx_fields[key] = float(influx_fields[key])
+
+                    influx_fields["gather_peers_list"] = json.dumps(
+                        [int(u) for u in self.comms.peers]
+                    )
+                    influx_fields["skipped_peers_list"] = json.dumps(
+                        skipped_uids_gather
+                    )
+
+                    self.metrics_logger.log(
+                        measurement="training_step_v2",
+                        tags={"window": step_window, "global_step": self.global_step},
+                        fields=influx_fields,
+                    )
                 tplr.logger.info(
-                    f"Creating checkpoint at global_step {self.global_step}"
+                    f"[Rank 0] Metrics (cluster-wide) logged for global_step {self.global_step}."
                 )
 
-                # asyncio checkpoint saving task
-                asyncio.create_task(
-                    self.comms.save_checkpoint(
-                        model=self.model,
-                        optimizer=self.optimizer,
-                        scheduler=self.scheduler,
-                        momentum=self.momentum,
-                        global_step=self.global_step,
-                        current_window=self.current_window,
-                        start_window=self.start_window,
-                    )
-                )
+                # Update rank 0's self.total_tokens_processed to the new global total
+                self.total_tokens_processed = new_global_total_tokens
+
+            # Broadcast the updated global total_tokens_processed from rank 0 to all ranks
+            # All ranks (including rank 0) will receive this value.
+            if distrib.is_rank0():
+                # Rank 0 has the authoritative value to broadcast
+                value_to_broadcast = self.total_tokens_processed
             else:
-                tplr.logger.info("Skipping checkpoint save this round")
+                # Other ranks provide a placeholder for the broadcast operation
+                value_to_broadcast = None
 
-            # 4. Wait for next window
-            tplr.logger.info("Wait for next window...")
-            while self.current_window == step_window:
-                await asyncio.sleep(0.1)
+            self.total_tokens_processed = distrib.broadcast_object(
+                value_to_broadcast, src=0
+            )
 
-    # Listens for new blocks and sets self.current_block and self.current_window
-    def block_listener(self, _):
-        import websockets.exceptions  # Ensure we catch websockets errors
+            # Wait for next window signal from Rank 0 (managed at the start of the loop)
+            # The old "while self.current_window == step_window: await asyncio.sleep(0.1)"
+            # is now implicitly handled by the broadcast of `step_window` at the loop start.
+            # If all ranks finish quickly, they will wait at the broadcast_object for the next window.
+            tplr.logger.info(
+                f"[Rank {self.rank}] Finished window {step_window}. Waiting for next window signal."
+            )
+            self.window_step += (
+                1  # Local counter for windows processed by this miner instance
+            )
 
-        def handler(event):
+            # Log total window time at the end
+            window_total_duration = tplr.T() - window_start_time
+            tplr.logger.info(
+                f"{tplr.P(step_window, window_total_duration)} [Rank {self.rank}] Completed window iteration"
+            )
+
+    def block_listener(self, loop: asyncio.AbstractEventLoop):
+        # This listener runs on all ranks. Rank 0's updates to self.current_window will be broadcast.
+        # Other ranks' listeners are mostly for their own logging or potential fallback.
+        asyncio.set_event_loop(loop)  # Set event loop for this thread
+
+        def handler(
+            event_details,
+        ):  # Renamed 'event' to 'event_details' to avoid conflict
             try:
-                self.current_block = int(event["header"]["number"])
-                new_window = int(self.current_block / self.hparams.blocks_per_window)
-                if new_window != self.current_window:
-                    self.current_window = new_window
-                    self.comms.current_window = self.current_window
-                    tplr.logger.info(
-                        f"New block received. Current window updated to: {self.current_window}"
-                    )
-            except Exception as e:
-                tplr.logger.error(f"Error processing block event: {e}")
+                new_block = int(event_details["header"]["number"])
+                new_window = int(new_block / self.hparams.blocks_per_window)
 
-        backoff = 1  # initial backoff in seconds
-        max_backoff = 60  # maximum backoff limit
+                # Only Rank 0's updates to self.current_block/window are authoritative for the main loop
+                # via broadcasting. Other ranks can log or use for local checks.
+                if distrib.is_rank0():
+                    if new_window != self.current_window:
+                        tplr.logger.info(
+                            f"[Rank 0 BlockListener] New window detected: {new_window} (from block {new_block}). Old: {self.current_window}"
+                        )
+                        self.current_block = new_block
+                        self.current_window = new_window
+                        self.comms.current_window = new_window  # Update comms as well
+                else:  # Non-rank0 listeners can log if their view diverges significantly (for debugging)
+                    if (
+                        abs(new_block - self.current_block)
+                        > self.hparams.blocks_per_window
+                    ):  # Example divergence check
+                        tplr.logger.debug(
+                            f"[Rank {self.rank} BlockListener] Local block {new_block}, window {new_window}. Synced block is {self.current_block}"
+                        )
 
-        while not self.stop_event.is_set():
-            try:
-                # This call subscribes to block headers and might throw keepalive errors
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(
-                    handler
-                )
-                backoff = 1  # reset backoff if subscription exits without exception
-            except websockets.exceptions.ConnectionClosedError as e:
-                tplr.logger.warning(
-                    f"Websocket ConnectionClosedError caught: {e}. Retrying in {backoff} seconds."
-                )
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
             except Exception as e:
                 tplr.logger.error(
-                    f"Block subscription error: {e}. Retrying in {backoff} seconds."
+                    f"[Rank {self.rank} BlockListener] Error processing block event: {e}"
                 )
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+
+        backoff = 1
+        max_backoff = 60
+        while (
+            not self.stop_event.is_set()
+        ):  # Assuming self.stop_event is set on shutdown
+            try:
+                # Each rank subscribes. Redundant but simple.
+                # Could be Rank 0 only + internal broadcast if subtensor connections are an issue.
+                sub_instance = bt.subtensor(
+                    config=self.config
+                )  # Fresh instance for thread safety potentially
+                sub_instance.substrate.subscribe_block_headers(
+                    handler
+                )  # This is a blocking call
+                # If subscribe_block_headers returns, it means connection was lost or exited cleanly.
+                tplr.logger.warning(
+                    f"[Rank {self.rank} BlockListener] Subscription ended. Reconnecting..."
+                )
+                backoff = (
+                    1  # Reset backoff on successful exit (though usually it's an error)
+                )
+            except websockets.exceptions.ConnectionClosedError as e:  # type: ignore
+                tplr.logger.warning(
+                    f"[Rank {self.rank} BlockListener] Websocket ConnectionClosedError: {e}. Retrying in {backoff}s."
+                )
+            except Exception as e:
+                tplr.logger.error(
+                    f"[Rank {self.rank} BlockListener] Subscription error: {e}. Retrying in {backoff}s."
+                )
+
+            if self.stop_event.is_set():
+                break
+            time.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+        tplr.logger.info(f"[Rank {self.rank} BlockListener] Listener thread stopped.")
+
+    async def _wait_for_start_window(
+        self, poll_interval: float = 5.0, timeout: int = 300
+    ) -> int:
+        """Rank 0 polls chain until a non-zero start window appears or determined by current block."""
+        assert distrib.is_rank0(), "Only Rank 0 should wait for start window this way."
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            # Get current block and calculate window
+            current_block_val = self.subtensor.block
+            current_window_val = int(current_block_val / self.hparams.blocks_per_window)
+
+            # A simple heuristic: if current window is positive, consider it the start.
+            # Or, if there's a specific minimum window defined in hparams.
+            min_start_window = getattr(self.hparams, "min_start_window", 1)
+            if current_window_val >= min_start_window:
+                tplr.logger.info(
+                    f"[Rank 0] Determined start window {current_window_val} from current block {current_block_val}."
+                )
+                # Update self for consistency before broadcasting
+                self.current_block = current_block_val
+                self.current_window = current_window_val
+                return current_window_val
+
+            tplr.logger.info(
+                f"[Rank 0] Waiting for a valid start window. Current block: {current_block_val}, window: {current_window_val}. Polling in {poll_interval}s."
+            )
+            await asyncio.sleep(poll_interval)
+
+        raise RuntimeError(f"[Rank 0] Timed out ({timeout}s) waiting for start window.")
+
+    def _safe_json(val):
+        """Convert tensors / numpy / containers → plain python scalars/lists."""
+        if isinstance(val, torch.Tensor):
+            return val.item() if val.ndim == 0 else val.tolist()
+        if isinstance(val, (np.ndarray,)):
+            return val.tolist()
+        if isinstance(val, (np.generic,)):  # numpy scalar
+            return val.item()
+        if isinstance(val, (list, tuple)):
+            return [_safe_json(x) for x in val]
+        if isinstance(val, dict):
+            return {k: _safe_json(v) for k, v in val.items()}
+        return val
 
 
-# Start miner.
-if __name__ == "__main__":
+def _safe_json(val):
+    """Convert tensors / numpy / containers → plain python scalars/lists."""
+    if isinstance(val, torch.Tensor):
+        return val.item() if val.ndim == 0 else val.tolist()
+    if isinstance(val, (np.ndarray,)):
+        return val.tolist()
+    if isinstance(val, (np.generic,)):  # numpy scalar
+        return val.item()
+    if isinstance(val, (list, tuple)):
+        return [_safe_json(x) for x in val]
+    if isinstance(val, dict):
+        return {k: _safe_json(v) for k, v in val.items()}
+    return val
+
+
+def main():
     uvloop.install()
-    asyncio.run(Miner().run())
+    miner_instance = Miner()
+    try:
+        asyncio.run(miner_instance.run())
+    except KeyboardInterrupt:
+        tplr.logger.info("Miner shutting down...")
+    except Exception as e:
+        tplr.logger.error(f"Unhandled exception in miner: {e}", exc_info=True)
+    finally:
+        if distrib.is_initialized():
+            distrib.cleanup()
+        tplr.logger.info("Miner run loop finished.")
+
+
+if __name__ == "__main__":
+    main()

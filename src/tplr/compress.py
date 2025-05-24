@@ -268,15 +268,23 @@ class CompressDCT:
         # Quantize to 8-bit representation
         centered_val = centered_val.to(torch.float32)
         quantized_val = (
-            (centered_val / scale + offset).round().clamp(0, 255).to(torch.uint8)
+            (centered_val / scale + offset)
+            .round()
+            .clamp(0, self.n_bins - 1)
+            .to(torch.uint8)
         )
 
         # Create lookup table by computing mean values for each bucket
-        lookup = torch.zeros(256, dtype=torch.float32, device=val.device)
-        for i in range(256):
-            mask = quantized_val == i
-            if mask.any():
-                lookup[i] = centered_val[mask].mean()
+        device = quantized_val.device
+        sums = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
+        counts = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
+
+        sums.scatter_add_(0, quantized_val.flatten().long(), centered_val.flatten())
+        counts.scatter_add_(
+            0, quantized_val.flatten().long(), torch.ones_like(centered_val.flatten())
+        )
+
+        lookup = torch.where(counts > 0, sums / counts, torch.zeros_like(sums))
 
         # Store quantization parameters for dequantization
         orig_dtype = val.dtype
@@ -306,11 +314,7 @@ class CompressDCT:
             lookup = lookup.to(val.device)
 
         # Convert quantized values back using lookup table
-        dequantized = torch.zeros_like(val, dtype=torch.float32)
-        for i in range(256):
-            mask = val == i
-            if mask.any():
-                dequantized[mask] = lookup[i]
+        dequantized = lookup[val.long()]
 
         # Apply scale and shift to get back original distribution
         val = dequantized + shift

@@ -145,6 +145,35 @@ def enable_tplr_logger_propagation():
     tplr.logger.propagate = True
 
 
+@pytest.fixture(autouse=True)
+def mock_distributed_operations(monkeypatch):
+    """Mock distributed operations for tests that don't initialize process groups."""
+    import torch.distributed as dist
+
+    # Mock dist.is_initialized to return False
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+
+    # Mock dist.get_backend to avoid initialization check
+    monkeypatch.setattr(dist, "get_backend", lambda group=None: "gloo")
+
+    # Mock dist.get_rank to return 0
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 0)
+
+    # Mock broadcast to do nothing
+    def mock_broadcast(tensor, src=0, group=None, async_op=False):
+        return None
+
+    monkeypatch.setattr(dist, "broadcast", mock_broadcast)
+
+    # Mock broadcast_object to just return the object
+    def mock_broadcast_object(obj, src=0):
+        return obj
+
+    monkeypatch.setattr(_distrib, "broadcast_object", mock_broadcast_object)
+
+    yield
+
+
 @pytest.fixture
 def num_non_zero_incentive():
     """Default fixture for number of non-zero incentive miners."""

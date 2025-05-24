@@ -46,6 +46,8 @@ class ChainManager:
         fetch_interval: int = 600,  # Fetch interval in seconds
         wallet: Optional["bt.wallet"] = None,
         bucket: Optional[Bucket] = None,
+        local_rank: int = 0,
+        world_size: int = 1,
     ):
         """
         Initialize chain commitment handler.
@@ -58,6 +60,8 @@ class ChainManager:
             fetch_interval (int): Interval in seconds between fetching commitments
             wallet (bt.wallet, optional): Wallet to sign commitments
             bucket (Bucket, optional): Bucket configuration to commit
+            local_rank (int): Local rank for distributed training
+            world_size (int): World size for distributed training
         """
         self.config = config
         self.netuid = netuid
@@ -85,6 +89,10 @@ class ChainManager:
         # Store wallet and bucket
         self.wallet = wallet
         self.bucket = bucket
+
+        self.local_rank = local_rank
+        self.world_size = world_size
+        self.is_ddp = world_size > 1
 
     def start_commitment_fetcher(self):
         """Attach to the already-running event loop."""

@@ -78,6 +78,12 @@
   when: cli_check.rc == 0 and subnet_exists | default(false)
   tags: network_verify
 
+- name: Set validator coldkey paths if not defined
+  set_fact:
+    validator_coldkey_paths: "{{ validator_hotkeys | map('regex_replace', '^(.*)$', cold_wallet_name + '_\\1') | list }}"
+  when: validator_coldkey_paths is not defined
+  tags: network_verify
+
 - name: Check validator registration and stake status
   shell: btcli wallet overview --wallet.name "{{ item }}" --subtensor.network {{ network }}
   loop: "{{ validator_coldkey_paths }}"

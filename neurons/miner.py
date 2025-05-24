@@ -74,6 +74,12 @@ class Miner:
             "--project", type=str, default="templar", help="Wandb project."
         )
         parser.add_argument(
+            "--actual-batch-size",
+            type=int,
+            default=None,
+            help="Override the batch size defined in hparams.",
+        )
+        parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
         )
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -111,6 +117,12 @@ class Miner:
         self.config = Miner.config()
         self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
 
+        if self.config.actual_batch_size is not None:
+            tplr.logger.info(
+                f"Overriding hparams batch size: {self.hparams.batch_size} -> {self.config.actual_batch_size}"
+            )
+            self.hparams.batch_size = self.config.actual_batch_size
+
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
@@ -131,7 +143,11 @@ class Miner:
         self.transformer = tplr.compress.TransformDCT(
             self.model, target_chunk=self.hparams.target_chunk
         )
-        self.compressor = tplr.compress.CompressDCT()
+        self.compressor = tplr.compress.CompressDCT(
+            use_quantization=True,
+            quantization_bins=self.hparams.quantization_bins,
+            quantization_range=self.hparams.quantization_range,
+        )
 
         # Init optimizer and momentum
         self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
@@ -140,7 +156,7 @@ class Miner:
         self.totalks = {}
         for n, p in self.model.named_parameters():
             self.momentum[n] = torch.zeros_like(p)
-            _, _, xshape, totalk = self.compressor.compress(
+            _, _, xshape, totalk, quant_params = self.compressor.compress(
                 self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
             )
             self.xshapes[n] = xshape
@@ -572,8 +588,11 @@ class Miner:
                 for n, p in self.model.named_parameters():
                     idxs_key = n + "idxs"
                     vals_key = n + "vals"
+                    quant_key = n + "quant_params"
+
                     idxs = getattr(gather_result.state_dict, idxs_key, None)
                     vals = getattr(gather_result.state_dict, vals_key, None)
+                    quant_params = getattr(gather_result.state_dict, quant_key, None)
                     if idxs is not None and vals is not None:
                         if not isinstance(idxs, (list, tuple)):
                             idxs = [idxs]
@@ -586,6 +605,7 @@ class Miner:
                                 vals,
                                 xshapes[n],
                                 totalks[n],
+                                quant_params,
                             )
                         )
 
@@ -732,6 +752,11 @@ class Miner:
             self.global_step += 1
             self.window_step += 1
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
+
+            # Log profiling summary every 10 windows
+            if self.current_window % 10 == 0:
+                tplr.logger.info("Logging performance profiling summary...")
+                tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
 
             # Save checkpoint logic
             if self.global_step % self.hparams.checkpoint_frequency == 0:

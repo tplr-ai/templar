@@ -17,26 +17,22 @@ class DummyHparams:
 
 class DummyCompressor:
     def compress(self, encoded_tensor, topk):
-        # Return fixed dummy values for testing:
-        # dummy idxs, vals, xshape, totalk
         dummy_idxs = "dummy_idxs"
         dummy_vals = "dummy_vals"
         dummy_xshape = "dummy_xshape"
         dummy_totalk = "dummy_totalk"
-        return dummy_idxs, dummy_vals, dummy_xshape, dummy_totalk
+        dummy_quant_params = "dummy_quant_params"
+        return dummy_idxs, dummy_vals, dummy_xshape, dummy_totalk, dummy_quant_params
 
-    def decompress(self, p, idxs, vals, xshape, totalk):
-        # Return a simple tensor value for testing.
+    def decompress(self, p, idxs, vals, xshape, totalk, quant_params):
         return torch.tensor([0.5, 0.5])
 
 
 class DummyTransformer:
     def encode(self, tensor):
-        # For testing, just return the tensor unchanged.
         return tensor
 
     def decode(self, tensor):
-        # Return a fixed dummy tensor.
         return torch.tensor([0.1, 0.1])
 
 
@@ -48,22 +44,18 @@ class DummyLogger:
         self.messages.append(msg)
 
 
-# Dummy model with one parameter named "weight".
 class DummyModel(torch.nn.Module):
     def __init__(self):
         super(DummyModel, self).__init__()
         self.weight = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
-        # Set a dummy gradient for the parameter.
         self.weight.grad = torch.tensor([0.1, 0.2])
 
 
-# Dummy Miner object containing the necessary attributes.
 class DummyMiner:
     def __init__(self):
         self.model = DummyModel()
         self.scheduler = DummyScheduler()
         self.hparams = DummyHparams()
-        # Initialize momentum dict with zeros matching the parameter shape.
         self.momentum = {"weight": torch.zeros_like(self.model.weight)}
         self.compressor = DummyCompressor()
         self.transformer = DummyTransformer()
@@ -98,6 +90,7 @@ def test_return_structure_and_types(caplog):
     # Verify gradient has keys for the parameter "weight"
     assert "weightidxs" in gradient
     assert "weightvals" in gradient
+    assert "weightquant_params" in gradient
     # Verify that the metadata key exists
     assert "metadata" in gradient
     # Check that metadata equals the expected dictionary.
@@ -232,19 +225,24 @@ def test_compressor_and_transformer_calls():
     # Define recorder classes for compressor and transformer.
     class DummyRecordingCompressor:
         def __init__(self):
-            self.called_args = None  # Will store (encoded_tensor, topk)
+            self.called_args = None
 
         def compress(self, encoded_tensor, topk):
-            # Record the arguments.
             self.called_args = (encoded_tensor.clone(), topk)
             dummy_idxs = "recorded_dummy_idxs"
             dummy_vals = "recorded_dummy_vals"
             dummy_xshape = "recorded_dummy_xshape"
             dummy_totalk = "recorded_dummy_totalk"
-            return dummy_idxs, dummy_vals, dummy_xshape, dummy_totalk
+            dummy_quant_params = "recorded_dummy_quant_params"
+            return (
+                dummy_idxs,
+                dummy_vals,
+                dummy_xshape,
+                dummy_totalk,
+                dummy_quant_params,
+            )
 
-        def decompress(self, p, idxs, vals, xshape, totalk):
-            # Return fixed tensor.
+        def decompress(self, p, idxs, vals, xshape, totalk, quant_params):
             return torch.tensor([0.2, 0.2])
 
     class DummyRecordingTransformer:
@@ -256,12 +254,9 @@ def test_compressor_and_transformer_calls():
 
         def decode(self, tensor):
             self.decode_called_with = tensor.clone()
-            # Return a fixed tensor for the transmitted gradient estimate
-            return torch.tensor([0.1, 0.1])  # Example value
+            return torch.tensor([0.1, 0.1])
 
-    # Create a dummy miner instance.
     miner = DummyMiner()
-    # Override the compressor and transformer with the recording versions.
     miner.compressor = DummyRecordingCompressor()
     miner.transformer = DummyRecordingTransformer()
 
@@ -349,20 +344,16 @@ def test_handling_multiple_parameters():
     - Also verify that xshapes, totalks, and transmitted dicts have both "weight1" and "weight2" as keys.
     """
 
-    # Define a dummy model with two parameters.
     class DummyMultiModel(torch.nn.Module):
         def __init__(self):
             super(DummyMultiModel, self).__init__()
             self.weight1 = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
             self.weight2 = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
-            # Set dummy gradients.
             self.weight1.grad = torch.tensor([0.1, 0.1])
             self.weight2.grad = torch.tensor([0.2, 0.2])
 
-    # Create a dummy miner and override the model and momentum.
     miner = DummyMiner()
     miner.model = DummyMultiModel()
-    # Reinitialize momentum to match both parameters.
     miner.momentum = {
         "weight1": torch.zeros_like(miner.model.weight1),
         "weight2": torch.zeros_like(miner.model.weight2),
@@ -377,8 +368,10 @@ def test_handling_multiple_parameters():
     # Check for gradient keys from both parameters.
     assert "weight1idxs" in gradient, "Missing key: weight1idxs"
     assert "weight1vals" in gradient, "Missing key: weight1vals"
+    assert "weight1quant_params" in gradient, "Missing key: weight1quant_params"
     assert "weight2idxs" in gradient, "Missing key: weight2idxs"
     assert "weight2vals" in gradient, "Missing key: weight2vals"
+    assert "weight2quant_params" in gradient, "Missing key: weight2quant_params"
 
     # Check that xshapes, totalks, and transmitted have both "weight1" and "weight2".
     for key in ["weight1", "weight2"]:

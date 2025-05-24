@@ -104,14 +104,18 @@ class AggregationServer:
         self.transformer = tplr.compress.TransformDCT(
             self.model, target_chunk=self.hparams.target_chunk
         )
-        self.compressor = tplr.compress.CompressDCT()
+        self.compressor = tplr.compress.CompressDCT(
+            use_quantization=True,
+            quantization_bins=self.hparams.quantization_bins,
+            quantization_range=self.hparams.quantization_range,
+        )
 
         # Pre-calculate shapes and totalks for all parameters
         self.param_shapes = {}
         self.param_totalks = {}
         tplr.logger.info("Pre-calculating compression parameters...")
         for name, param in self.model.named_parameters():
-            _, _, shape, totalk = self.compressor.compress(
+            _, _, shape, totalk, _ = self.compressor.compress(
                 self.transformer.encode(param.data), topk=self.hparams.topk_compression
             )
             self.param_shapes[name] = shape
@@ -297,9 +301,11 @@ class AggregationServer:
             for name, param in self.model.named_parameters():
                 idxs_key = name + "idxs"
                 vals_key = name + "vals"
+                quant_key = name + "quant_params"
 
                 idxs = getattr(gather_result.state_dict, idxs_key, None)
                 vals = getattr(gather_result.state_dict, vals_key, None)
+                quant_params = getattr(gather_result.state_dict, quant_key, None)
 
                 if idxs is not None and vals is not None:
                     # Ensure idx and val are lists of tensors
@@ -315,6 +321,7 @@ class AggregationServer:
                         vals,
                         self.param_shapes[name],
                         self.param_totalks[name],
+                        quant_params,
                     )
 
                     # Pack the decompressed gradient

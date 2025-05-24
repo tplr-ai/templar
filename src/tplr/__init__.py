@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "0.2.85"
+__version__ = "0.2.86"
 
 # Import package.
 from .chain import *
@@ -34,3 +34,4 @@ from .logging import *
 from .schemas import *
 from .wandb import initialize_wandb
 from .metrics import *
+from .shard_index import ShardIndex

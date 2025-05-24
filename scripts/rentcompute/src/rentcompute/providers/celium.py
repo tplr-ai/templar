@@ -220,7 +220,8 @@ class CeliumProvider(BaseProvider):
         # Prepare the request payload
         payload = {
             "pod_name": pod_name,
-            "template_id": "1742e309-5dcb-4de6-84f3-ad7190df4689",  # Hardcoded template ID
+            # "template_id": "1742e309-5dcb-4de6-84f3-ad7190df4689",  # Hardcoded template ID
+            "template_id": "9f1207a8-4633-412b-aab9-1256b9f94cad",  # Hardcoded template ID
             "user_public_key": user_public_keys,
         }
 

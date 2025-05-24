@@ -2,6 +2,25 @@
   vars_files:
     - group_vars/all/vault.yml
   become: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    remote_mode: "{{ hostvars[inventory_hostname]['remote_mode'] | default(false) }}"
+
+  pre_tasks:
+    - name: Install build deps for python-apt
+      become: true
+      apt:
+        name:
+          - dpkg-dev
+          - build-essential
+          - python3-dev
+          - libapt-pkg-dev
+          - libpython3-dev
+          - python3-apt
+          - python3-setuptools
+          - python3-pkg-resources
+        state: present
+        update_cache: yes
 
   roles:
     - { role: common, tags: ["common"] }

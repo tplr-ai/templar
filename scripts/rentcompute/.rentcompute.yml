@@ -30,3 +30,9 @@ sync:
     destination: ~/templar/neurons
   - source: ../../src
     destination: ~/templar/src
+  - source: ../../hparams.json
+    destination: ~/templar/hparams.json
+  - source: ../../_metadata.yaml
+    destination: ~/templar/_metadata.yaml
+  - source: ../../_shard_sizes.json
+    destination: ~/templar/_shard_sizes.json

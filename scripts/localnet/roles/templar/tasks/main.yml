@@ -1,11 +1,37 @@
+- name: Debug remote_mode variable
+  debug:
+    msg:
+      - "remote_mode is set to: {{ remote_mode }}"
+      - "remote_mode as bool: {{ remote_mode | bool }}"
+      - "ansible_env.HOME: {{ ansible_env.HOME }}"
+      - "playbook_dir: {{ playbook_dir }}"
+  tags: templar
+
+- name: Set templar_path based on deployment mode
+  set_fact:
+    templar_path: "{{ ansible_env.HOME }}/templar"
+  when: remote_mode is defined and remote_mode | bool
+  tags: templar
+
+- name: Set templar_path for local deployment
+  set_fact:
+    templar_path: "{{ playbook_dir }}/../.."
+  when: remote_mode is not defined or not remote_mode | bool
+  tags: templar
+
+- name: Debug templar_path after setting
+  debug:
+    msg: "templar_path is set to: {{ templar_path }}"
+  tags: templar
+
 - name: Include local deployment tasks
   include_tasks: local.yml
-  when: not remote_mode | bool
+  when: not (remote_mode | default(false) | bool)
   tags: templar
 
 - name: Include remote deployment tasks
   include_tasks: remote.yml
-  when: remote_mode | bool
+  when: remote_mode | default(false) | bool
   tags: templar
 
 - name: Check available GPU count (informational only)

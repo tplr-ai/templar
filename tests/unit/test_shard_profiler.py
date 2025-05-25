@@ -123,7 +123,7 @@ class TestShardProfiler:
         profiler.end_read(timer_id, shard_path)
 
         # Mock the logger to capture log output
-        with mock.patch("tplr.profilers.shard_profiler.logger") as mock_logger:
+        with mock.patch("tplr.logger") as mock_logger:
             profiler.log_analysis()
             # Verify that log_analysis produces output
             assert mock_logger.info.call_count > 0
@@ -163,7 +163,7 @@ class TestShardProfiler:
         profiler.end_read(timer_id, shard_path)
 
         # Test logging metadata
-        with mock.patch("tplr.profilers.shard_profiler.logger") as mock_logger:
+        with mock.patch("tplr.logger") as mock_logger:
             profiler.log_parquet_metadata(
                 shard_path, file_size=2048, num_row_groups=5, total_rows=1000
             )
@@ -181,7 +181,7 @@ class TestShardProfiler:
         profiler = ShardProfiler(name="TestShardProfiler")
         shard_path = "/test/shard.parquet"
 
-        with mock.patch("tplr.profilers.shard_profiler.logger") as mock_logger:
+        with mock.patch("tplr.logger") as mock_logger:
             profiler.log_read_details(
                 shard_path=shard_path,
                 group_index=2,

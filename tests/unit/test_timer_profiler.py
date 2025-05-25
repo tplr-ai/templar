@@ -153,12 +153,12 @@ class TestTimerProfiler:
         test_function()
 
         # Mock the logger to capture log output
-        with mock.patch("tplr.profilers.timer_profiler.logger") as mock_logger:
+        with mock.patch("tplr.logger") as mock_logger:
             profiler.log_summary()
             assert mock_logger.info.call_count >= 2
             # First call should be the summary header
             assert mock_logger.info.call_args_list[0][0][0].startswith(
-                "[TIMER] TestProfiler Summary:"
+                "[TestProfiler] Summary:"
             )
             # There should be one call with test_function stats
             function_log_calls = [

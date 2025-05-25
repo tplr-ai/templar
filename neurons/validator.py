@@ -2957,8 +2957,7 @@ class Validator:
 
     def select_next_bin_for_evaluation(self, num_bins: int) -> int:
         """
-        Determine which bin should be evaluated in the current window.
-        We rotate through bins sequentially, keeping track of the last evaluated bin.
+        Randomly select a bin to evaluate in the current window.
 
         Args:
             num_bins (int): Total number of bins
@@ -2966,19 +2965,11 @@ class Validator:
         Returns:
             int: The bin index to evaluate in this window
         """
-        # Initialize bin rotation tracking if not present
-        if not hasattr(self, "last_evaluated_bin"):
-            self.last_evaluated_bin = -1
-
-        # Rotate to the next bin
-        next_bin = (self.last_evaluated_bin + 1) % num_bins
-
-        # Update for next window
-        self.last_evaluated_bin = next_bin
+        next_bin = random.randint(0, num_bins - 1)
 
         tplr.log_with_context(
             level="info",
-            message=f"Selected bin {next_bin} for evaluation in window {self.sync_window}",
+            message=f"Randomly selected bin {next_bin} for evaluation in window {self.sync_window}",
             sync_window=self.sync_window,
             current_window=self.current_window,
         )

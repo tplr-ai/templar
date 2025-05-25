@@ -4,14 +4,16 @@ from collections import defaultdict
 from functools import wraps
 from typing import Any, Callable, Dict, List, Optional
 
-from tplr import logger
+import tplr
+
+from .base_profiler import BaseProfiler, DummyProfiler, create_profiler_getter
 
 
-class TimerProfiler:
+class TimerProfiler(BaseProfiler[Dict[str, List[float]]]):
     """A modular timer profiler for performance monitoring"""
 
     def __init__(self, name: str = "TimerProfiler"):
-        self.name = name
+        super().__init__(name)
         self.timings: Dict[str, List[float]] = defaultdict(list)
         self.active_timers: Dict[str, float] = {}
         self.counts: Dict[str, int] = defaultdict(int)
@@ -38,12 +40,12 @@ class TimerProfiler:
                     result = await func(*args, **kwargs)
                     elapsed = time.time() - start_time
                     self._record_timing(name, elapsed)
-                    logger.info(f"[TIMER] {self.name}.{name}: {elapsed:.4f}s")
+                    tplr.logger.info(f"[TIMER] {self.name}.{name}: {elapsed:.4f}s")
                     return result
                 except Exception as e:
                     elapsed = time.time() - start_time
                     self._record_timing(name, elapsed, error=True)
-                    logger.error(
+                    tplr.logger.error(
                         f"[TIMER] {self.name}.{name}: {elapsed:.4f}s (error: {e})"
                     )
                     raise
@@ -64,12 +66,12 @@ class TimerProfiler:
                     result = func(*args, **kwargs)
                     elapsed = time.time() - start_time
                     self._record_timing(name, elapsed)
-                    logger.info(f"[TIMER] {self.name}.{name}: {elapsed:.4f}s")
+                    tplr.logger.info(f"[TIMER] {self.name}.{name}: {elapsed:.4f}s")
                     return result
                 except Exception as e:
                     elapsed = time.time() - start_time
                     self._record_timing(name, elapsed, error=True)
-                    logger.error(
+                    tplr.logger.error(
                         f"[TIMER] {self.name}.{name}: {elapsed:.4f}s (error: {e})"
                     )
                     raise
@@ -125,14 +127,11 @@ class TimerProfiler:
             self.counts.clear()
             self.active_timers.clear()
 
-    def log_summary(self) -> None:
-        """Log a summary of all timing statistics"""
-        logger.info(f"[TIMER] {self.name} Summary:")
-        stats = self.get_stats()
-
+    def _log_stats_details(self, stats: Dict[str, Any]) -> None:
+        """Log the detailed timing statistics"""
         for func_name, func_stats in stats.items():
             if isinstance(func_stats, dict) and "count" in func_stats:
-                logger.info(
+                tplr.logger.info(
                     f"  {func_name}: "
                     f"count={func_stats['count']}, "
                     f"avg={func_stats['avg']:.4f}s, "
@@ -143,11 +142,8 @@ class TimerProfiler:
 
 
 # Dummy profiler implementation for when profiling is disabled
-class DummyTimerProfiler:
+class DummyTimerProfiler(DummyProfiler):
     """No-op implementation of TimerProfiler when profiling is disabled"""
-
-    def __init__(self, name: str = "DummyTimerProfiler"):
-        self.name = name
 
     def profile(self, func_name: str = "") -> Callable[..., Any]:
         """No-op decorator that returns the original function unchanged"""
@@ -160,38 +156,13 @@ class DummyTimerProfiler:
     def _record_timing(self, *args, **kwargs) -> None:
         pass
 
-    def get_stats(self, *args, **kwargs) -> Dict:
-        return {}
 
-    def reset(self, *args, **kwargs) -> None:
-        pass
-
-    def log_summary(self) -> None:
-        pass
-
-
-# Global singleton instances
-_timer_profiler: Optional[TimerProfiler] = None
-_dummy_profiler = DummyTimerProfiler()
-
-
-def get_timer_profiler(name: str = "TimerProfiler") -> TimerProfiler:
-    """
-    Get or create a named timer profiler instance.
-    Returns a dummy profiler if profiling is disabled.
-
-    Args:
-        name: Name for the profiler instance
-
-    Returns:
-        TimerProfiler instance (or dummy instance if disabled)
-    """
-    from . import ENABLE_TIMER_PROFILER
-
-    if not ENABLE_TIMER_PROFILER:
-        return _dummy_profiler  # type: ignore
-
-    global _timer_profiler
-    if _timer_profiler is None or _timer_profiler.name != name:
-        _timer_profiler = TimerProfiler(name)
-    return _timer_profiler
+# Create the getter function using the factory
+get_timer_profiler = create_profiler_getter(
+    profiler_class=TimerProfiler,
+    dummy_class=DummyTimerProfiler,
+    enable_flag_getter=lambda: __import__(
+        "tplr.profilers", fromlist=["ENABLE_TIMER_PROFILER"]
+    ).ENABLE_TIMER_PROFILER,
+    global_instance_name="_timer_profiler",
+)

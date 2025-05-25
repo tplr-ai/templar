@@ -4,16 +4,18 @@ Shard performance profiler for tracking parquet file read performance.
 
 import json
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
-from tplr import logger
+import tplr
+
+from .base_profiler import BaseProfiler, DummyProfiler, create_profiler_getter
 
 
-class ShardProfiler:
+class ShardProfiler(BaseProfiler[Dict[str, Dict]]):
     """Profile shard read performance to identify bottlenecks"""
 
     def __init__(self, name: str = "ShardProfiler"):
-        self.name = name
+        super().__init__(name)
         self.shard_performance: Dict[str, Dict] = {}
         self._active_timers: Dict[str, float] = {}
 
@@ -73,7 +75,7 @@ class ShardProfiler:
             Elapsed time for this read
         """
         if timer_id not in self._active_timers:
-            logger.error(f"Timer {timer_id} not found")
+            tplr.logger.error(f"Timer {timer_id} not found")
             return 0.0
 
         start_time = self._active_timers.pop(timer_id)
@@ -96,7 +98,7 @@ class ShardProfiler:
         avg_time = perf_data["total_time"] / perf_data["reads"]
 
         if elapsed > avg_time * 2 and perf_data["reads"] > 10:
-            logger.warning(
+            tplr.logger.warning(
                 f"SLOW READ DETECTED: {shard_path} took {elapsed:.4f}s "
                 f"(2x slower than avg: {avg_time:.4f}s)"
             )
@@ -112,7 +114,7 @@ class ShardProfiler:
         rows_per_group: int,
     ):
         """Log detailed information about a row group read"""
-        logger.info(
+        tplr.logger.info(
             f"Reading row group {group_index}/{num_row_groups} from shard: {shard_path}, "
             f"offset: {offset}, rows_per_group: {rows_per_group}"
         )
@@ -125,7 +127,7 @@ class ShardProfiler:
         total_rows: int,
     ):
         """Log parquet file metadata"""
-        logger.debug(
+        tplr.logger.debug(
             f"Opening parquet file: {shard_path} - "
             f"Size: {file_size}, Row groups: {num_row_groups}, "
             f"Total rows: {total_rows}"
@@ -145,23 +147,27 @@ class ShardProfiler:
             return
 
         avg_time = perf_data["total_time"] / perf_data["reads"]
-        logger.info(
+        tplr.logger.info(
             f"Row group read completed from {shard_path} in {elapsed:.4f}s "
             f"(avg: {avg_time:.4f}s, min: {perf_data['min_time']:.4f}s, "
             f"max: {perf_data['max_time']:.4f}s, reads: {perf_data['reads']})"
         )
 
-    def get_stats(self) -> Dict:
-        """Get all shard performance statistics"""
+    def get_stats(self, key: Optional[str] = None) -> Dict[str, Any]:
+        """Get shard performance statistics for a specific shard or all shards"""
+        if key:
+            return self.shard_performance.get(
+                key, {"error": f"No stats found for {key}"}
+            )
         return self.shard_performance
 
     def log_analysis(self):
         """Log detailed analysis of shard performance"""
         if not self.shard_performance:
-            logger.info("No shard performance data collected yet")
+            tplr.logger.info("No shard performance data collected yet")
             return
 
-        logger.info("=== SHARD PERFORMANCE ANALYSIS ===")
+        tplr.logger.info("=== SHARD PERFORMANCE ANALYSIS ===")
 
         # Collect all shard stats
         shard_stats = []
@@ -183,10 +189,10 @@ class ShardProfiler:
 
         shard_stats.sort(key=lambda x: x["avg_time"], reverse=True)
 
-        logger.info(f"Total shards analyzed: {len(shard_stats)}")
-        logger.info("\nTop 10 SLOWEST shards by average read time:")
+        tplr.logger.info(f"Total shards analyzed: {len(shard_stats)}")
+        tplr.logger.info("\nTop 10 SLOWEST shards by average read time:")
         for i, shard in enumerate(shard_stats[:10]):
-            logger.info(
+            tplr.logger.info(
                 f"{i + 1}. {shard['path']}\n"
                 f"   Avg: {shard['avg_time']:.4f}s, Max: {shard['max_time']:.4f}s, "
                 f"Min: {shard['min_time']:.4f}s\n"
@@ -199,26 +205,26 @@ class ShardProfiler:
             global_total_time = sum(s["total_time"] for s in shard_stats)
             global_total_reads = sum(s["reads"] for s in shard_stats)
 
-            logger.info("\nGLOBAL STATISTICS:")
-            logger.info(f"Overall average read time: {global_avg:.4f}s")
-            logger.info(f"Total cumulative read time: {global_total_time:.2f}s")
-            logger.info(f"Total number of reads: {global_total_reads}")
+            tplr.logger.info("\nGLOBAL STATISTICS:")
+            tplr.logger.info(f"Overall average read time: {global_avg:.4f}s")
+            tplr.logger.info(f"Total cumulative read time: {global_total_time:.2f}s")
+            tplr.logger.info(f"Total number of reads: {global_total_reads}")
 
             outliers = [s for s in shard_stats if s["avg_time"] > global_avg * 2]
             if outliers:
-                logger.warning("\nPERFORMANCE OUTLIERS (2x slower than average):")
+                tplr.logger.warning("\nPERFORMANCE OUTLIERS (2x slower than average):")
                 for outlier in outliers:
-                    logger.warning(
+                    tplr.logger.warning(
                         f"- {outlier['path']}: {outlier['avg_time']:.4f}s "
                         f"({outlier['avg_time'] / global_avg:.1f}x slower)"
                     )
 
-        logger.info("=== END SHARD PERFORMANCE ANALYSIS ===")
+        tplr.logger.info("=== END SHARD PERFORMANCE ANALYSIS ===")
 
     def export_data(self, output_file: str = "shard_performance_report.json"):
         """Export shard performance data to a JSON file"""
         if not self.shard_performance:
-            logger.info("No shard performance data to export")
+            tplr.logger.info("No shard performance data to export")
             return
 
         export_data = {
@@ -267,23 +273,25 @@ class ShardProfiler:
         with open(output_file, "w") as f:
             json.dump(export_data, f, indent=2)
 
-        logger.info(f"Shard performance data exported to {output_file}")
+        tplr.logger.info(f"Shard performance data exported to {output_file}")
 
-    def reset(self, shard_path: Optional[str] = None):
+    def reset(self, key: Optional[str] = None) -> None:
         """Reset performance data for a specific shard or all shards"""
-        if shard_path:
-            self.shard_performance.pop(shard_path, None)
+        if key:
+            self.shard_performance.pop(key, None)
         else:
             self.shard_performance.clear()
             self._active_timers.clear()
 
+    def _log_stats_details(self, stats: Dict[str, Any]) -> None:
+        """Log the detailed shard performance statistics"""
+        # This is handled by log_analysis() method
+        self.log_analysis()
+
 
 # Dummy profiler implementation for when profiling is disabled
-class DummyShardProfiler:
+class DummyShardProfiler(DummyProfiler):
     """No-op implementation of ShardProfiler when profiling is disabled"""
-
-    def __init__(self, name: str = "DummyShardProfiler"):
-        self.name = name
 
     def start_read(self, *args, **kwargs) -> str:
         return "dummy_timer"
@@ -300,32 +308,19 @@ class DummyShardProfiler:
     def log_read_complete(self, *args, **kwargs) -> None:
         pass
 
-    def get_stats(self) -> Dict:
-        return {}
-
     def log_analysis(self) -> None:
         pass
 
     def export_data(self, *args, **kwargs) -> None:
         pass
 
-    def reset(self, *args, **kwargs) -> None:
-        pass
 
-
-# Global singleton instance
-_shard_profiler: Optional[ShardProfiler] = None
-_dummy_profiler = DummyShardProfiler()
-
-
-def get_profiler() -> ShardProfiler:
-    """Get the global shard profiler instance or a dummy profiler if disabled"""
-    from . import ENABLE_SHARD_PROFILER
-
-    if not ENABLE_SHARD_PROFILER:
-        return _dummy_profiler  # type: ignore
-
-    global _shard_profiler
-    if _shard_profiler is None:
-        _shard_profiler = ShardProfiler()
-    return _shard_profiler
+# Create the getter function using the factory
+get_profiler = create_profiler_getter(
+    profiler_class=ShardProfiler,
+    dummy_class=DummyShardProfiler,
+    enable_flag_getter=lambda: __import__(
+        "tplr.profilers", fromlist=["ENABLE_SHARD_PROFILER"]
+    ).ENABLE_SHARD_PROFILER,
+    global_instance_name="_shard_profiler",
+)

@@ -2901,8 +2901,8 @@ class Validator:
         peer_metrics = []
         for uid in active_peers:
             metric = (
-                float(self.final_scores[uid].item())
-                if uid < len(self.final_scores)
+                float(self.openskill_ratings[uid].ordinal())
+                if uid in self.openskill_ratings
                 else 0.0
             )
             peer_metrics.append((uid, metric))

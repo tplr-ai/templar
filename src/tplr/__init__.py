@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "dev-h9231whz"
+__version__ = "dev-2ofojd0e"
 
 # Import package.
 from .chain import *

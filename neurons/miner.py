@@ -592,7 +592,7 @@ class Miner:
         # # Load checkpoint and synchronize across ranks
         # await self._load_checkpoint_and_sync(self.start_window)
 
-        if distrib.is_rank0():  # Commitment fetcher only on rank 0
+        if tplr.distrib.is_rank0():  # Commitment fetcher only on rank 0
             self.comms.start_commitment_fetcher()
 
         distrib.barrier()

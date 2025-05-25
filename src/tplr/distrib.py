@@ -23,18 +23,25 @@ def find_free_port():
         return s.getsockname()[1]
 
 
-def ddp_init(local_rank: int, world_size: int, timeout_min: int = 5):
+def ddp_init(local_rank=None, world_size=None, timeout_min: int = 5):
     """
     Initialize the distributed process group for DDP.
 
     Args:
-        local_rank: Local rank of this process
-        world_size: Total number of processes
+        local_rank: Local rank of this process. If None, will try to get from env vars.
+        world_size: Total number of processes. If None, will try to get from env vars.
         timeout_min: Timeout in minutes for operations
     """
     if dist.is_initialized():
         logger.warning("Process group already initialized, skipping initialization")
         return
+
+    # Try to get rank and world_size from environment variables if not provided
+    if local_rank is None:
+        local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
+
+    if world_size is None:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
     # make sure the vars required by `init_method="env://"` are present
     os.environ.setdefault("RANK", str(local_rank))

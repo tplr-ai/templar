@@ -80,4 +80,5 @@ chain-specs/
 .env.backup
 CLAUDE.md
 .cache
-validator-state-*.npz
+validator-state-*
+SPEC*

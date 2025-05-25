@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, Dict, cast
 
 import bittensor as bt
 import numpy as np
@@ -98,11 +98,6 @@ class Validator:
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
         parser.add_argument("--trace", action="store_true", help="Enable trace logging")
         parser.add_argument(
-            "--store-gathers",
-            action="store_true",
-            help="Store gathered gradients in R2",
-        )
-        parser.add_argument(
             "--test",
             action="store_true",
             help="Test mode - use all peers without filtering",
@@ -124,96 +119,133 @@ class Validator:
         return config
 
     def __init__(self):
-        # Initialize distributed setup early
-        tplr.distrib.ddp_init()
-        self.rank = tplr.distrib.get_rank()
+        tplr.logger.info(
+            "Starting initialization…"
+        )  # This will log from all ranks initially
+
+        # --------------------------------------------------------
+        # 1. DDP bootstrap (must precede any CUDA work on a specific device)
+        # --------------------------------------------------------
+        self.config = Validator.config()  # All ranks parse CLI
+
+        # WORLD_SIZE and LOCAL_RANK should be set by torchrun
+        world_size = int(os.getenv("WORLD_SIZE", "1"))
+        # LOCAL_RANK is the rank of the process on the current node.
+        # RANK is the global rank across all nodes. For single-node, RANK == LOCAL_RANK.
+        # ddp_init will use RANK.
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))  # This is the device index
+
+        # Pass local_rank for torch.cuda.set_device, global_rank for dist.init_process_group
+        tplr.distrib.ddp_init(
+            local_rank, world_size
+        )  # Initializes DDP, sets device to local_rank
+
+        self.rank = tplr.distrib.get_rank()  # Global rank
         self.world_size = tplr.distrib.get_world_size()
-        self.device = torch.device(f"cuda:{self.rank}")
-        self.is_rank0 = self.is_rank0()
-
-        tplr.logger.debug("Starting initialization...")
-
-        # Init config and load hparams
-        self.config = Validator.config()
-        self.config.device = self.device  # Override device with rank-specific GPU
-        self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
-
-        # Init bittensor objects
-        self.wallet = bt.wallet(config=self.config)
-        self.subtensor = bt.subtensor(config=self.config)
-        self.metagraph = self.subtensor.metagraph(self.config.netuid)
-        if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
-            tplr.logger.error(
-                f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
-            )
-            sys.exit()
-        self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-
-        try:
-            version = tplr.__version__
-            tplr.logger = tplr.setup_loki_logger(
-                service="validator", uid=str(self.uid), version=version
-            )
-            tplr.logger.info(f"Loki logging enabled for validator UID: {self.uid}")
-        except Exception as e:
-            tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
-
-        # Initialize model on rank 0 first, then broadcast to all ranks
-        if self.is_rank0():
-            self.model = LlamaForCausalLM(self.hparams.model_config)
-            self.model.to(self.device)
-
-            # If bootstrap version is specified, load initial weights on rank 0
-            if self.bootstrap_version:
-                # Prepare model state dict for broadcasting (move to CPU)
-                initial_model_state_dict = {
-                    k: v.cpu() for k, v in self.model.state_dict().items()
-                }
-        else:
-            initial_model_state_dict = None
-
-        # Broadcast model state from rank 0 to all ranks
-        synced_model_state_dict = tplr.distrib.broadcast_object(
-            initial_model_state_dict if self.is_rank0 else None, src=0
+        self.device = (
+            f"cuda:{local_rank}"
+            if torch.cuda.is_available() and self.config.device == "cuda"
+            else "cpu"
         )
 
-        # If not rank 0, initialize model and load the broadcast state
-        if not self.is_rank0():
-            self.model = LlamaForCausalLM(self.hparams.model_config)
-            self.model.load_state_dict(synced_model_state_dict)
-            self.model.to(self.device)
+        # Configure logging: Rank 0 full, others warning (after DDP init)
+        if not tplr.distrib.is_rank0():
+            tplr.logger.setLevel("WARNING")
+        tplr.logger.info(
+            f"[Rank {self.rank}/{self.world_size}] DDP initialized. Device: {self.device}"
+        )
 
-        self.tokenizer = self.hparams.tokenizer
+        # Set per-rank RNG *after* DDP init and device setting
+        torch.manual_seed(42 + self.rank)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(
+                42 + self.rank
+            )  # Seeds all GPUs, but current device is set
+        np.random.seed(42 + self.rank)
+        random.seed(42 + self.rank)
 
-        # Init compression
+        # HParams: Rank 0 loads, then broadcasts
+        if tplr.distrib.is_rank0():
+            self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
+        else:
+            self.hparams = None  # Placeholder for non-rank0
+        self.hparams = tplr.distrib.broadcast_object(self.hparams, src=0)
+        tplr.logger.info(f"[Rank {self.rank}] HParams synchronized.")
+
+        # Bittensor objects
+        # Wallet and Subtensor can be initialized by all ranks
+        self.wallet = bt.wallet(config=self.config)
+        self.subtensor = bt.subtensor(config=self.config)
+
+        # Metagraph: fetch on every rank ( cheap ) and only broadcast the UID
+        self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
+
+        # Rank-0 validates registration
+        if (
+            tplr.distrib.is_rank0()
+            and self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys
+        ):
+            tplr.logger.error(
+                f"[Rank 0] Wallet {self.wallet} not registered on subnet {self.metagraph.netuid}"
+            )
+            tplr.distrib.broadcast_object({"error": "Wallet not registered"}, src=0)
+            sys.exit(1)
+
+        # Compute / broadcast UID so that all ranks are consistent
+        uid_local = (
+            self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+            if self.wallet.hotkey.ss58_address in self.metagraph.hotkeys
+            else -1
+        )
+        self.uid = tplr.distrib.broadcast_object(uid_local, src=0)
+
+        # React to broadcasted error from rank-0 (if any)
+        if self.uid == -1:
+            tplr.logger.error(f"[Rank {self.rank}] Wallet not registered – exiting.")
+            sys.exit(1)
+
+        tplr.logger.info(
+            f"[Rank {self.rank}] Metagraph and UID {self.uid} synchronized."
+        )
+
+        # --------------------------------------------------------
+        # 2.  Model (no DDP wrapper for validator)
+        # --------------------------------------------------------
+        # All ranks create the model instance.
+        self.model = LlamaForCausalLM(self.hparams.model_config).to(self.device)
+        tplr.logger.info(f"[Rank {self.rank}] Model created on {self.device}.")
+
+        # Tokenizer should be loaded consistently. Assuming hparams provide necessary info.
+        self.tokenizer = self.hparams.tokenizer  # Assuming this is lightweight
+
+        # Init compression (all ranks, based on common hparams and model structure)
         self.transformer = tplr.compress.TransformDCT(
             self.model, target_chunk=self.hparams.target_chunk
         )
         self.compressor = tplr.compress.CompressDCT()
 
-        # Init optimizer and momentum
-        self.optimizer = SGD(
-            self.model.parameters(),
-            lr=self.hparams.learning_rate,
-            momentum=self.hparams.momentum,
-        )
-        self.momentum = {}
-        self.xshapes = {}
-        self.totalks = {}
+        # Optimizer (all ranks)
+        self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
+
+        # Momentum, xshapes, totalks (all ranks, derived from model parameters)
+        self.momentum: Dict[str, torch.Tensor] = {}
+        self.xshapes: Dict[str, Any] = {}
+        self.totalks: Dict[str, Any] = {}
+
         for n, p in self.model.named_parameters():
-            self.momentum[n] = torch.zeros_like(p)
+            self.momentum[n] = torch.zeros_like(
+                p, device=self.device
+            )  # Ensure momentum is on correct device
+            encoded_param = self.transformer.encode(self.momentum[n])
             _, _, xshape, totalk = self.compressor.compress(
-                self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
+                encoded_param, self.hparams.topk_compression
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
 
-        # Set up scheduler setup
+        # Scheduler (all ranks)
         warmup_scheduler = LinearLR(
-            self.optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=250,
+            self.optimizer, start_factor=0.1, end_factor=1.0, total_iters=250
         )
         cosine_scheduler = CosineAnnealingWarmRestarts(
             self.optimizer,
@@ -227,18 +259,13 @@ class Validator:
             milestones=[250],
         )
 
-        self.openskill_model = PlackettLuce(
-            beta=self.hparams.openskill_beta, tau=self.hparams.openskill_tau
-        )
-        self.openskill_ratings = {}  # Dictionary to store peer ratings
-
         self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
         tplr.logger.info(
-            f"[Miner] code_version={tplr.__version__} "
+            f"[Rank {self.rank}] Validator code_version={tplr.__version__} "
             f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
         )
 
-        # Init comms
+        # Init comms - all ranks need full Comms object
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",
@@ -250,60 +277,75 @@ class Validator:
             uid=self.uid,
         )
 
-        self.bucket = self.comms.get_own_bucket("gradients", "read")
-        self.comms.try_commit(self.wallet, self.bucket)
+        # Only rank 0 handles bucket operations
+        if tplr.distrib.is_rank0():
+            self.bucket = self.comms.get_own_bucket("gradients", "read")
+            self.comms.try_commit(self.wallet, self.bucket)
 
-        # Init state params
-        self.stop_event = asyncio.Event()
-        self.current_block = self.subtensor.block
-        self.current_window = int(self.current_block / self.hparams.blocks_per_window)
-        self.start_window = self.current_window  # Record the start window
-        self.global_step = 0  # Initialize global_step to zero
+        # Barrier to ensure rank 0 completes bucket operations
+        tplr.distrib.barrier()
+
+        # Init state params (all ranks)
+        self.stop_event = (
+            asyncio.Event()
+        )  # For async tasks, typically managed by rank 0 actions
+        self.current_block = (
+            self.subtensor.block
+        )  # Will be updated by listener or broadcast
+        self.current_window = int(
+            self.current_block / self.hparams.blocks_per_window
+        )  # Will be updated
+        # start_window will be determined and synced in run()
+        self.global_step = 0
         self.comms.current_window = self.current_window
         self.sync_window = self.current_window
-
-        # Init score tracking variables
-        self.loss_before_per_batch_own = 0.0
-        self.loss_after_per_batch_own = 0.0
-        self.loss_before_per_batch_random = 0.0
-        self.loss_after_per_batch_random = 0.0
-        self.loss_improvement_own = 0.0
-        self.loss_improvement_random = 0.0
-        self.relative_improvement_own = 0.0
-        self.relative_improvement_random = 0.0
-
-        # For better looking graphs if no eval peers could be evaluated
-        self.previous_avg_loss_before_own = 0.0
-        self.previous_avg_loss_after_own = 0.0
-        self.previous_avg_loss_before_random = 0.0
-        self.previous_avg_loss_after_random = 0.0
-        self.valid_score_indices = []
-
-        # Caching
-        self.state_path = f"validator-state-{tplr.__version__}.pt"
-        if os.path.isfile(self.state_path):
-            self.load_state()
-        else:
-            d = self.config.device
-            self.gradient_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.sync_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.binary_indicator_scores = torch.zeros(
-                256, dtype=torch.float32, device=d
-            )
-            self.final_scores = torch.zeros(256, dtype=torch.float32, device=d)
-            self.binary_moving_averages = torch.zeros(
-                256, dtype=torch.float32, device=d
-            )
-            self.weights = torch.zeros(256, dtype=torch.float32, device=d)
-        self.evaluated_uids = set()
-
-        # Add step tracking
+        # self.comms.current_window needs to be updated based on synced current_window
         self.window_step = 0
         self.eval_count = 0
 
-        # Initialize WandB and metrics logger only on rank 0
-        if self.is_rank0():
-            self.wandb = tplr.wandb.init(
+        # OpenSkill and scoring - all ranks need these
+        self.openskill_model = PlackettLuce(
+            beta=self.hparams.openskill_beta, tau=self.hparams.openskill_tau
+        )
+        self.openskill_ratings = {}
+        self.current_window_scores = {}
+
+        # Initialize scoring tensors - all ranks need these
+        d = self.device
+        self.gradient_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.sync_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.binary_indicator_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.final_scores = torch.zeros(256, dtype=torch.float32, device=d)
+        self.binary_moving_averages = torch.zeros(256, dtype=torch.float32, device=d)
+        self.weights = torch.zeros(256, dtype=torch.float32, device=d)
+        self.evaluated_uids = set()
+
+        # Load state if exists - only rank 0 loads, then broadcasts
+        self.state_path = f"validator-state-{tplr.__version__}.pt"
+        if tplr.distrib.is_rank0() and os.path.isfile(self.state_path):
+            state_data = torch.load(self.state_path, map_location="cpu")
+        else:
+            state_data = None
+
+        # Broadcast state data
+        state_data = tplr.distrib.broadcast_object(state_data, src=0)
+        if state_data is not None:
+            # All ranks load the broadcast state
+            for key, value in state_data.items():
+                if hasattr(self, key) and isinstance(getattr(self, key), torch.Tensor):
+                    getattr(self, key).copy_(value.to(self.device))
+                else:
+                    setattr(self, key, value)
+        self.window_step = 0
+        self.eval_count = 0
+
+        # --------------------------------------------------------
+        # 3. Logging / WANDB only on rank-0
+        # --------------------------------------------------------
+        self.wandb = None
+        self.metrics_logger = None
+        if tplr.distrib.is_rank0():
+            self.wandb = tplr.initialize_wandb(
                 run_prefix="V",
                 uid=self.uid,
                 config=self.config,
@@ -311,7 +353,13 @@ class Validator:
                 job_type="validation",
             )
 
-            # Initialize metrics logger (InfluxDB)
+            if self.wandb:
+                tplr.logger.info(
+                    f"[Rank 0 W&B] Run initialized: {self.wandb.url or 'local run'}"
+                )
+            else:
+                tplr.logger.warning("[Rank 0 W&B] WandB initialization failed.")
+
             self.metrics_logger = tplr.metrics.MetricsLogger(
                 prefix="V",
                 uid=self.uid,
@@ -320,24 +368,20 @@ class Validator:
                 group="validator",
                 job_type="validation",
             )
-        else:
-            self.wandb = None
-            self.metrics_logger = None
 
-        # Weighted selection counters for fair picking of eval peers
+        tplr.distrib.barrier()  # Ensure rank 0 logging is set up before proceeding
+
+        # Initialize remaining attributes
         self.eval_peers = defaultdict(lambda: 1)
-
-        # Track inactive peer scores
-        self.inactive_scores = {}  # {uid: (last_active_window, last_score)}
-        self.inactivity_slash_rate = 0.25  # 25% slash per window
+        self.inactive_scores = {}
+        self.inactivity_slash_rate = 0.25
         self.missing_gradient_slash_rate = 0.75
         self.sync_score_slash_rate = 0.75
-
-        # Initialize peer related attributes
-        self.next_peers: list[int] | None = None
+        self.next_peers = None
         self.peers_update_window = -1
-
         self.peers_last_eval_window = {}
+
+        tplr.logger.info(f"[Rank {self.rank}] Initialization complete.")
 
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
@@ -661,21 +705,42 @@ class Validator:
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
         self.loop.set_default_executor(self.executor)
 
-        if self.is_rank0():
+        if tplr.distrib.is_rank0():
             self.listener = threading.Thread(
                 target=self.block_listener, args=(self.loop,), daemon=True
             ).start()
 
-        # Use config peers if provided
-        if self.config.peers:
-            self.comms.peers = self.config.peers
+        # Use config peers if provided - only rank 0 handles this
+        if tplr.distrib.is_rank0():
+            if self.config.peers:
+                self.comms.peers = self.config.peers
 
-        self.comms.commitments = await self.comms.get_commitments()
-        self.comms.update_peers_with_buckets()
-        tplr.logger.info("Loaded commitments")
+            self.comms.commitments = await self.comms.get_commitments()
+            self.comms.update_peers_with_buckets()
+            tplr.logger.info("Loaded commitments")
+
+            # Prepare data for broadcast
+            comms_data = {
+                "peers": self.comms.peers,
+                "commitments": self.comms.commitments,
+                "eval_peers": self.comms.eval_peers,
+            }
+        else:
+            comms_data = None
+
+        # Broadcast comms data to all ranks
+        comms_data = tplr.distrib.broadcast_object(comms_data, src=0)
+
+        # Non-rank 0 processes update their local comms state
+        if not tplr.distrib.is_rank0():
+            self.comms.peers = comms_data["peers"]
+            self.comms.commitments = comms_data["commitments"]
+            self.comms.eval_peers = comms_data["eval_peers"]
+            # Add other necessary attributes as needed
+            self.comms.inactive_peers = []
 
         # Only post start window if you are the highest stake validator and rank 0
-        if self.is_rank0() and self.uid == self.metagraph.S.argmax().item():
+        if tplr.distrib.is_rank0() and self.uid == self.metagraph.S.argmax().item():
             # Check if an existing start window already exists
             try:
                 existing_start_window = await self.comms.get_start_window(retries=2)
@@ -689,20 +754,25 @@ class Validator:
                     f"Highest staked validator found existing start_window: {self.start_window}"
                 )
             else:
+                # Initialize start_window before using it
+                self.start_window = self.current_window
                 # No existing start window, so post new start window to R2
                 await self.comms.post_start_window(self.start_window)
                 tplr.logger.info(
                     f"This validator is the highest staked. Posted start_window: {self.start_window}"
                 )
-        elif self.is_rank0():
+        elif tplr.distrib.is_rank0():
             tplr.logger.info(
                 "This validator is not the highest staked. Waiting to fetch start_window."
             )
             self.start_window = await self.comms.get_start_window()
+        else:
+            # Initialize start_window for non-rank0 processes
+            self.start_window = None
 
         # Broadcast start_window from rank 0 to all ranks
         self.start_window = tplr.distrib.broadcast_object(
-            self.start_window if self.is_rank0() else None, src=0
+            self.start_window if tplr.distrib.is_rank0() else None, src=0
         )
 
         if self.start_window is None:
@@ -711,8 +781,9 @@ class Validator:
             )
 
         self.global_step = self.current_window - self.start_window
+
         tplr.logger.info(
-            f"Using start_window: {self.start_window}, global_step: {self.global_step}"
+            f"Using start_window: {self.start_window}, global_step: {self.global_step}, sync_window: {self.sync_window}"
         )
 
         checkpoint_window_buffer = 5
@@ -722,7 +793,7 @@ class Validator:
         )
 
         # Proceed to load checkpoint - rank 0 loads, then broadcasts to all ranks
-        if self.is_rank0():
+        if tplr.distrib.is_rank0():
             # Rank 0 loads the checkpoint
             (
                 success,
@@ -766,14 +837,15 @@ class Validator:
 
         # Broadcast checkpoint loading result and data
         broadcast_result = tplr.distrib.broadcast_object(
-            (success, checkpoint_data) if self.is_rank0() else (None, None), src=0
+            (success, checkpoint_data) if tplr.distrib.is_rank0() else (None, None),
+            src=0,
         )
 
         success_on_rank0, checkpoint_data = broadcast_result
 
         # If checkpoint was loaded on rank 0, all ranks update their local state
         if success_on_rank0:
-            if not self.is_rank0():
+            if not tplr.distrib.is_rank0():
                 # Non-rank 0 processes load the broadcast state
                 self.model.load_state_dict(checkpoint_data["model_state"])
                 self.optimizer.load_state_dict(checkpoint_data["optimizer_state"])
@@ -792,7 +864,7 @@ class Validator:
 
             # Only catch up if we're behind and we're rank 0
             if (
-                self.is_rank0()
+                tplr.distrib.is_rank0()
                 and loaded_checkpoint_window < self.current_window
                 and self.global_step > checkpoint_window_buffer
             ):
@@ -808,10 +880,10 @@ class Validator:
                     k: v.cpu() for k, v in self.model.state_dict().items()
                 }
                 updated_model_state = tplr.distrib.broadcast_object(
-                    updated_model_state if self.is_rank0() else None, src=0
+                    updated_model_state if tplr.distrib.is_rank0() else None, src=0
                 )
 
-                if not self.is_rank0():
+                if not tplr.distrib.is_rank0():
                     self.model.load_state_dict(updated_model_state)
             else:
                 tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
@@ -822,8 +894,9 @@ class Validator:
             }
             self.model.to(self.config.device)
 
-        self.comms.start_commitment_fetcher()
-        self.comms.start_background_tasks()
+        if tplr.distrib.is_rank0():  # Commitment fetcher only on rank 0
+            self.comms.start_commitment_fetcher()
+            self.comms.start_background_tasks()
         time_min = None
         self.last_peer_update_window = None
         self.last_peer_post_window = None
@@ -832,1841 +905,991 @@ class Validator:
         tplr.distrib.barrier()
 
         while True:
-            # Synchronize window information across ranks
-            if self.is_rank0():
-                # 1. Wait for the validator window offset
-                while self.sync_window >= (
-                    self.current_window - self.hparams.validator_offset
-                ):
+            try:
+                # Synchronize window information across ranks
+                if tplr.distrib.is_rank0():
+                    # 1. Wait for the validator window offset - USE THE ORIGINAL LOGIC
+                    while self.sync_window >= (
+                        self.current_window - self.hparams.validator_offset
+                    ):
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}, gap:{self.current_window - self.sync_window}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+                        await asyncio.sleep(12)
+
+                    # 2. Increment sync window and update peer lists
+                    self.sync_window += 1
+
+                # Broadcast current_block, current_window, sync_window from rank 0
+                sync_data = tplr.distrib.broadcast_object(
+                    (self.current_block, self.current_window, self.sync_window)
+                    if tplr.distrib.is_rank0()
+                    else None,
+                    src=0,
+                )
+
+                if not tplr.distrib.is_rank0():
+                    # Update local values on non-rank 0 processes
+                    self.current_block, self.current_window, self.sync_window = (
+                        sync_data
+                    )
+
+                # Barrier to ensure all ranks are synchronized
+                tplr.distrib.barrier()
+
+                window_start = tplr.T()
+
+                if tplr.distrib.is_rank0():
                     tplr.log_with_context(
                         level="info",
-                        message=f"Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}",
+                        message=f"Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
-                    )
-                    await asyncio.sleep(12)
-
-                # 2. Increment sync window and update peer lists
-                self.sync_window += 1
-
-            # Broadcast current_block, current_window, sync_window from rank 0
-            sync_data = tplr.distrib.broadcast_object(
-                (self.current_block, self.current_window, self.sync_window)
-                if self.is_rank0()
-                else None,
-                src=0,
-            )
-
-            if not self.is_rank0():
-                # Update local values on non-rank 0 processes
-                self.current_block, self.current_window, self.sync_window = sync_data
-
-            # Barrier to ensure all ranks are synchronized
-            tplr.distrib.barrier()
-
-            window_start = tplr.T()
-
-            if self.is_rank0():
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Processing window: {self.sync_window} current: {self.current_window}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-
-            # Save state
-            if self.is_rank0():
-                self.save_state()
-
-            # Create and post peers - only rank 0 handles peer selection and posting
-            initial_selection = False
-            if self.is_rank0():
-                if (
-                    self.last_peer_update_window is None
-                    or self.sync_window - self.last_peer_update_window
-                    >= self.hparams.peer_replacement_frequency
-                ):
-                    reason = (
-                        f"{self.last_peer_update_window=}"
-                        if self.last_peer_update_window is None
-                        else f"{self.sync_window=}>="
-                        f"{self.last_peer_update_window}+"
-                        f"{self.hparams.peer_replacement_frequency}="
-                        "self.last_peer_update_window+"
-                        "self.hparams.peer_replacement_frequency"
                     )
 
                     tplr.log_with_context(
                         level="info",
-                        message=f"Time to create and post a new peer list because {reason}",
+                        message=f"Processing window: {self.sync_window} current: {self.current_window}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
                     )
-                    if self.last_peer_update_window is None:
-                        selected_peers = self.select_initial_peers()
-                        initial_selection = True
+
+                # Save state
+                if tplr.distrib.is_rank0():
+                    self.save_state()
+
+                # Create and post peers - only rank 0 handles peer selection and posting
+                initial_selection = False
+                if tplr.distrib.is_rank0():
+                    if (
+                        self.last_peer_update_window is None
+                        or self.sync_window - self.last_peer_update_window
+                        >= self.hparams.peer_replacement_frequency
+                    ):
+                        reason = (
+                            f"{self.last_peer_update_window=}"
+                            if self.last_peer_update_window is None
+                            else f"{self.sync_window=}>="
+                            f"{self.last_peer_update_window}+"
+                            f"{self.hparams.peer_replacement_frequency}="
+                            "self.last_peer_update_window+"
+                            "self.hparams.peer_replacement_frequency"
+                        )
+
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Time to create and post a new peer list because {reason}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+                        if self.last_peer_update_window is None:
+                            selected_peers = self.select_initial_peers()
+                            initial_selection = True
+                        else:
+                            selected_peers = self.select_next_peers()
+                        if selected_peers is not None:
+                            self.last_peer_update_window = self.sync_window
+                            await self.comms.post_peer_list(
+                                peers=selected_peers,
+                                first_effective_window=self.current_window
+                                + self.hparams.peer_list_window_margin,
+                                sync_window=self.sync_window,
+                                weights=self.weights,
+                                initial_selection=initial_selection,
+                            )
+
+                # Update peers on all ranks
+                self.comms.update_peers_with_buckets()
+                peer_start = tplr.T()
+                await tplr.neurons.update_peers(
+                    instance=self, window=self.sync_window, peer_start=peer_start
+                )
+
+                # Broadcast eval_peers from rank 0 to ensure consistency
+                if tplr.distrib.is_rank0():
+                    self.eval_peers = self.comms.eval_peers
+                    eval_peers_to_broadcast = self.eval_peers
+                else:
+                    eval_peers_to_broadcast = None
+
+                self.eval_peers = tplr.distrib.broadcast_object(
+                    eval_peers_to_broadcast if tplr.distrib.is_rank0() else None, src=0
+                )
+
+                if tplr.distrib.is_rank0():
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - eval:{len(self.eval_peers)}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Current gather peers: {self.comms.peers}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Current evaluation peers: {self.eval_peers}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+
+                # Check if we have any peers to work with
+                peers_available = True
+                if tplr.distrib.is_rank0():
+                    try:
+                        # Handle case where peers might be numpy array, tensor, or list
+                        if hasattr(self.comms.peers, "__len__"):
+                            peers_available = len(self.comms.peers) > 0
+                        elif hasattr(self.comms.peers, "numel"):  # torch tensor
+                            peers_available = self.comms.peers.numel() > 0
+                        elif hasattr(self.comms.peers, "size"):  # numpy array
+                            peers_available = self.comms.peers.size > 0
+                        else:
+                            peers_available = bool(self.comms.peers)
+                    except Exception as e:
+                        tplr.log_with_context(
+                            level="warning",
+                            message=f"Error checking peers availability: {e}. Assuming no peers.",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+                        peers_available = False
+
+                    if not peers_available:
+                        tplr.log_with_context(
+                            level="warning",
+                            message="No peers available for gathering. Skipping this window.",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+
+                    skip_window = not peers_available
+                else:
+                    skip_window = False
+
+                # Broadcast skip decision to all ranks
+                skip_window = tplr.distrib.broadcast_object(
+                    skip_window if tplr.distrib.is_rank0() else None, src=0
+                )
+
+                if skip_window:
+                    # All ranks skip this window together
+                    self.global_step += 1
+                    tplr.distrib.barrier()
+                    continue
+
+                # Process inactive peers - only rank 0 updates scores
+                if tplr.distrib.is_rank0():
+                    newly_inactive = self.comms.inactive_peers
+                    current_window = self.sync_window
+
+                    # Process inactive peers and apply penalties
+                    for uid in newly_inactive:
+                        if uid not in self.inactive_scores:
+                            self.inactive_scores[uid] = (
+                                current_window,
+                                self.final_scores[uid].item(),
+                            )
+                            tplr.log_with_context(
+                                level="info",
+                                message=f"UID {uid} became inactive at window {current_window} with score {self.final_scores[uid].item():.4f}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                            )
+
+                    # Apply penalties to all inactive peers
+                    for uid, (inactive_since, _) in list(self.inactive_scores.items()):
+                        # If peer became active again, remove from inactive tracking
+                        if uid in self.eval_peers.keys():
+                            del self.inactive_scores[uid]
+                            tplr.log_with_context(
+                                level="info",
+                                message=f"UID {uid} became active again",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                            )
+                            continue
+
+                        peer_reset = self.reset_peer(inactive_since, uid)
+                        if peer_reset:
+                            continue
+
+                        # Apply flat 25% penalty instead of exponential decay
+                        old_score = self.final_scores[uid].item()
+                        new_score = (
+                            old_score  # Initialize new_score with old_score value
+                        )
+                        if self.final_scores[uid] > 0:
+                            self.final_scores[uid] *= (
+                                0.75  # Apply flat 25% reduction for positive scores only
+                            )
+
+                            new_score = self.final_scores[uid].item()
+
+                            tplr.log_with_context(
+                                level="info",
+                                message=f"UID {uid} penalized for inactivity: {old_score:.4f} -> {new_score:.4f}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                            )
+
+                        # Log slash metrics to WandB
+                        self.wandb.log(
+                            {
+                                f"validator/inactivity/{uid}/score_before": old_score,
+                                f"validator/inactivity/{uid}/score_after": new_score,
+                            },
+                            step=self.global_step,
+                        )
+
+                        # Log slash metrics to InfluxDB with primitive types
+                        self.metrics_logger.log(
+                            measurement="validator_inactivity",
+                            tags={
+                                "uid": str(uid),
+                                "window": int(current_window),
+                                "global_step": int(self.global_step),
+                            },
+                            fields={
+                                "score_before": float(old_score),
+                                "score_after": float(new_score),
+                            },
+                            with_system_metrics=True,
+                            with_gpu_metrics=True,
+                        )
+
+                # Calculate time window for this sync window
+                if tplr.distrib.is_rank0():
+                    # Use a simpler approach like validator_old - query timestamp for current sync window
+                    retries = 0
+                    delay = 1
+                    max_retries = 2
+                    max_delay = 60
+                    while True:
+                        try:
+                            # Query timestamp for current block instead of calculated future block
+                            response = self.subtensor.query_module("Timestamp", "Now")
+                            ts_value = response.value / 1000  # convert ms to seconds
+                            break
+                        except Exception as e:
+                            tplr.log_with_context(
+                                level="error",
+                                message=f"Failed to query current timestamp: {str(e)}. Retry {retries + 1}/{max_retries}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                            )
+                            retries += 1
+                            if retries > max_retries:
+                                tplr.log_with_context(
+                                    level="error",
+                                    message="Exceeded maximum retries for timestamp query. Falling back to current system time.",
+                                    sync_window=self.sync_window,
+                                    current_window=self.current_window,
+                                )
+                                ts_value = (
+                                    time.time()
+                                )  # Fallback: use current system time
+                                break
+                            await asyncio.sleep(delay)
+                            delay = min(delay * 2, max_delay)
+                    time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
+                    time_max = time_min + timedelta(
+                        seconds=self.hparams.time_window_delta_seconds
+                    )
+
+                    # Log the time window we're using
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Using time window for gather: {time_min} to {time_max}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"We are using peers {self.comms.peers}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+                else:
+                    time_min = None
+                    time_max = None
+
+                # Broadcast time window from rank 0 to all ranks
+                time_window = tplr.distrib.broadcast_object(
+                    (time_min, time_max) if tplr.distrib.is_rank0() else None, src=0
+                )
+                time_min, time_max = time_window
+
+                # Refresh peers explicitly before starting gather to avoid missing updated active peers.
+                if tplr.distrib.is_rank0():
+                    tplr.log_with_context(
+                        level="info",
+                        message="Refreshing eval peers before gather task in validator...",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+
+                    if self.config.test:
+                        # In test mode, use all UIDs from metagraph except self
+                        tplr.log_with_context(
+                            level="info",
+                            message="Test mode active: Using all peers from metagraph.",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+                        all_uids = list(range(len(self.metagraph.S)))
+                        self.comms.peers = [uid for uid in all_uids if uid != self.uid]
+
+                        # For evaluation, also use all peers but track separately with equal initial weight
+                        self.eval_peers = {uid: 1 for uid in self.comms.peers}
                     else:
-                        selected_peers = self.select_next_peers()
-                    if selected_peers is not None:
-                        self.last_peer_update_window = self.sync_window
-                        await self.comms.post_peer_list(
-                            peers=selected_peers,
-                            first_effective_window=self.current_window
-                            + self.hparams.peer_list_window_margin,
-                            sync_window=self.sync_window,
-                            weights=self.weights,
-                            initial_selection=initial_selection,
-                        )
+                        # Normal operation - update and filter peers
+                        self.comms.update_peers_with_buckets()
+                        self.eval_peers = self.comms.eval_peers
 
-            # Update peers on all ranks
-            self.comms.update_peers_with_buckets()
-            peer_start = tplr.T()
-            await tplr.neurons.update_peers(
-                instance=self, window=self.sync_window, peer_start=peer_start
-            )
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Validator gather peers: {self.comms.peers}",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
 
-            # Broadcast eval_peers from rank 0 to ensure consistency
-            if self.is_rank0():
-                self.eval_peers = self.comms.eval_peers
-                eval_peers_to_broadcast = self.eval_peers
-            else:
-                eval_peers_to_broadcast = None
-
-            self.eval_peers = tplr.distrib.broadcast_object(
-                eval_peers_to_broadcast if self.is_rank0() else None, src=0
-            )
-
-            if self.is_rank0():
-                tplr.log_with_context(
-                    level="info",
-                    message=f"{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - eval:{len(self.eval_peers)}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
+                # Broadcast updated peers to all ranks
+                peers_data = tplr.distrib.broadcast_object(
+                    (self.comms.peers, self.eval_peers)
+                    if tplr.distrib.is_rank0()
+                    else None,
+                    src=0,
                 )
+                self.comms.peers, self.eval_peers = peers_data
 
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Current gather peers: {self.comms.peers}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Current evaluation peers: {self.eval_peers}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
+                # Gradient gathering/loading aggregation - only rank 0 handles this
+                aggregation_result = None
+                gather_result = None
 
-            # Process inactive peers - only rank 0 updates scores
-            if self.is_rank0():
-                newly_inactive = self.comms.inactive_peers
-                current_window = self.sync_window
+                if tplr.distrib.is_rank0():
+                    gather_start = tplr.T()
 
-                # Process inactive peers and apply penalties
-                for uid in newly_inactive:
-                    if uid not in self.inactive_scores:
-                        self.inactive_scores[uid] = (
-                            current_window,
-                            self.final_scores[uid].item(),
-                        )
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"UID {uid} became inactive at window {current_window} with score {self.final_scores[uid].item():.4f}",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
+                    # Try to load from aggregation server first
+                    aggregation_result = await self.comms.load_aggregation(
+                        window=self.sync_window,
+                        device=self.config.device,
+                        timeout=10,
+                    )
+
+                    if aggregation_result is None:
+                        gather_result = await self.comms.gather(
+                            my_uid=self.uid,
+                            uids=self.comms.peers,
+                            window=self.sync_window,
+                            key="gradient",
+                            timeout=35,
+                            device=self.config.device,
+                            local=False,
+                            totalks=self.totalks,
+                            time_min=time_min,
+                            time_max=time_max,
                         )
 
-                # Apply penalties to all inactive peers
-                for uid, (inactive_since, _) in list(self.inactive_scores.items()):
-                    # If peer became active again, remove from inactive tracking
-                    if uid in self.eval_peers.keys():
-                        del self.inactive_scores[uid]
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"UID {uid} became active again",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
+                        if gather_result is None:
+                            tplr.log_with_context(
+                                level="error",
+                                message="Failed to gather gradients from peers. Waiting for next window.",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                            )
+                            self.global_step += 1
+                            continue
+
+                        skipped_uids = gather_result.skipped_uids
+                        success_rate = gather_result.success_rate
+                    else:
+                        state_dict = cast(dict, aggregation_result.get("state_dict"))
+                        skipped_uids = cast(
+                            list[int], state_dict.get("skipped_uids", [])
                         )
-                        continue
+                        success_rate = cast(float, state_dict.get("success_rate", 0.0))
 
-                    peer_reset = self.reset_peer(inactive_since, uid)
-                    if peer_reset:
-                        continue
+                    gather_time = tplr.T() - gather_start
 
-                    # Apply flat 25% penalty instead of exponential decay
-                    old_score = self.final_scores[uid].item()
-                    new_score = old_score  # Initialize new_score with old_score value
-                    if self.final_scores[uid] > 0:
-                        self.final_scores[uid] *= (
-                            0.75  # Apply flat 25% reduction for positive scores only
-                        )
+                    from_aggregator = 1 if aggregation_result is not None else 0
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Using gradient source: {'aggregator' if from_aggregator else 'gather'} (took {gather_time:.2f}s)",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
 
-                        new_score = self.final_scores[uid].item()
-
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"UID {uid} penalized for inactivity: {old_score:.4f} -> {new_score:.4f}",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-
-                    # Log slash metrics to WandB
                     self.wandb.log(
                         {
-                            f"validator/inactivity/{uid}/score_before": old_score,
-                            f"validator/inactivity/{uid}/score_after": new_score,
+                            "validator/aggregator_gradient": from_aggregator,
+                            "validator/gather_time": gather_time,
                         },
                         step=self.global_step,
                     )
 
-                    # Log slash metrics to InfluxDB with primitive types
-                    self.metrics_logger.log(
-                        measurement="validator_inactivity",
-                        tags={
-                            "uid": str(uid),
-                            "window": int(current_window),
-                            "global_step": int(self.global_step),
-                        },
-                        fields={
-                            "score_before": float(old_score),
-                            "score_after": float(new_score),
-                        },
-                        with_system_metrics=True,
-                        with_gpu_metrics=True,
-                    )
-
-            # Calculate time window for this sync window
-            if self.is_rank0():
-                sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
-                retries = 0
-                delay = 1
-                max_retries = 2
-                max_delay = 60
-                while True:
-                    try:
-                        response = self.subtensor.query_module(
-                            "Timestamp", "Now", block=sync_block
-                        )
-                        ts_value = response.value / 1000  # convert ms to seconds
-                        break
-                    except Exception as e:
-                        tplr.log_with_context(
-                            level="error",
-                            message=f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-                        retries += 1
-                        if retries > max_retries:
-                            tplr.log_with_context(
-                                level="error",
-                                message="Exceeded maximum retries for timestamp query. Falling back to current system time.",
-                                sync_window=self.sync_window,
-                                current_window=self.current_window,
-                            )
-                            ts_value = (
-                                time.time()
-                            )  # Fallback: use current system time as timestamp
-                            break
-                        await asyncio.sleep(delay)
-                        delay = min(delay * 2, max_delay)
-                time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
-                time_max = time_min + timedelta(
-                    seconds=self.hparams.time_window_delta_seconds
-                )
-
-                # Log the time window we're using
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Using time window for gather: {time_min} to {time_max}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                tplr.log_with_context(
-                    level="info",
-                    message=f"We are using peers {self.comms.peers}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-            else:
-                time_min = None
-                time_max = None
-
-            # Broadcast time window from rank 0 to all ranks
-            time_window = tplr.distrib.broadcast_object(
-                (time_min, time_max) if self.is_rank0() else None, src=0
-            )
-            time_min, time_max = time_window
-
-            # Refresh peers explicitly before starting gather to avoid missing updated active peers.
-            if self.is_rank0():
-                tplr.log_with_context(
-                    level="info",
-                    message="Refreshing eval peers before gather task in validator...",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-
-                if self.config.test:
-                    # In test mode, use all UIDs from metagraph except self
                     tplr.log_with_context(
                         level="info",
-                        message="Test mode active: Using all peers from metagraph.",
+                        message=f"Skipped UIDs: {skipped_uids}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
                     )
-                    all_uids = list(range(len(self.metagraph.S)))
-                    self.comms.peers = [uid for uid in all_uids if uid != self.uid]
-
-                    # For evaluation, also use all peers but track separately with equal initial weight
-                    self.eval_peers = {uid: 1 for uid in self.comms.peers}
                 else:
-                    # Normal operation - update and filter peers
-                    self.comms.update_peers_with_buckets()
-                    self.eval_peers = self.comms.eval_peers
+                    skipped_uids = None
+                    success_rate = None
 
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Validator gather peers: {self.comms.peers}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
+                # Broadcast gradient results to all ranks
+                gradient_data = tplr.distrib.broadcast_object(
+                    (aggregation_result, gather_result, skipped_uids, success_rate)
+                    if tplr.distrib.is_rank0()
+                    else None,
+                    src=0,
+                )
+                aggregation_result, gather_result, skipped_uids, success_rate = (
+                    gradient_data
                 )
 
-            # Broadcast updated peers to all ranks
-            peers_data = tplr.distrib.broadcast_object(
-                (self.comms.peers, self.eval_peers) if self.is_rank0() else None, src=0
-            )
-            self.comms.peers, self.eval_peers = peers_data
-
-            # Gather gradients - only rank 0 performs the actual gather
-            if self.is_rank0():
-                gather_start = tplr.T()
-                skipped_uids: list[int] = []
-                success_rate = 0.0
-                gather_result = None
-                aggregation_result = await self.comms.load_aggregation(self.sync_window)
-
-                if aggregation_result is None:
-                    gather_result = await self.comms.gather(
-                        my_uid=self.uid,
-                        uids=self.comms.peers,
-                        window=self.sync_window,
-                        key="gradient",
-                        timeout=35,
-                        device=self.config.device,
-                        local=False,
-                        totalks=self.totalks,
-                        time_min=time_min,
-                        time_max=time_max,
-                    )
-
-                    if gather_result is None:
-                        tplr.log_with_context(
-                            level="error",
-                            message="Failed to gather gradients from peers. Waiting for next window.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-                        self.global_step += 1
-                        # Ensure all ranks continue to next window together
-                        tplr.distrib.barrier()
-                        continue
-
-                    skipped_uids = gather_result.skipped_uids
-                    success_rate = gather_result.success_rate
-                else:
-                    state_dict = cast(dict, aggregation_result.get("state_dict"))
-                    skipped_uids = cast(list[int], state_dict.get("skipped_uids", []))
-                    success_rate = cast(float, state_dict.get("success_rate", 0.0))
-
-                gather_time = tplr.T() - gather_start
-
-                from_aggregator = 1 if aggregation_result is not None else 0
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Using gradient source: {'aggregator' if from_aggregator else 'gather'}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-
-                self.wandb.log(
-                    {
-                        "validator/aggregator_gradient": from_aggregator,
-                    },
-                    step=self.global_step,
-                )
-
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Skipped UIDs: {skipped_uids}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-            else:
-                # Initialize these variables on non-rank 0 processes
-                skipped_uids = []
-                gather_result = None
-                aggregation_result = None
-                from_aggregator = 0
-
-            # Broadcast gather results to all ranks
-            gather_data = tplr.distrib.broadcast_object(
-                (skipped_uids, from_aggregator) if self.is_rank0() else None, src=0
-            )
-            skipped_uids, from_aggregator = gather_data
-
-            # Distribute miner sync evaluation across ranks
-            all_peers = list(self.comms.peers)
-            peers_per_rank = [
-                all_peers[i :: self.world_size] for i in range(self.world_size)
-            ]
-            my_peers = peers_per_rank[self.rank]
-
-            # Each rank evaluates its subset of peers for sync
-            local_sync_scores = {}
-            gather_sync_scores = await asyncio.gather(
-                *(self.evaluate_miner_sync(uid) for uid in my_peers)
-            )
-
-            for score_info, uid in zip(gather_sync_scores, my_peers):
-                local_sync_scores[uid] = score_info
-
-            # Gather sync scores from all ranks
-            all_sync_scores_list = tplr.distrib.all_gather_object(local_sync_scores)
-
-            # Merge sync scores
-            all_sync_scores = {}
-            for rank_scores in all_sync_scores_list:
-                all_sync_scores.update(rank_scores)
-
-            # Apply sync score penalties - only rank 0 updates global scores
-            if self.is_rank0():
-                for uid, score_info in all_sync_scores.items():
-                    avg_steps_behind = score_info.get("avg_steps_behind", 99.0)
-                    success = score_info.get("success", False)
-                    if (
-                        not success
-                        or avg_steps_behind > self.hparams.sync_max_steps_behind
-                    ):
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"Slashing {uid}: avg_steps_behind={avg_steps_behind:.2f} > max={self.hparams.sync_max_steps_behind}",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-                        if self.final_scores[uid] > 0:
-                            self.final_scores[uid] *= self.sync_score_slash_rate
-                            self.binary_moving_averages[uid] *= (
-                                self.sync_score_slash_rate
-                            )
-
-                    # Slash peers failing to submit gradients
-                    for uid in skipped_uids:
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"No gradient gathered from UID {uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-                        if 0 <= uid < self.final_scores.size(0):
-                            old_score = self.final_scores[uid].item()
-
-                            # Only reduce positive scores
-                            if self.final_scores[uid] > 0:
-                                self.final_scores[uid] *= (
-                                    self.missing_gradient_slash_rate
-                                )
-                                self.binary_moving_averages[uid] *= (
-                                    self.missing_gradient_slash_rate
-                                )
-
-                                new_score = self.final_scores[uid].item()
-                                tplr.log_with_context(
-                                    level="info",
-                                    message=f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient in gather.",
-                                    sync_window=self.sync_window,
-                                    current_window=self.current_window,
-                                )
-                            else:
-                                tplr.log_with_context(
-                                    level="info",
-                                    message=f"Skipped score of UID {uid} (current score: {old_score:.4f}) due to negative or zero value.",
-                                    sync_window=self.sync_window,
-                                    current_window=self.current_window,
-                                )
-                            self.evaluated_uids.add(uid)
-                            self.peers_last_eval_window[uid] = self.sync_window
-                        else:
-                            tplr.log_with_context(
-                                level="info",
-                                message=f"UID {uid} not found in final_scores; skipping penalty.",
-                                sync_window=self.sync_window,
-                                current_window=self.current_window,
-                            )
-
-            # Broadcast updated scores to all ranks
-            if self.is_rank0():
-                scores_to_broadcast = {
-                    "final_scores": self.final_scores,
-                    "binary_moving_averages": self.binary_moving_averages,
-                    "evaluated_uids": self.evaluated_uids,
-                    "peers_last_eval_window": self.peers_last_eval_window,
-                }
-            else:
-                scores_to_broadcast = None
-
-            updated_scores = tplr.distrib.broadcast_object(
-                scores_to_broadcast if self.is_rank0() else None, src=0
-            )
-
-            if not self.is_rank0():
-                self.final_scores = updated_scores["final_scores"]
-                self.binary_moving_averages = updated_scores["binary_moving_averages"]
-                self.evaluated_uids = updated_scores["evaluated_uids"]
-                self.peers_last_eval_window = updated_scores["peers_last_eval_window"]
-
-            # 5. Save original model state for evaluation
-            eval_start = tplr.T()
-
-            # 6. Select peers to evaluate using bin rotation
-            if self.is_rank0():
-                tplr.log_with_context(
-                    level="info",
-                    message="Creating performance bins for peer evaluation",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-
-                # Create performance bins
-                performance_bins = self.bin_evaluation_peers(
-                    num_bins=self.hparams.num_evaluation_bins
-                )
-
-                # Select which bin to evaluate in this window
-                current_bin = self.select_next_bin_for_evaluation(
-                    num_bins=self.hparams.num_evaluation_bins
-                )
-
-                # Select peers from the chosen bin using weighted sampling
-                evaluation_uids = self.select_evaluation_uids_from_bin(
-                    performance_bins,
-                    current_bin,
-                )
-
-                # Reset counters for chosen peers
-                for uid in evaluation_uids:
-                    self.eval_peers[uid] = 1
-
-                # Increment counters for not chosen peers
-                for uid in self.eval_peers.keys():
-                    if uid not in evaluation_uids:
-                        self.eval_peers[uid] += 1
-                self.comms.eval_peers = self.eval_peers
-
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Evaluating peers from bin {current_bin}: {evaluation_uids}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-            else:
+                # Miner evaluation workload distribution
                 evaluation_uids = []
+                if tplr.distrib.is_rank0():
+                    # Determine evaluation UIDs using binning strategy
+                    num_bins = self.hparams.num_bins
+                    bins = self.bin_evaluation_peers(num_bins)
+                    selected_bin = self.select_next_bin_for_evaluation(num_bins)
+                    evaluation_uids = self.select_evaluation_uids_from_bin(
+                        bins, selected_bin
+                    )
 
-            # Broadcast evaluation UIDs and updated eval_peers to all ranks
-            eval_data = tplr.distrib.broadcast_object(
-                (evaluation_uids, self.eval_peers) if self.is_rank0() else None, src=0
-            )
-            evaluation_uids, self.eval_peers = eval_data
-            self.comms.eval_peers = self.eval_peers
-
-            avg_loss_before_per_batch_own = 0.0
-            avg_loss_after_per_batch_own = 0.0
-            avg_loss_before_per_batch_random = 0.0
-            avg_loss_after_per_batch_random = 0.0
-            evaluated_peers = 0
-
-            # Pre-load common random loader for all evaluated UIDs in this window.
-            data_start_random = tplr.T()
-
-            # Load the random loader directly
-            random_seed = random.randint(
-                1000, 10000000
-            )  # Using high seed number for random context
-            tplr.log_with_context(
-                level="info",
-                message=f"Loading common random dataloader with seed {random_seed}",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
-
-            # Ensure all ranks use the same random seed
-            if self.is_rank0():
-                seed_to_broadcast = random_seed
-            else:
-                seed_to_broadcast = None
-
-            random_seed = tplr.distrib.broadcast_object(
-                seed_to_broadcast if self.is_rank0() else None, src=0
-            )
-
-            try:
-                random_loader_data = await self.preload_dataloader(seed=random_seed)
-                if random_loader_data:
-                    common_loader_random = random_loader_data["loader"]
                     tplr.log_with_context(
                         level="info",
-                        message=f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation.",
+                        message=f"Selected {len(evaluation_uids)} UIDs for evaluation: {evaluation_uids}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
                     )
+
+                    # Split evaluation UIDs across ranks
+                    if len(evaluation_uids) > 0:
+                        uids_chunks = [
+                            list(arr)
+                            for arr in np.array_split(
+                                evaluation_uids, tplr.distrib.get_world_size()
+                            )
+                        ]
+                    else:
+                        uids_chunks = [[] for _ in range(tplr.distrib.get_world_size())]
                 else:
-                    tplr.log_with_context(
-                        level="error",
-                        message="Random loader was None, cannot continue evaluation",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                    continue
-            except Exception as e:
-                tplr.log_with_context(
-                    level="error",
-                    message=f"Error loading random loader: {str(e)}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                continue
+                    uids_chunks = None
 
-            # Setup for sliding window approach
-            evaluation_uids_queue = list(
-                evaluation_uids
-            )  # Create a copy of the list to work with
-            next_uid_dataloader_task = None
-            next_uid = None
-
-            # If we have at least one UID to evaluate, start loading the first one
-            if evaluation_uids_queue:
-                next_uid = evaluation_uids_queue.pop(0)
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Starting preload for first UID: {next_uid}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                next_uid_dataloader_task = asyncio.create_task(
-                    self.preload_dataloader(seed=next_uid)
+                # Broadcast UID chunks to all ranks
+                uids_chunks = tplr.distrib.broadcast_object(
+                    uids_chunks if tplr.distrib.is_rank0() else None, src=0
                 )
 
-            # Process each UID with sliding window loading
-            while next_uid is not None:
-                eval_uid = next_uid
-                eval_uid_dataloader_task = next_uid_dataloader_task
-                self.peers_last_eval_window[eval_uid] = self.sync_window
-
-                if eval_uid_dataloader_task is None:
-                    tplr.log_with_context(
-                        level="error",
-                        message=f"Error loading data for UID {eval_uid}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-                    continue
+                # Each rank gets its subset of UIDs to evaluate
+                uids_for_my_rank = uids_chunks[tplr.distrib.get_rank()]
 
                 tplr.log_with_context(
                     level="info",
-                    message=f"Evaluating UID: {eval_uid}",
+                    message=f"Rank {tplr.distrib.get_rank()} will evaluate UIDs: {uids_for_my_rank}",
                     sync_window=self.sync_window,
                     current_window=self.current_window,
-                    eval_uid=eval_uid,
                 )
 
-                # Fetch gradient data for evaluation
-                eval_result = await self.comms.get(
-                    uid=str(eval_uid),
-                    window=self.sync_window,
-                    key="gradient",
-                    local=False,
-                    stale_retention=10,
-                    time_max=time_max,
-                    time_min=time_min,
+                # Parallel miner evaluation - each rank processes its subset
+                local_evaluation_results = {}
+
+                # Generate common random seed for shared dataloader - rank 0 decides
+                if tplr.distrib.is_rank0():
+                    common_random_seed = random.randint(
+                        256, 10000
+                    )  # > 255 for random context
+                else:
+                    common_random_seed = None
+
+                common_random_seed = tplr.distrib.broadcast_object(
+                    common_random_seed if tplr.distrib.is_rank0() else None, src=0
                 )
 
-                scoring_start = tplr.T()
-
-                # Wait for the current UID's data to be loaded
-                data_start = tplr.T()
-                try:
-                    loader_data = await eval_uid_dataloader_task
-                    # Start loading the next UID if there are more in the queue
-                    next_uid = None
-                    next_uid_dataloader_task = None
-                    if evaluation_uids_queue:
-                        next_uid = evaluation_uids_queue.pop(0)
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"Starting preload for next UID: {next_uid}",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-                        next_uid_dataloader_task = asyncio.create_task(
-                            self.preload_dataloader(seed=next_uid)
-                        )
-                except Exception as e:
-                    tplr.log_with_context(
-                        level="error",
-                        message=f"Error loading data for UID {eval_uid}: {str(e)}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-                    # Move to the next UID
-                    next_uid = None
-                    next_uid_dataloader_task = None
-                    if evaluation_uids_queue:
-                        next_uid = evaluation_uids_queue.pop(0)
-                        next_uid_dataloader_task = asyncio.create_task(
-                            self.preload_dataloader(seed=next_uid)
-                        )
-                    continue
-
-                if (
-                    eval_result is not None
-                    and not (
-                        isinstance(eval_result, dict)
-                        and eval_result.get("__status") in ["TOO_LATE", "TOO_EARLY"]
-                    )
-                    and eval_result[0] is not None
-                    and loader_data is not None
-                ):
-                    state_dict, _ = eval_result
-
-                    # Extract data from loader
-                    loader_own = loader_data["loader"]
-                    local_pages = loader_data["pages"]
-
-                    # Pull miner-sent pages info from metadata
-                    miner_pages = None
-                    if (
-                        "metadata" in state_dict
-                        and "pages_info" in state_dict["metadata"]
-                    ):
-                        miner_pages = state_dict["metadata"]["pages_info"]
-                    else:
-                        tplr.log_with_context(
-                            level="warning",
-                            message=f"Missing pages info metadata from miner UID {eval_uid}",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
+                # Each rank evaluates its assigned UIDs
+                for eval_uid in uids_for_my_rank:
+                    try:
+                        # Create temporary model copy for this evaluation
+                        model_eval_copy = copy.deepcopy(self.model).to(self.device)
+                        optimizer_eval_copy = SGD(
+                            model_eval_copy.parameters(), lr=self.hparams.learning_rate
                         )
 
-                    if local_pages is None or loader_own is None:
-                        tplr.log_with_context(
-                            level="warning",
-                            message=f"Invalid loader data for UID {eval_uid}, skipping",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
+                        # Preload dataloaders
+                        loader_own_result = await self.preload_dataloader(seed=eval_uid)
+                        loader_random_result = await self.preload_dataloader(
+                            seed=common_random_seed
                         )
-                        continue
 
-                    # Verify pages match if miner sent them
-                    if miner_pages is not None:
-                        if local_pages != miner_pages:
+                        if loader_own_result is None or loader_random_result is None:
                             tplr.log_with_context(
                                 level="warning",
-                                message=f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}",
+                                message=f"Failed to preload dataloaders for UID {eval_uid}",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
-                                eval_uid=eval_uid,
                             )
-                        else:
+                            continue
+
+                        loader_own = loader_own_result["loader"]
+                        loader_random = loader_random_result["loader"]
+
+                        # Evaluate model performance on both dataloaders
+                        eval_start = tplr.T()
+
+                        # Get miner's gradient
+                        gradient_result = await self.comms.get(
+                            uid=str(eval_uid),
+                            window=self.sync_window,
+                            key="gradient",
+                            local=False,
+                            stale_retention=10,
+                        )
+
+                        if gradient_result is None:
                             tplr.log_with_context(
-                                level="info",
-                                message=f"Pages verified for UID {eval_uid}: pages match.",
+                                level="warning",
+                                message=f"Failed to get gradient for UID {eval_uid}",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
-                                eval_uid=eval_uid,
                             )
-                    else:
+                            local_evaluation_results[eval_uid] = {
+                                "gradient_score": 0.0,
+                                "binary_indicator_score": 0.0,
+                                "sync_score": 0.0,
+                                "success": False,
+                            }
+                            continue
+
+                        # Evaluate model on batches before applying gradient
+                        own_batches = []
+                        random_batches = []
+                        sampled_indices_own = []
+                        sampled_indices_random = []
+
+                        # Sample batches for evaluation
+                        for i, batch in enumerate(loader_own):
+                            if i >= self.hparams.batches_per_eval:
+                                break
+                            own_batches.append(batch)
+                            sampled_indices_own.append(i)
+
+                        for i, batch in enumerate(loader_random):
+                            if i >= self.hparams.batches_per_eval:
+                                break
+                            random_batches.append(batch)
+                            sampled_indices_random.append(i)
+
+                        # Evaluate before applying gradient
+                        loss_before_own = self.evaluate_model_on_batches(
+                            model_eval_copy, own_batches, sampled_indices_own
+                        )
+                        loss_before_random = self.evaluate_model_on_batches(
+                            model_eval_copy, random_batches, sampled_indices_random
+                        )
+
+                        # Apply miner's gradient to the temporary model
+                        miner_gradient = gradient_result[0]
+                        if miner_gradient is not None:
+                            # Apply gradient directly to temporary model parameters
+                            for name, param in model_eval_copy.named_parameters():
+                                if name in miner_gradient:
+                                    # Decompress the gradient
+                                    compressed_grad = miner_gradient[name]
+                                    try:
+                                        # Decompress using the compressor
+                                        decompressed_grad = self.compressor.decompress(
+                                            compressed_grad,
+                                            self.xshapes[name],
+                                            self.totalks[name],
+                                        )
+                                        # Decode using transformer
+                                        decoded_grad = self.transformer.decode(
+                                            decompressed_grad, name
+                                        )
+
+                                        # Apply momentum and gradient update
+                                        if param.grad is None:
+                                            param.grad = torch.zeros_like(param)
+
+                                        # Update momentum for this parameter
+                                        momentum_val = (
+                                            self.hparams.momentum
+                                            * self.momentum.get(
+                                                name, torch.zeros_like(param)
+                                            )
+                                        )
+                                        momentum_val += decoded_grad
+
+                                        # Apply the gradient with momentum
+                                        param.grad.data = momentum_val.to(param.device)
+
+                                    except Exception as e:
+                                        tplr.log_with_context(
+                                            level="warning",
+                                            message=f"Failed to decompress gradient for parameter {name} in UID {eval_uid}: {e}",
+                                            sync_window=self.sync_window,
+                                            current_window=self.current_window,
+                                        )
+                                        continue
+
+                            # Apply the gradients using optimizer step
+                            try:
+                                optimizer_eval_copy.step()
+                                optimizer_eval_copy.zero_grad()
+                            except Exception as e:
+                                tplr.log_with_context(
+                                    level="warning",
+                                    message=f"Failed to apply optimizer step for UID {eval_uid}: {e}",
+                                    sync_window=self.sync_window,
+                                    current_window=self.current_window,
+                                )
+
+                        # Evaluate after applying gradient
+                        loss_after_own = self.evaluate_model_on_batches(
+                            model_eval_copy, own_batches, sampled_indices_own
+                        )
+                        loss_after_random = self.evaluate_model_on_batches(
+                            model_eval_copy, random_batches, sampled_indices_random
+                        )
+
+                        # Calculate gradient score
+                        improvement_own = loss_before_own - loss_after_own
+                        improvement_random = loss_before_random - loss_after_random
+
+                        # Binary indicator score (1 if improvement on own data, 0 otherwise)
+                        binary_indicator_score = 1.0 if improvement_own > 0 else 0.0
+
+                        # Gradient score calculation
+                        if improvement_random > 0:
+                            gradient_score = improvement_own / improvement_random
+                        else:
+                            gradient_score = (
+                                improvement_own if improvement_own > 0 else 0.0
+                            )
+
+                        # Evaluate synchronization
+                        sync_result = await self.evaluate_miner_sync(eval_uid)
+                        sync_score = sync_result.get("sync_score", 0.0)
+
+                        eval_time = tplr.T() - eval_start
+
+                        local_evaluation_results[eval_uid] = {
+                            "gradient_score": float(gradient_score),
+                            "binary_indicator_score": float(binary_indicator_score),
+                            "sync_score": float(sync_score),
+                            "loss_before_own": float(loss_before_own),
+                            "loss_after_own": float(loss_after_own),
+                            "loss_before_random": float(loss_before_random),
+                            "loss_after_random": float(loss_after_random),
+                            "improvement_own": float(improvement_own),
+                            "improvement_random": float(improvement_random),
+                            "success": True,
+                        }
+
                         tplr.log_with_context(
                             level="info",
-                            message=f"Using local pages for UID {eval_uid} as miner metadata is missing.",
+                            message=f"Evaluated UID {eval_uid}: gradient_score={gradient_score:.4f}, binary={binary_indicator_score}, sync={sync_score:.4f} (took {eval_time:.2f}s)",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
-                            eval_uid=eval_uid,
                         )
+
+                        # Cleanup
+                        del model_eval_copy, optimizer_eval_copy
+                        torch.cuda.empty_cache()
+
+                    except Exception as e:
+                        tplr.log_with_context(
+                            level="error",
+                            message=f"Error evaluating UID {eval_uid}: {e}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+                        local_evaluation_results[eval_uid] = {
+                            "gradient_score": 0.0,
+                            "binary_indicator_score": 0.0,
+                            "sync_score": 0.0,
+                            "success": False,
+                        }
+
+                # Gather evaluation results from all ranks
+                list_of_local_results_dicts = tplr.distrib.all_gather_object(
+                    local_evaluation_results
+                )
+
+                # Rank 0 aggregates all results and updates global scores
+                if tplr.distrib.is_rank0():
+                    aggregated_results = {}
+                    for results_dict in list_of_local_results_dicts:
+                        aggregated_results.update(results_dict)
 
                     tplr.log_with_context(
                         level="info",
-                        message=f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}",
+                        message=f"Aggregated evaluation results for {len(aggregated_results)} UIDs",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
-                        eval_uid=eval_uid,
                     )
 
-                    state_dict, _ = eval_result
-                    model_own_data_eval = copy.deepcopy(self.model)
+                    # Update global scores with aggregated results
+                    for uid, results in aggregated_results.items():
+                        if results["success"]:
+                            self.gradient_scores[uid] = results["gradient_score"]
+                            self.binary_indicator_scores[uid] = results[
+                                "binary_indicator_score"
+                            ]
+                            self.sync_scores[uid] = results["sync_score"]
 
-                    # 9. Compute loss before applying gradient
-                    self.optimizer.zero_grad()
-                    model_own_data_eval.zero_grad()
-                    with torch.no_grad():
-                        model_own_data_eval.eval()
-                        batches_own = []
-                        for batch in loader_own:
-                            batches_own.append(batch)
-
-                        total_batches_own = len(batches_own)
-                        sample_size_own = max(
-                            1,
-                            int(total_batches_own * self.hparams.validator_sample_rate),
-                        )
-                        sampled_indices_own = random.sample(
-                            range(total_batches_own), sample_size_own
-                        )
-                        sampled_indices_own = sorted(
-                            sampled_indices_own
-                        )  # Sort for sequential access
-
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"Evaluating {sample_size_own}/{total_batches_own} batches ({self.hparams.validator_sample_rate * 100:.1f}%)",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-
-                        loss_before_own, n_batches = self.evaluate_model_on_batches(
-                            model_own_data_eval, batches_own, sampled_indices_own
-                        )
-
-                    self.loss_before_per_batch_own = (
-                        loss_before_own / n_batches if n_batches > 0 else 0
-                    )
-                    tplr.log_with_context(
-                        level="debug",
-                        message=f"Loss before (own data): {self.loss_before_per_batch_own}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-
-                    # 9. Apply gradient and compute loss after
-                    try:
-                        self.optimizer.zero_grad()
-                        model_own_data_eval.zero_grad()
-
-                        # First validate all gradients before applying any
-                        for n, p in model_own_data_eval.named_parameters():
-                            idxs_key = n + "idxs"
-                            vals_key = n + "vals"
-                            idxs = state_dict.get(idxs_key, None)
-                            vals = state_dict.get(vals_key, None)
-
-                            if idxs is not None and vals is not None:
-                                # Move tensors to device
-                                idxs = idxs.to(self.config.device)
-                                vals = vals.to(self.config.device)
-
-                                # Validate indices are within bounds
-                                if self.totalks.get(n) is None:
-                                    tplr.log_with_context(
-                                        level="warning",
-                                        message=f"Missing totalk for parameter {n}, skipping peer {eval_uid}",
-                                        sync_window=self.sync_window,
-                                        current_window=self.current_window,
-                                        eval_uid=eval_uid,
-                                    )
-                                    raise ValueError(
-                                        f"Invalid gradient data from peer {eval_uid}: Missing totalk for parameter {n}"
-                                    )
-
-                                # Check compressed indices are valid
-                                self.comms.check_compressed_indices(
-                                    idxs_key,
-                                    idxs,
-                                    self.totalks[n],
-                                    allowed_topk=self.hparams.topk_compression,
-                                )
-
-                                # Check for NaN or Inf values
-                                if torch.isnan(vals).any() or torch.isinf(vals).any():
-                                    tplr.log_with_context(
-                                        level="warning",
-                                        message=f"Values contain NaN or Inf for parameter {vals_key}, skipping peer {eval_uid}",
-                                        sync_window=self.sync_window,
-                                        current_window=self.current_window,
-                                        eval_uid=eval_uid,
-                                    )
-                                    raise ValueError(
-                                        f"Invalid gradient data from peer {eval_uid}: NaN or Inf values in {vals_key}"
-                                    )
-
-                        # If all validations pass, apply the gradients
-                        for n, p in model_own_data_eval.named_parameters():
-                            idxs_key = n + "idxs"
-                            vals_key = n + "vals"
-                            idxs = state_dict.get(idxs_key, None)
-                            vals = state_dict.get(vals_key, None)
-
-                            if idxs is not None and vals is not None:
-                                idxs = idxs.to(self.config.device)
-                                vals = vals.to(self.config.device)
-
-                                grad = self.transformer.decode(
-                                    self.compressor.decompress(
-                                        p.to(self.config.device),
-                                        idxs,
-                                        vals,
-                                        self.xshapes[n],
-                                        self.totalks[n],
-                                    )
-                                ).to(self.config.device)
-
-                                # Final safety check on the gradient itself
-                                if torch.isnan(grad).any() or torch.isinf(grad).any():
-                                    tplr.log_with_context(
-                                        level="warning",
-                                        message=f"Decompressed gradient for {n} contains NaN/Inf, skipping peer {eval_uid}",
-                                        sync_window=self.sync_window,
-                                        current_window=self.current_window,
-                                        eval_uid=eval_uid,
-                                    )
-                                    raise ValueError(
-                                        f"Invalid gradient from peer {eval_uid}: NaN or Inf in decompressed gradient for {n}"
-                                    )
-
-                                p.data.sub_(
-                                    grad.sign(),
-                                    alpha=self.scheduler.get_last_lr()[0]
-                                    * self.hparams.eval_lr_factor,
-                                )
-                    except Exception as e:
-                        old_score = self.final_scores[eval_uid].item()
-
-                        if old_score > 0:
-                            # Reset positive scores to zero explicitly
-                            self.final_scores[eval_uid] = 0.0
-                            tplr.log_with_context(
-                                level="warning",
-                                message=f"Set positive score of UID {eval_uid} from {old_score:.4f} to 0.0 - invalid gradient data",
-                                sync_window=self.sync_window,
-                                current_window=self.current_window,
-                                eval_uid=eval_uid,
-                            )
-                        else:
-                            # Negative score is worse than zero; keep it as-is.
-                            tplr.log_with_context(
-                                level="warning",
-                                message=f"UID {eval_uid} had negative score {old_score:.4f}; retaining due to invalid gradient data",
-                                sync_window=self.sync_window,
-                                current_window=self.current_window,
-                                eval_uid=eval_uid,
-                            )
-
-                        # Include in evaluated UIDs so it gets logged in metrics
-                        self.evaluated_uids.add(eval_uid)
-
-                        # Log to WandB
-                        if self.is_rank0():
+                            # Log individual miner metrics
                             self.wandb.log(
                                 {
-                                    f"validator/slash/{eval_uid}/score_before": old_score,
-                                    f"validator/slash/{eval_uid}/score_after": self.final_scores[
-                                        eval_uid
-                                    ].item(),
-                                    f"validator/slash/{eval_uid}/reason": str(e),
+                                    f"validator/miner_{uid}/gradient_score": results[
+                                        "gradient_score"
+                                    ],
+                                    f"validator/miner_{uid}/binary_indicator_score": results[
+                                        "binary_indicator_score"
+                                    ],
+                                    f"validator/miner_{uid}/sync_score": results[
+                                        "sync_score"
+                                    ],
+                                    f"validator/miner_{uid}/loss_before_own": results.get(
+                                        "loss_before_own", 0.0
+                                    ),
+                                    f"validator/miner_{uid}/loss_after_own": results.get(
+                                        "loss_after_own", 0.0
+                                    ),
+                                    f"validator/miner_{uid}/improvement_own": results.get(
+                                        "improvement_own", 0.0
+                                    ),
                                 },
                                 step=self.global_step,
                             )
 
-                            # Log to InfluxDB metrics with primitive types
+                            # Log to InfluxDB
                             self.metrics_logger.log(
-                                measurement="validator_slash",
+                                measurement="miner_evaluation",
                                 tags={
-                                    "eval_uid": str(eval_uid),
+                                    "uid": str(uid),
                                     "window": int(self.sync_window),
                                     "global_step": int(self.global_step),
-                                    "reason_code": "invalid_gradient",
                                 },
                                 fields={
-                                    "score_before": float(old_score),
-                                    "score_after": float(
-                                        self.final_scores[eval_uid].item()
+                                    "gradient_score": float(results["gradient_score"]),
+                                    "binary_indicator_score": float(
+                                        results["binary_indicator_score"]
                                     ),
-                                    "reason": str(e)[
-                                        :255
-                                    ],  # Truncate long error messages
+                                    "sync_score": float(results["sync_score"]),
+                                    "loss_before_own": float(
+                                        results.get("loss_before_own", 0.0)
+                                    ),
+                                    "loss_after_own": float(
+                                        results.get("loss_after_own", 0.0)
+                                    ),
+                                    "improvement_own": float(
+                                        results.get("improvement_own", 0.0)
+                                    ),
                                 },
                                 with_system_metrics=True,
                                 with_gpu_metrics=True,
                             )
 
-                        # Skip the rest of processing for this peer
-                        continue
-
-                    # 10. Compute loss after gradient application
-                    self.optimizer.zero_grad()
-                    model_own_data_eval.zero_grad()
-                    loss_after_own, n_batches = self.evaluate_model_on_batches(
-                        model_own_data_eval, batches_own, sampled_indices_own
-                    )
-
-                    # Clean up stored batches
-                    del (
-                        batches_own,
-                        local_pages,
-                        loader_own,
-                        model_own_data_eval,
-                        loader_data,
-                    )
-                    torch.cuda.empty_cache()
-
-                    self.loss_after_per_batch_own = (
-                        loss_after_own / n_batches if n_batches > 0 else 0
-                    )
-                    avg_loss_before_per_batch_own += self.loss_before_per_batch_own
-                    avg_loss_after_per_batch_own += self.loss_after_per_batch_own
-                    tplr.log_with_context(
-                        level="debug",
-                        message=f"Loss after (own data): {self.loss_after_per_batch_own}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-
-                    # 11. Calculate improvements and update scores
-                    # Compute and assign the loss improvement to self
-                    self.loss_improvement_own = (
-                        self.loss_before_per_batch_own - self.loss_after_per_batch_own
-                    )
-                    tplr.log_with_context(
-                        level="debug",
-                        message=f"Loss improvement (own data): {self.loss_improvement_own}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-
-                    self.relative_improvement_own = (
-                        self.loss_improvement_own / self.loss_before_per_batch_own
-                        if self.loss_before_per_batch_own > 0
-                        else 0.0
-                    )
-                    tplr.log_with_context(
-                        level="debug",
-                        message=f"Relative improvement (own data): {self.relative_improvement_own:.4f}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-
-                    # 7. Use common random loader for evaluation
-                    model_random_data_eval = copy.deepcopy(self.model)
-
-                    loader_random = common_loader_random
-
-                    # 8. Compute initial loss
-                    self.optimizer.zero_grad()
-                    model_random_data_eval.zero_grad()
-                    with torch.no_grad():
-                        model_random_data_eval.eval()
-                        # Sample random batches from the loader
-                        batches_random = []
-                        for batch in loader_random:
-                            batches_random.append(batch)
-
-                        total_batches_random = len(batches_random)
-                        sample_size_random = max(
-                            1,
-                            int(
-                                total_batches_random
-                                * self.hparams.validator_sample_rate
-                            ),
-                        )
-                        sampled_indices_random = random.sample(
-                            range(total_batches_random), sample_size_random
-                        )
-                        sampled_indices_random = sorted(
-                            sampled_indices_random
-                        )  # Sort for sequential access
-
+                # Apply gathered gradients to validator's main model - only rank 0
+                model_was_updated = False
+                if tplr.distrib.is_rank0():
+                    if aggregation_result is not None:
+                        self.apply_aggregated_gradients(aggregation_result)
+                        model_was_updated = True
                         tplr.log_with_context(
                             level="info",
-                            message=f"Evaluating {sample_size_random}/{total_batches_random} batches ({self.hparams.validator_sample_rate * 100:.1f}%)",
+                            message="Applied aggregated gradients to validator model",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
-                            eval_uid=eval_uid,
+                        )
+                    elif gather_result is not None:
+                        self.apply_gathered_gradients(gather_result)
+                        model_was_updated = True
+                        tplr.log_with_context(
+                            level="info",
+                            message="Applied gathered gradients to validator model",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
                         )
 
-                        loss_before_random, n_batches = self.evaluate_model_on_batches(
-                            model_random_data_eval,
-                            batches_random,
-                            sampled_indices_random,
-                        )
+                    if model_was_updated:
+                        self.scheduler.step()
+                        # Prepare updated model state for broadcasting
+                        updated_model_state_dict = {
+                            k: v.cpu() for k, v in self.model.state_dict().items()
+                        }
+                    else:
+                        updated_model_state_dict = None
 
-                    self.loss_before_per_batch_random = (
-                        loss_before_random / n_batches if n_batches > 0 else 0
-                    )
+                # Broadcast model updates to all ranks
+                broadcast_data = tplr.distrib.broadcast_object(
+                    (updated_model_state_dict, model_was_updated)
+                    if tplr.distrib.is_rank0()
+                    else (None, False),
+                    src=0,
+                )
+                new_model_state_to_load, model_updated_on_rank0 = broadcast_data
+
+                # All ranks update their model if rank 0 updated
+                if model_updated_on_rank0 and not tplr.distrib.is_rank0():
+                    self.model.load_state_dict(new_model_state_to_load)
+                    self.scheduler.step()  # Keep scheduler in sync
                     tplr.log_with_context(
-                        level="debug",
-                        message=f"Loss before (random data): {self.loss_before_per_batch_random}",
+                        level="info",
+                        message="Updated local model from rank 0 broadcast",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
-                        eval_uid=eval_uid,
                     )
-                    # 9. Apply gradient and compute loss after
+
+                # Barrier to ensure all models are synced before continuing
+                tplr.distrib.barrier()
+
+                # Update scores and weights - only rank 0
+                if tplr.distrib.is_rank0():
+                    # Update OpenSkill ratings
+                    self.update_openskill_ratings()
+
+                    # Update final scores and weights
+                    self.update_weights()
+
+                    # Set weights on subtensor
                     try:
-                        self.optimizer.zero_grad()
-                        model_random_data_eval.zero_grad()
-
-                        for n, p in model_random_data_eval.named_parameters():
-                            idxs_key = n + "idxs"
-                            vals_key = n + "vals"
-                            idxs = state_dict.get(idxs_key, None)
-                            vals = state_dict.get(vals_key, None)
-
-                            if idxs is not None and vals is not None:
-                                idxs = idxs.to(self.config.device)
-                                vals = vals.to(self.config.device)
-
-                                grad = self.transformer.decode(
-                                    self.compressor.decompress(
-                                        p.to(self.config.device),
-                                        idxs,
-                                        vals,
-                                        self.xshapes[n],
-                                        self.totalks[n],
-                                    )
-                                ).to(self.config.device)
-
-                                p.data.sub_(
-                                    grad.sign(),
-                                    alpha=self.scheduler.get_last_lr()[0]
-                                    * self.hparams.eval_lr_factor,
-                                )
+                        result, message = self.subtensor.set_weights(
+                            wallet=self.wallet,
+                            netuid=self.config.netuid,
+                            uids=self.metagraph.uids,
+                            weights=self.weights,
+                            wait_for_finalization=False,
+                            wait_for_inclusion=True,
+                            max_retries=3,
+                        )
+                        if result:
+                            tplr.log_with_context(
+                                level="info",
+                                message=f"Successfully set weights on chain: {message}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                            )
+                        else:
+                            tplr.log_with_context(
+                                level="error",
+                                message=f"Failed to set weights on chain: {message}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                            )
                     except Exception as e:
                         tplr.log_with_context(
                             level="error",
-                            message=f"Failed to apply gradient for UID {eval_uid}: {str(e)}",
+                            message=f"Exception setting weights: {e}",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-                        continue
-
-                    # 10. Compute loss after gradient application for random data
-                    self.optimizer.zero_grad()
-                    model_random_data_eval.zero_grad()
-                    loss_after_random, n_batches = self.evaluate_model_on_batches(
-                        model_random_data_eval,
-                        batches_random,
-                        sampled_indices_random,
-                    )
-
-                    # Clean up stored batches, loader & pages
-                    del (
-                        batches_random,
-                        model_random_data_eval,
-                    )
-                    torch.cuda.empty_cache()
-
-                    self.loss_after_per_batch_random = (
-                        loss_after_random / n_batches if n_batches > 0 else 0
-                    )
-
-                    avg_loss_before_per_batch_random += (
-                        self.loss_before_per_batch_random
-                    )
-                    avg_loss_after_per_batch_random += self.loss_after_per_batch_random
-
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"Loss after (random data): {self.loss_after_per_batch_random}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-
-                    # 11. Calculate improvements and update scores
-                    # Compute and assign the loss improvement to self
-                    self.loss_improvement_random = (
-                        self.loss_before_per_batch_random
-                        - self.loss_after_per_batch_random
-                    )
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"Loss improvement (random data): {self.loss_improvement_random}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-
-                    self.relative_improvement_random = (
-                        self.loss_improvement_random / self.loss_before_per_batch_random
-                        if self.loss_before_per_batch_random > 0
-                        else 0.0
-                    )
-                    tplr.log_with_context(
-                        level="debug",
-                        message=f"Relative improvement (random data): {self.relative_improvement_random}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-
-                    # Calculate original performance score (gradient quality)
-                    self.gradient_scores[eval_uid] = (
-                        loss_before_random - loss_after_random
-                    ) / loss_before_random
-                    tplr.log_with_context(
-                        level="debug",
-                        message=f"Gradient Score: {self.gradient_scores[eval_uid]}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-
-                    # Initialize or update OpenSkill rating for this peer
-                    if eval_uid not in self.openskill_ratings:
-                        self.openskill_ratings[eval_uid] = self.openskill_model.rating(
-                            name=str(eval_uid)
                         )
 
-                    # Record the gradient score for later OpenSkill updates
-                    if not hasattr(self, "current_window_scores"):
-                        self.current_window_scores = {}
-                    self.current_window_scores[eval_uid] = self.gradient_scores[
-                        eval_uid
-                    ].item()
+                    # Log final scores table
+                    self.log_final_scores_table()
 
-                    # Calculate binary indicator for overfitting detection
-                    improvement_own = (
-                        (loss_before_own - loss_after_own) / loss_before_own
-                        if loss_before_own > 0
-                        else 0
+                    # Store debug information
+                    debug_info = {
+                        "sync_window": self.sync_window,
+                        "global_step": self.global_step,
+                        "gradient_scores": {
+                            k: float(v) for k, v in self.gradient_scores.items()
+                        },
+                        "binary_indicator_scores": {
+                            k: float(v) for k, v in self.binary_indicator_scores.items()
+                        },
+                        "sync_scores": {
+                            k: float(v) for k, v in self.sync_scores.items()
+                        },
+                        "final_scores": {
+                            k: float(v)
+                            for k, v in enumerate(self.final_scores.tolist())
+                        },
+                        "weights": {
+                            k: float(v) for k, v in enumerate(self.weights.tolist())
+                        },
+                        "skipped_uids": skipped_uids,
+                        "success_rate": success_rate,
+                    }
+
+                    await self.comms.put(
+                        key="debug",
+                        data=debug_info,
+                        window=self.sync_window,
+                        uid=str(self.uid),
                     )
-                    improvement_random = (
-                        (loss_before_random - loss_after_random) / loss_before_random
-                        if loss_before_random > 0
-                        else 0
+
+                    # Store checkpoint
+                    checkpoint_data = {
+                        "model_state": self.model.state_dict(),
+                        "optimizer_state": self.optimizer.state_dict(),
+                        "scheduler_state": self.scheduler.state_dict(),
+                        "momentum": self.momentum,
+                        "checkpoint_window": self.sync_window,
+                    }
+
+                    await self.comms.put(
+                        key="checkpoint",
+                        data=checkpoint_data,
+                        window=self.sync_window,
+                        uid=str(self.uid),
                     )
-                    self.binary_indicator_scores[eval_uid] = (
-                        1 if improvement_own > improvement_random else -1
-                    )
+
+                # Increment global step and log window completion
+                self.global_step += 1
+
+                if tplr.distrib.is_rank0():
+                    window_time = tplr.T() - window_start
                     tplr.log_with_context(
                         level="info",
-                        message=f"Binary Indicator Score : {self.binary_indicator_scores[eval_uid]}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-
-                    # Update binary moving average using exponential moving average formula:
-                    # new_avg = (1-alpha) * old_avg + alpha * new_value
-                    # where alpha is binary_score_ma_alpha hyperparameter
-                    self.binary_moving_averages[eval_uid] = (
-                        (1 - self.hparams.binary_score_ma_alpha)
-                        * self.binary_moving_averages[eval_uid]
-                        + self.hparams.binary_score_ma_alpha
-                        * self.binary_indicator_scores[eval_uid]
-                    )
-                    tplr.log_with_context(
-                        level="debug",
-                        message=f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-
-                    sync_result = await self.evaluate_miner_sync(eval_uid)
-                    sync_score = cast(
-                        float,
-                        sync_result.get("sync_score", 0.0),
-                    )
-                    self.log_sync_score(eval_uid, sync_result)
-
-                    # Store the sync score for this miner
-                    self.sync_scores[eval_uid] = sync_score
-
-                    self.evaluated_uids.add(eval_uid)
-
-                    evaluated_peers += 1
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-
-                else:
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"No gradient received from UID {eval_uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-                    old_score = self.final_scores[eval_uid].item()
-
-                    if self.final_scores[eval_uid] > 0:
-                        self.final_scores[eval_uid] *= self.missing_gradient_slash_rate
-                        self.binary_moving_averages[eval_uid] *= (
-                            self.missing_gradient_slash_rate
-                        )
-
-                        new_score = self.final_scores[eval_uid].item()
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"Reduced score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to missing gradient.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-                    else:
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"Skipped reducing score of UID {eval_uid} (current score: {old_score:.4f}) due to negative or zero value.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-
-                    # Ensure the UID is included in evaluated_uids
-                    self.evaluated_uids.add(eval_uid)
-
-                    # Log updated scores
-                    tplr.log_with_context(
-                        level="info",
-                        message="Updated scores for evaluated UIDs after slashing:",
+                        message=f"Completed window {self.sync_window} in {window_time:.2f}s",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
                     )
-                    # Log evaluated UID scores (fixed join call)
-                    line = " | ".join(
-                        f"UID {uid}: {self.final_scores[uid]:.4f}"
-                        for uid in sorted(self.evaluated_uids)
-                    )
-                    tplr.logger.info(line)
 
-                    # Optionally, log to WandB
+                    # Log window timing metrics
                     self.wandb.log(
                         {
-                            f"validator/final_scores/{eval_uid}": self.final_scores[
-                                eval_uid
-                            ].item(),
-                            f"validator/weights/{eval_uid}": self.weights[
-                                eval_uid
-                            ].item(),
+                            "validator/window_time": window_time,
+                            "validator/global_step": self.global_step,
+                            "validator/sync_window": self.sync_window,
                         },
                         step=self.global_step,
                     )
+
+                # Barrier to ensure all ranks complete the window together
+                tplr.distrib.barrier()
+
+            except Exception as e:
+                if tplr.distrib.is_rank0():
                     tplr.log_with_context(
-                        level="info",
-                        message=f"{tplr.P(self.sync_window, tplr.T() - scoring_start)} Computed scores and weights",
+                        level="error",
+                        message=f"Error in main validator loop: {str(e)}",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
                     )
 
-                tplr.log_with_context(
-                    level="info",
-                    message=f"{tplr.P(self.sync_window, tplr.T() - eval_start)} Completed evaluation",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
+                # Broadcast error to all ranks to keep them synchronized
+                error_occurred = True
+                error_occurred = tplr.distrib.broadcast_object(
+                    error_occurred if tplr.distrib.is_rank0() else None, src=0
                 )
 
-            # Cancel any remaining preload task if exiting the loop early
-            if (
-                next_uid_dataloader_task is not None
-                and not next_uid_dataloader_task.done()
-            ):
-                next_uid_dataloader_task.cancel()
-                try:
-                    await next_uid_dataloader_task
-                except asyncio.CancelledError:
-                    pass
-
-            # Clean up common random loader
-            del common_loader_random
-            torch.cuda.empty_cache()
-
-            # Gather evaluation results from all ranks
-            if self.is_rank0():
-                # Prepare to gather results from all ranks
-                tplr.log_with_context(
-                    level="info",
-                    message="Gathering evaluation results from all ranks",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-
-            # All ranks participate in gathering results
-            all_eval_results = tplr.distrib.all_gather_object(
-                {
-                    "gradient_scores": {
-                        uid: self.gradient_scores[uid].item()
-                        if isinstance(self.gradient_scores[uid], torch.Tensor)
-                        else self.gradient_scores[uid]
-                        for uid in self.evaluated_uids
-                    },
-                    "binary_indicator_scores": {
-                        uid: self.binary_indicator_scores[uid].item()
-                        if isinstance(self.binary_indicator_scores[uid], torch.Tensor)
-                        else self.binary_indicator_scores[uid]
-                        for uid in self.evaluated_uids
-                    },
-                    "binary_moving_averages": {
-                        uid: self.binary_moving_averages[uid].item()
-                        if isinstance(self.binary_moving_averages[uid], torch.Tensor)
-                        else self.binary_moving_averages[uid]
-                        for uid in self.evaluated_uids
-                    },
-                    "final_scores": {
-                        uid: self.final_scores[uid].item()
-                        if isinstance(self.final_scores[uid], torch.Tensor)
-                        else self.final_scores[uid]
-                        for uid in self.evaluated_uids
-                    },
-                    "evaluated_uids": list(self.evaluated_uids),
-                    "peers_last_eval_window": {
-                        uid: self.peers_last_eval_window[uid]
-                        for uid in self.evaluated_uids
-                    },
-                    "sync_scores": {
-                        uid: self.sync_scores.get(uid, 0.0)
-                        for uid in self.evaluated_uids
-                    },
-                    "avg_loss_before_per_batch_own": avg_loss_before_per_batch_own,
-                    "avg_loss_after_per_batch_own": avg_loss_after_per_batch_own,
-                    "avg_loss_before_per_batch_random": avg_loss_before_per_batch_random,
-                    "avg_loss_after_per_batch_random": avg_loss_after_per_batch_random,
-                    "evaluated_peers": evaluated_peers,
-                }
-            )
-
-            # Only rank 0 combines results and updates global state
-            if self.is_rank0():
-                # Combine results from all ranks
-                combined_evaluated_uids = set()
-                combined_evaluated_peers = 0
-
-                for rank_result in all_eval_results:
-                    # Add all evaluated UIDs from this rank
-                    combined_evaluated_uids.update(rank_result["evaluated_uids"])
-                    combined_evaluated_peers += rank_result["evaluated_peers"]
-
-                    # Update scores for UIDs evaluated by this rank
-                    for uid in rank_result["evaluated_uids"]:
-                        if uid in rank_result["gradient_scores"]:
-                            self.gradient_scores[uid] = torch.tensor(
-                                rank_result["gradient_scores"][uid],
-                                device=self.config.device,
-                            )
-                        if uid in rank_result["binary_indicator_scores"]:
-                            self.binary_indicator_scores[uid] = torch.tensor(
-                                rank_result["binary_indicator_scores"][uid],
-                                device=self.config.device,
-                            )
-                        if uid in rank_result["binary_moving_averages"]:
-                            self.binary_moving_averages[uid] = torch.tensor(
-                                rank_result["binary_moving_averages"][uid],
-                                device=self.config.device,
-                            )
-                        if uid in rank_result["final_scores"]:
-                            self.final_scores[uid] = torch.tensor(
-                                rank_result["final_scores"][uid],
-                                device=self.config.device,
-                            )
-                        if uid in rank_result["peers_last_eval_window"]:
-                            self.peers_last_eval_window[uid] = rank_result[
-                                "peers_last_eval_window"
-                            ][uid]
-                        if uid in rank_result["sync_scores"]:
-                            self.sync_scores[uid] = rank_result["sync_scores"][uid]
-
-                # Update global metrics
-                self.evaluated_uids = combined_evaluated_uids
-                evaluated_peers = combined_evaluated_peers
-
-                # Recalculate averages
-                if evaluated_peers > 0:
-                    avg_loss_before_per_batch_own = (
-                        sum(
-                            r["avg_loss_before_per_batch_own"] * r["evaluated_peers"]
-                            for r in all_eval_results
-                        )
-                        / evaluated_peers
-                    )
-                    avg_loss_after_per_batch_own = (
-                        sum(
-                            r["avg_loss_after_per_batch_own"] * r["evaluated_peers"]
-                            for r in all_eval_results
-                        )
-                        / evaluated_peers
-                    )
-                    avg_loss_before_per_batch_random = (
-                        sum(
-                            r["avg_loss_before_per_batch_random"] * r["evaluated_peers"]
-                            for r in all_eval_results
-                        )
-                        / evaluated_peers
-                    )
-                    avg_loss_after_per_batch_random = (
-                        sum(
-                            r["avg_loss_after_per_batch_random"] * r["evaluated_peers"]
-                            for r in all_eval_results
-                        )
-                        / evaluated_peers
-                    )
-
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Combined evaluation results from all ranks: {len(combined_evaluated_uids)} UIDs evaluated",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-
-                # Update weights based on combined scores
-                if self.is_rank0():
-                    self.update_openskill_ratings()
-                    self.update_weights()
-
-            # Broadcast final scores and weights to all ranks
-            if self.is_rank0():
-                scores_to_broadcast = {
-                    "final_scores": self.final_scores,
-                    "binary_moving_averages": self.binary_moving_averages,
-                    "evaluated_uids": self.evaluated_uids,
-                    "peers_last_eval_window": self.peers_last_eval_window,
-                    "weights": self.weights,
-                    "openskill_ratings": self.openskill_ratings,
-                    "avg_loss_before_per_batch_own": avg_loss_before_per_batch_own,
-                    "avg_loss_after_per_batch_own": avg_loss_after_per_batch_own,
-                    "avg_loss_before_per_batch_random": avg_loss_before_per_batch_random,
-                    "avg_loss_after_per_batch_random": avg_loss_after_per_batch_random,
-                    "evaluated_peers": evaluated_peers,
-                }
-            else:
-                scores_to_broadcast = None
-
-            updated_scores = tplr.distrib.broadcast_object(
-                scores_to_broadcast if self.is_rank0() else None, src=0
-            )
-
-            if not self.is_rank0():
-                self.final_scores = updated_scores["final_scores"]
-                self.binary_moving_averages = updated_scores["binary_moving_averages"]
-                self.evaluated_uids = updated_scores["evaluated_uids"]
-                self.peers_last_eval_window = updated_scores["peers_last_eval_window"]
-                self.weights = updated_scores["weights"]
-                self.openskill_ratings = updated_scores["openskill_ratings"]
-                avg_loss_before_per_batch_own = updated_scores[
-                    "avg_loss_before_per_batch_own"
-                ]
-                avg_loss_after_per_batch_own = updated_scores[
-                    "avg_loss_after_per_batch_own"
-                ]
-                avg_loss_before_per_batch_random = updated_scores[
-                    "avg_loss_before_per_batch_random"
-                ]
-                avg_loss_after_per_batch_random = updated_scores[
-                    "avg_loss_after_per_batch_random"
-                ]
-                evaluated_peers = updated_scores["evaluated_peers"]
-
-            # 17. Set weights periodically
-
-            if (
-                self.sync_window % self.hparams.windows_per_weights == 0
-                and self.is_rank0()
-            ):
-                # Only set weights for evaluated peers with non-negative (positive) weight values.
-                positive_weighted_uids = sorted(
-                    [uid for uid in self.evaluated_uids if self.weights[uid] > 0]
-                )
-                if positive_weighted_uids:
-                    self.subtensor.set_weights(
-                        wallet=self.wallet,
-                        netuid=self.config.netuid,
-                        uids=positive_weighted_uids,
-                        weights=self.weights[positive_weighted_uids],
-                        wait_for_inclusion=False,
-                        wait_for_finalization=False,
-                    )
-
-            # 14. Now, merge the gathered gradients into the model AFTER finishing evaluation
-            self.model.train()
-            update_start = tplr.T()
-            self.optimizer.zero_grad()
-            self.model.zero_grad()
-            lr = self.scheduler.get_last_lr()[0]
-            # Apply weight decay just like in the miner
-            for n, p in self.model.named_parameters():
-                p.data.mul_(1.0 - lr * self.hparams.weight_decay)
-
-            model_was_updated = False
-            if self.is_rank0():
-                if aggregation_result is not None:
-                    self.apply_aggregated_gradients(
-                        aggregation_result=aggregation_result
-                    )
-                    model_was_updated = True
-                elif gather_result is not None and gather_result.state_dict is not None:
-                    self.apply_gathered_gradients(gather_result=gather_result)
-                    model_was_updated = True
-                else:
-                    tplr.log_with_context(
-                        level="warning",
-                        message="No gradients to apply.",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-
-                # Step the scheduler on rank 0
-                if model_was_updated:
-                    self.scheduler.step()
-                    # Prepare model state for broadcasting
-                    updated_model_state_dict = {
-                        k: v.cpu() for k, v in self.model.state_dict().items()
-                    }
-                else:
-                    updated_model_state_dict = None
-
-            # Broadcast model update status and state if updated
-            broadcast_data = tplr.distrib.broadcast_object(
-                (model_was_updated, updated_model_state_dict)
-                if self.is_rank0()
-                else None,
-                src=0,
-            )
-            model_was_updated, updated_model_state_dict = broadcast_data
-
-            # All non-rank 0 processes update their models if needed
-            if model_was_updated and not self.is_rank0():
-                self.model.load_state_dict(updated_model_state_dict)
-                self.model.to(self.config.device)
-                # Step the scheduler on other ranks to keep in sync
-                self.scheduler.step()
-
-            torch.cuda.empty_cache()
-
-            tplr.log_with_context(
-                level="info",
-                message=f"{tplr.P(self.sync_window, tplr.T() - update_start)} Updated model",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
-
-            # Add debug data including successfully gathered peers
-            debug_dict = {}
-
-            # Add model parameters debug info
-            for name, param in self.model.named_parameters():
-                if (
-                    param is not None and param.numel() >= 2
-                ):  # Check if tensor has at least 2 elements
-                    debug_dict[name + "_debug"] = (
-                        param.flatten()[:2].detach().cpu().tolist()
-                    )
-
-            # Add successful peers information
-            if len(skipped_uids) > 0:
-                debug_dict["successful_peers"] = sorted(
-                    list(set(self.comms.peers) - set(skipped_uids))
-                )
-                debug_dict["skipped_peers"] = sorted(list(skipped_uids))
-
-            # 15. Store debug values and model metadata
-            asyncio.create_task(
-                self.comms.put(
-                    state_dict=debug_dict,
-                    uid=str(self.uid),
-                    window=self.sync_window,
-                    key="debug",
-                    local=False,
-                )
-            )
-            tplr.log_with_context(
-                level="info",
-                message=f"Stored debug values for window {self.current_window}",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
-            # Log total window time and metrics
-            tplr.log_with_context(
-                level="info",
-                message=f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
-
-            if evaluated_peers == 0:
-                # Use the values from the previous step
-                avg_loss_before_per_batch_own = self.previous_avg_loss_before_own
-                avg_loss_after_per_batch_own = self.previous_avg_loss_after_own
-                avg_loss_before_per_batch_random = self.previous_avg_loss_before_random
-                avg_loss_after_per_batch_random = self.previous_avg_loss_after_random
-            else:
-                # Calculate averages normally
-                avg_loss_before_per_batch_own /= evaluated_peers
-                avg_loss_after_per_batch_own /= evaluated_peers
-                avg_loss_before_per_batch_random /= evaluated_peers
-                avg_loss_after_per_batch_random /= evaluated_peers
-
-                # Store current values for future use when evaluated_peers might be 0
-                self.previous_avg_loss_before_own = avg_loss_before_per_batch_own
-                self.previous_avg_loss_after_own = avg_loss_after_per_batch_own
-                self.previous_avg_loss_before_random = avg_loss_before_per_batch_random
-                self.previous_avg_loss_after_random = avg_loss_after_per_batch_random
-
-            # Only rank 0 logs metrics to WandB and InfluxDB
-            if self.is_rank0():
-                if evaluated_peers == 0:
-                    # Use the values from the previous step
-                    avg_loss_before_per_batch_own = self.previous_avg_loss_before_own
-                    avg_loss_after_per_batch_own = self.previous_avg_loss_after_own
-                    avg_loss_before_per_batch_random = (
-                        self.previous_avg_loss_before_random
-                    )
-                    avg_loss_after_per_batch_random = (
-                        self.previous_avg_loss_after_random
-                    )
-                else:
-                    # Store current values for future use when evaluated_peers might be 0
-                    self.previous_avg_loss_before_own = avg_loss_before_per_batch_own
-                    self.previous_avg_loss_after_own = avg_loss_after_per_batch_own
-                    self.previous_avg_loss_before_random = (
-                        avg_loss_before_per_batch_random
-                    )
-                    self.previous_avg_loss_after_random = (
-                        avg_loss_after_per_batch_random
-                    )
-
-                # 16. Log evaluation metrics once all evaluations are done
-                evaluation_metrics = {
-                    "validator/loss/own/before": avg_loss_before_per_batch_own,
-                    "validator/loss/own/after": avg_loss_after_per_batch_own,
-                    "validator/loss/random/before": avg_loss_before_per_batch_random,
-                    "validator/loss/random/after": avg_loss_after_per_batch_random,
-                    "validator/loss/own/improvement": self.relative_improvement_own,
-                    "validator/loss/random/improvement": self.relative_improvement_random,
-                    "validator/network/block": self.current_block,
-                    "validator/network/window": self.sync_window,
-                    "validator/network/step": self.global_step,
-                    "validator/network/evaluated_uids": len(self.evaluated_uids),
-                    "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[
-                        0
-                    ],
-                    "validator/network/active_miners": len(self.valid_score_indices),
-                    "validator/gather/success_rate": success_rate * 100,
-                    "validator/timing/window_total": tplr.T() - window_start,
-                    "validator/timing/peer_update": tplr.T() - peer_start,
-                    "validator/timing/gather": gather_time,
-                    "validator/timing/evaluation": tplr.T() - eval_start,
-                    "validator/timing/model_update": tplr.T() - update_start,
-                    "validator/distributed/world_size": self.world_size,
-                }
-                self.wandb.log(evaluation_metrics, step=self.global_step)
-
-                # Log metrics to InfluxDB in parallel using primitive types
-                gather_success_rate = float(success_rate * 100)
-                total_skipped = len(skipped_uids)
-
-                self.metrics_logger.log(
-                    measurement="validator_window_v2",
-                    tags={
-                        "window": int(self.sync_window),
-                        "global_step": int(self.global_step),
-                        "world_size": int(self.world_size),
-                    },
-                    fields={
-                        "loss_own_before": float(avg_loss_before_per_batch_own),
-                        "loss_own_after": float(avg_loss_after_per_batch_own),
-                        "loss_random_before": float(avg_loss_before_per_batch_random),
-                        "loss_random_after": float(avg_loss_after_per_batch_random),
-                        "loss_own_improvement": float(self.relative_improvement_own),
-                        "loss_random_improvement": float(
-                            self.relative_improvement_random
-                        ),
-                        "current_block": int(self.current_block),
-                        "evaluated_uids_count": int(len(self.evaluated_uids)),
-                        "learning_rate": float(self.scheduler.get_last_lr()[0]),
-                        "active_miners_count": int(len(self.valid_score_indices)),
-                        "gather_success_rate": gather_success_rate,
-                        "window_total_time": float(tplr.T() - window_start),
-                        "peer_update_time": float(tplr.T() - peer_start),
-                        "gather_time": float(gather_time),
-                        "evaluation_time": float(tplr.T() - eval_start),
-                        "model_update_time": float(tplr.T() - update_start),
-                        "total_peers": int(len(self.comms.peers)),
-                        "total_skipped": int(total_skipped),
-                    },
-                    with_system_metrics=True,
-                    with_gpu_metrics=True,
-                )
-                tplr.log_with_context(
-                    level="info",
-                    message="Finished metrics logging call for validator",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-
-                # 17. Create checkpoints periodically
-                if (
-                    self.global_step % self.hparams.checkpoint_frequency == 0
-                    and self.global_step != 0
-                ):
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"Creating checkpoint at global_step {self.global_step}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                    checkpoint_data = {
-                        "model_state_dict": {
-                            k: v.cpu().clone()
-                            for k, v in self.model.state_dict().items()
-                        },
-                        "optimizer_state_dict": {
-                            k: v.cpu().clone() if torch.is_tensor(v) else v
-                            for k, v in self.optimizer.state_dict().items()
-                        },
-                        "scheduler_state_dict": self.scheduler.state_dict(),
-                        "momentum": {
-                            n: torch.zeros_like(p)
-                            for n, p in self.model.named_parameters()
-                        },
-                        "start_window": self.start_window,
-                        "current_window": self.current_window,
-                        "sync_window": self.sync_window,
-                    }
-                    asyncio.create_task(
-                        self.comms.put(
-                            state_dict=checkpoint_data,
-                            uid=str(self.uid),
-                            window=self.sync_window,
-                            key="checkpoint",
-                            global_step=self.global_step,
-                            local=False,
-                        )
-                    )
-
-            # Ensure all ranks wait for each other before proceeding to the next window
-            tplr.distrib.barrier()
-
-            # 18. Increment global step
-            self.global_step += 1
-
-            torch.cuda.empty_cache()
+                # All ranks sleep and continue together
+                await asyncio.sleep(30)
+                continue
 
     def select_initial_peers(self) -> list[int] | None:
         """
@@ -2803,74 +2026,111 @@ class Validator:
 
         return selected_peers
 
-    async def evaluate_miner_sync(
-        self, eval_uid: int
-    ) -> dict[str, bool | float | int | str]:
+    async def evaluate_miner_sync(self, eval_uid, model_to_compare_against=None):
         """
-        Evaluates the synchronization of a specific miner with the validator's model.
+        Evaluate miner synchronization by comparing model states.
 
         Args:
-            validator: The validator instance
-            eval_uid: The UID of the miner to evaluate
-
-        Returns:
-            dict: Synchronization metrics and score
+            eval_uid: UID of the miner to evaluate
+            model_to_compare_against: Model to use for comparison (defaults to self.model)
         """
-        # Fetch the miner's debug dictionary
-        debug_result = await self.comms.get(
-            uid=str(eval_uid),
-            window=self.sync_window - 1,
-            key="debug",
-            local=False,
-            stale_retention=10,
-        )
+        if model_to_compare_against is None:
+            model_to_compare_against = self.model
 
-        # Check if we got a valid result
-        if debug_result is None:
+        try:
+            # Get miner's debug information
+            debug_result = await self.comms.get(
+                uid=str(eval_uid),
+                window=self.sync_window,
+                key="debug",
+                local=False,
+                stale_retention=10,
+            )
+
+            if debug_result is None:
+                return {"sync_score": 0.0, "reason": "no_debug_data"}
+
+            debug_dict = debug_result[0]
+            if debug_dict is None:
+                return {"sync_score": 0.0, "reason": "empty_debug_data"}
+
+            # Compare model with debug dict using the provided model
+            sync_result = tplr.neurons.compare_model_with_debug_dict(
+                model=model_to_compare_against,
+                debug_dict=debug_dict,
+                tolerance=self.hparams.sync_tolerance,
+            )
+
             return {
-                "success": False,
-                "error": "Failed to retrieve debug dictionary",
-                "sync_score": 0.0,
+                "sync_score": sync_result.get("sync_score", 0.0),
+                "reason": sync_result.get("reason", "unknown"),
             }
 
-        miner_debug_dict = cast(dict, debug_result[0])
+        except Exception as e:
+            tplr.log_with_context(
+                level="warning",
+                message=f"Error evaluating sync for UID {eval_uid}: {e}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            return {"sync_score": 0.0, "reason": f"error: {str(e)}"}
 
-        # Validate debug dictionary format
-        if miner_debug_dict is None or not isinstance(miner_debug_dict, dict):
-            return {
-                "success": False,
-                "error": "Invalid debug dictionary format",
-                "sync_score": 0.0,
-            }
+    def log_final_scores_table(self):
+        """Log a table of final scores for all miners."""
+        if not tplr.distrib.is_rank0():
+            return  # Only rank 0 logs tables
 
-        # Get current learning rate
-        current_lr = self.scheduler.get_last_lr()[0]
+        try:
+            # Create rich table
+            table = Table(title=f"Final Scores - Window {self.sync_window}")
+            table.add_column("UID", style="cyan")
+            table.add_column("Gradient", style="green")
+            table.add_column("Binary", style="yellow")
+            table.add_column("Sync", style="blue")
+            table.add_column("Final", style="red")
+            table.add_column("Weight", style="magenta")
 
-        # Compare miner's debug dict with validator's model
-        comparison_metrics = await tplr.neurons.compare_model_with_debug_dict(
-            model=self.model,
-            debug_dict=miner_debug_dict,
-            learning_rate=current_lr,
-            index_range=(10, 12),
-        )
+            # Add rows for miners with scores
+            for uid in range(len(self.final_scores)):
+                if (
+                    uid in self.gradient_scores
+                    or uid in self.binary_indicator_scores
+                    or uid in self.sync_scores
+                ):
+                    gradient_score = self.gradient_scores.get(uid, 0.0)
+                    binary_score = self.binary_indicator_scores.get(uid, 0.0)
+                    sync_score = self.sync_scores.get(uid, 0.0)
+                    final_score = float(self.final_scores[uid])
+                    weight = float(self.weights[uid])
 
-        if not comparison_metrics["success"]:
-            return {
-                "success": False,
-                "error": "Failed to compare model with debug dictionary",
-                "sync_score": 0.0,
-            }
+                    table.add_row(
+                        str(uid),
+                        f"{gradient_score:.4f}",
+                        f"{binary_score:.1f}",
+                        f"{sync_score:.4f}",
+                        f"{final_score:.4f}",
+                        f"{weight:.6f}",
+                    )
 
-        # Calculate sync score using the formula: score = (1-x/5)^2.5
-        # where x is the average steps behind, capped at 5
-        avg_steps_behind = comparison_metrics["avg_steps_behind"]
-        x = min(avg_steps_behind, 5.0)
-        sync_score = max(0.0, (1.0 - x / 5.0) ** 2.5)
+            # Log table using rich console
+            console = Console(file=StringIO(), width=120)
+            console.print(table)
+            table_str = console.file.getvalue()
 
-        # Add the sync score to the metrics
-        result = {**comparison_metrics, "sync_score": sync_score}
+            tplr.log_with_context(
+                level="info",
+                message=f"Final Scores Table:\n{table_str}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
 
-        return result
+        except Exception as e:
+            tplr.log_with_context(
+                level="warning",
+                message=f"Error creating scores table: {e}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
 
     def apply_aggregated_gradients(self, aggregation_result: dict):
         """
@@ -3010,7 +2270,7 @@ class Validator:
     # ------------- state helpers ----------------
     def _state_dict(self):
         # Only rank 0 needs to create the full state dict
-        if not self.is_rank0():
+        if not tplr.distrib.is_rank0():
             return None
 
         return {
@@ -3035,7 +2295,7 @@ class Validator:
 
     def save_state(self):
         # Only rank 0 saves state
-        if not self.is_rank0():
+        if not tplr.distrib.is_rank0():
             return
 
         try:
@@ -3052,7 +2312,7 @@ class Validator:
 
     def load_state(self):
         # Rank 0 loads state from file, then broadcasts to other ranks
-        if self.is_rank0():
+        if tplr.distrib.is_rank0():
             tplr.logger.info("Loading validator state")
 
             # ── stage 1: read file ─────────────────────────────────────────────

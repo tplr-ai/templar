@@ -47,6 +47,7 @@ from . import __version__
 from .chain import ChainManager
 from .compress import CompressDCT, TransformDCT
 from .config import BUCKET_SECRETS, client_config
+from .profilers import get_timer_profiler
 from .schemas import Bucket
 
 # Constants
@@ -55,6 +56,8 @@ LOCAL_TMP_DIR = "/tmp/local_store"
 PEERS_FILE_PREFIX = "peers_"
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
+
+_timer_profiler = get_timer_profiler("Comms")
 
 
 class Comms(ChainManager):
@@ -319,6 +322,7 @@ class Comms(ChainManager):
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(self.bucket)
 
+    @_timer_profiler.profile("s3_put_object")
     async def s3_put_object(
         self,
         key: str,
@@ -367,6 +371,7 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error uploading {key} to S3: {e}")
             raise
 
+    @_timer_profiler.profile("s3_get_object")
     async def s3_get_object(
         self,
         key: str,
@@ -473,6 +478,7 @@ class Comms(ChainManager):
 
     #  Large File Operations
 
+    @_timer_profiler.profile("upload_large_file")
     async def upload_large_file(self, file_path: str, key: str, s3_client):
         """Uploads a large file to S3 using asynchronous multipart upload with 5MB chunks."""
         upload_id = None
@@ -569,6 +575,7 @@ class Comms(ChainManager):
                     tplr.logger.error(f"Failed to abort multipart upload: {abort_e}")
             raise
 
+    @_timer_profiler.profile("download_large_file")
     async def download_large_file(
         self, s3_client, bucket: Bucket, key: str, file_size: int, temp_file_path: str
     ):
@@ -694,6 +701,7 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error in download_large_file for {key}: {e}")
             return False
 
+    @_timer_profiler.profile("put")
     async def put(
         self,
         state_dict: dict,
@@ -771,6 +779,7 @@ class Comms(ChainManager):
         tplr.logger.info(f"{tplr.P(window, put_end - put_start)} PUT {filename} <--")
         return put_end - put_start
 
+    @_timer_profiler.profile("get")
     async def get(
         self,
         uid: str,
@@ -923,6 +932,7 @@ class Comms(ChainManager):
             # Short delay before retrying
             await asyncio.sleep(0.1)
 
+    @_timer_profiler.profile("gather")
     async def gather(
         self,
         my_uid: int | None,
@@ -1122,6 +1132,7 @@ class Comms(ChainManager):
 
     ## Peer Management
 
+    @_timer_profiler.profile("is_miner_active")
     async def is_miner_active(self, uid: int, recent_windows: int = 3) -> bool:
         """Check if the miner has uploaded gradients in the last few windows."""
         tplr.logger.debug(f"Checking if UID {uid} is active")
@@ -1216,6 +1227,7 @@ class Comms(ChainManager):
         tplr.logger.info(f"Validator Bucket: {validator_bucket}")
         return validator_bucket, validator_uid
 
+    @_timer_profiler.profile("get_latest_checkpoint")
     async def get_latest_checkpoint(self, version):
         """
         Sequentially check:
@@ -1359,6 +1371,7 @@ class Comms(ChainManager):
             await self._purge_s3_client(bucket)
             return None
 
+    @_timer_profiler.profile("load_checkpoint")
     async def load_checkpoint(
         self,
         model,
@@ -1488,6 +1501,7 @@ class Comms(ChainManager):
             if os.path.exists(temp_file):
                 os.remove(temp_file)
 
+    @_timer_profiler.profile("get_peer_list")
     async def get_peer_list(
         self, fetch_previous: bool = False
     ) -> tuple[list[int], int] | None:
@@ -1643,6 +1657,7 @@ class Comms(ChainManager):
         tplr.logger.warning("Max retries exceeded while trying to fetch start_window")
         return None
 
+    @_timer_profiler.profile("save_checkpoint")
     async def save_checkpoint(
         self,
         model,
@@ -1893,6 +1908,7 @@ class Comms(ChainManager):
                     f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
                 )
 
+    @_timer_profiler.profile("load_aggregation")
     async def load_aggregation(self, window: int):
         """
         Load aggregated gradients for a specified window from the aggregation server.

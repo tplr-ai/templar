@@ -7,6 +7,27 @@ The TPLR project includes profiling utilities for performance tracking and analy
 1. **Timer Profiler** - Tracks function execution times
 2. **Shard Profiler** - Measures parquet file read performance
 
+## Profiled Components
+
+The following components in the TPLR system are instrumented with profilers:
+
+### R2DatasetLoader
+
+- **Profiler Type**: Timer Profiler
+- **Instance Name**: `R2DatasetLoader`
+- **Tracked Operations**: Data loading, parquet file processing, tokenization, metadata operations
+
+### Comms (Communication Layer)
+
+- **Profiler Type**: Timer Profiler
+- **Instance Name**: `Comms`
+- **Tracked Operations**:
+  - **S3 Operations**: `s3_put_object`, `s3_get_object`, `upload_large_file`, `download_large_file`
+  - **Data Operations**: `put`, `get`, `gather`
+  - **Checkpoint Operations**: `get_latest_checkpoint`, `load_checkpoint`, `save_checkpoint`
+  - **Peer Management**: `is_miner_active`, `get_peer_list`
+  - **Aggregation**: `load_aggregation`
+
 ## Configuration via Environment Variables
 
 By default, all profilers are **disabled** to minimize overhead in production environments. You can control profiler behavior using the following environment variables:
@@ -160,6 +181,32 @@ python neurons/miner.py
 3. View timing traces and performance metrics
 4. Use the search functionality to filter by specific functions or shards
 
+### Example Metrics in Jaeger
+
+When running with profilers enabled, you can expect to see metrics like:
+
+**R2DatasetLoader Operations:**
+
+- `R2DatasetLoader.next_pages` - Time to load next batch of data pages
+- `R2DatasetLoader._get_parquet` - Time to fetch parquet files from R2
+- `R2DatasetLoader._batch_tokenize` - Time for tokenization operations
+
+**Comms Operations:**
+
+- `Comms.s3_put_object` - Time to upload objects to S3/R2
+- `Comms.s3_get_object` - Time to download objects from S3/R2
+- `Comms.gather` - Time to gather gradients from multiple peers
+- `Comms.save_checkpoint` - Time to save model checkpoints
+- `Comms.load_checkpoint` - Time to load model checkpoints
+- `Comms.is_miner_active` - Time to check if a miner is active
+
+These metrics help identify performance bottlenecks in:
+
+- Network I/O operations (S3/R2 transfers)
+- Peer communication and gradient gathering
+- Checkpoint operations
+- Data loading and processing
+
 ### Alternative Endpoints
 
 The Jaeger setup provides multiple endpoints:
@@ -210,6 +257,7 @@ docker compose down -v
 - Wait 30 seconds for metrics export (default interval)
 - Check Jaeger logs: `docker compose logs jaeger`
 - Verify service name: Look for `tplr-profiler.profiler` in the service dropdown
+- Check for specific operations: Look for `Comms.*` or `R2DatasetLoader.*` in the traces
 
 **Performance impact:**
 

@@ -93,6 +93,16 @@ class TimerProfiler(BaseProfiler[Dict[str, List[float]]]):
         if error:
             self.counts[f"{name}_errors"] += 1
 
+        # Record to OpenTelemetry if enabled
+        otel_integration = self._get_otel_integration()
+        if otel_integration:
+            otel_integration.record_function_timing(
+                function_name=name,
+                duration=elapsed,
+                error=error,
+                attributes={"profiler_name": self.name},
+            )
+
     def get_stats(self, func_name: Optional[str] = None) -> Dict:
         """Get timing statistics for a specific function or all functions"""
         if func_name:

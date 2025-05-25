@@ -103,6 +103,28 @@ class ShardProfiler(BaseProfiler[Dict[str, Dict]]):
                 f"(2x slower than avg: {avg_time:.4f}s)"
             )
 
+        # Record to OpenTelemetry if enabled
+        otel_integration = self._get_otel_integration()
+        if otel_integration:
+            file_size = None
+            if perf_data["file_size"] != "unknown":
+                try:
+                    file_size = int(perf_data["file_size"])
+                except (ValueError, TypeError):
+                    file_size = None
+
+            otel_integration.record_shard_metrics(
+                shard_path=shard_path,
+                duration=elapsed,
+                file_size=file_size,
+                row_count=perf_data["num_rows"],
+                attributes={
+                    "profiler_name": self.name,
+                    "row_groups": str(perf_data.get("row_groups", "unknown")),
+                    "rows_per_group": str(perf_data.get("rows_per_group", "unknown")),
+                },
+            )
+
         return elapsed
 
     def log_read_details(

@@ -2,6 +2,7 @@
 Base profiler class providing common functionality for all profilers.
 """
 
+import os
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Generic, Optional, TypeVar
 
@@ -27,6 +28,7 @@ class BaseProfiler(ABC, Generic[T]):
         """
         self.name = name
         self._stats_data: Dict[str, Any] = {}
+        self._otel_enabled = self._should_enable_otel()
 
     @abstractmethod
     def get_stats(self, key: Optional[str] = None) -> Dict[str, Any]:
@@ -64,6 +66,18 @@ class BaseProfiler(ABC, Generic[T]):
             return
 
         self._log_stats_details(stats)
+
+    def _should_enable_otel(self) -> bool:
+        """Check if OpenTelemetry should be enabled for this profiler."""
+        return os.environ.get("TPLR_ENABLE_OTEL_PROFILING", "0") == "1"
+
+    def _get_otel_integration(self):
+        """Get OpenTelemetry integration if enabled."""
+        if not self._otel_enabled:
+            return None
+        from .otel_integration import get_otel_integration
+
+        return get_otel_integration()
 
     @abstractmethod
     def _log_stats_details(self, stats: Dict[str, Any]) -> None:

@@ -1,0 +1,31 @@
+version: '3.8'
+
+# From https://github.com/hansehe/jaeger-all-in-one/blob/master/docker-compose.yml
+# https://www.jaegertracing.io/docs/1.55/deployment/
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - 6831:6831/udp # accept jaeger.thrift in compact Thrift protocol used by most current Jaeger clients
+      - 6832:6832/udp # accept jaeger.thrift in binary Thrift protocol used by Node.js Jaeger client (because thriftrw npm package does not support compact protocol)
+      - 5775:5775/udp # accept zipkin.thrift in compact Thrift protocol (deprecated; only used by very old Jaeger clients, circa 2016)
+      - 5778:5778 # serve configs, sampling strategies
+      - 4317:4317 # OpenTelemetry Protocol (OTLP) over gRPC
+      - 4318:4318 # OpenTelemetry Protocol (OTLP) over HTTP
+      - 16686:16686 # UI port
+      - 14269:14269 # collector admin port: health check at / and metrics at /metrics
+      - 9411:9411 # Zipkin compatible endpoint
+    environment:
+      - MEMORY_MAX_TRACES=100000
+      - SPAN_STORAGE_TYPE=badger
+      - BADGER_EPHEMERAL=false
+      - BADGER_DIRECTORY_VALUE=/badger/data
+      - BADGER_DIRECTORY_KEY=/badger/key
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+      - COLLECTOR_OTLP_ENABLED=true
+    volumes:
+      - jaeger-data:/badger
+    restart: unless-stopped
+
+volumes:
+  jaeger-data:

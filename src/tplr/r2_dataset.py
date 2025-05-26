@@ -635,7 +635,25 @@ class R2DatasetLoader(DatasetLoader):
                 )
 
         executor = self.get_executor()
-        result = await asyncio.get_event_loop().run_in_executor(executor, _read_group)
+
+        # Retry logic for closed file handles
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(
+                    executor, _read_group
+                )
+                break
+            except IOError as e:
+                if "Parquet file is closed" in str(e) and attempt < max_retries - 1:
+                    logger.warning(
+                        f"Parquet file was closed during read, attempting to reopen (attempt {attempt + 1}/{max_retries}): {shard_path}"
+                    )
+                    # Clear from cache and get fresh file handle
+                    self._parquet_cache.pop(shard_path, None)
+                    pf_data = await self._get_parquet(shard_path)
+                else:
+                    raise
 
         elapsed = shard_profiler.end_read(
             timer_id,

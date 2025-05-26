@@ -37,7 +37,7 @@
     "peer_list_window_margin": 2,
     "active_check_interval": 60,
     "recent_windows": 5,
-    "power_normalisation": 3.0,
+    "power_normalisation": 2.2,
     "validator_sample_rate": 0.1,
     "catch_up_threshold": 15,
     "catch_up_batch_size": 5,
@@ -50,7 +50,7 @@
     "openskill_beta": 7,
     "openskill_tau": 0.1,
     "checkpoint_init_version": null,
-    "num_evaluation_bins": 5,
+    "num_evaluation_bins": 10,
     "quantization_bins": 256,
     "quantization_range": 6
 }

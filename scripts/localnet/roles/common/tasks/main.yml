@@ -1,12 +1,12 @@
-- name: Update apt cache
+- name: Update apt cache manually
   become: true
-  apt:
-    update_cache: yes
-  tags: common
+  command: apt-get update
+  changed_when: false
 
 - name: Install base apt packages
   become: true
   apt:
+    update_cache: no
     name:
       - build-essential
       - make
@@ -73,9 +73,26 @@
     name: pm2
     global: yes
     state: present
+    version: 6.0.5
   tags: common
 
-- name: Install Bittensor CLI and Python dependencies
+- name: Check pip version
+  command: python3 -m pip --version
+  register: pip_version_output
+  changed_when: false
+  tags: common
+
+- name: Extract pip version
+  set_fact:
+    pip_version: "{{ pip_version_output.stdout | regex_search('([0-9]+\\.[0-9]+\\.[0-9]+)', '\\1') | first }}"
+  tags: common
+
+- name: Debug pip version
+  debug:
+    msg: "Detected pip version: {{ pip_version }}"
+  tags: common
+
+- name: Install Bittensor CLI and Python dependencies for pip >= 23.0
   become: true
   pip:
     name:
@@ -95,9 +112,34 @@
       - scipy
       - "rich>=13.0.0"
     state: present
-    extra_args: --no-cache-dir
+    extra_args: --no-cache-dir --break-system-packages --ignore-installed
+  when: (pip_version is version('23.0', '>='))
   tags: common
-  
+
+- name: Install Bittensor CLI and Python dependencies for pip < 23.0
+  become: true
+  pip:
+    name:
+      - bittensor-cli
+      - bt-decode
+      - torch
+      - boto3
+      - einops
+      - aiofiles==24.1.0
+      - aioboto3==13.2.0
+      - transformers
+      - wandb
+      - python-dotenv
+      - zstandard
+      - s3fs
+      - pyarrow
+      - scipy
+      - "rich>=13.0.0"
+    state: present
+    extra_args: --no-cache-dir --ignore-installed
+  when: (pip_version is version('23.0', '<'))
+  tags: common
+
 - name: Install uv package installer
   become: true
   shell: |
@@ -108,13 +150,13 @@
   args:
     executable: /bin/bash
   tags: common
-  
+
 - name: Verify uv installation
   shell: which uv
   register: uv_which
   changed_when: false
   tags: common
-  
+
 - name: Show uv location
   debug:
     var: uv_which.stdout

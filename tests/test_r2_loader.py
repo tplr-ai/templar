@@ -1332,6 +1332,271 @@ def test_validate_configuration_correctness(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Test for closed parquet file retry logic
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_closed_parquet_file_retry(monkeypatch):
+    """
+    Test that when a parquet file is closed during read_row_group,
+    it is properly retried by clearing the cache and reopening the file.
+    """
+    # Create a minimal parquet file in memory
+    table = pa.table(
+        {"text": ["Testing closed file retry", "More testing", "Even more testing"]}
+    )
+    parquet_buffer = io.BytesIO()
+    pq.write_table(table, parquet_buffer)
+    parquet_bytes = parquet_buffer.getvalue()
+
+    # Track state
+    close_count = 0
+    reopen_count = 0
+
+    class ClosableFile:
+        """A file-like object that can be closed programmatically"""
+
+        def __init__(self, data):
+            self.buffer = io.BytesIO(data)
+            self.closed = False
+
+        def read(self, *args, **kwargs):
+            if self.closed:
+                raise ValueError("I/O operation on closed file.")
+            return self.buffer.read(*args, **kwargs)
+
+        def seek(self, *args, **kwargs):
+            if self.closed:
+                raise ValueError("I/O operation on closed file.")
+            return self.buffer.seek(*args, **kwargs)
+
+        def tell(self):
+            if self.closed:
+                raise ValueError("I/O operation on closed file.")
+            return self.buffer.tell()
+
+        def close(self):
+            self.closed = True
+            self.buffer.close()
+
+    # Keep reference to the file object so we can close it
+    current_file = None
+
+    # Mock filesystem
+    class TestFS:
+        def open(self, *args, **kwargs):
+            nonlocal current_file, reopen_count
+            reopen_count += 1
+            current_file = ClosableFile(parquet_bytes)
+            return current_file
+
+        def info(self, path):
+            return {"Size": len(parquet_bytes)}
+
+    test_fs = TestFS()
+
+    def get_test_fs(*args, **kwargs):
+        return test_fs
+
+    monkeypatch.setattr(R2DatasetLoader, "_get_fs", get_test_fs)
+
+    # Mock _get_parquet_file to return our closable file
+    def mock_get_parquet_file(path):
+        f = test_fs.open(path)
+        pf = pq.ParquetFile(f)
+
+        return {
+            "file": f,
+            "parquet": pf,
+            "lock": threading.Lock(),
+            "metadata": {
+                "path": path,
+                "file_size": len(parquet_bytes),
+                "num_row_groups": pf.num_row_groups,
+                "total_rows": pf.metadata.num_rows,
+                "schema": str(pf.schema),
+            },
+        }
+
+    monkeypatch.setattr(R2DatasetLoader, "_get_parquet_file", mock_get_parquet_file)
+
+    # Mock metadata
+    dummy_config = "test_config"
+    dummy_shard = {"path": "test/path.parquet", "num_rows": 3}
+
+    async def fake_metadata(*args):
+        shard_sizes = {
+            dummy_config: {
+                "total_rows": 3,
+                "split": "train",
+                "shards": [dummy_shard],
+            }
+        }
+        metadata_config = {"configs": [{"config_name": dummy_config}]}
+        shard_index = ShardIndex(shard_sizes)
+        R2DatasetLoader._shard_index = shard_index
+        return (shard_sizes, metadata_config, shard_index)
+
+    monkeypatch.setattr(R2DatasetLoader, "_load_r2_metadata", fake_metadata)
+
+    # Setup tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Create loader
+    loader = R2DatasetLoader(
+        batch_size=1, sequence_length=20, tokenizer=tokenizer, pack_samples=False
+    )
+    loader.num_rows_per_page = 1
+
+    # Get the parquet file into cache
+    pf_data = await loader._get_parquet("test/path.parquet")
+
+    # Now close the file to simulate the error condition
+    current_file.close()
+    assert current_file.closed == True
+
+    # Call read_row_group - it should detect the closed file and retry
+    chosen_shard = {"path": "test/path.parquet", "num_rows": 3}
+    result = await loader.read_row_group(pf_data, chosen_shard, 0)
+
+    # Verify the retry happened
+    assert reopen_count == 2, (
+        f"Expected file to be opened twice (initial + retry), but was opened {reopen_count} times"
+    )
+    assert result is not None, "read_row_group should have succeeded after retry"
+
+    # Verify the cache was cleared and new file is in cache
+    assert "test/path.parquet" in loader._parquet_cache
+    new_pf_data = loader._parquet_cache["test/path.parquet"]
+    assert not new_pf_data["file"].closed, "New cached file should not be closed"
+
+
+@pytest.mark.asyncio
+async def test_closed_parquet_file_max_retries_exceeded(monkeypatch):
+    """
+    Test that when a parquet file is persistently closed during read_row_group,
+    it eventually raises an error after max retries.
+    """
+    # Create a minimal parquet file in memory
+    table = pa.table({"text": ["Testing max retries"]})
+    parquet_buffer = io.BytesIO()
+    pq.write_table(table, parquet_buffer)
+    parquet_bytes = parquet_buffer.getvalue()
+
+    open_count = 0
+
+    class AlwaysClosedFile:
+        """A file-like object that is always closed"""
+
+        def __init__(self, data):
+            self.buffer = io.BytesIO(data)
+            self.closed = True
+
+        def read(self, *args, **kwargs):
+            raise ValueError("I/O operation on closed file.")
+
+        def seek(self, *args, **kwargs):
+            raise ValueError("I/O operation on closed file.")
+
+        def tell(self):
+            raise ValueError("I/O operation on closed file.")
+
+        def close(self):
+            pass
+
+    # Mock filesystem that always returns closed files
+    class TestFS:
+        def open(self, *args, **kwargs):
+            nonlocal open_count
+            open_count += 1
+            return AlwaysClosedFile(parquet_bytes)
+
+        def info(self, path):
+            return {"Size": len(parquet_bytes)}
+
+    test_fs = TestFS()
+
+    def get_test_fs(*args, **kwargs):
+        return test_fs
+
+    monkeypatch.setattr(R2DatasetLoader, "_get_fs", get_test_fs)
+
+    # Track how many times _get_parquet_file is called
+    get_parquet_calls = 0
+
+    # Mock _get_parquet_file to return a "valid" structure but with always-closed file
+    def mock_get_parquet_file(path):
+        nonlocal get_parquet_calls
+        get_parquet_calls += 1
+
+        # We need to create a valid ParquetFile first, then close it
+        buffer = io.BytesIO(parquet_bytes)
+        pf = pq.ParquetFile(buffer)
+        buffer.close()  # Close the buffer to simulate the issue
+
+        return {
+            "file": AlwaysClosedFile(parquet_bytes),
+            "parquet": pf,
+            "lock": threading.Lock(),
+            "metadata": {
+                "path": path,
+                "file_size": len(parquet_bytes),
+                "num_row_groups": pf.num_row_groups,
+                "total_rows": pf.metadata.num_rows,
+                "schema": str(pf.schema),
+            },
+        }
+
+    monkeypatch.setattr(R2DatasetLoader, "_get_parquet_file", mock_get_parquet_file)
+
+    # Mock metadata
+    dummy_config = "test_config"
+    dummy_shard = {"path": "test/always_closed.parquet", "num_rows": 1}
+
+    async def fake_metadata(*args):
+        shard_sizes = {
+            dummy_config: {
+                "total_rows": 1,
+                "split": "train",
+                "shards": [dummy_shard],
+            }
+        }
+        metadata_config = {"configs": [{"config_name": dummy_config}]}
+        shard_index = ShardIndex(shard_sizes)
+        R2DatasetLoader._shard_index = shard_index
+        return (shard_sizes, metadata_config, shard_index)
+
+    monkeypatch.setattr(R2DatasetLoader, "_load_r2_metadata", fake_metadata)
+
+    # Setup tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Create loader
+    loader = R2DatasetLoader(
+        batch_size=1, sequence_length=20, tokenizer=tokenizer, pack_samples=False
+    )
+    loader.num_rows_per_page = 1
+
+    # Get the parquet file into cache
+    pf_data = await loader._get_parquet("test/always_closed.parquet")
+
+    # Call read_row_group - it should fail after max retries
+    chosen_shard = {"path": "test/always_closed.parquet", "num_rows": 1}
+
+    with pytest.raises(IOError, match="Parquet file is closed"):
+        await loader.read_row_group(pf_data, chosen_shard, 0)
+
+    # Verify it tried multiple times (initial attempt + retries)
+    # The loader will try 3 times total (initial + 2 retries for max_retries=3)
+    assert get_parquet_calls >= 3, (
+        f"Expected at least 3 _get_parquet_file calls, but got {get_parquet_calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Regression test: concurrent access to the same ParquetFile must be safe.
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio

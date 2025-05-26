@@ -35,10 +35,6 @@ import bittensor.core.subtensor as bt_subtensor
 import numpy as np
 import torch
 import torch.optim as optim
-
-# Local
-import tplr
-import tplr.distrib as distrib  # Using the provided distrib.py content
 import uvloop
 import websockets
 from torch import autocast
@@ -48,11 +44,15 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
+from transformers import LlamaForCausalLM
+
+# Local
+import tplr
+import tplr.distrib as distrib  # Using the provided distrib.py content
 from tplr.distrib import (
     ddp_init,
     # rank_world is already available as distrib.rank_world
 )
-from transformers import LlamaForCausalLM
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -740,26 +740,26 @@ class Miner:
                 loss = outputs.loss
                 total_loss_this_window += loss.item()
 
-            if num_batches_this_window > 0:
-                tplr.logger.info(
-                    f"Normalizing gradients by {num_batches_this_window} accumulation steps"
-                )
-                for param in self.model.parameters():
-                    if param.grad is not None:
-                        param.grad.div_(num_batches_this_window)
+                if num_batches_this_window > 0:
+                    tplr.logger.info(
+                        f"Normalizing gradients by {num_batches_this_window} accumulation steps"
+                    )
+                    for param in self.model.parameters():
+                        if param.grad is not None:
+                            param.grad.div_(num_batches_this_window)
 
                 loss.backward()  # ← DDP syncs grads right here
                 num_batches_this_window += 1
 
-                tplr.logger.debug(
+                tplr.logger.info(
                     f"[Rank {self.rank}] Loss: {outputs.loss.item()} [Window {step_window}, Batch {i + 1}]"
                 )
 
-            tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - training_start_time)} "
-                f"[Rank {self.rank}] Completed local gradient accumulation. "
-                f"Batches: {num_batches_this_window}"
-            )
+                tplr.logger.info(
+                    f"{tplr.P(step_window, tplr.T() - training_start_time)} "
+                    f"[Rank {self.rank}] Completed local gradient accumulation. "
+                    f"Batches: {num_batches_this_window}"
+                )
 
             if distrib.is_rank0():  # only rank-0 polls chain
                 while self.current_window == step_window:

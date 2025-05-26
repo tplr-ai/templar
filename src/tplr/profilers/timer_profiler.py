@@ -6,6 +6,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 import tplr
 
+try:
+    from opentelemetry import trace
+except ImportError:
+    trace = None
+
 from .base_profiler import BaseProfiler, DummyProfiler, create_profiler_getter
 
 
@@ -36,15 +41,41 @@ class TimerProfiler(BaseProfiler[Dict[str, List[float]]]):
                 timer_id = f"{name}_{id(args)}"
                 self.active_timers[timer_id] = start_time
 
+                # Create span for tracing
+                otel_integration = self._get_otel_integration()
+                span = None
+                if otel_integration:
+                    span = otel_integration.create_span(
+                        f"{self.name}.{name}",
+                        attributes={"profiler_name": self.name, "function_name": name}
+                    )
+
                 try:
-                    result = await func(*args, **kwargs)
-                    elapsed = time.time() - start_time
-                    self._record_timing(name, elapsed)
-                    tplr.logger.info(f"[TIMER] {self.name}.{name}: {elapsed:.4f}s")
-                    return result
+                    if span:
+                        with span as current_span:
+                            result = await func(*args, **kwargs)
+                            elapsed = time.time() - start_time
+                            self._record_timing(name, elapsed)
+                            print(f"[OTEL DEBUG] Span completed: {self.name}.{name} ({elapsed:.4f}s)")
+                            tplr.logger.info(f"[TIMER] {self.name}.{name}: {elapsed:.4f}s")
+                            return result
+                    else:
+                        result = await func(*args, **kwargs)
+                        elapsed = time.time() - start_time
+                        self._record_timing(name, elapsed)
+                        tplr.logger.info(f"[TIMER] {self.name}.{name}: {elapsed:.4f}s")
+                        return result
                 except Exception as e:
                     elapsed = time.time() - start_time
                     self._record_timing(name, elapsed, error=True)
+                    if span and trace:
+                        try:
+                            # Get current span and set error status
+                            current_span = trace.get_current_span()
+                            if current_span:
+                                current_span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+                        except Exception:
+                            pass  # Ignore tracing errors
                     tplr.logger.error(
                         f"[TIMER] {self.name}.{name}: {elapsed:.4f}s (error: {e})"
                     )
@@ -62,15 +93,41 @@ class TimerProfiler(BaseProfiler[Dict[str, List[float]]]):
                 timer_id = f"{name}_{id(args)}"
                 self.active_timers[timer_id] = start_time
 
+                # Create span for tracing
+                otel_integration = self._get_otel_integration()
+                span = None
+                if otel_integration:
+                    span = otel_integration.create_span(
+                        f"{self.name}.{name}",
+                        attributes={"profiler_name": self.name, "function_name": name}
+                    )
+
                 try:
-                    result = func(*args, **kwargs)
-                    elapsed = time.time() - start_time
-                    self._record_timing(name, elapsed)
-                    tplr.logger.info(f"[TIMER] {self.name}.{name}: {elapsed:.4f}s")
-                    return result
+                    if span:
+                        with span as current_span:
+                            result = func(*args, **kwargs)
+                            elapsed = time.time() - start_time
+                            self._record_timing(name, elapsed)
+                            print(f"[OTEL DEBUG] Span completed: {self.name}.{name} ({elapsed:.4f}s)")
+                            tplr.logger.info(f"[TIMER] {self.name}.{name}: {elapsed:.4f}s")
+                            return result
+                    else:
+                        result = func(*args, **kwargs)
+                        elapsed = time.time() - start_time
+                        self._record_timing(name, elapsed)
+                        tplr.logger.info(f"[TIMER] {self.name}.{name}: {elapsed:.4f}s")
+                        return result
                 except Exception as e:
                     elapsed = time.time() - start_time
                     self._record_timing(name, elapsed, error=True)
+                    if span and trace:
+                        try:
+                            # Get current span and set error status
+                            current_span = trace.get_current_span()
+                            if current_span:
+                                current_span.set_status(trace.Status(trace.StatusCode.ERROR, str(e)))
+                        except Exception:
+                            pass  # Ignore tracing errors
                     tplr.logger.error(
                         f"[TIMER] {self.name}.{name}: {elapsed:.4f}s (error: {e})"
                     )

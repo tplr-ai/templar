@@ -93,20 +93,74 @@ The deployment process follows these steps in sequence:
    - Installs Bittensor CLI and Python dependencies
    - Installs uv package manager for Python
 
-2. **Templar Deployment** (`templar` role):
+2. **Subtensor Setup** (`subtensor` role):
+   - Sets up local Bittensor subtensor node
+   - Creates and funds wallets for validators and miners
+
+3. **Telemetry Stack** (`telemetry` role):
+   - Installs Docker and Docker Compose
+   - Deploys Jaeger all-in-one container
+   - Configures OpenTelemetry endpoints
+   - Sets up profiling infrastructure
+
+4. **Templar Deployment** (`templar` role):
    - Checks for available GPUs on the system
    - Creates Python virtual environment using uv
    - Installs project dependencies with uv sync
-   - Configures environment variables via .env file
+   - Configures environment variables via .env file (including profiling settings)
    - Generates PM2 ecosystem.config.js for process management
    - Starts validator processes with proper GPU assignments
    - Starts miner processes with proper GPU assignments
 
-3. **Network Verification** (`network_verify` role):
+5. **Network Verification** (`network_verify` role):
    - Validates that all processes are running correctly
    - Ensures proper network connectivity
+   - Verifies telemetry stack is operational
 
-### 4. Technical Implementation Details
+### 4. Telemetry and Performance Monitoring
+
+The localnet deployment now includes built-in telemetry and profiling capabilities powered by Jaeger and OpenTelemetry.
+
+#### Telemetry Stack
+- **Jaeger All-in-One**: Distributed tracing and metrics collection
+- **OpenTelemetry**: Standard metrics export from TPLR profilers
+- **Performance Profiling**: Automatic profiling of R2 operations, data loading, and communication layers
+
+#### Configuration
+Telemetry is enabled by default in the vault.yml:
+```yaml
+# Telemetry, Tracing and Profiling Configuration
+enable_telemetry: true                    # Enable Jaeger telemetry stack deployment
+jaeger_host: "127.0.0.1"                 # Jaeger host address
+otlp_grpc_port: 4317              # OpenTelemetry OTLP gRPC port
+otlp_ui_port: 16686                    # Jaeger UI port
+
+# Profiler Configuration (enabled by default for localnet development)
+TPLR_ENABLE_PROFILERS: "1"              # Master switch for all profilers
+TPLR_ENABLE_TIMER_PROFILER: "1"         # Enable function timing profiler
+TPLR_ENABLE_SHARD_PROFILER: "1"         # Enable shard read performance profiler
+TPLR_ENABLE_OTEL_PROFILING: "1"         # Enable OpenTelemetry metrics export
+```
+
+#### Accessing Telemetry Data
+After deployment, access the Jaeger UI at:
+- **Jaeger UI**: http://localhost:16686
+- **Service Name**: Look for `tplr-profiler.profiler` in the service dropdown
+
+#### Available Metrics
+- **R2DatasetLoader Operations**: Data loading, parquet processing, tokenization
+- **Comms Operations**: S3 transfers, gradient gathering, checkpoint operations
+- **Performance Insights**: Network I/O bottlenecks, peer communication timing
+
+#### Disabling Telemetry
+To disable telemetry for production-like testing:
+```yaml
+enable_telemetry: false
+TPLR_ENABLE_PROFILERS: "0"
+TPLR_ENABLE_OTEL_PROFILING: "0"
+```
+
+### 5. Technical Implementation Details
 
 #### Wallet Management
 The playbook uses a secure approach to wallet management:
@@ -163,6 +217,36 @@ pm2 stop all
 pm2 delete all
 ```
 
+### Telemetry Management
+
+Check telemetry stack status:
+
+```bash
+cd ~/telemetry
+docker compose ps
+```
+
+View Jaeger logs:
+
+```bash
+cd ~/telemetry
+docker compose logs jaeger
+```
+
+Restart telemetry stack:
+
+```bash
+cd ~/telemetry
+docker compose restart
+```
+
+Stop telemetry stack:
+
+```bash
+cd ~/telemetry
+docker compose down
+```
+
 ### Troubleshooting Steps
 
 1. **GPU Issues**
@@ -202,6 +286,11 @@ pm2 delete all
 4. **Port Conflicts**:
    - Error: Address already in use
    - Solution: Stop conflicting processes or change ports in configuration
+
+5. **Docker Installation Issues**:
+   - Error: `containerd.io : Conflicts: containerd`
+   - Solution: The telemetry role automatically removes conflicting packages and installs Docker CE
+   - Manual fix: `sudo apt remove docker docker-engine docker.io containerd runc && sudo apt update`
 
 ## Advanced Usage
 

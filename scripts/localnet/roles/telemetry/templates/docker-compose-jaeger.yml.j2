@@ -1,0 +1,97 @@
+# OpenTelemetry telemetry stack for TPLR
+
+services:
+  # OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: tplr-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "{{ otlp_grpc_port | default(4317) }}:4317"   # OTLP gRPC receiver
+      - "{{ otlp_http_port | default(4318) }}:4318"   # OTLP HTTP receiver
+      - "8889:8889"                   # Prometheus metrics endpoint
+    depends_on:
+      - tempo
+      - jaeger
+      - prometheus
+    networks:
+      - tplr-telemetry
+    restart: unless-stopped
+
+  # Jaeger for traces
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: tplr-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14250:14250"  # gRPC
+    networks:
+      - tplr-telemetry
+    restart: unless-stopped
+
+  # Tempo for traces (alternative)
+  tempo:
+    image: grafana/tempo:latest
+    container_name: tplr-tempo
+    command: [ "-config.file=/etc/tempo.yaml" ]
+    volumes:
+      - ./tempo-config.yaml:/etc/tempo.yaml
+      - tempo-data:/tmp/tempo
+    ports:
+      - "3200:3200"   # Tempo query API
+    networks:
+      - tplr-telemetry
+    restart: unless-stopped
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: tplr-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - tplr-telemetry
+    restart: unless-stopped
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: tplr-grafana
+    ports:
+      - "{{ otlp_ui_port | default(3000) }}:3000"         # Grafana UI
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_DEFAULT_THEME=dark
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+    networks:
+      - tplr-telemetry
+    restart: unless-stopped
+    depends_on:
+      - tempo
+      - prometheus
+      - jaeger
+
+volumes:
+  tempo-data:
+  grafana-data:
+  prometheus-data:
+
+networks:
+  tplr-telemetry:
+    driver: bridge

@@ -1,0 +1,155 @@
+---
+- name: Check if Docker is installed
+  shell: docker --version
+  register: docker_check
+  ignore_errors: true
+  when: enable_telemetry | default(false)
+
+- name: Install Docker if not present
+  become: true
+  apt:
+    name:
+      - docker.io
+      - docker-compose
+    state: present
+    update_cache: yes
+  when: enable_telemetry | default(false) and docker_check.rc != 0
+
+- name: Start and enable Docker service
+  become: true
+  systemd:
+    name: docker
+    state: started
+    enabled: yes
+  when: enable_telemetry | default(false)
+
+- name: Add user to docker group
+  become: true
+  user:
+    name: "{{ ansible_user }}"
+    groups: docker
+    append: yes
+  when: enable_telemetry | default(false)
+
+- name: Create telemetry directory
+  file:
+    path: "{{ ansible_env.HOME }}/telemetry"
+    state: directory
+    mode: '0755'
+  when: enable_telemetry | default(false)
+
+- name: Copy telemetry stack docker-compose file
+  template:
+    src: docker-compose-jaeger.yml.j2
+    dest: "{{ ansible_env.HOME }}/telemetry/docker-compose.yml"
+    mode: '0644'
+  when: enable_telemetry | default(false)
+  register: docker_compose_updated
+
+- name: Copy OpenTelemetry Collector configuration
+  template:
+    src: otel-collector-config.yaml.j2
+    dest: "{{ ansible_env.HOME }}/telemetry/otel-collector-config.yaml"
+    mode: '0644'
+  when: enable_telemetry | default(false)
+  register: otel_config_updated
+
+- name: Copy Tempo configuration
+  template:
+    src: tempo-config.yaml.j2
+    dest: "{{ ansible_env.HOME }}/telemetry/tempo-config.yaml"
+    mode: '0644'
+  when: enable_telemetry | default(false)
+  register: tempo_config_updated
+
+- name: Copy Prometheus configuration
+  template:
+    src: prometheus.yml.j2
+    dest: "{{ ansible_env.HOME }}/telemetry/prometheus.yml"
+    mode: '0644'
+  when: enable_telemetry | default(false)
+  register: prometheus_config_updated
+
+- name: Copy Grafana datasources configuration
+  template:
+    src: grafana-datasources.yaml.j2
+    dest: "{{ ansible_env.HOME }}/telemetry/grafana-datasources.yaml"
+    mode: '0644'
+  when: enable_telemetry | default(false)
+  register: grafana_config_updated
+
+- name: Stop any existing telemetry containers
+  shell: |
+    # Stop and remove any existing telemetry containers
+    docker stop $(docker ps -q --filter "name=tplr-") 2>/dev/null || true
+    docker rm $(docker ps -aq --filter "name=tplr-") 2>/dev/null || true
+
+    # Stop any containers using our ports
+    docker stop $(docker ps -q --filter "publish={{ otlp_grpc_port | default(4317) }}") 2>/dev/null || true
+    docker stop $(docker ps -q --filter "publish={{ otlp_http_port | default(4318) }}") 2>/dev/null || true
+
+    # Clean up any existing compose stack if directory exists
+    if [ -d "{{ ansible_env.HOME }}/telemetry" ]; then
+      cd "{{ ansible_env.HOME }}/telemetry"
+      docker compose down --remove-orphans 2>/dev/null || true
+    fi
+  when: enable_telemetry | default(false)
+  ignore_errors: true
+
+- name: Force kill processes using OTLP ports if still occupied
+  shell: |
+    # Kill any remaining processes using our ports
+    for port in {{ otlp_grpc_port | default(4317) }} {{ otlp_http_port | default(4318) }}; do
+      pid=$(lsof -ti:$port 2>/dev/null || true)
+      if [ ! -z "$pid" ]; then
+        echo "Killing process $pid using port $port"
+        kill -9 $pid 2>/dev/null || true
+        sleep 2
+      fi
+    done
+  when: enable_telemetry | default(false)
+  ignore_errors: true
+
+- name: Start telemetry stack
+  shell: |
+    cd "{{ ansible_env.HOME }}/telemetry"
+    docker compose up -d
+  when: enable_telemetry | default(false)
+  register: telemetry_output
+
+- name: Wait for Grafana to be ready
+  uri:
+    url: "http://{{ jaeger_host | default('localhost') }}:{{ otlp_ui_port | default(3000) }}"
+    method: GET
+    status_code: 200
+  register: grafana_check
+  until: grafana_check.status == 200
+  retries: 30
+  delay: 5
+  when: enable_telemetry | default(false)
+  ignore_errors: true
+
+- name: Display telemetry stack status
+  debug:
+    msg: |
+      OpenTelemetry telemetry stack deployed successfully!
+
+      🎯 Access Points:
+      - Grafana Dashboard: http://{{ jaeger_host | default('localhost') }}:{{ otlp_ui_port | default(3000) }} (admin/admin)
+      - Jaeger Tracing UI: http://{{ jaeger_host | default('localhost') }}:16686
+      - Prometheus Metrics: http://{{ jaeger_host | default('localhost') }}:9090
+      - Tempo API: http://{{ jaeger_host | default('localhost') }}:3200
+
+      📡 OTLP Endpoints:
+      - OTLP gRPC: http://{{ jaeger_host | default('localhost') }}:{{ otlp_grpc_port | default(4317) }}
+      - OTLP HTTP: http://{{ jaeger_host | default('localhost') }}:{{ otlp_http_port | default(4318) }}
+
+      📊 Data Sources configured in Grafana:
+      - Prometheus (metrics) - Default
+      - Tempo (traces)
+      - Jaeger (traces)
+
+      🚀 To enable telemetry in your apps:
+      export TPLR_ENABLE_OTEL_PROFILING=1
+      export OTEL_EXPORTER_OTLP_ENDPOINT=http://{{ jaeger_host | default('localhost') }}:{{ otlp_grpc_port | default(4317) }}
+  when: enable_telemetry | default(false)

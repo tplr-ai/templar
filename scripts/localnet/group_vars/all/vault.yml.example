@@ -61,3 +61,17 @@ R2_DATASET_WRITE_SECRET_ACCESS_KEY: "YOUR_R2_DATASET_WRITE_SECRET_ACCESS_KEY"
 # R2_AGGREGATOR_WRITE_SECRET_ACCESS_KEY: "YOUR_R2_AGGREGATOR_WRITE_SECRET_ACCESS_KEY"
 # R2_AGGREGATOR_READ_ACCESS_KEY_ID: "YOUR_R2_AGGREGATOR_READ_ACCESS_KEY_ID"
 # R2_AGGREGATOR_READ_SECRET_ACCESS_KEY: "YOUR_R2_AGGREGATOR_READ_SECRET_ACCESS_KEY"
+
+# Telemetry, Tracing and Profiling Configuration
+enable_telemetry: true                    # Enable Jaeger telemetry stack deployment
+jaeger_host: "127.0.0.1"                 # Jaeger host address
+otlp_grpc_port: 4317              # OpenTelemetry OTLP gRPC port
+otlp_http_port: 4318              # OpenTelemetry OTLP HTTP port
+otlp_ui_port: 16686                    # Jaeger UI port
+
+# Profiler Configuration (enabled by default for localnet development)
+TPLR_ENABLE_PROFILERS: "1"              # Master switch for all profilers
+TPLR_ENABLE_TIMER_PROFILER: "1"         # Enable function timing profiler
+TPLR_ENABLE_SHARD_PROFILER: "1"         # Enable shard read performance profiler
+TPLR_ENABLE_OTEL_PROFILING: "1"         # Enable OpenTelemetry metrics export
+OTEL_EXPORTER_OTLP_ENDPOINT: "http://{{ jaeger_host }}:{{ otlp_grpc_port }}" # OTLP endpoint URL

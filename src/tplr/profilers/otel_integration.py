@@ -7,11 +7,16 @@ Provides telemetry metrics export functionality for profiler data.
 import os
 from typing import Dict, Any, Optional
 
-from opentelemetry import metrics
+from opentelemetry import metrics, trace
 from opentelemetry.metrics import get_meter_provider
+from opentelemetry.trace import get_tracer_provider
 from opentelemetry.sdk.metrics import MeterProvider as SDKMeterProvider
+from opentelemetry.sdk.trace import TracerProvider as SDKTracerProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.resources import Resource
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
 
 class OpenTelemetryProfilerIntegration:
@@ -21,20 +26,45 @@ class OpenTelemetryProfilerIntegration:
     Handles creation and management of OTEL metrics for profiler data.
     """
 
-    def __init__(self, service_name: str = "tplr-profiler"):
+    def __init__(self, service_name: str = None):
         """
         Initialize OpenTelemetry integration.
 
         Args:
             service_name: Service name for telemetry identification
         """
+        if service_name is None:
+            # Auto-detect service name from environment or script name
+            service_name = self._detect_service_name()
         self.service_name = service_name
         self.enabled = self._should_enable()
         self.meter: Optional[metrics.Meter] = None
+        self.tracer: Optional[trace.Tracer] = None
         self.instruments: Dict[str, Any] = {}
 
         if self.enabled:
             self._setup_meter()
+            self._setup_tracer()
+
+    def _detect_service_name(self) -> str:
+        """Auto-detect service name from environment or process."""
+        # Try to get from environment first
+        service_name = os.environ.get("OTEL_SERVICE_NAME")
+        if service_name:
+            return service_name
+        
+        # Try to detect from script name
+        import sys
+        script_name = os.path.basename(sys.argv[0]) if sys.argv else "unknown"
+        
+        if "validator" in script_name:
+            return "tplr-validator"
+        elif "miner" in script_name:
+            return "tplr-miner"
+        elif "aggregator" in script_name:
+            return "tplr-aggregator"
+        else:
+            return "tplr-profiler"
 
     def _should_enable(self) -> bool:
         """Check if OpenTelemetry should be enabled based on environment."""
@@ -48,7 +78,7 @@ class OpenTelemetryProfilerIntegration:
         # Get or create meter provider
         provider = get_meter_provider()
         if not isinstance(provider, SDKMeterProvider):
-            # If no provider is configured, create a basic one
+            # If no provider is configured, create a basic one with service resource
             endpoint = os.environ.get(
                 "OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"
             )
@@ -56,15 +86,48 @@ class OpenTelemetryProfilerIntegration:
             reader = PeriodicExportingMetricReader(
                 exporter, export_interval_millis=30000
             )
-            provider = SDKMeterProvider(metric_readers=[reader])
+            
+            # Create resource with service name
+            resource = Resource.create({"service.name": self.service_name})
+            provider = SDKMeterProvider(metric_readers=[reader], resource=resource)
             metrics.set_meter_provider(provider)
 
         self.meter = provider.get_meter(
-            name=f"{self.service_name}.profiler", version="1.0.0"
+            f"{self.service_name}.profiler", "1.0.0"
         )
 
         # Create metric instruments
         self._create_instruments()
+
+    def _setup_tracer(self) -> None:
+        """Setup OpenTelemetry tracer."""
+        if not self.enabled:
+            return
+
+        # Get or create tracer provider
+        provider = get_tracer_provider()
+        if not isinstance(provider, SDKTracerProvider):
+            # If no provider is configured, create a basic one with service resource
+            endpoint = os.environ.get(
+                "OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317"
+            )
+            span_exporter = OTLPSpanExporter(endpoint=endpoint)
+            span_processor = BatchSpanProcessor(
+                span_exporter,
+                max_queue_size=512,
+                schedule_delay_millis=1000,  # Export every 1 second
+                max_export_batch_size=64
+            )
+            
+            # Create resource with service name
+            resource = Resource.create({"service.name": self.service_name})
+            provider = SDKTracerProvider(resource=resource)
+            provider.add_span_processor(span_processor)
+            trace.set_tracer_provider(provider)
+
+        self.tracer = provider.get_tracer(
+            f"{self.service_name}.profiler", "1.0.0"
+        )
 
     def _create_instruments(self) -> None:
         """Create OpenTelemetry metric instruments."""
@@ -141,6 +204,27 @@ class OpenTelemetryProfilerIntegration:
         # Record error count if applicable
         if error:
             self.instruments["function_error_count"].add(1, attributes=base_attrs)
+
+    def create_span(self, operation_name: str, attributes: Optional[Dict[str, str]] = None):
+        """
+        Create a trace span for an operation.
+
+        Args:
+            operation_name: Name of the operation
+            attributes: Additional attributes for the span
+
+        Returns:
+            Span context manager or None if tracing is disabled
+        """
+        if not self.enabled or not self.tracer:
+            print(f"[OTEL DEBUG] Tracing disabled: enabled={self.enabled}, tracer={self.tracer is not None}")
+            return None
+
+        span_attrs = attributes or {}
+        print(f"[OTEL DEBUG] Creating span '{operation_name}' for service '{self.service_name}'")
+        return self.tracer.start_as_current_span(
+            operation_name, attributes=span_attrs
+        )
 
     def record_shard_metrics(
         self,

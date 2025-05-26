@@ -1,14 +1,16 @@
 """Templar Autonomous Model Converter Service
 
 This script implements an autonomous service that continuously monitors the latest
-model checkpoints, saves them with proper versioning, and converts them to GGUF format.
-It runs on a fixed interval (default 10 minutes), downloads the latest model checkpoint,
-saves it with a versioned format that combines the package version and the global step
-in a semver-compatible way: {version}-alpha+{global_step}, and converts it to GGUF format.
+model checkpoints, saves them with proper versioning, converts them to GGUF format,
+and optionally uploads them to HuggingFace Hub and/or Ollama. It runs on a fixed interval
+(default 10 minutes), downloads the latest model checkpoint, saves it with a versioned format
+that combines the package version and the global step in a semver-compatible way:
+{version}-alpha+{global_step}, and converts it to GGUF format.
 
 Key Features:
     - Automatic checkpoint detection and versioned saving
     - GGUF format conversion for compatibility with efficient inference engines
+    - Optional upload to HuggingFace Hub and Ollama
     - Resource management
     - Service-oriented design for continuous operation
 
@@ -17,12 +19,17 @@ Environment Requirements:
     - R2 Dataset access credentials
     - Python scripts for GGUF conversion (scripts/convert_hf_to_gguf.py)
     - Python package: gguf (will be automatically installed if missing)
+    - Optional: huggingface_hub for HuggingFace uploads
+    - Optional: Ollama for local model deployment
 
 Required Environment Variables:
     R2_DATASET_ACCOUNT_ID: R2 dataset account identifier (see miner documentation)
     R2_DATASET_BUCKET_NAME: R2 storage bucket name (see miner documentation)
     R2_DATASET_READ_ACCESS_KEY_ID: R2 read access key (see miner documentation)
     R2_DATASET_READ_SECRET_ACCESS_KEY: R2 secret access key (see miner documentation)
+
+Optional Environment Variables (for uploads):
+    HF_TOKEN: HuggingFace authentication token for Hub uploads
 
 Usage Examples:
     Basic run:
@@ -33,6 +40,14 @@ Usage Examples:
             --netuid 3 \
             --device cuda \
             --conversion_interval 300
+
+    With upload capabilities:
+        $ export HF_TOKEN=hf_your_token_here
+        $ uv run scripts/model_converter.py \
+            --netuid 3 \
+            --device cuda \
+            --upload-hf \
+            --upload-ollama
 
 For additional environment setup, refer to the miner documentation:
 https://github.com/tplr-ai/templar/blob/main/docs/miner.md
@@ -51,6 +66,13 @@ import bittensor as bt
 from transformers.models.llama import LlamaForCausalLM
 
 import tplr
+
+try:
+    from huggingface_hub import HfApi, create_repo
+
+    HF_AVAILABLE = True
+except ImportError:
+    HF_AVAILABLE = False
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/upload"
@@ -101,6 +123,51 @@ def config() -> bt.Config:
         help="Override the wallet's UID",
     )
 
+    parser.add_argument(
+        "--upload-hf",
+        action="store_true",
+        help="Upload converted model to HuggingFace Hub",
+    )
+    parser.add_argument(
+        "--upload-ollama",
+        action="store_true",
+        help="Upload GGUF model to Ollama",
+    )
+    parser.add_argument(
+        "--hf_repo_id",
+        type=str,
+        default=None,
+        help="HuggingFace repository ID (e.g., 'username/model-name'). Auto-generated if not provided.",
+    )
+    parser.add_argument(
+        "--hf_token",
+        type=str,
+        default=None,
+        help="HuggingFace token for authentication (overrides HF_TOKEN env var)",
+    )
+    parser.add_argument(
+        "--ollama_model_name",
+        type=str,
+        default=None,
+        help="Custom Ollama model name (default: auto-generate from version)",
+    )
+    parser.add_argument(
+        "--private",
+        action="store_true",
+        help="Create private HuggingFace repository",
+    )
+    parser.add_argument(
+        "--commit_message",
+        type=str,
+        default=None,
+        help="Custom commit message for HuggingFace upload",
+    )
+    parser.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="Show what would be uploaded without actually uploading",
+    )
+
     bt.subtensor.add_args(parser)
     parser.parse_args()
     return bt.config(parser)
@@ -109,15 +176,17 @@ def config() -> bt.Config:
 class ModelConverter:
     """Templar Model Converter Component
 
-    The ModelConverter is responsible for monitoring model checkpoints and converting them
-    to GGUF format. It continuously checks for new checkpoints by window number,
-    downloads them, and saves them with a versioned format combining the package version and
-    the global step in a semver-compatible way: {version}-alpha+{global_step}
+    The ModelConverter is responsible for monitoring model checkpoints, converting them
+    to GGUF format, and optionally uploading them to deployment platforms. It continuously
+    checks for new checkpoints by window number, downloads them, and saves them with a
+    versioned format combining the package version and the global step in a semver-compatible
+    way: {version}-alpha+{global_step}
 
     Key Features:
         - Automatic checkpoint detection by window number
         - Versioned model saving using semver-compatible format
         - GGUF format conversion
+        - Optional upload to HuggingFace Hub and Ollama
         - Resource management
 
     Workflow:
@@ -125,8 +194,9 @@ class ModelConverter:
         2. Download and load checkpoint when detected
         3. Save model with versioned format
         4. Convert model to GGUF format
-        5. Clean up previous versions
-        6. Wait for next checkpoint
+        5. Upload to HuggingFace Hub and/or Ollama if configured
+        6. Clean up previous versions
+        7. Wait for next checkpoint
 
     Attributes:
         config (bt.Config): Configuration object containing CLI arguments
@@ -374,15 +444,16 @@ class ModelConverter:
         return gguf_output
 
     async def _convert(self) -> Optional[int]:
-        """Execute model save and GGUF conversion process.
+        """Execute model save, GGUF conversion, and optional upload process.
 
         Workflow:
         1. Load model from checkpoint
         2. Create versioned directory
         3. Save model and tokenizer to versioned location
         4. Convert model to GGUF format (raises error on failure)
-        5. Log metrics about the conversion operations
-        6. Clean up previous versions
+        5. Upload to HuggingFace Hub and/or Ollama if configured
+        6. Log metrics about the conversion and upload operations
+        7. Clean up previous versions
 
         Returns:
             Optional[int]: Global step number if successful, None on failure
@@ -424,6 +495,40 @@ class ModelConverter:
             tplr.logger.error(error_msg)
             raise RuntimeError(error_msg)
 
+        hf_success = False
+        ollama_success = False
+        hf_repo_id = None
+        ollama_model_name = None
+
+        if getattr(self.config, "upload_hf", False):
+            hf_repo_id = generate_repo_id(
+                version_string, getattr(self.config, "hf_repo_id", None)
+            )
+            tplr.logger.info(f"Uploading to HuggingFace: {hf_repo_id}")
+
+            hf_success = upload_to_huggingface(
+                model_path=model_dir,
+                repo_id=hf_repo_id,
+                version=version_string,
+                private=getattr(self.config, "private", False),
+                commit_message=getattr(self.config, "commit_message", None),
+                dry_run=getattr(self.config, "dry_run", False),
+                hf_token=getattr(self.config, "hf_token", None),
+            )
+
+        if getattr(self.config, "upload_ollama", False):
+            ollama_model_name = (
+                getattr(self.config, "ollama_model_name", None)
+                or f"templar-{version_string}"
+            )
+            tplr.logger.info(f"Uploading to Ollama: {ollama_model_name}")
+
+            ollama_success = upload_to_ollama(
+                model_path=model_dir,
+                model_name=ollama_model_name,
+                dry_run=getattr(self.config, "dry_run", False),
+            )
+
         self.metrics_logger.log(
             measurement="model_conversion",
             tags={
@@ -435,16 +540,24 @@ class ModelConverter:
             fields={
                 "conversion_timestamp": time.time(),
                 "gguf_converted": 1.0,
+                "hf_uploaded": 1.0 if hf_success else 0.0,
+                "ollama_uploaded": 1.0 if ollama_success else 0.0,
             },
         )
 
         self.last_converted_window = checkpoint_window
         self.last_block_number = block_number
 
+        upload_info = ""
+        if hf_success:
+            upload_info += f", HF: {hf_repo_id}"
+        if ollama_success:
+            upload_info += f", Ollama: {ollama_model_name}"
+
         success_message = (
             f"Successfully converted model (window: {checkpoint_window}, "
             f"global_step: {global_step}, block: {block_number}, version: {version_string}"
-            f", GGUF: {gguf_path})"
+            f", GGUF: {gguf_path}{upload_info})"
         )
         tplr.logger.info(success_message)
 
@@ -580,6 +693,220 @@ def ensure_gguf_script_exists() -> None:
         error_msg = f"Downloaded GGUF script at {GGUF_SCRIPT_PATH} is missing or empty"
         tplr.logger.error(error_msg)
         raise RuntimeError(error_msg)
+
+
+def generate_repo_id(version: str, custom_repo_id: Optional[str] = None) -> str:
+    """Generate HuggingFace repository ID.
+
+    Args:
+        version: Version string
+        custom_repo_id: Custom repo ID if provided
+
+    Returns:
+        Repository ID string
+    """
+    if custom_repo_id:
+        return custom_repo_id
+    safe_version = version.replace("+", "-").replace(".", "-")
+    return f"templar-model-{safe_version}"
+
+
+def check_huggingface_auth(hf_token: Optional[str] = None) -> bool:
+    """Check if HuggingFace authentication is available.
+
+    Args:
+        hf_token: Optional HF token to use instead of environment variable
+
+    Returns:
+        True if authentication is successful
+    """
+    if not HF_AVAILABLE:
+        return False
+    token = hf_token or os.getenv("HF_TOKEN")
+    if not token:
+        return False
+
+    try:
+        api = HfApi(token=token)
+        api.whoami()
+        return True
+    except Exception:
+        return False
+
+
+def upload_to_huggingface(
+    model_path: str,
+    repo_id: str,
+    version: str,
+    private: bool = False,
+    commit_message: Optional[str] = None,
+    dry_run: bool = False,
+    hf_token: Optional[str] = None,
+) -> bool:
+    """Upload model to HuggingFace Hub.
+
+    Args:
+        model_path: Path to the model directory
+        repo_id: HuggingFace repository ID
+        version: Version tag
+        private: Whether to create private repository
+        commit_message: Custom commit message
+        dry_run: Whether to perform dry run
+        hf_token: Optional HF token for authentication
+
+    Returns:
+        Success status
+    """
+    if not HF_AVAILABLE:
+        tplr.logger.error(
+            "HuggingFace Hub library not available. Install with: pip install huggingface_hub"
+        )
+        return False
+
+    if not check_huggingface_auth(hf_token):
+        token = hf_token or os.getenv("HF_TOKEN")
+        if not token:
+            tplr.logger.error(
+                "HuggingFace token not found. Provide via --hf_token or set HF_TOKEN environment variable"
+            )
+        else:
+            tplr.logger.error(
+                "HuggingFace authentication failed. Verify your token or run: huggingface-cli login"
+            )
+        return False
+
+    if dry_run:
+        tplr.logger.info(
+            f"[DRY RUN] Would upload {model_path} to HuggingFace repo: {repo_id}"
+        )
+        return True
+
+    try:
+        token = hf_token or os.getenv("HF_TOKEN")
+        api = HfApi(token=token)
+        try:
+            create_repo(repo_id, private=private, exist_ok=True, token=token)
+            tplr.logger.info(f"Repository ready: {repo_id}")
+        except Exception as e:
+            tplr.logger.error(f"Failed to create repository: {e}")
+            return False
+        if not commit_message:
+            commit_message = f"Upload model version {version}"
+
+        tplr.logger.info(f"Uploading model to HuggingFace: {repo_id}")
+        api.upload_folder(
+            folder_path=model_path,
+            repo_id=repo_id,
+            commit_message=commit_message,
+            ignore_patterns=["*.gguf"],
+        )
+
+        tplr.logger.info(
+            f"Successfully uploaded to HuggingFace: https://huggingface.co/{repo_id}"
+        )
+        return True
+
+    except Exception as e:
+        tplr.logger.error(f"HuggingFace upload failed: {e}")
+        return False
+
+
+def check_ollama_available() -> bool:
+    """Check if Ollama is available."""
+    try:
+        subprocess.run(
+            ["ollama", "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def create_ollama_modelfile(gguf_path: str, model_name: str, temp_dir: str) -> str:
+    """Create Ollama Modelfile for GGUF model.
+
+    Args:
+        gguf_path: Path to GGUF file
+        model_name: Name for the Ollama model
+        temp_dir: Temporary directory for Modelfile
+
+    Returns:
+        Path to created Modelfile
+    """
+    modelfile_path = os.path.join(temp_dir, "Modelfile")
+
+    modelfile_content = f"""FROM {gguf_path}
+
+PARAMETER temperature 0.8
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+
+SYSTEM \"\"\"You are a helpful AI assistant based on the Templar model.\"\"\"
+"""
+
+    with open(modelfile_path, "w") as f:
+        f.write(modelfile_content)
+
+    return modelfile_path
+
+
+def upload_to_ollama(
+    model_path: str,
+    model_name: str,
+    dry_run: bool = False,
+) -> bool:
+    """Upload GGUF model to Ollama.
+
+    Args:
+        model_path: Path to the model directory
+        model_name: Name for the Ollama model
+        dry_run: Whether to perform dry run
+
+    Returns:
+        Success status
+    """
+    if not check_ollama_available():
+        tplr.logger.error("Ollama not found. Install from: https://ollama.ai")
+        return False
+
+    gguf_path = os.path.join(model_path, "model.gguf")
+    if not os.path.exists(gguf_path):
+        tplr.logger.error(f"GGUF file not found: {gguf_path}")
+        return False
+
+    if dry_run:
+        tplr.logger.info(
+            f"[DRY RUN] Would upload {gguf_path} to Ollama as: {model_name}"
+        )
+        return True
+
+    try:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            modelfile_path = create_ollama_modelfile(gguf_path, model_name, temp_dir)
+            tplr.logger.info(f"Creating Ollama model: {model_name}")
+            subprocess.run(
+                ["ollama", "create", model_name, "-f", modelfile_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
+
+            tplr.logger.info(f"Successfully created Ollama model: {model_name}")
+            tplr.logger.info(f"Test with: ollama run {model_name}")
+            return True
+
+    except subprocess.CalledProcessError as e:
+        tplr.logger.error(f"Ollama upload failed: {e.stderr}")
+        return False
+    except Exception as e:
+        tplr.logger.error(f"Ollama upload failed: {e}")
+        return False
 
 
 def main() -> None:

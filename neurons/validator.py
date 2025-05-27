@@ -1167,21 +1167,28 @@ class Validator:
 
                 # Calculate time window for this sync window
                 if tplr.distrib.is_rank0():
-                    # Use a simpler approach like validator_old - query timestamp for current sync window
+                   
+                    sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
                     retries = 0
                     delay = 1
                     max_retries = 2
                     max_delay = 60
                     while True:
                         try:
-                            # Query timestamp for current block instead of calculated future block
-                            response = self.subtensor.query_module("Timestamp", "Now")
+                            # Query timestamp for target block instead of current block
+                            response = self.subtensor.query_module("Timestamp", "Now", block=sync_block)
                             ts_value = response.value / 1000  # convert ms to seconds
+                            tplr.log_with_context(
+                                level="info", 
+                                message=f"Queried timestamp for target block {sync_block}: {ts_value}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                            )
                             break
                         except Exception as e:
                             tplr.log_with_context(
                                 level="error",
-                                message=f"Failed to query current timestamp: {str(e)}. Retry {retries + 1}/{max_retries}",
+                                message=f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
                             )
@@ -1193,9 +1200,7 @@ class Validator:
                                     sync_window=self.sync_window,
                                     current_window=self.current_window,
                                 )
-                                ts_value = (
-                                    time.time()
-                                )  # Fallback: use current system time
+                                ts_value = time.time()  # Fallback: use current system time
                                 break
                             await asyncio.sleep(delay)
                             delay = min(delay * 2, max_delay)
@@ -1358,7 +1363,7 @@ class Validator:
                 evaluation_uids = []
                 if tplr.distrib.is_rank0():
                     # Determine evaluation UIDs using binning strategy
-                    num_bins = self.hparams.num_bins
+                    num_bins = self.hparams.num_evaluation_bins
                     bins = self.bin_evaluation_peers(num_bins)
                     selected_bin = self.select_next_bin_for_evaluation(num_bins)
                     evaluation_uids = self.select_evaluation_uids_from_bin(
@@ -1443,44 +1448,85 @@ class Validator:
 
                         loader_own = loader_own_result["loader"]
                         loader_random = loader_random_result["loader"]
-                        local_pages = loader_own_result[
-                            "pages"
-                        ]  # ← FIX: Add missing variable
+                        local_pages = loader_own_result["pages"]  # ← FIX: Add missing variable
 
+                        # Add detailed logging for gradient fetching across all ranks
                         # Get miner's gradient
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"[Rank {self.rank}] Attempting to fetch gradient for UID {eval_uid} with time window {time_min} to {time_max}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
+                        )
+
                         gradient_result = await self.comms.get(
                             uid=str(eval_uid),
                             window=self.sync_window,
                             key="gradient",
                             local=False,
                             stale_retention=10,
+                            time_max=time_max,  # ADD THIS
+                            time_min=time_min,  # ADD THIS
+                        )
+
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"[Rank {self.rank}] Gradient fetch result for UID {eval_uid}: {gradient_result is not None}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                         if gradient_result is None:
                             tplr.log_with_context(
                                 level="warning",
-                                message=f"Failed to get gradient for UID {eval_uid}",
+                                message=f"[Rank {self.rank}] Failed to get gradient for UID {eval_uid} - no data returned",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
+                                eval_uid=eval_uid,
                             )
                             local_evaluation_results[eval_uid] = {
                                 "gradient_score": 0.0,
                                 "binary_indicator_score": 0.0,
                                 "sync_score": 0.0,
                                 "success": False,
+                                "error": "No gradient data returned",
                             }
                             continue
 
-                        # Extract metadata from gradient result IMMEDIATELY after getting it
+                        # Check for status errors in gradient result
+                        if isinstance(gradient_result, dict) and gradient_result.get("__status") in ["TOO_LATE", "TOO_EARLY"]:
+                            tplr.log_with_context(
+                                level="warning",
+                                message=f"[Rank {self.rank}] Gradient fetch for UID {eval_uid} failed with status: {gradient_result.get('__status')}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=eval_uid,
+                            )
+                            local_evaluation_results[eval_uid] = {
+                                "gradient_score": 0.0,
+                                "binary_indicator_score": 0.0,
+                                "sync_score": 0.0,
+                                "success": False,
+                                "error": f"Gradient fetch status: {gradient_result.get('__status')}",
+                            }
+                            continue
+
+                        # Extract the gradient data (should be tuple: (state_dict, metadata))
+                        if isinstance(gradient_result, (list, tuple)) and len(gradient_result) >= 1:
+                            state_dict = gradient_result[0]
+                            metadata = gradient_result[1] if len(gradient_result) > 1 else None
+                        else:
+                            state_dict = gradient_result
+                            metadata = None
+
+                        # Extract pages info from metadata
                         miner_pages = None
-                        if (
-                            gradient_result
-                            and len(gradient_result) > 1
-                            and gradient_result[1]
-                        ):
-                            metadata = gradient_result[1]
-                            if isinstance(metadata, dict) and "pages_info" in metadata:
-                                miner_pages = metadata["pages_info"]
+                        if metadata and isinstance(metadata, dict) and "pages_info" in metadata:
+                            miner_pages = metadata["pages_info"]
+                        elif isinstance(state_dict, dict) and "metadata" in state_dict:
+                            miner_pages = state_dict["metadata"].get("pages_info")
 
                         # Verify pages match if miner sent them
                         if miner_pages is not None:
@@ -1564,6 +1610,32 @@ class Validator:
                             )
                         )
 
+                        # Calculate per-batch averages
+                        loss_before_own_per_batch = (
+                            loss_before_own / n_batches_own if n_batches_own > 0 else 0
+                        )
+                        loss_before_random_per_batch = (
+                            loss_before_random / n_batches_random
+                            if n_batches_random > 0
+                            else 0
+                        )
+
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"[Rank {self.rank}] UID {eval_uid} Loss before (own data): {loss_before_own_per_batch:.6f}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
+                        )
+
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"[Rank {self.rank}] UID {eval_uid} Loss before (random data): {loss_before_random_per_batch:.6f}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
+                        )
+
                         # Apply miner's gradient to the temporary model
                         miner_gradient = gradient_result[0]
                         if miner_gradient is not None:
@@ -1613,7 +1685,7 @@ class Validator:
                                                 f"[{validation_step}] Invalid values in gradient for {name}: {nan_count} NaN, {inf_count} Inf values"
                                             )
 
-                                # If all validations pass, apply the gradients
+                                # If all validations pass, apply the gradients using the OLD METHOD
                                 for name, param in model_eval_copy.named_parameters():
                                     if name in miner_gradient:
                                         compressed_grad = miner_gradient[name]
@@ -1622,12 +1694,10 @@ class Validator:
 
                                         try:
                                             # Decompress the gradient
-                                            decompressed_grad = (
-                                                self.compressor.decompress(
-                                                    compressed_grad,
-                                                    self.xshapes[name],
-                                                    self.totalks[name],
-                                                )
+                                            decompressed_grad = self.compressor.decompress(
+                                                compressed_grad,
+                                                self.xshapes[name],
+                                                self.totalks[name],
                                             )
                                             # Decode using transformer
                                             decoded_grad = self.transformer.decode(
@@ -1643,22 +1713,10 @@ class Validator:
                                                     f"NaN/Inf in decompressed gradient for {name}"
                                                 )
 
-                                            # Apply momentum and gradient update
-                                            if param.grad is None:
-                                                param.grad = torch.zeros_like(param)
-
-                                            # Update momentum for this parameter
-                                            momentum_val = (
-                                                self.hparams.momentum
-                                                * self.momentum.get(
-                                                    name, torch.zeros_like(param)
-                                                )
-                                            )
-                                            momentum_val += decoded_grad
-
-                                            # Apply the gradient with momentum
-                                            param.grad.data = momentum_val.to(
-                                                param.device
+                                            # FIXED: Use the old code method instead of momentum/optimizer
+                                            param.data.sub_(
+                                                decoded_grad.sign(),
+                                                alpha=self.scheduler.get_last_lr()[0] * self.hparams.eval_lr_factor,
                                             )
 
                                         except Exception as e:
@@ -1697,47 +1755,80 @@ class Validator:
                         )
 
                         # Calculate per-batch averages
-                        loss_before_own_per_batch = (
-                            loss_before_own / n_batches_own if n_batches_own > 0 else 0
+                        loss_after_own_per_batch = loss_after_own / n_batches_own if n_batches_own > 0 else 0
+                        loss_after_random_per_batch = loss_after_random / n_batches_random if n_batches_random > 0 else 0
+
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"[Rank {self.rank}] UID {eval_uid} Loss after (own data): {loss_after_own_per_batch:.6f}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
-                        loss_before_random_per_batch = (
-                            loss_before_random / n_batches_random
-                            if n_batches_random > 0
-                            else 0
-                        )
-                        loss_after_own_per_batch = (
-                            loss_after_own / n_batches_own if n_batches_own > 0 else 0
-                        )
-                        loss_after_random_per_batch = (
-                            loss_after_random / n_batches_random
-                            if n_batches_random > 0
-                            else 0
+
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"[Rank {self.rank}] UID {eval_uid} Loss after (random data): {loss_after_random_per_batch:.6f}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                         # Use per-batch values for score calculations
-                        improvement_own = (
-                            loss_before_own_per_batch - loss_after_own_per_batch
+                        improvement_own = loss_before_own_per_batch - loss_after_own_per_batch
+                        improvement_random = loss_before_random_per_batch - loss_after_random_per_batch
+
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"[Rank {self.rank}] UID {eval_uid} Loss improvement (own data): {improvement_own:.6f}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
-                        improvement_random = (
-                            loss_before_random_per_batch - loss_after_random_per_batch
+
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"[Rank {self.rank}] UID {eval_uid} Loss improvement (random data): {improvement_random:.6f}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                         # Binary indicator score (1 if improvement on own data, 0 otherwise)
                         binary_indicator_score = 1.0 if improvement_own > 0 else 0.0
 
-                        # Gradient score calculation
-                        if improvement_random > 0:
-                            gradient_score = improvement_own / improvement_random
-                        else:
-                            gradient_score = (
-                                improvement_own if improvement_own > 0 else 0.0
-                            )
+                        # FIXED: Use the old code gradient score calculation formula
+                        gradient_score = (loss_before_random_per_batch - loss_after_random_per_batch) / loss_before_random_per_batch if loss_before_random_per_batch > 0 else 0.0
+
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"[Rank {self.rank}] UID {eval_uid} Gradient Score: {gradient_score:.6f}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
+                        )
+
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"[Rank {self.rank}] UID {eval_uid} Binary Indicator Score: {binary_indicator_score}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
+                        )
 
                         # Evaluate synchronization
                         sync_result = await self.evaluate_miner_sync(
                             eval_uid, model_eval_copy
                         )
                         sync_score = sync_result.get("sync_score", 0.0)
+
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"[Rank {self.rank}] UID {eval_uid} Sync Score: {sync_score:.6f}",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
+                        )
 
                         eval_time = tplr.T() - eval_start
 
@@ -1759,9 +1850,10 @@ class Validator:
 
                         tplr.log_with_context(
                             level="info",
-                            message=f"[Rank {self.rank}] Evaluated UID {eval_uid}: gradient_score={gradient_score:.4f}, binary={binary_indicator_score}, sync={sync_score:.4f} (took {eval_time:.2f}s)",
+                            message=f"[Rank {self.rank}] Completed evaluation for UID {eval_uid}: gradient_score={gradient_score:.4f}, binary={binary_indicator_score}, sync={sync_score:.4f} (took {eval_time:.2f}s)",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
+                            eval_uid=eval_uid,
                         )
 
                         # Memory monitoring before cleanup
@@ -1996,25 +2088,35 @@ class Validator:
                     # Log final scores table
                     self.log_final_scores_table()
 
-                    # Store debug information
+                    # Store debug information - fix any tensor.items() calls
                     debug_info = {
                         "sync_window": self.sync_window,
                         "global_step": self.global_step,
+                        # FIXED: Convert tensors to dictionaries properly
                         "gradient_scores": {
-                            k: float(v) for k, v in self.gradient_scores.items()
+                            uid: float(self.gradient_scores[uid].item()) 
+                            for uid in range(len(self.gradient_scores)) 
+                            if uid in self.evaluated_uids
                         },
                         "binary_indicator_scores": {
-                            k: float(v) for k, v in self.binary_indicator_scores.items()
+                            uid: float(self.binary_indicator_scores[uid].item()) 
+                            for uid in range(len(self.binary_indicator_scores)) 
+                            if uid in self.evaluated_uids
                         },
                         "sync_scores": {
-                            k: float(v) for k, v in self.sync_scores.items()
+                            uid: float(self.sync_scores[uid].item()) 
+                            for uid in range(len(self.sync_scores)) 
+                            if uid in self.evaluated_uids
                         },
                         "final_scores": {
-                            k: float(v)
-                            for k, v in enumerate(self.final_scores.tolist())
+                            uid: float(self.final_scores[uid].item()) 
+                            for uid in range(len(self.final_scores)) 
+                            if uid in self.evaluated_uids or self.final_scores[uid] > 0
                         },
                         "weights": {
-                            k: float(v) for k, v in enumerate(self.weights.tolist())
+                            uid: float(self.weights[uid].item()) 
+                            for uid in range(len(self.weights)) 
+                            if uid in self.evaluated_uids or self.weights[uid] > 0
                         },
                         "skipped_uids": skipped_uids,
                         "success_rate": success_rate,
@@ -2125,6 +2227,39 @@ class Validator:
                         },
                         step=self.global_step,
                     )
+
+                # Add logging for the distributed evaluation summary on all ranks
+                # After gathering results from all ranks, log summary on each rank
+                if not tplr.distrib.is_rank0():
+                    # Non-rank 0 processes log their local results
+                    successful_local = sum(1 for r in local_evaluation_results.values() if r["success"])
+                    failed_local = len(local_evaluation_results) - successful_local
+                    
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"[Rank {self.rank}] Local evaluation results: {successful_local}/{len(local_evaluation_results)} successful, {failed_local} failed",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+                    
+                    # Log individual results
+                    for uid, result in local_evaluation_results.items():
+                        if result["success"]:
+                            tplr.log_with_context(
+                                level="info",
+                                message=f"[Rank {self.rank}] UID {uid} final scores: gradient={result['gradient_score']:.6f}, binary={result['binary_indicator_score']}, sync={result['sync_score']:.6f}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=uid,
+                            )
+                        else:
+                            tplr.log_with_context(
+                                level="warning",
+                                message=f"[Rank {self.rank}] UID {uid} evaluation failed: {result.get('error', 'unknown error')}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=uid,
+                            )
 
             except Exception as e:
                 if tplr.distrib.is_rank0():
@@ -2347,15 +2482,16 @@ class Validator:
             # Add rows for miners with scores
             for uid in range(len(self.final_scores)):
                 if (
-                    uid in self.gradient_scores
-                    or uid in self.binary_indicator_scores
-                    or uid in self.sync_scores
+                    uid in self.evaluated_uids
+                    or self.final_scores[uid] > 0
+                    or self.weights[uid] > 0
                 ):
-                    gradient_score = self.gradient_scores.get(uid, 0.0)
-                    binary_score = self.binary_indicator_scores.get(uid, 0.0)
-                    sync_score = self.sync_scores.get(uid, 0.0)
-                    final_score = float(self.final_scores[uid])
-                    weight = float(self.weights[uid])
+                    # Use tensor indexing instead of .get() method
+                    gradient_score = float(self.gradient_scores[uid].item()) if uid < len(self.gradient_scores) else 0.0
+                    binary_score = float(self.binary_indicator_scores[uid].item()) if uid < len(self.binary_indicator_scores) else 0.0
+                    sync_score = float(self.sync_scores[uid].item()) if uid < len(self.sync_scores) else 0.0
+                    final_score = float(self.final_scores[uid].item())
+                    weight = float(self.weights[uid].item())
 
                     table.add_row(
                         str(uid),
@@ -2933,27 +3069,26 @@ class Validator:
 
     def log_gpu_memory_usage(self, context: str):
         """Log current GPU memory usage with context."""
-        if (
-            torch.cuda.is_available() and tplr.distrib.is_rank0()
-        ):  # Only log from rank 0
+        if torch.cuda.is_available():  # Log from all ranks
             allocated = torch.cuda.memory_allocated(self.device) / 1024**3  # GB
             reserved = torch.cuda.memory_reserved(self.device) / 1024**3  # GB
 
             tplr.log_with_context(
                 level="debug",
-                message=f"GPU Memory [{context}]: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved",
+                message=f"[Rank {self.rank}] GPU Memory [{context}]: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved",
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
 
-            # Log to WandB for monitoring
-            self.wandb.log(
-                {
-                    "validator/gpu_memory/allocated_gb": allocated,
-                    "validator/gpu_memory/reserved_gb": reserved,
-                },
-                step=self.global_step,
-            )
+            # Only log to WandB from rank 0 to avoid duplicates
+            if self.wandb and tplr.distrib.is_rank0():
+                self.wandb.log(
+                    {
+                        f"validator/gpu_memory/rank_{self.rank}/allocated_gb": allocated,
+                        f"validator/gpu_memory/rank_{self.rank}/reserved_gb": reserved,
+                    },
+                    step=self.global_step,
+                )
 
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):

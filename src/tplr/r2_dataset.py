@@ -225,13 +225,23 @@ class R2DatasetLoader(DatasetLoader):
         world_size: int | None = None,
     ) -> list[tuple[str, int, str]]:
         """
-        Deterministically sample **n_pages** per rank, no duplicates
-        across ranks, works for any world_size.
-
+        Deterministically sample **n_pages** per rank with guaranteed overlap.
+        
+        For multi-rank scenarios, ensures validator evaluation pages are always 
+        a subset of any miner's training pages, regardless of world_size.
+        
         Returned tuples: (config_name, row_idx, split)
         """
         rank = get_rank() if rank is None else rank
         world_size = get_world_size() if world_size is None else world_size
+
+        # Validate inputs
+        if n_pages <= 0:
+            raise ValueError(f"n_pages must be positive, got {n_pages}")
+        if world_size <= 0:
+            raise ValueError(f"world_size must be positive, got {world_size}")
+        if rank < 0 or rank >= world_size:
+            raise ValueError(f"rank {rank} must be in range [0, {world_size})")
 
         # 1) configs (broadcast once)
         if R2DatasetLoader._configs_data_cache is None:
@@ -259,37 +269,69 @@ class R2DatasetLoader(DatasetLoader):
                 row = 0 if max_row <= 0 else int(rng.integers(0, max_row))
                 out.append((str(cfg), row, meta["split"]))
             return out
-        # ───────────────────────── multi-GPU path ─────────────────────────── #
 
-        global_needed = n_pages * world_size
-        seen: set[tuple[str, int, str]] = set()
-        all_pages: list[tuple[str, int, str]] = []
+        # ───────────────────────── multi-GPU guaranteed overlap path ─────────────────────────── #
+        
+        # STEP 1: Generate CORE pages that all ranks must include
+        core_pages_count = max(1, n_pages // 3)  # At least 1/3 overlap
+        core_pages = []
 
-        # keep drawing pages until we have enough unique ones
-        while len(all_pages) < global_needed:
+        for _ in range(core_pages_count):
             cfg = rng.choice(sorted_keys)
             meta = configs_data[cfg]
             max_row = meta["num_rows"] - num_rows_per_page
-            if max_row <= 0:  # skip shards that are too small
-                continue
-            row = int(rng.integers(0, max_row))
-            pg = (str(cfg), row, meta["split"])
-            if pg not in seen:  # de-dupe globally
-                seen.add(pg)
-                all_pages.append(pg)
+            row = 0 if max_row <= 0 else int(rng.integers(0, max_row))
+            core_pages.append((str(cfg), row, meta["split"]))
 
-        # stride assignment → rank-k gets indices k, k+world_size, …
-        pages_for_rank = all_pages[rank::world_size][:n_pages]
+        # STEP 2: Generate rank-specific pages for remaining slots
+        remaining_slots = n_pages - core_pages_count
+        rank_specific_pages = []
 
-        # LOG (helps debugging determinism)
-        from tplr import logger as _log
+        # Advance RNG differently for each rank to get different pages
+        rank_rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
+        rank_rng.bit_generator.advance(offset + (rank + 1) * 10000)  # Large jump per rank
 
-        _log.info(
-            f"[R2DatasetLoader] rank={rank}/{world_size - 1} → "  # 0-based upper-bound
-            f"{len(pages_for_rank)} pages "
-            f"{[f'{c}:{r}' for c, r, _ in pages_for_rank]}"
+        seen_core = set(core_pages)  # Avoid duplicating core pages
+
+        attempts = 0
+        while len(rank_specific_pages) < remaining_slots and attempts < remaining_slots * 3:
+            cfg = rank_rng.choice(sorted_keys)
+            meta = configs_data[cfg]
+            max_row = meta["num_rows"] - num_rows_per_page
+            row = 0 if max_row <= 0 else int(rank_rng.integers(0, max_row))
+            page = (str(cfg), row, meta["split"])
+            
+            if page not in seen_core:  # Don't duplicate core pages
+                rank_specific_pages.append(page)
+            attempts += 1
+
+        # Fill remaining slots if we couldn't find enough unique pages
+        while len(rank_specific_pages) < remaining_slots:
+            cfg = rank_rng.choice(sorted_keys)
+            meta = configs_data[cfg]
+            max_row = meta["num_rows"] - num_rows_per_page  
+            row = 0 if max_row <= 0 else int(rank_rng.integers(0, max_row))
+            rank_specific_pages.append((str(cfg), row, meta["split"]))
+
+        # STEP 3: Combine core + rank-specific pages
+        all_rank_pages = core_pages + rank_specific_pages[:remaining_slots]
+
+        # Ensure exact page count
+        if len(all_rank_pages) != n_pages:
+            if len(all_rank_pages) < n_pages:
+                # Pad with duplicates from core pages
+                while len(all_rank_pages) < n_pages:
+                    all_rank_pages.append(core_pages[len(all_rank_pages) % len(core_pages)])
+            else:
+                all_rank_pages = all_rank_pages[:n_pages]
+
+        logger.info(
+            f"[R2DatasetLoader] rank={rank}/{world_size-1} → "
+            f"{len(all_rank_pages)} pages "
+            f"(core: {len(core_pages)}, rank-specific: {len(rank_specific_pages[:remaining_slots])})"
         )
-        return pages_for_rank
+
+        return all_rank_pages
 
     @staticmethod
     async def create(

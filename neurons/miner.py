@@ -663,6 +663,7 @@ class Miner:
                 rank=current_rank,
                 world_size=world_size_for_data,
             )
+            
             debug_pages = distrib.all_gather_object(
                 pages
             )  # list[ list[tuple] ] from every rank

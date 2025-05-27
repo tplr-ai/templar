@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "dev-rzr1kon0"
+__version__ = "dev-ibt45gc4"
 
 # Import package.
 from .chain import *

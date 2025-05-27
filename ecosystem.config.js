@@ -26,13 +26,13 @@ module.exports = {
         },
         {
             name: "TV1",
-            script: "/bin/bash",
-            args: `-c "CUDA_VISIBLE_DEVICES=6,7 /home/templar/templar/.venv/bin/torchrun --nproc_per_node=2 --rdzv_endpoint=localhost:29503 --rdzv_id=TV1_${PROJECT_NAME} neurons/validator.py --subtensor.network local --netuid 2 --wallet.name templar_test --wallet.hotkey V1 --project '${PROJECT_NAME}'"`,
-            interpreter: null,
+            script: "neurons/validator.py",
+            interpreter: "python3",
             env: {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
+            args: `--wallet.name templar_test --wallet.hotkey V1 --device cuda:6 --subtensor.network local --netuid 2 --project "${PROJECT_NAME}"`
         },
         {
             name: "Aggregator",

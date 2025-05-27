@@ -21,30 +21,29 @@ import argparse
 import asyncio
 import concurrent.futures
 import json
+import logging  # ← NEW
 import os
 import random
 import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import cast, Any, Dict, Optional, List
-import logging  # ← NEW
+from typing import Any, Dict, List, Optional, cast
 
 import bittensor as bt
+import bittensor.core.subtensor as bt_subtensor
 import numpy as np
 import torch
-from torch import autocast
+import torch.optim as optim
 import uvloop
 import websockets
-
-import bittensor.core.subtensor as bt_subtensor
-import torch.optim as optim
+from torch import autocast
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
     LinearLR,
     SequentialLR,
 )
-from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import LlamaForCausalLM
 
 # Local
@@ -54,7 +53,6 @@ from tplr.distrib import (
     ddp_init,
     # rank_world is already available as distrib.rank_world
 )
-
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -69,6 +67,12 @@ class Miner:
         )
         parser.add_argument(
             "--project", type=str, default="templar", help="Wandb project."
+        )
+        parser.add_argument(
+            "--actual-batch-size",
+            type=int,
+            default=None,
+            help="Override the batch size defined in hparams.",
         )
         parser.add_argument(
             "--device",
@@ -129,6 +133,13 @@ class Miner:
         # --------------------------------------------------------
         self.config = Miner.config()  # All ranks parse CLI
 
+        if self.config.actual_batch_size is not None:
+            tplr.logger.info(
+                f"Overriding hparams batch size: {self.hparams.batch_size} -> {self.config.actual_batch_size}"
+            )
+            self.hparams.batch_size = self.config.actual_batch_size
+
+        # Init bittensor objects
         # WORLD_SIZE and LOCAL_RANK should be set by torchrun
         world_size = int(os.getenv("WORLD_SIZE", "1"))
         # LOCAL_RANK is the rank of the process on the current node.
@@ -238,7 +249,11 @@ class Miner:
         self.transformer = tplr.compress.TransformDCT(
             model_to_transform, target_chunk=self.hparams.target_chunk
         )
-        self.compressor = tplr.compress.CompressDCT()
+        self.compressor = tplr.compress.CompressDCT(
+            use_quantization=True,
+            quantization_bins=self.hparams.quantization_bins,
+            quantization_range=self.hparams.quantization_range,
+        )
 
         # Optimizer (all ranks)
         self.optimizer = optim.SGD(
@@ -249,22 +264,24 @@ class Miner:
         self.momentum: Dict[str, torch.Tensor] = {}
         self.xshapes: Dict[str, Any] = {}
         self.totalks: Dict[str, Any] = {}
+        self.quant_params: Dict[str, Any] = {}
 
         # Use self.model.module.named_parameters() if DDP wrapped, else self.model.named_parameters()
         named_params_iter = (
             self.model.module if self.world_size > 1 else self.model
-        ).named_parameters()
+        ).named_parameters()  # type: ignore
         for n, p in named_params_iter:
             self.momentum[n] = torch.zeros_like(
                 p, device=self.device
             )  # Ensure momentum is on correct device
             # Encode with model.module if DDP
             encoded_param = self.transformer.encode(self.momentum[n])
-            _, _, xshape, totalk = self.compressor.compress(
+            _, _, xshape, totalk, quant_params = self.compressor.compress(
                 encoded_param, self.hparams.topk_compression
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
+            self.quant_params[n] = quant_params
 
         # Scheduler (all ranks)
         warmup_scheduler = LinearLR(
@@ -724,18 +741,26 @@ class Miner:
                 loss = outputs.loss
                 total_loss_this_window += loss.item()
 
+                if num_batches_this_window > 0:
+                    tplr.logger.info(
+                        f"Normalizing gradients by {num_batches_this_window} accumulation steps"
+                    )
+                    for param in self.model.parameters():
+                        if param.grad is not None:
+                            param.grad.div_(num_batches_this_window)
+
                 loss.backward()  # ← DDP syncs grads right here
                 num_batches_this_window += 1
 
-                tplr.logger.debug(
+                tplr.logger.info(
                     f"[Rank {self.rank}] Loss: {outputs.loss.item()} [Window {step_window}, Batch {i + 1}]"
                 )
 
-            tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - training_start_time)} "
-                f"[Rank {self.rank}] Completed local gradient accumulation. "
-                f"Batches: {num_batches_this_window}"
-            )
+                tplr.logger.info(
+                    f"{tplr.P(step_window, tplr.T() - training_start_time)} "
+                    f"[Rank {self.rank}] Completed local gradient accumulation. "
+                    f"Batches: {num_batches_this_window}"
+                )
 
             if distrib.is_rank0():  # only rank-0 polls chain
                 while self.current_window == step_window:
@@ -758,7 +783,7 @@ class Miner:
                 # tplr.prepare_gradient_dict should take this model_ref_for_grads and extract .grad
                 gradient_to_put, _, _, _ = tplr.prepare_gradient_dict(
                     self, pages, step_window
-                )
+                )  # type: ignore
                 tplr.logger.info(
                     f"{tplr.P(step_window, tplr.T() - compression_start_time)} [Rank 0] Compressed local DDP-synced gradients for upload."
                 )
@@ -952,10 +977,16 @@ class Miner:
                     if not p.requires_grad:
                         continue
 
-                    idxs_key, vals_key = n + "idxs", n + "vals"
+                    idxs_key = n + "idxs"
+                    vals_key = n + "vals"
+                    quant_key = n + "quant_params"
+
                     # gathered_state_dict_for_apply is the custom object, not a PyTorch state_dict
                     idxs = getattr(gathered_state_dict_for_apply, idxs_key, None)
                     vals = getattr(gathered_state_dict_for_apply, vals_key, None)
+                    quant_params = getattr(
+                        gathered_state_dict_for_apply, quant_key, None
+                    )
 
                     if idxs is not None and vals is not None:
                         if not isinstance(idxs, (list, tuple)):
@@ -977,6 +1008,7 @@ class Miner:
                                 [v.to(self.device) for v in vals],
                                 self.xshapes[n],
                                 self.totalks[n],
+                                quant_params,
                             )
                         )
 
@@ -1150,6 +1182,11 @@ class Miner:
                         )
                         for k, v in log_payload.items()
                     }
+
+                    # Log profiling summary every 10 windows
+                    if self.current_window % 10 == 0:
+                        tplr.logger.info("Logging performance profiling summary...")
+                        tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
 
                     # Ensure all numeric values are explicitly converted to the same type (float)
                     # to avoid type conflicts with InfluxDB

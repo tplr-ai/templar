@@ -3,17 +3,16 @@ Distributed training utilities for Templar.
 Handles PyTorch DDP initialization, synchronization, and gradient operations.
 """
 
+import datetime
 import os
 import socket
-import torch
-import torch.distributed as dist
-import datetime
-import cloudpickle
 from typing import Any, List
 
-import tplr
+import cloudpickle
+import torch
+import torch.distributed as dist
 
-logger = tplr.logger
+from tplr import logger
 
 
 def find_free_port():

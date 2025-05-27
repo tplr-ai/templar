@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "dev-ibt45gc4"
+__version__ = "0.2.88"
 
 # Import package.
 from .chain import *
@@ -34,4 +34,5 @@ from .logging import *
 from .schemas import *
 from .wandb import initialize_wandb
 from .metrics import *
+from .shard_index import ShardIndex
 from .distrib import *

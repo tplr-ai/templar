@@ -9,17 +9,26 @@
 
 - name: Synchronize local Templar code to remote host
   synchronize:
-    src: "{{ playbook_dir }}/../.."
+    src: "{{ playbook_dir }}/../../"
     dest: "{{ ansible_env.HOME }}/templar"
     rsync_opts:
       - "--exclude=.venv"
       - "--exclude=__pycache__"
+      - "--exclude=*.pyc"
     delete: yes
   tags: templar
 
-- name: Set templar_path for remote deployment
-  set_fact:
-    templar_path: "{{ ansible_env.HOME }}/templar"
+- name: Debug templar_path and check structure
+  shell: |
+    echo "templar_path: {{ templar_path }}"
+    ls -la {{ templar_path }}/
+    ls -la {{ templar_path }}/src/ || echo "src directory not found"
+  register: debug_output
+  tags: templar
+
+- name: Show debug output
+  debug:
+    var: debug_output.stdout_lines
   tags: templar
 
 - name: Check if src/tplr/__init__.py exists

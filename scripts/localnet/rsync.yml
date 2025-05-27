@@ -1,0 +1,89 @@
+---
+- hosts: localnet
+  vars_files:
+    - group_vars/all/vault.yml
+  become: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    remote_mode: "{{ hostvars[inventory_hostname]['remote_mode'] | default(false) }}"
+
+  tasks:
+    - name: Create templar directory on remote if it doesn't exist
+      file:
+        path: "{{ ansible_env.HOME }}/templar"
+        state: directory
+        mode: '0755'
+      tags: rsync
+
+    - name: Synchronize scripts directory
+      synchronize:
+        src: "../../scripts/"
+        dest: "{{ ansible_env.HOME }}/templar/scripts"
+        rsync_opts:
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+        delete: yes
+      tags: rsync
+
+    - name: Synchronize neurons directory
+      synchronize:
+        src: "../../neurons/"
+        dest: "{{ ansible_env.HOME }}/templar/neurons"
+        rsync_opts:
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+        delete: yes
+      tags: rsync
+
+    - name: Synchronize src directory
+      synchronize:
+        src: "../../src/"
+        dest: "{{ ansible_env.HOME }}/templar/src"
+        rsync_opts:
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+          - "--exclude=*.egg-info"
+        delete: yes
+      tags: rsync
+
+    - name: Synchronize hparams.json
+      synchronize:
+        src: "../../hparams.json"
+        dest: "{{ ansible_env.HOME }}/templar/hparams.json"
+        delete: no
+      tags: rsync
+
+    - name: Synchronize _metadata.yaml
+      synchronize:
+        src: "../../_metadata.yaml"
+        dest: "{{ ansible_env.HOME }}/templar/_metadata.yaml"
+        delete: no
+      tags: rsync
+
+    - name: Synchronize _shard_sizes.json
+      synchronize:
+        src: "../../_shard_sizes.json"
+        dest: "{{ ansible_env.HOME }}/templar/_shard_sizes.json"
+        delete: no
+      tags: rsync
+
+    - name: Synchronize pyproject.toml
+      synchronize:
+        src: "../../pyproject.toml"
+        dest: "{{ ansible_env.HOME }}/templar/pyproject.toml"
+        delete: no
+      tags: rsync
+
+    - name: Display sync completion
+      debug:
+        msg: "Files synchronized successfully to {{ ansible_env.HOME }}/templar"
+      tags: rsync
+
+    - name: Run uv sync to update dependencies
+      shell: uv sync
+      args:
+        chdir: "{{ ansible_env.HOME }}/templar"
+      tags: rsync
+
+- name: Trigger reload playbook
+  import_playbook: reload.yml

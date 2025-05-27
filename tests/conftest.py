@@ -5,13 +5,39 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "asyncio: mark test as requiring async")
 
 
+# Set up mock environment variables before imports
+import os
+
+# Mock R2 bucket access for testing
+os.environ.setdefault("R2_AGGREGATOR_ACCOUNT_ID", "mock-account-id")
+os.environ.setdefault("R2_AGGREGATOR_BUCKET_NAME", "mock-bucket-name")
+os.environ.setdefault("R2_AGGREGATOR_READ_ACCESS_KEY_ID", "mock-read-key-id")
+os.environ.setdefault("R2_AGGREGATOR_READ_SECRET_ACCESS_KEY", "mock-read-secret-key")
+
+# Also set other required variables from config.py
+os.environ.setdefault("R2_GRADIENTS_ACCOUNT_ID", "mock-gradients-account-id")
+os.environ.setdefault("R2_GRADIENTS_BUCKET_NAME", "mock-gradients-bucket-name")
+os.environ.setdefault("R2_GRADIENTS_READ_ACCESS_KEY_ID", "mock-gradients-read-key-id")
+os.environ.setdefault(
+    "R2_GRADIENTS_READ_SECRET_ACCESS_KEY", "mock-gradients-read-secret-key"
+)
+os.environ.setdefault("R2_GRADIENTS_WRITE_ACCESS_KEY_ID", "mock-gradients-write-key-id")
+os.environ.setdefault(
+    "R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY", "mock-gradients-write-secret-key"
+)
+os.environ.setdefault("R2_DATASET_ACCOUNT_ID", "mock-dataset-account-id")
+os.environ.setdefault("R2_DATASET_BUCKET_NAME", "mock-dataset-bucket-name")
+os.environ.setdefault("R2_DATASET_READ_ACCESS_KEY_ID", "mock-dataset-read-key-id")
+os.environ.setdefault(
+    "R2_DATASET_READ_SECRET_ACCESS_KEY", "mock-dataset-read-secret-key"
+)
+
 import pytest
 import torch
 import tplr.comms as comms_module
 import tplr.compress as compress
 from types import SimpleNamespace
 import tplr
-import os
 import sys
 import numpy as np
 import asyncio
@@ -117,6 +143,35 @@ async def comms_instance():
 def enable_tplr_logger_propagation():
     tplr.logger.setLevel("INFO")
     tplr.logger.propagate = True
+
+
+@pytest.fixture(autouse=True)
+def mock_distributed_operations(monkeypatch):
+    """Mock distributed operations for tests that don't initialize process groups."""
+    import torch.distributed as dist
+
+    # Mock dist.is_initialized to return False
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+
+    # Mock dist.get_backend to avoid initialization check
+    monkeypatch.setattr(dist, "get_backend", lambda group=None: "gloo")
+
+    # Mock dist.get_rank to return 0
+    monkeypatch.setattr(dist, "get_rank", lambda group=None: 0)
+
+    # Mock broadcast to do nothing
+    def mock_broadcast(tensor, src=0, group=None, async_op=False):
+        return None
+
+    monkeypatch.setattr(dist, "broadcast", mock_broadcast)
+
+    # Mock broadcast_object to just return the object
+    def mock_broadcast_object(obj, src=0):
+        return obj
+
+    monkeypatch.setattr(_distrib, "broadcast_object", mock_broadcast_object)
+
+    yield
 
 
 @pytest.fixture

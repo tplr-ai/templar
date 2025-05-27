@@ -29,11 +29,10 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import tplr
 from tplr.logging import logger
 
-
 if TYPE_CHECKING:
+    from neurons.aggregator import AggregationServer
     from neurons.miner import Miner
     from neurons.validator import Validator
-    from neurons.aggregator import AggregationServer
 
 NeuronT = TypeVar("NeuronT", "Miner", "Validator")
 
@@ -110,7 +109,7 @@ def prepare_gradient_dict(self, pages_info_for_metadata: list, step_window: int)
         # self.momentum[n] is now identical across ranks.
         # transformer.encode and compressor.compress are deterministic.
         encoded_momentum = self.transformer.encode(self.momentum[n])
-        idxs, vals, xshape, totalk = self.compressor.compress(
+        idxs, vals, xshape, totalk, quant_params = self.compressor.compress(
             encoded_momentum, self.hparams.topk_compression
         )
 
@@ -119,7 +118,7 @@ def prepare_gradient_dict(self, pages_info_for_metadata: list, step_window: int)
         # Note: `p` passed to decompress is for shape/dtype reference.
         # The actual parameter `p` has already had weight decay applied.
         decompressed_momentum_estimate = self.transformer.decode(
-            self.compressor.decompress(p, idxs, vals, xshape, totalk)
+            self.compressor.decompress(p, idxs, vals, xshape, totalk, quant_params)
         )
 
         if not is_early_iteration:
@@ -128,6 +127,7 @@ def prepare_gradient_dict(self, pages_info_for_metadata: list, step_window: int)
         # Store compressed representation (will be identical on all ranks)
         gradient_output_dict[n + "idxs"] = idxs
         gradient_output_dict[n + "vals"] = vals
+        gradient_output_dict[n + "quant_params"] = quant_params
         xshapes_output[n] = xshape
         totalks_output[n] = totalk
         transmitted_grads_output[n] = decompressed_momentum_estimate  # For diagnostics

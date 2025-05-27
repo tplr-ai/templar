@@ -58,14 +58,11 @@ PEERS_FILE_PREFIX = "peers_"
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
-# Types
-PeerArray = np.ndarray[Any, np.dtype[np.int64]]
-
 
 class Comms(ChainManager):
     def __init__(
         self,
-        wallet: "bt.wallet",
+        wallet: "bt.wallet | None",
         save_location: str = "/tmp",
         key_prefix: str = "model",
         config=None,
@@ -77,8 +74,8 @@ class Comms(ChainManager):
         world_size: int = 1,
         **kwargs,
     ):
-        self.wallet = wallet
         self.uid = uid
+        self.wallet = wallet
         self.local_rank = local_rank
         self.world_size = world_size
         self.is_ddp = world_size > 1
@@ -115,8 +112,10 @@ class Comms(ChainManager):
         )
 
         # Use the hotkey directly in the save_location
-        hotkey = self.wallet.hotkey.ss58_address
-        self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
+        if self.wallet is not None:
+            hotkey = self.wallet.hotkey.ss58_address
+            self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
+
         if distrib.is_rank0():
             os.makedirs(self.save_location, exist_ok=True)
         self.key_prefix = key_prefix
@@ -133,6 +132,7 @@ class Comms(ChainManager):
         self.recent_windows = self.hparams.recent_windows
 
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
+        self.gather_semaphore = asyncio.Semaphore(15)
 
         # keep a reference to the *whole* ckpt that was loaded once, so
         # miners / validators can consult keys such as `start_window`.
@@ -962,7 +962,8 @@ class Comms(ChainManager):
 
         start_time = time.time()
         end_time = start_time + timeout
-        tried_after_time_max = False  # Track if we've tried once after passing time_max
+        tried_after_time_max = False
+        time_max_grace_period = 3.0
 
         while True:
             # Check if we've timed out
@@ -970,16 +971,28 @@ class Comms(ChainManager):
                 tplr.logger.debug(f"GET {uid}/{window}/{key} timed out.")
                 return None
 
-            # Check if we're past time_max
+            # Check if we're past time_max with grace period
             now = datetime.now(timezone.utc)
-            past_time_max = time_max is not None and now > time_max
 
-            # If we're past time_max and already tried once, don't retry again
+            # Only consider it "past time_max" if we're 3 seconds beyond time_max
+            past_time_max = False
+            if time_max is not None and now > time_max:
+                seconds_past_time_max = (now - time_max).total_seconds()
+                past_time_max = seconds_past_time_max > time_max_grace_period
+
+            # If we're past time_max (with grace period) and already tried once, don't retry again
             if past_time_max and tried_after_time_max:
                 tplr.logger.debug(
-                    f"Already tried once after time_max for UID {uid}, window {window}. Stopping retries."
+                    f"Already tried once after time_max + {time_max_grace_period}s for UID {uid}, window {window}. Stopping retries."
                 )
                 return None
+
+            # If we're past time_max (with grace period), mark that we've tried once
+            if past_time_max:
+                tried_after_time_max = True
+                tplr.logger.debug(
+                    f"Past time_max + {time_max_grace_period}s for UID {uid}, window {window}. This is the final retry."
+                )
 
             # Make the request
             state_dict = await self.get(
@@ -1008,13 +1021,6 @@ class Comms(ChainManager):
             # If we got a result, return it
             if state_dict is not None:
                 return state_dict
-
-            # If we're past time_max, mark that we've tried once
-            if past_time_max:
-                tried_after_time_max = True
-                tplr.logger.debug(
-                    f"Past time_max for UID {uid}, window {window}. This is the final retry."
-                )
 
             # Short delay before retrying
             await asyncio.sleep(0.1)
@@ -1054,7 +1060,7 @@ class Comms(ChainManager):
         skipped_uids = []  # Retain UIDs that are skipped.
         global_steps = []
 
-        async with self.client_semaphore:
+        async with self.gather_semaphore:
             batch_tasks = [
                 self.get_with_retry(
                     uid=uid,
@@ -1149,19 +1155,15 @@ class Comms(ChainManager):
 
                     for param_name, tensor in state_dict_resp.items():
                         if isinstance(tensor, torch.Tensor):
-                            if param_name.endswith("vals"):
-                                tensor = tensor.to(device)
-                                norm = torch.norm(tensor)
-                                normalized = tensor / (norm + 1e-8)
-                                aggregated_state_dict.setdefault(param_name, []).append(
-                                    normalized
-                                )
-                            else:
-                                aggregated_state_dict.setdefault(param_name, []).append(
-                                    tensor.to(device)
-                                )
+                            aggregated_state_dict.setdefault(param_name, []).append(
+                                tensor.to(device)
+                            )
                             metrics["download_bytes"] += (
                                 tensor.element_size() * tensor.nelement()
+                            )
+                        elif param_name.endswith("quant_params"):
+                            aggregated_state_dict.setdefault(param_name, []).append(
+                                tensor
                             )
 
                     valid_uids.append(uid)
@@ -1587,7 +1589,7 @@ class Comms(ChainManager):
 
     async def post_peer_list(
         self,
-        peers: PeerArray,
+        peers: list[int],
         first_effective_window: int,
         sync_window: int,
         weights: torch.Tensor,
@@ -1628,8 +1630,8 @@ class Comms(ChainManager):
 
         # -----------------------------------------------------------------------
         peers_and_weights = {
-            "peers": peers_for_json,  # ← was peers.tolist()  ❌
-            "weights": weights_for_json,  # handle any iterable
+            "peers": peers_for_json,
+            "weights": weights_for_json,
             "initial_selection": initial_selection,
             "sync_window": sync_window,
             "first_effective_window": first_effective_window,
@@ -1671,13 +1673,13 @@ class Comms(ChainManager):
 
     async def get_peer_list(
         self, fetch_previous: bool = False
-    ) -> tuple[PeerArray, int] | None:
+    ) -> tuple[np.ndarray, int] | None:
         """
         Fetch the current or (optionally) previous peer-list JSON from the
         highest-staked validator's bucket. Rank-0 only.
 
-        – returns (np.ndarray peers, first_effective_window) or None
-        – retries forever (10 s back-off) unless a fatal/logic error occurs
+        returns (np.ndarray peers, first_effective_window) or None
+        retries forever (10 s back-off) unless a fatal/logic error occurs
         """
         if not distrib.is_rank0():
             return None

@@ -2,17 +2,24 @@
 remote_mode: false
 
 # Wallet configuration
-cold_wallet_name: "default"
-bittensor_wallet_password: "your_wallet_password_here"  # Password for the coldkey
-owner_hotkey: "validator_1"            # Hotkey name to use for subnet creation (should belong to cold_wallet_name)
-validator_hotkeys: ["validator_1"]     # List of validator hotkeys (belonging to cold_wallet_name)
-miner_hotkeys: ["miner_1", "miner_2"]  # List of miner hotkeys (belonging to cold_wallet_name)
-aggregator_hotkeys: ["aggregator_1"]   # List of aggregator hotkeys (belonging to cold_wallet_name)
-local_bittensor_wallets_dir: "{{ lookup('env','HOME') }}/.bittensor/wallets"  # Local directory where wallets are stored
+# This prefix will be used for all wallet names, e.g. "owner", "owner_validator_1", etc.
+cold_wallet_name: "owner"
+
+# Hotkey names and role identifiers
+# Passwordless wallets will be created on the target machine
+# Only the owner wallet is funded from the faucet, then wallets are registered to the subnet
+# Validators receive stake directly during the staking step
+owner_hotkey: "default"                # Hotkey name for the owner wallet (used for subnet creation)
+validator_hotkeys: ["validator_1"]     # List of validator identifiers (these are NOT actual hotkeys but identifiers)
+miner_hotkeys: ["miner_1", "miner_2"]  # List of miner identifiers (these are NOT actual hotkeys but identifiers)
+aggregator_hotkeys: ["aggregator_1"]   # List of aggregator identifiers (optional)
 
 # Network configuration
 network: "local"
 netuid: 2
+
+# DDP configuration for miners
+miner_gpus: 4                              # Number of GPUs per miner for DDP training
 
 # Version override for development
 templar_version: "0.2.52dev"           # Version string to use (typically a non-production version for testing)

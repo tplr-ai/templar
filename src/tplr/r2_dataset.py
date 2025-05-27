@@ -250,10 +250,10 @@ class R2DatasetLoader(DatasetLoader):
     ) -> list[tuple[str, int, str]]:
         """
         Deterministically sample **n_pages** per rank with guaranteed overlap.
-        
-        For multi-rank scenarios, ensures validator evaluation pages are always 
+
+        For multi-rank scenarios, ensures validator evaluation pages are always
         a subset of any miner's training pages, regardless of world_size.
-        
+
         Returned tuples: (config_name, row_idx, split)
         """
         rank = get_rank() if rank is None else rank
@@ -295,7 +295,7 @@ class R2DatasetLoader(DatasetLoader):
             return out
 
         # ───────────────────────── multi-GPU guaranteed overlap path ─────────────────────────── #
-        
+
         # STEP 1: Generate CORE pages that all ranks must include
         core_pages_count = max(1, n_pages // 3)  # At least 1/3 overlap
         core_pages = []
@@ -313,18 +313,23 @@ class R2DatasetLoader(DatasetLoader):
 
         # Advance RNG differently for each rank to get different pages
         rank_rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
-        rank_rng.bit_generator.advance(offset + (rank + 1) * 10000)  # Large jump per rank
+        rank_rng.bit_generator.advance(
+            offset + (rank + 1) * 10000
+        )  # Large jump per rank
 
         seen_core = set(core_pages)  # Avoid duplicating core pages
 
         attempts = 0
-        while len(rank_specific_pages) < remaining_slots and attempts < remaining_slots * 3:
+        while (
+            len(rank_specific_pages) < remaining_slots
+            and attempts < remaining_slots * 3
+        ):
             cfg = rank_rng.choice(sorted_keys)
             meta = configs_data[cfg]
             max_row = meta["num_rows"] - num_rows_per_page
             row = 0 if max_row <= 0 else int(rank_rng.integers(0, max_row))
             page = (str(cfg), row, meta["split"])
-            
+
             if page not in seen_core:  # Don't duplicate core pages
                 rank_specific_pages.append(page)
             attempts += 1
@@ -333,7 +338,7 @@ class R2DatasetLoader(DatasetLoader):
         while len(rank_specific_pages) < remaining_slots:
             cfg = rank_rng.choice(sorted_keys)
             meta = configs_data[cfg]
-            max_row = meta["num_rows"] - num_rows_per_page  
+            max_row = meta["num_rows"] - num_rows_per_page
             row = 0 if max_row <= 0 else int(rank_rng.integers(0, max_row))
             rank_specific_pages.append((str(cfg), row, meta["split"]))
 
@@ -345,12 +350,14 @@ class R2DatasetLoader(DatasetLoader):
             if len(all_rank_pages) < n_pages:
                 # Pad with duplicates from core pages
                 while len(all_rank_pages) < n_pages:
-                    all_rank_pages.append(core_pages[len(all_rank_pages) % len(core_pages)])
+                    all_rank_pages.append(
+                        core_pages[len(all_rank_pages) % len(core_pages)]
+                    )
             else:
                 all_rank_pages = all_rank_pages[:n_pages]
 
-        logger.info(
-            f"[R2DatasetLoader] rank={rank}/{world_size-1} → "
+        _log.info(
+            f"[R2DatasetLoader] rank={rank}/{world_size - 1} → "
             f"{len(all_rank_pages)} pages "
             f"(core: {len(core_pages)}, rank-specific: {len(rank_specific_pages[:remaining_slots])})"
         )
@@ -691,7 +698,7 @@ class R2DatasetLoader(DatasetLoader):
                 break
             except IOError as e:
                 if "Parquet file is closed" in str(e) and attempt < max_retries - 1:
-                    logger.warning(
+                    _log.warning(
                         f"Parquet file was closed during read, attempting to reopen (attempt {attempt + 1}/{max_retries}): {shard_path}"
                     )
                     # Clear from cache and get fresh file handle

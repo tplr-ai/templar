@@ -231,7 +231,7 @@ class Validator:
         self.start_window = self.current_window  # Record the start window
         self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window
-        self.sync_window = self.current_window 
+        self.sync_window = self.current_window
 
         # Init score tracking variables
         self.loss_before_per_batch_own = 0.0
@@ -2117,6 +2117,7 @@ class Validator:
                     },
                     with_system_metrics=True,
                     with_gpu_metrics=True,
+                    sample_rate=0.8 if should_downsample else 1.0,
                 )
 
             # 17. Set weights periodically
@@ -2853,12 +2854,14 @@ class Validator:
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
-            
+
             # Optional: Log which pages we're evaluating against for verification
             if not is_random:  # Only for UID-based evaluation, not random
                 tplr.log_with_context(
-                    level="info", 
-                    message=f"Evaluating UID {seed} using {len(local_pages)} core pages: {[p[1] for p in local_pages[:5]]}..." if local_pages else "No pages",
+                    level="info",
+                    message=f"Evaluating UID {seed} using {len(local_pages)} core pages: {[p[1] for p in local_pages[:5]]}..."
+                    if local_pages
+                    else "No pages",
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )

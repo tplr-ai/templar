@@ -1,0 +1,18 @@
+[Unit]
+Description=Subtensor Nodes
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/subtensor
+
+ExecStart=/usr/local/bin/docker-compose -f /opt/subtensor/docker-compose.yml up -d
+ExecStop=/usr/local/bin/docker-compose -f /opt/subtensor/docker-compose.yml down
+
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

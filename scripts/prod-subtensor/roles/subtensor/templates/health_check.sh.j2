@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+
+LOG_FILE="{{ subtensor_logs_dir }}/health_check.log"
+STATUS_FILE="{{ subtensor_base_path }}/status.json"
+
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+check_node_health() {
+    local port=$1 node_id=$2
+    docker-compose -f {{ subtensor_base_path }}/docker-compose.yml ps --services --filter "status=running" | grep -q "subtensor-$node_id" || return 1
+    response=$(curl -s --max-time 10 -H "Content-Type: application/json" -d '{"id":1, "jsonrpc":"2.0", "method": "system_health", "params":[]}' http://localhost:$port/ || echo "ERROR")
+    [[ "$response" != "ERROR" ]] && echo "$response" | jq -e '.result' > /dev/null 2>&1
+}
+
+update_status() {
+    cat > "$STATUS_FILE" << EOF
+{
+    "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+    "status": "$1"
+}
+EOF
+}
+
+healthy_nodes=0
+for i in {0..{{ subtensor_replicas | int - 1 }}}; do
+    check_node_health $(({{ subtensor_rpc_port_start }} + i)) $i && healthy_nodes=$((healthy_nodes + 1))
+done
+
+total_nodes={{ subtensor_replicas }}
+if [[ $healthy_nodes -eq $total_nodes ]]; then
+    update_status "healthy"
+elif [[ $healthy_nodes -gt 0 ]]; then
+    update_status "degraded"
+else
+    update_status "unhealthy"
+fi
+
+log_message "Health check: $healthy_nodes/$total_nodes nodes healthy"

@@ -1,0 +1,189 @@
+---
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+
+- name: Upgrade all packages
+  apt:
+    upgrade: dist
+    autoremove: yes
+    autoclean: yes
+  when: ansible_os_family == "Debian"
+  tags: [system-update]
+
+- name: Install essential packages
+  apt:
+    name: "{{ essential_packages }}"
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Install security packages
+  apt:
+    name: "{{ security_packages }}"
+    state: present
+  when: ansible_os_family == "Debian" and enable_security | default(true)
+
+- name: Install monitoring packages
+  apt:
+    name: "{{ monitoring_packages }}"
+    state: present
+  when: ansible_os_family == "Debian" and enable_node_exporter | default(true)
+
+- name: Set timezone
+  timezone:
+    name: "{{ timezone | default('UTC') }}"
+
+- name: Configure kernel parameters
+  sysctl:
+    name: "{{ item.split('=')[0].strip() }}"
+    value: "{{ item.split('=')[1].strip() }}"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-subtensor.conf
+    reload: yes
+  loop: "{{ kernel_params | default([]) }}"
+
+- name: Enable TCP BBR
+  block:
+    - name: Add TCP BBR module
+      lineinfile:
+        path: /etc/modules-load.d/bbr.conf
+        line: "tcp_bbr"
+        create: yes
+    - name: Configure BBR
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/99-bbr.conf
+        reload: yes
+      loop:
+        - { name: "net.core.default_qdisc", value: "fq" }
+        - { name: "net.ipv4.tcp_congestion_control", value: "bbr" }
+  when: enable_tcp_bbr | default(true)
+
+- name: Configure file limits
+  pam_limits:
+    domain: "*"
+    limit_type: "{{ item.type }}"
+    limit_item: nofile
+    value: "{{ item.value }}"
+  loop:
+    - { type: "soft", value: "{{ nofile_soft }}" }
+    - { type: "hard", value: "{{ nofile_hard }}" }
+
+- name: Set system-wide file limit
+  sysctl:
+    name: fs.file-max
+    value: "{{ fs_file_max }}"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-file-limits.conf
+    reload: yes
+
+- name: Create swap file
+  block:
+    - stat:
+        path: /swapfile
+      register: swap_file
+    - command: dd if=/dev/zero of=/swapfile bs=1M count={{ swap_size_mb }}
+      when: not swap_file.stat.exists
+    - file:
+        path: /swapfile
+        mode: '0600'
+      when: not swap_file.stat.exists
+    - command: mkswap /swapfile
+      when: not swap_file.stat.exists
+    - command: swapon /swapfile
+      when: not swap_file.stat.exists
+    - lineinfile:
+        path: /etc/fstab
+        line: "/swapfile none swap sw 0 0"
+        state: present
+    - sysctl:
+        name: vm.swappiness
+        value: "{{ swappiness }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/99-swap.conf
+        reload: yes
+  when: enable_swap | default(true)
+
+- name: Configure fail2ban
+  block:
+    - template:
+        src: jail.local.j2
+        dest: /etc/fail2ban/jail.local
+        backup: yes
+      notify: restart fail2ban
+    - systemd:
+        name: fail2ban
+        state: started
+        enabled: yes
+  when: enable_fail2ban | default(true)
+
+- name: Configure UFW
+  block:
+    - ufw:
+        state: reset
+    - ufw:
+        rule: allow
+        port: "{{ ssh_port | default(22) }}"
+        proto: tcp
+    - ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: [80, 443]
+    - ufw:
+        rule: allow
+        port: "{{ subtensor_p2p_port_start | int + item }}"
+        proto: tcp
+      loop: "{{ range(subtensor_replicas | int) | list }}"
+    - ufw:
+        state: enabled
+        policy: deny
+        direction: incoming
+  when: enable_ufw | default(true)
+
+- name: Configure log rotation
+  template:
+    src: subtensor-logs.j2
+    dest: /etc/logrotate.d/subtensor-logs
+    mode: '0644'
+
+- name: Start and enable node exporter
+  systemd:
+    name: prometheus-node-exporter
+    state: started
+    enabled: yes
+  when: enable_node_exporter | default(true)
+
+- name: Create subtensor directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ subtensor_base_path }}"
+    - "{{ subtensor_data_dir }}"
+    - "{{ subtensor_logs_dir }}"
+    - "{{ backup_storage_path | default(subtensor_base_path + '/backups') }}"
+
+- name: Install Docker
+  include_tasks: docker.yml
+
+- name: Configure automatic updates
+  block:
+    - apt:
+        name: unattended-upgrades
+        state: present
+    - template:
+        src: 50unattended-upgrades.j2
+        dest: /etc/apt/apt.conf.d/50unattended-upgrades
+        backup: yes
+    - template:
+        src: 20auto-upgrades.j2
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+  when: enable_auto_updates | default(false)

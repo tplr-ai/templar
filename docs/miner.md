@@ -37,7 +37,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Git**
 - **Cloudflare R2 Bucket Configuration**:
-  - **Dataset Setup**: You must set up your own dataset following the instructions in the [R2 Dataset Guide](./r2_dataset.md)
+  - **Dataset Setup**: You must set up your own DCLM dataset following the instructions in the [R2 Dataset Guide](./r2_dataset.md)
   - **Gradient Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:
@@ -50,12 +50,13 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 ## Running the Miner
 
 > Note: Using Ansible (Automated Setup)
-> 
+>
 > For automated deployment across multiple hosts or multi-GPU configurations, you can use our Ansible playbook. This method is particularly useful for:
+>
 > - Deploying to multiple servers
 > - Managing multi-GPU setups
 > - Automating the entire setup process
-
+>
 > See the [Ansible Setup Guide](./miner-setup-ansible.md) for detailed instructions.
 
 ### Instructions
@@ -70,7 +71,9 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    # Install required packages
    sudo apt-get install python3.11 python3.11-venv git
    ```
+
   *PM2 Support Installation
+
   ```bash
    # Install required packages
    apt update && apt upgrade -y && apt-get install -y nano git python3-pip jq npm && npm install pm2 -g && pm2 update
@@ -104,8 +107,9 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    # Install uv tool (if needed)
    pip install uv
    ```
-   
+
   *PM2 Support Installation
+
   ```bash
    # Install uv and configure venv
    pip install uv && uv python install 3.11 && uv python pin 3.11 && uv venv .venv
@@ -138,6 +142,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 7. **Set Environment Variables**:
 
    Export necessary environment variables or create a `.env` file in the project root.
+
    ```bash
    export WANDB_API_KEY=your_wandb_api_key
    export INFLUXDB_TOKEN=your_influxdb_token
@@ -157,7 +162,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    export R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
    export R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
 
-   # Dataset R2 credentials - You must set up your own dataset
+   # Dataset R2 credentials - You must set up your own DCLM dataset
    # See docs/r2_dataset.md for instructions
    export R2_DATASET_ACCOUNT_ID=your_dataset_account_id
    export R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
@@ -188,6 +193,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    ```
 
   *PM2 Support Installation
+
   ```bash
    pm2 start neurons/miner.py --interpreter python3 --name sn3miner -- \
    --actual_batch_size 6 \
@@ -269,7 +275,7 @@ Optional InfluxDB configuration variables include:
 
 Example configuration:
 
-```
+```bash
 INFLUXDB_HOST=custom-influxdb-host.example.com
 INFLUXDB_PORT=8086
 INFLUXDB_DATABASE=custom-database

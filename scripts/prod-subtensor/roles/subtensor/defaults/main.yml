@@ -1,0 +1,41 @@
+---
+subtensor_user: "subtensor"
+subtensor_group: "subtensor"
+subtensor_home: "/home/subtensor"
+
+subtensor_docker_network: "subtensor_net"
+subtensor_docker_subnet: "172.20.0.0/16"
+
+subtensor_chains:
+  finney:
+    spec: "raw_spec_finney.json"
+    bootnodes: "/dns/bootnode.finney.chain.opentensor.ai/tcp/30333/ws/p2p/12D3KooWRwbMb85RWnT8DSXSYMWQtuDwh4LJzndoRrTDotTR5gDC"
+    name: "finney"
+
+subtensor_node_types:
+  lite:
+    sync: "warp"
+    pruning: "1000"
+    description: "Fast sync node"
+  archive:
+    sync: "full"
+    pruning: "archive"
+    description: "Full archive node"
+
+subtensor_env_vars:
+  RUST_BACKTRACE: "1"
+  CARGO_HOME: "/var/cache/cargo"
+
+subtensor_health_check:
+  interval: "30s"
+  timeout: "10s"
+  retries: 3
+  start_period: "60s"
+
+subtensor_backup_enabled: true
+subtensor_backup_volumes:
+  - "data"
+  - "chainspec"
+
+subtensor_monitoring_enabled: true
+subtensor_metrics_port: 9615

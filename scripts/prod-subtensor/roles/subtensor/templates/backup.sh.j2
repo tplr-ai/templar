@@ -1,0 +1,57 @@
+#!/bin/bash
+set -euo pipefail
+
+BACKUP_DIR="{{ backup_storage_path }}"
+LOG_FILE="{{ subtensor_logs_dir }}/backup.log"
+RETENTION_DAYS={{ backup_retention_days | default(7) }}
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BACKUP_NAME="subtensor_backup_$TIMESTAMP"
+
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+create_backup() {
+    local backup_path="$BACKUP_DIR/$BACKUP_NAME"
+    mkdir -p "$backup_path"
+    
+    cp {{ subtensor_base_path }}/docker-compose.yml "$backup_path/"
+    cp {{ subtensor_base_path }}/.env "$backup_path/"
+    cp -r {{ subtensor_base_path }}/chainspec "$backup_path/"
+    
+{% if 'data' in subtensor_backup_volumes %}
+    mkdir -p "$backup_path/data"
+    for i in {0..{{ subtensor_replicas | int - 1 }}}; do
+        [[ -d "{{ subtensor_data_dir }}/node-$i" ]] && rsync -av --exclude='lock' "{{ subtensor_data_dir }}/node-$i/" "$backup_path/data/node-$i/"
+    done
+{% endif %}
+    
+    mkdir -p "$backup_path/logs"
+    find {{ subtensor_logs_dir }} -name "*.log" -mtime -1 -exec cp {} "$backup_path/logs/" \;
+    
+    cat > "$backup_path/metadata.json" << EOF
+{
+    "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+    "hostname": "{{ ansible_host }}",
+    "subtensor_version": "{{ subtensor_version }}",
+    "network": "{{ subtensor_network }}",
+    "replicas": {{ subtensor_replicas }}
+}
+EOF
+    
+    cd "$BACKUP_DIR"
+    tar -czf "$BACKUP_NAME.tar.gz" "$BACKUP_NAME"
+    rm -rf "$BACKUP_NAME"
+    
+    log_message "Backup completed: $BACKUP_NAME.tar.gz"
+}
+
+cleanup_old_backups() {
+    find "$BACKUP_DIR" -name "subtensor_backup_*.tar.gz" -mtime +$RETENTION_DAYS -delete
+}
+
+{% if enable_backup | default(true) %}
+mkdir -p "$BACKUP_DIR"
+create_backup
+cleanup_old_backups
+{% endif %}

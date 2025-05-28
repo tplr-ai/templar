@@ -1,0 +1,59 @@
+---
+- name: Create subtensor user
+  user:
+    name: subtensor
+    system: yes
+    create_home: yes
+    groups: docker
+
+- name: Create base directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: subtensor
+    group: subtensor
+    mode: '0755'
+  loop:
+    - /opt/subtensor
+    - /opt/subtensor/data
+    - /opt/subtensor/data/node-0
+    - /opt/subtensor/data/node-1
+    - /opt/subtensor/data/node-2
+
+- name: Generate Docker Compose
+  template:
+    src: docker-compose.yml.j2
+    dest: /opt/subtensor/docker-compose.yml
+    owner: subtensor
+    group: subtensor
+    mode: '0644'
+
+- name: Create systemd service
+  template:
+    src: subtensor.service.j2
+    dest: /etc/systemd/system/subtensor.service
+    mode: '0644'
+  notify: reload systemd
+
+- name: Pull subtensor image
+  docker_image:
+    name: "{{ subtensor_image }}:{{ subtensor_version }}"
+    source: pull
+
+- name: Start and enable subtensor service
+  systemd:
+    name: subtensor
+    state: started
+    enabled: yes
+    daemon_reload: yes
+
+- name: Wait for nodes to start
+  wait_for:
+    port: "{{ item }}"
+    host: localhost
+    timeout: 120
+    delay: 30
+  loop:
+    - 9933
+    - 9934
+    - 9935

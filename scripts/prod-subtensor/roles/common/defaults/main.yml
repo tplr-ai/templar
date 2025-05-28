@@ -1,0 +1,41 @@
+---
+essential_packages:
+  - curl
+  - wget
+  - git
+  - htop
+  - vim
+  - unzip
+  - software-properties-common
+  - apt-transport-https
+  - ca-certificates
+  - gnupg
+  - lsb-release
+  - jq
+  - net-tools
+  - tcpdump
+  - iotop
+  - rsync
+  - logrotate
+  - cron
+
+security_packages:
+  - fail2ban
+  - ufw
+  - rkhunter
+  - chkrootkit
+
+monitoring_packages:
+  - prometheus-node-exporter
+  - sysstat
+
+swap_size_mb: 2048
+enable_swap: true
+swappiness: 10
+
+fs_file_max: 2097152
+nofile_soft: 65536
+nofile_hard: 65536
+
+tcp_congestion_control: "bbr"
+enable_tcp_bbr: true

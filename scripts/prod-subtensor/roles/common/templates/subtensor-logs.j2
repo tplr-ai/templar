@@ -1,0 +1,28 @@
+{{ subtensor_logs_dir }}/*.log {
+    daily
+    missingok
+    rotate {{ log_retention_days | default(30) }}
+    compress
+    delaycompress
+    notifempty
+    create 644 root root
+    postrotate
+        /usr/bin/docker-compose -f {{ subtensor_base_path }}/docker-compose.yml logs --no-color --tail=0 > {{ subtensor_logs_dir }}/docker-compose.log 2>&1 || true
+    endscript
+}
+
+/var/log/nginx/*.log {
+    daily
+    missingok
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    create 644 www-data adm
+    sharedscripts
+    postrotate
+        if [ -f /var/run/nginx.pid ]; then
+            kill -USR1 `cat /var/run/nginx.pid`
+        fi
+    endscript
+}

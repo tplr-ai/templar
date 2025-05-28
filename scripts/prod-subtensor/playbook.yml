@@ -1,0 +1,136 @@
+---
+# Main playbook for Subtensor Production deployment
+- name: Deploy Subtensor Production Infrastructure
+  hosts: all
+  become: true
+  vars_files:
+    - group_vars/all.yml
+    - group_vars/vault.yml
+
+  pre_tasks:
+    - name: Gather system facts
+      setup:
+        gather_subset:
+          - "!all"
+          - "!min"
+          - hardware
+          - network
+          - virtual
+          - distribution
+
+    - name: Verify system requirements
+      assert:
+        that:
+          - ansible_memtotal_mb >= 8192
+          - ansible_processor_vcpus >= 4
+          - ansible_os_family == "Debian"
+        fail_msg: |
+          System requirements not met:
+          - Memory: {{ ansible_memtotal_mb }}MB (required: 8192MB+)
+          - CPU: {{ ansible_processor_vcpus }} cores (required: 4+ cores)
+          - OS: {{ ansible_os_family }} (required: Debian)
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+  roles:
+    - role: common
+      tags: [common, system]
+
+    - role: nginx
+      tags: [nginx, proxy]
+      when: nginx_enabled | default(true)
+
+    - role: subtensor
+      tags: [subtensor, blockchain]
+
+  post_tasks:
+    - name: Verify Subtensor deployment
+      block:
+        - name: Wait for all Subtensor nodes to be responsive
+          uri:
+            url: "http://localhost:{{ subtensor_rpc_port_start | int + item }}"
+            method: POST
+            body_format: json
+            body:
+              jsonrpc: "2.0"
+              method: "system_health"
+              params: []
+              id: 1
+            headers:
+              Content-Type: "application/json"
+            status_code: 200
+          register: node_health
+          retries: 10
+          delay: 30
+          loop: "{{ range(subtensor_replicas | int) | list }}"
+          when: not ansible_check_mode
+
+        - name: Check node sync status
+          uri:
+            url: "http://localhost:{{ subtensor_rpc_port_start | int + item }}"
+            method: POST
+            body_format: json
+            body:
+              jsonrpc: "2.0"
+              method: "system_syncState"
+              params: []
+              id: 1
+            headers:
+              Content-Type: "application/json"
+            status_code: 200
+          register: sync_status
+          loop: "{{ range(subtensor_replicas | int) | list }}"
+          when: not ansible_check_mode
+          failed_when: false
+
+        - name: Display node status
+          debug:
+            msg:
+              - "Node {{ item.item }} Health: {{ item.json.result if item.json is defined else 'Unknown' }}"
+          loop: "{{ node_health.results }}"
+          when: not ansible_check_mode and node_health is defined
+
+        - name: Display sync status
+          debug:
+            msg:
+              - "Node {{ item.item }} Sync: {{ item.json.result if item.json is defined else 'Unknown' }}"
+          loop: "{{ sync_status.results }}"
+          when: not ansible_check_mode and sync_status is defined
+
+    - name: Verify NGINX load balancer
+      block:
+        - name: Test NGINX RPC proxy
+          uri:
+            url: "{% if nginx_ssl_enabled %}https{% else %}http{% endif %}://localhost/"
+            validate_certs: false
+            method: POST
+            body_format: json
+            body:
+              jsonrpc: "2.0"
+              method: "system_name"
+              params: []
+              id: 1
+            headers:
+              Content-Type: "application/json"
+            status_code: 200
+          register: nginx_rpc_test
+          when: not ansible_check_mode and nginx_enabled | default(true)
+
+        - name: Display NGINX status
+          debug:
+            msg:
+              - "NGINX RPC Proxy: {{ 'Working' if nginx_rpc_test.status == 200 else 'Failed' }}"
+              - "Response: {{ nginx_rpc_test.json.result if nginx_rpc_test.json is defined else 'No response' }}"
+          when: not ansible_check_mode and nginx_enabled | default(true)
+      when: nginx_enabled | default(true)
+
+    - name: Run health check
+      command: /opt/subtensor/scripts/health_check.sh
+      become_user: subtensor
+      register: health_check_result
+      when: not ansible_check_mode
+      ignore_errors: true

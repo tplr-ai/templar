@@ -1,0 +1,62 @@
+version: "3.8"
+
+services:
+  subtensor-0:
+    image: {{ subtensor_image }}:{{ subtensor_version }}
+    container_name: subtensor-0
+    restart: unless-stopped
+    ports:
+      - "9933:9933"
+      - "9944:9944"
+      - "30333:30333"
+    volumes:
+      - /opt/subtensor/data/node-0:/data
+    command: >
+      node-subtensor
+      --base-path /data
+      --chain {{ subtensor_network }}
+      --rpc-external
+      --rpc-cors all
+      --port 30333
+      --rpc-port 9933
+      --name "node-0"
+
+  subtensor-1:
+    image: {{ subtensor_image }}:{{ subtensor_version }}
+    container_name: subtensor-1
+    restart: unless-stopped
+    ports:
+      - "9934:9933"
+      - "9945:9944"
+      - "30334:30333"
+    volumes:
+      - /opt/subtensor/data/node-1:/data
+    command: >
+      node-subtensor
+      --base-path /data
+      --chain {{ subtensor_network }}
+      --rpc-external
+      --rpc-cors all
+      --port 30333
+      --rpc-port 9933
+      --name "node-1"
+
+  subtensor-2:
+    image: {{ subtensor_image }}:{{ subtensor_version }}
+    container_name: subtensor-2
+    restart: unless-stopped
+    ports:
+      - "9935:9933"
+      - "9946:9944"
+      - "30335:30333"
+    volumes:
+      - /opt/subtensor/data/node-2:/data
+    command: >
+      node-subtensor
+      --base-path /data
+      --chain {{ subtensor_network }}
+      --rpc-external
+      --rpc-cors all
+      --port 30333
+      --rpc-port 9933
+      --name "node-2"

@@ -74,7 +74,7 @@ class Miner:
             "--project", type=str, default="templar", help="Wandb project."
         )
         parser.add_argument(
-            "--actual-batch-size",
+            "--actual_batch_size",
             type=int,
             default=None,
             help="Override the batch size defined in hparams.",

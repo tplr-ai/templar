@@ -1339,41 +1339,25 @@ class Validator:
                         )
                         continue
 
-                    # Verify pages match if miner sent them
+                    # Verify that we have at least a subset of core pages overlap if miner sent them
                     if miner_pages is not None:
-                        if local_pages != miner_pages:
+                        # Check if some of the miner's pages are included in validator pages (core pages overlap)
+                        validator_pages_set = set(local_pages)
+                        miner_pages_set = set(miner_pages)
+                        overlap = validator_pages_set & miner_pages_set
+
+                        if not overlap:
                             tplr.log_with_context(
-                                level="warning",
-                                message=f"Pages mismatch for UID {eval_uid}: miner sent {len(miner_pages)} pages vs local {len(local_pages)} pages. First 3 miner: {miner_pages[:3]}, First 3 local: {local_pages[:3]}",
+                                level="error",
+                                message=f"CRITICAL: No overlap between validator and miner pages for UID {eval_uid}. Validator: {len(local_pages)} pages, Miner: {len(miner_pages)} pages",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
                                 eval_uid=eval_uid,
                             )
-                            # With the new guaranteed overlap approach, validator pages should be subset of miner pages
-                            # Check if validator pages are subset of miner pages
-                            validator_pages_set = set(local_pages)
-                            miner_pages_set = set(miner_pages)
-                            missing_from_miner = validator_pages_set - miner_pages_set
-                            if missing_from_miner:
-                                tplr.log_with_context(
-                                    level="error",
-                                    message=f"CRITICAL: Validator pages not subset of miner pages for UID {eval_uid}. Missing: {list(missing_from_miner)[:3]}...",
-                                    sync_window=self.sync_window,
-                                    current_window=self.current_window,
-                                    eval_uid=eval_uid,
-                                )
-                            else:
-                                tplr.log_with_context(
-                                    level="info",
-                                    message=f"✓ Validator pages are subset of miner pages for UID {eval_uid} (expected with guaranteed overlap)",
-                                    sync_window=self.sync_window,
-                                    current_window=self.current_window,
-                                    eval_uid=eval_uid,
-                                )
                         else:
                             tplr.log_with_context(
                                 level="info",
-                                message=f"Pages verified for UID {eval_uid}: pages match exactly.",
+                                message=f"Found page overlap for UID {eval_uid}: {len(overlap)} common pages (validator: {len(local_pages)}, miner: {len(miner_pages)} total pages)",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
                                 eval_uid=eval_uid,

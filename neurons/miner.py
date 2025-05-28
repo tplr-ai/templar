@@ -684,16 +684,16 @@ class Miner:
             debug_pages = distrib.all_gather_object(
                 pages
             )  # list[ list[tuple] ] from every rank
+            debug_pages_flat = [tuple(p) for sub in debug_pages for p in sub]
             if distrib.is_rank0():
-                flat = [tuple(p) for sub in debug_pages for p in sub]
-                dups = set(x for x in flat if flat.count(x) > 1)
+                dups = set(x for x in debug_pages_flat if debug_pages_flat.count(x) > 1)
                 if dups:
                     tplr.logger.warning(
                         f"Page overlap across ranks: {sorted(dups)[:10]} …"
                     )
                 else:
                     tplr.logger.info(
-                        f"Page split OK • total={len(flat)} • per-rank={[len(x) for x in debug_pages]}"
+                        f"Page split OK • total={len(debug_pages_flat)} • per-rank={[len(x) for x in debug_pages]}"
                     )
 
             loader = await tplr.r2_dataset.R2DatasetLoader.create(
@@ -782,7 +782,7 @@ class Miner:
             if distrib.is_rank0():
                 # tplr.prepare_gradient_dict should take this model_ref_for_grads and extract .grad
                 gradient_to_put, _, _, _ = tplr.prepare_gradient_dict(
-                    self, pages, step_window
+                    self, debug_pages_flat, step_window
                 )  # type: ignore
                 tplr.logger.info(
                     f"{tplr.P(step_window, tplr.T() - compression_start_time)} [Rank 0] Compressed local DDP-synced gradients for upload."

@@ -316,6 +316,10 @@ class CompressDCT:
         # Convert quantized values back using lookup table
         dequantized = lookup[val.long()]
 
+        # Check and move shift to the same device as dequantized
+        if not shift.is_cuda or shift.device != dequantized.device:
+            shift = shift.to(dequantized.device)
+
         # Apply scale and shift to get back original distribution
         val = dequantized + shift
         val = val.to(orig_dtype)

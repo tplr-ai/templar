@@ -1,6 +1,6 @@
 # Templar Model Converter
 
-The Templar Model Converter is an autonomous service that continuously monitors model checkpoints, saves them with proper versioning, and converts them to GGUF format for efficient inference. It automatically detects new checkpoints and performs conversions on a configurable interval.
+The Templar Model Converter is an autonomous service that continuously monitors model checkpoints, saves them with proper versioning, converts them to GGUF format, and optionally uploads them to deployment platforms. It automatically detects new checkpoints and performs conversions with optional uploads on a configurable interval.
 
 ## Overview
 
@@ -8,6 +8,7 @@ The model converter script (`scripts/model_converter.py`) performs:
 - Automatic checkpoint detection by window number
 - Versioned model saving using semver-compatible format
 - GGUF format conversion for deployment
+- Optional upload to HuggingFace Hub and Ollama
 - Resource management and cleanup
 - Service-oriented design for continuous operation
 
@@ -16,9 +17,12 @@ The model converter script (`scripts/model_converter.py`) performs:
 - **Automated Monitoring**: Continuously checks for new model checkpoints
 - **Semantic Versioning**: Saves models with format `{version}-alpha+{global_step}`
 - **GGUF Conversion**: Converts models to GGUF format for efficient inference
+- **HuggingFace Hub Integration**: Automatic upload to HuggingFace repositories
+- **Ollama Integration**: Direct deployment to local Ollama installation
+- **Flexible Authentication**: Support for environment variables and configuration
 - **Resource Management**: Cleans up previous model versions automatically
-- **Configurable Intervals**: Customizable conversion frequency
-- **Error Handling**: Robust error handling for conversion failures
+- **Configurable Intervals**: Customizable conversion and upload frequency
+- **Error Handling**: Robust error handling for conversion and upload failures
 
 ## Prerequisites
 
@@ -37,15 +41,26 @@ The converter requires:
 - Standard Templar environment configuration
 - Access to model checkpoints on the network
 
+For upload functionality (optional):
+- `HF_TOKEN`: HuggingFace authentication token for Hub uploads
+- Ollama service running locally for Ollama integration
+
 ## Installation
 
 The converter automatically handles its dependencies:
 
 1. **Automatic Script Download**: Downloads the GGUF conversion script if not present
 2. **Dependency Installation**: Installs the `gguf` Python package if missing
-3. **Directory Creation**: Creates necessary directories for model storage
+3. **Upload Dependencies**: Installs `huggingface_hub` for HuggingFace uploads if needed
+4. **Directory Creation**: Creates necessary directories for model storage
 
 These steps happen automatically when you first run the converter.
+
+For upload functionality, install optional dependencies:
+```bash
+pip install huggingface_hub  # For HuggingFace uploads
+curl -fsSL https://ollama.ai/install.sh | sh  # For Ollama integration
+```
 
 ## Usage
 
@@ -67,7 +82,25 @@ uv run scripts/model_converter.py \
   --checkpoint_path custom/checkpoints/
 ```
 
+### With Upload Integration
+
+Run with automatic uploads enabled:
+```bash
+# Set authentication
+export HF_TOKEN=hf_your_token_here
+
+# Run with uploads enabled
+uv run scripts/model_converter.py \
+  --netuid 3 \
+  --device cuda:0 \
+  --upload-hf \
+  --upload-ollama \
+  --hf_repo_id "myuser/templar-models"
+```
+
 ### Command-Line Arguments
+
+#### Core Arguments
 
 | Argument | Default | Description |
 |----------|---------|-------------|
@@ -77,6 +110,17 @@ uv run scripts/model_converter.py \
 | `--checkpoint_path` | checkpoints/ | Directory for checkpoint storage |
 | `--uid` | None | Override the wallet's UID |
 
+#### Upload Arguments (Future Implementation)
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--upload-hf` | False | Upload converted models to HuggingFace Hub |
+| `--upload-ollama` | False | Upload GGUF models to Ollama |
+| `--hf_repo_id` | Auto-generated | HuggingFace repository ID |
+| `--hf_token` | HF_TOKEN env | HuggingFace authentication token |
+| `--ollama_model_name` | Auto-generated | Custom Ollama model name |
+| `--private` | False | Create private HuggingFace repository |
+
 ## Architecture
 
 ### Conversion Workflow
@@ -85,9 +129,10 @@ uv run scripts/model_converter.py \
 2. **Model Loading**: Downloads and loads checkpoint when new version is detected
 3. **Versioned Saving**: Saves model with semantic version format
 4. **GGUF Conversion**: Converts model to GGUF format using conversion script
-5. **Cleanup**: Deletes previous model versions to save space
-6. **Metrics Logging**: Reports conversion metrics to monitoring systems
-7. **Wait**: Sleeps until next conversion interval
+5. **Upload to Services**: Optionally uploads to HuggingFace Hub and/or Ollama
+6. **Cleanup**: Deletes previous model versions to save space
+7. **Metrics Logging**: Reports conversion and upload metrics to monitoring systems
+8. **Wait**: Sleeps until next conversion interval
 
 ### Key Components
 
@@ -95,6 +140,8 @@ uv run scripts/model_converter.py \
 - **CommsClass**: Handles network communication and checkpoint retrieval
 - **MetricsLogger**: Manages metrics submission for monitoring
 - **GGUF Script Integration**: Uses official llama.cpp conversion script
+- **Upload Integrations**: HuggingFace Hub and Ollama deployment handlers
+- **Authentication Manager**: Handles tokens and credentials for uploads
 
 ### Versioning Format
 
@@ -160,6 +207,8 @@ uv run python scripts/convert_hf_to_gguf.py {model_dir}/ --outfile {model_dir}/m
 The converter reports metrics including:
 - `conversion_timestamp`: When the conversion occurred
 - `gguf_converted`: Success indicator (1.0 for success)
+- `hf_uploaded`: HuggingFace upload success indicator
+- `ollama_uploaded`: Ollama upload success indicator
 - `global_step`: Training step of the converted model
 - `window`: Window number of the checkpoint
 - `version`: Semantic version string
@@ -168,8 +217,9 @@ The converter reports metrics including:
 
 Access metrics through your monitoring dashboard to track:
 - Conversion success rates
+- Upload success rates
 - Model version history
-- Processing times
+- Processing and upload times
 - System health
 
 ## Troubleshooting
@@ -200,6 +250,13 @@ Access metrics through your monitoring dashboard to track:
    - Check conversion script output
    - Verify model format compatibility
    - Review error logs for details
+
+6. **Upload Failures**:
+   - Verify HF_TOKEN is set and valid
+   - Check internet connectivity
+   - Ensure Ollama service is running
+   - Review authentication credentials
+   - Check repository permissions
 
 ### Debug Mode
 
@@ -238,6 +295,9 @@ The model converter integrates with:
 - Checkpoint distribution network
 - Monitoring infrastructure
 - Version control systems
+- HuggingFace Hub for model sharing
+- Ollama for local model deployment
+- CI/CD pipelines for automated deployment
 
 ## Advanced Usage
 
@@ -271,6 +331,9 @@ To enhance the converter:
 2. Implement compression options
 3. Add model validation steps
 4. Enhance metrics reporting
+5. Add more upload destinations
+6. Implement upload retry mechanisms
+7. Add model metadata management
 
 ### Contributing
 

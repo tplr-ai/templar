@@ -449,11 +449,11 @@ class Miner:
 
         # All ranks participate in broadcast_object_list
         if distrib.is_rank0():
-            distrib.broadcast_object_list(load_results_list, src=0)
+            distrib.broadcast_object(load_results_list, src=0)
         else:
             # Create placeholders for receiving objects
             placeholders = [None] * len(load_results_list)
-            distrib.broadcast_object_list(placeholders, src=0)
+            distrib.broadcast_object(placeholders, src=0)
             load_results_list = placeholders
 
         (

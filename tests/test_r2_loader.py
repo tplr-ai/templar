@@ -1787,7 +1787,9 @@ async def test_next_pages_two_ranks_with_overlap(fake_dataset_configs):
     # There should be some overlap (core pages shared between ranks)
     assert not set(p0).isdisjoint(set(p1)), "Expected overlap between ranks"
     # Total unique pages should be less than n_pages * world_size due to overlap
-    assert len(set(p0) | set(p1)) < n_pages * wsize, "Expected shared pages to reduce total unique count"
+    assert len(set(p0) | set(p1)) < n_pages * wsize, (
+        "Expected shared pages to reduce total unique count"
+    )
 
 
 @pytest.mark.asyncio
@@ -1847,4 +1849,6 @@ async def test_small_n_pages_vs_large_world(fake_dataset_configs):
     # With core page overlap, total unique pages should be less than n_pages * world_size
     # But every rank should still get their n_pages
     assert len(all_rank_pages) == n_pages * wsize, "Each rank should get exact n_pages"
-    assert len(unions) <= n_pages * wsize, "Unique pages should be <= total due to overlap"
+    assert len(unions) <= n_pages * wsize, (
+        "Unique pages should be <= total due to overlap"
+    )

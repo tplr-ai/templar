@@ -406,7 +406,7 @@ class Miner:
                 _loaded_checkpoint_window,
                 _loaded_optimizer,
                 _loaded_scheduler,
-                _loaded_model_state_dict,  # Assuming load_checkpoint can return model_state_dict
+                #_loaded_model_state_dict,  # Assuming load_checkpoint can return model_state_dict
             ) = await self.comms.load_checkpoint(
                 model=model_to_load,  # Pass the actual model module for rank 0 to load into
                 optimizer=self.optimizer,
@@ -419,9 +419,9 @@ class Miner:
             )
             if success:
                 load_success = True
-                loaded_model_state_dict = (
-                    _loaded_model_state_dict  # This should be a state_dict
-                )
+               #loaded_model_state_dict = (
+                #    _loaded_model_state_dict  # This should be a state_dict
+                #)
                 loaded_optimizer_state_dict = (
                     _loaded_optimizer.state_dict() if _loaded_optimizer else None
                 )

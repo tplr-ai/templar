@@ -21,9 +21,9 @@
 # Global imports
 
 import math
+
 import torch
 import torch.fft
-
 from einops import rearrange
 
 
@@ -160,7 +160,7 @@ class CompressDCT:
             val, quant_params = self._quantize_values(val)
             return idx, val, xshape, totalk, quant_params
 
-        return idx, val, xshape, totalk
+        return idx, val, xshape, totalk, None
 
     @torch.no_grad()
     def decompress(self, p, idx, val, xshape, totalk, quantize_params=None):
@@ -315,6 +315,10 @@ class CompressDCT:
 
         # Convert quantized values back using lookup table
         dequantized = lookup[val.long()]
+
+        # Check and move shift to the same device as dequantized
+        if not shift.is_cuda or shift.device != dequantized.device:
+            shift = shift.to(dequantized.device)
 
         # Apply scale and shift to get back original distribution
         val = dequantized + shift

@@ -18,6 +18,9 @@ aggregator_hotkeys: ["aggregator_1"]   # List of aggregator identifiers (optiona
 network: "local"
 netuid: 2
 
+# DDP configuration for miners
+miner_gpus: 4                              # Number of GPUs per miner for DDP training
+
 # Version override for development
 templar_version: "0.2.52dev"           # Version string to use (typically a non-production version for testing)
 

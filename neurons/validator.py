@@ -1339,12 +1339,17 @@ class Validator:
                         )
                         continue
 
-                    # Verify pages match if miner sent them
+                    # Verify that we have at least a subset of core pages overlap if miner sent them
                     if miner_pages is not None:
-                        if local_pages != miner_pages:
+                        # Check if some of the miner's pages are included in validator pages (core pages overlap)
+                        validator_pages_set = set(local_pages)
+                        miner_pages_set = set(miner_pages)
+                        overlap = validator_pages_set & miner_pages_set
+
+                        if not overlap:
                             tplr.log_with_context(
-                                level="warning",
-                                message=f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}",
+                                level="error",
+                                message=f"CRITICAL: No overlap between validator and miner pages for UID {eval_uid}. Validator: {len(local_pages)} pages, Miner: {len(miner_pages)} pages",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
                                 eval_uid=eval_uid,
@@ -1352,7 +1357,7 @@ class Validator:
                         else:
                             tplr.log_with_context(
                                 level="info",
-                                message=f"Pages verified for UID {eval_uid}: pages match.",
+                                message=f"Found page overlap for UID {eval_uid}: {len(overlap)} common pages (validator: {len(local_pages)}, miner: {len(miner_pages)} total pages)",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
                                 eval_uid=eval_uid,
@@ -2833,6 +2838,17 @@ class Validator:
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
+
+            # Optional: Log which pages we're evaluating against for verification
+            if not is_random:  # Only for UID-based evaluation, not random
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Evaluating UID {seed} using {len(local_pages)} core pages: {[p[1] for p in local_pages[:5]]}..."
+                    if local_pages
+                    else "No pages",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
 
             # Create the evaluation loader using the generated pages
             loader = await retry_call(

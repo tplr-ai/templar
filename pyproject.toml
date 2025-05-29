@@ -34,6 +34,7 @@ dependencies = [
     "uvloop>=0.21.0",
     "openskill>=6.0.2",
     "dnspython>=2.7.0",
+    "cloudpickle>=3.1.1",
 ]
 
 [project.optional-dependencies]

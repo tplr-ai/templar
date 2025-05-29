@@ -32,6 +32,12 @@ import logging_loki
 from rich.highlighter import NullHighlighter
 from rich.logging import RichHandler
 
+# Distributed-rank detection (works even if torch.distributed is unavailable)
+try:
+    import torch.distributed as _dist
+except Exception:  # torch might not be installed when building docs, etc.
+    _dist = None  # type: ignore
+
 LOKI_URL: Final[str] = os.environ.get(
     "LOKI_URL", "https://logs.tplr.ai/loki/api/v1/push"
 )
@@ -80,8 +86,35 @@ logging.basicConfig(
     ],
 )
 
-# Create a logger instance
+
+# ---------------------------------------------------------------------------
+class _RankZeroFilter(logging.Filter):
+    """
+    Suppress DEBUG / INFO logs coming from non-rank-0 processes.
+    Still forward WARNING and above so problems are visible cluster-wide.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
+        if _is_rank0():
+            return True
+        return record.levelno >= logging.WARNING
+
+
+# ---------------------------------------------------------------------------
+# Make the "hide non-rank-0" behaviour optional / selective
+#   • TPLR_LOG_ALL_RANKS=1 disables the filter completely
+#   • enable_all_rank_logging("logger.name") disables it for that subtree
+# ---------------------------------------------------------------------------
+
+_RANK_FILTER = _RankZeroFilter()
+
+_DISABLE_FILTER_GLOBALLY = os.getenv("TPLR_LOG_ALL_RANKS", "0") == "1"
+if not _DISABLE_FILTER_GLOBALLY:
+    logging.getLogger().addFilter(_RANK_FILTER)
+
 logger = logging.getLogger("templar")
+if not _DISABLE_FILTER_GLOBALLY:
+    logger.addFilter(_RANK_FILTER)  # rank-0 only for templar by default
 logger.setLevel(logging.INFO)
 
 
@@ -132,7 +165,7 @@ def trace() -> None:
 bt.logging.off()
 
 logger.setLevel(logging.INFO)
-logger.propagate = True
+logger.propagate = False
 logger.handlers.clear()
 logger.addHandler(
     RichHandler(
@@ -309,6 +342,43 @@ def log_with_context(level, message, **context):
     logger.log_with_context(level, message, **context)  # type: ignore
 
 
+def _is_rank0() -> bool:
+    """
+    Returns True iff this process is global rank-0.
+    Falls back to env-vars when torch.distributed is not initialised.
+    """
+    if _dist is not None and _dist.is_initialized():
+        return _dist.get_rank() == 0
+    # Typical torchrun / mp.spawn env var
+    return os.environ.get("RANK", "0") in ("0", "", None)
+
+
+# --- helper -------------------------------------------------------------------
+def enable_all_rank_logging(
+    logger_name: str = "templar",
+    level: int = logging.INFO,
+    root_too: bool = False,
+):
+    """
+    Remove rank-zero filter for `logger_name` so every rank prints at `level`.
+    Call from your code after DDP initialisation.
+    """
+    lg = logging.getLogger(logger_name)
+    for f in list(lg.filters):
+        if isinstance(f, _RankZeroFilter):
+            lg.removeFilter(f)
+    lg.setLevel(level)
+
+    # optional – also unfilter the *root* logger so child loggers that
+    # propagate to it aren't cut off.
+    if root_too:
+        root = logging.getLogger()
+        for f in list(root.filters):
+            if isinstance(f, _RankZeroFilter):
+                root.removeFilter(f)
+        root.setLevel(level)
+
+
 __all__ = [
     "logger",
     "debug",
@@ -317,4 +387,5 @@ __all__ = [
     "T",
     "setup_loki_logger",
     "log_with_context",
+    "enable_all_rank_logging",
 ]

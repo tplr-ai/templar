@@ -60,6 +60,8 @@ class DummyMiner:
         self.compressor = DummyCompressor()
         self.transformer = DummyTransformer()
         self.logger = DummyLogger()
+        self.gradient_iteration_counter = 0
+        self.rank = 0
 
 
 # Test 1: Return Structure and Types
@@ -76,7 +78,7 @@ def test_return_structure_and_types(caplog):
     pages = [["doc1", "page1"]]
     step_window = 5
 
-    with caplog.at_level("INFO", logger="templar"):
+    with caplog.at_level("DEBUG", logger="templar"):
         # Call the helper function.
         result = prepare_gradient_dict(miner, pages, step_window)
 
@@ -94,7 +96,7 @@ def test_return_structure_and_types(caplog):
     # Verify that the metadata key exists
     assert "metadata" in gradient
     # Check that metadata equals the expected dictionary.
-    expected_metadata = {"pages_info": pages, "window": step_window}
+    expected_metadata = {"pages_info": pages, "window": step_window, "rank": 0}
     assert gradient["metadata"] == expected_metadata
 
     # Check that xshapes, totalks, transmitted are dictionaries.
@@ -133,7 +135,7 @@ def test_metadata_attachment():
     )
 
     # Verify that gradient["metadata"] exactly equals the expected dictionary.
-    expected_metadata = {"pages_info": pages, "window": step_window}
+    expected_metadata = {"pages_info": pages, "window": step_window, "rank": 0}
     assert gradient.get("metadata") == expected_metadata, (
         f"Metadata does not match. Expected: {expected_metadata}, Got: {gradient.get('metadata')}"
     )
@@ -403,11 +405,14 @@ def test_behavior_when_p_grad_is_none():
     pages = [["doc", "page"]]
     step_window = 3
 
-    with pytest.raises(Exception) as excinfo:
-        prepare_gradient_dict(miner, pages, step_window)
+    # The function now logs a warning and skips parameters with no gradient
+    # So it should return successfully with empty gradient dict
+    result = prepare_gradient_dict(miner, pages, step_window)
+    gradient, xshapes, totalks, transmitted = result
 
-    # You might expect a TypeError or AttributeError; ensure some exception is raised.
-    assert "None" in str(excinfo.value) or "grad" in str(excinfo.value)
+    # Since the only parameter has no gradient, the gradient dict should only have metadata
+    assert "metadata" in gradient
+    assert "weightidxs" not in gradient  # No weight gradients should be present
 
 
 def test_logging_behavior(caplog):
@@ -422,10 +427,13 @@ def test_logging_behavior(caplog):
     pages = [["doc_log", "page_log"]]
     step_window = 15
 
-    with caplog.at_level("INFO", logger="templar"):
+    # The function now uses logger.debug instead of logger.info
+    with caplog.at_level("DEBUG", logger="templar"):
         prepare_gradient_dict(miner, pages, step_window)
 
-    expected_str = f"Attached metadata to gradient: {{'pages_info': {pages}, 'window': {step_window}}}"
+    # Check for the debug log message with rank
+    expected_metadata = {"pages_info": pages, "window": step_window, "rank": 0}
+    expected_str = f"[Rank 0] Attached metadata to gradient: {expected_metadata}"
     assert expected_str in caplog.text, (
         f"Expected log message not found in logs: {caplog.text}"
     )

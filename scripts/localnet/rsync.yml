@@ -6,7 +6,7 @@
   vars:
     ansible_python_interpreter: /usr/bin/python3
     remote_mode: "{{ hostvars[inventory_hostname]['remote_mode'] | default(false) }}"
-    
+
   tasks:
     - name: Create templar directory on remote if it doesn't exist
       file:
@@ -67,9 +67,22 @@
         delete: no
       tags: rsync
 
+    - name: Synchronize pyproject.toml
+      synchronize:
+        src: "../../pyproject.toml"
+        dest: "{{ ansible_env.HOME }}/templar/pyproject.toml"
+        delete: no
+      tags: rsync
+
     - name: Display sync completion
       debug:
         msg: "Files synchronized successfully to {{ ansible_env.HOME }}/templar"
+      tags: rsync
+
+    - name: Run uv sync to update dependencies
+      shell: uv sync
+      args:
+        chdir: "{{ ansible_env.HOME }}/templar"
       tags: rsync
 
 - name: Trigger reload playbook

@@ -10,13 +10,13 @@ module.exports = {
         {% for hk in miner_hotkeys %}
         {
             name: "TM{{ loop.index }}",
-            script: "neurons/miner.py",
-            interpreter: ".venv/bin/python",
+            script: "torchrun",
+            interpreter: null,
             env: {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
-            args: `--wallet.name "{{ cold_wallet_name }}_{{ hk }}" --wallet.hotkey default --device cuda:{{ miner_devices[loop.index0] if miner_devices is defined else loop.index0 }} --subtensor.network {{ network }} --netuid {{ netuid }} --enable-influxdb --use_wandb --project "${PROJECT_NAME}"`
+            args: `--standalone --rdzv-endpoint=localhost:0 --nproc-per-node={{ miner_gpus | default(4) }} neurons/miner.py --gpus {{ miner_gpus | default(4) }} --wallet.name "{{ cold_wallet_name }}_{{ hk }}" --wallet.hotkey default --subtensor.network {{ network }} --netuid {{ netuid }} --enable-influxdb --use_wandb --project "${PROJECT_NAME}"`
         }{% if not loop.last or validator_hotkeys|length > 0 or (aggregator_hotkeys|default([]))|length > 0 %},{% endif %}
         {% endfor %}
         {% for hk in validator_hotkeys %}

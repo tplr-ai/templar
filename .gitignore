@@ -1,5 +1,5 @@
 .env.yaml
-.env
+.env*
 *.pth
 
 # Python
@@ -80,4 +80,5 @@ chain-specs/
 .env.backup
 CLAUDE.md
 .cache
-validator-state-*.npz
+validator-state-*
+SPEC*

@@ -21,7 +21,6 @@ import json
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -678,7 +677,6 @@ class R2DatasetLoader(DatasetLoader):
         self._token_cache.clear()
 
     @staticmethod
-    @lru_cache(maxsize=2048)
     @_timer_profiler.profile("_get_parquet_file")
     def _get_parquet_file(shard_path: str) -> dict:
         """Cached parquet file access with metadata"""
@@ -722,7 +720,6 @@ class R2DatasetLoader(DatasetLoader):
         }
 
     @staticmethod
-    @lru_cache(maxsize=2048)
     def _get_tokenized_cache(cache_key: str):
         """Cached tokenization results"""
         return R2DatasetLoader._token_cache.get(cache_key)

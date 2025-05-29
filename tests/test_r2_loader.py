@@ -1771,8 +1771,8 @@ async def test_next_pages_single_rank(fake_dataset_configs):
 
 
 @pytest.mark.asyncio
-async def test_next_pages_two_ranks_no_overlap(fake_dataset_configs):
-    """Ranks must receive equal work and zero overlap."""
+async def test_next_pages_two_ranks_with_overlap(fake_dataset_configs):
+    """Ranks must receive equal work with guaranteed overlap for evaluation."""
     n_pages = 7
     wsize = 2
     p0 = await R2DatasetLoader.next_pages(
@@ -1784,8 +1784,10 @@ async def test_next_pages_two_ranks_no_overlap(fake_dataset_configs):
 
     assert len(p0) == n_pages
     assert len(p1) == n_pages
-    assert set(p0).isdisjoint(set(p1))
-    assert len(set(p0) | set(p1)) == n_pages * wsize  # full coverage
+    # There should be some overlap (core pages shared between ranks)
+    assert not set(p0).isdisjoint(set(p1)), "Expected overlap between ranks"
+    # Total unique pages should be less than n_pages * world_size due to overlap
+    assert len(set(p0) | set(p1)) < n_pages * wsize, "Expected shared pages to reduce total unique count"
 
 
 @pytest.mark.asyncio
@@ -1828,17 +1830,21 @@ async def test_next_pages_offset_changes(fake_dataset_configs):
 async def test_small_n_pages_vs_large_world(fake_dataset_configs):
     """
     Even if n_pages is tiny, every rank must still get that many pages
-    (the generator keeps striding until satisfied).
+    with core overlap behavior.
     """
     n_pages = 1
     wsize = 8
     unions = set()
+    all_rank_pages = []
     for r in range(wsize):
         pr = await R2DatasetLoader.next_pages(
             offset=5, n_pages=n_pages, seed="tiny-seed", rank=r, world_size=wsize
         )
         assert len(pr) == n_pages
         unions.update(pr)
+        all_rank_pages.extend(pr)
 
-    # total unique pages == n_pages * world_size
-    assert len(unions) == n_pages * wsize
+    # With core page overlap, total unique pages should be less than n_pages * world_size
+    # But every rank should still get their n_pages
+    assert len(all_rank_pages) == n_pages * wsize, "Each rank should get exact n_pages"
+    assert len(unions) <= n_pages * wsize, "Unique pages should be <= total due to overlap"

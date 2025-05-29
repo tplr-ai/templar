@@ -22,7 +22,7 @@ def find_free_port():
         return s.getsockname()[1]
 
 
-def ddp_init(local_rank=None, world_size=None, timeout_min: int = 5):
+def ddp_init(local_rank=None, world_size=None, timeout_min: int = 10):
     """
     Initialize the distributed process group for DDP.
 

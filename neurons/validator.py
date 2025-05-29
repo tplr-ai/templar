@@ -1341,7 +1341,10 @@ class Validator:
 
                     # Verify pages match if miner sent them
                     if miner_pages is not None:
-                        if local_pages != miner_pages:
+                        if (
+                            isinstance(local_pages, type(miner_pages))
+                            and local_pages != miner_pages
+                        ):
                             tplr.log_with_context(
                                 level="warning",
                                 message=f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}",

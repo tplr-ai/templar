@@ -1485,9 +1485,7 @@ class Comms(ChainManager):
         current_window: int,
         device: str,
         init_version: Optional[str] = None,
-    ) -> tuple[
-        bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
-    ]:
+    ) -> tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
         """
         Loads the latest checkpoint. Rank 0 loads, broadcasts, others receive.
         This function itself *only* loads on Rank 0. Broadcasting happens externally.
@@ -1557,7 +1555,6 @@ class Comms(ChainManager):
             optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
 
             scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
-            momentum = checkpoint_data["momentum"]
 
             checkpoint_start_window = checkpoint_data.get("start_window")
             checkpoint_current_window = checkpoint_data.get("current_window")
@@ -1576,7 +1573,7 @@ class Comms(ChainManager):
             )
             self.last_checkpoint_data = checkpoint_data
 
-            return True, momentum, checkpoint_sync_window, optimizer, scheduler
+            return True, checkpoint_sync_window, optimizer, scheduler
 
         except KeyError as e:
             tplr.logger.error(f"[Rank 0] Invalid checkpoint format: missing key {e}")

@@ -62,6 +62,7 @@ export DATABUCKET="dataset"
   --r2-bucket="$DATABUCKET" \
   --workers=16 \
   --r2-subfolder="mlfoundations-dclm-baseline-1.0-parquet-optimized" \
+  --hf-prefix="filtered/OH_eli5_vs_rw_v2_bigram_200k_train/fasttext_openhermes_reddit_eli5_vs_rw_v2_bigram_200k_train/processed_data" \
   --compression-level=3 \
   --row-group-size=1000
 ```

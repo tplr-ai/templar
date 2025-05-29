@@ -1,12 +1,14 @@
-# FineWeb-edu Dataset Setup for Miners
+# FineWeb-edu Dataset Setup for Miners (Legacy)
 
-This guide explains how to properly download, validate, and set up the FineWeb-edu dataset for use with your miner. The miner will download and process the dataset during its operation, transferring data from Hugging Face to your Cloudflare R2 bucket.
+This guide explains how to properly download, validate, and set up the FineWeb-edu dataset for use with your miner. **This dataset is for legacy releases only.**
+
+> **Important**: This dataset is no longer the current dataset. For current releases, use the [DCLM Dataset Setup Guide](./r2_dataset-dclm.md).
 
 ## Dataset Information
 
-The FineWeb-edu dataset is based on the [HuggingFaceFW/fineweb-edu-score-2](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu-score-2) dataset on Hugging Face. This is the primary dataset currently used by Templar miners.
+The FineWeb-edu dataset is based on the [HuggingFaceFW/fineweb-edu-score-2](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu-score-2) dataset on Hugging Face. This was the primary dataset used by Templar miners in previous releases.
 
-> **Note**: The DCLM dataset is planned for future releases but is not currently in use.
+> **Note**: The DCLM dataset is now the current dataset for active releases.
 
 ## System Requirements
 

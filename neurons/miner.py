@@ -406,7 +406,6 @@ class Miner:
                 _loaded_checkpoint_window,
                 _loaded_optimizer,
                 _loaded_scheduler,
-                _loaded_model_state_dict,  # Assuming load_checkpoint can return model_state_dict
             ) = await self.comms.load_checkpoint(
                 model=model_to_load,  # Pass the actual model module for rank 0 to load into
                 optimizer=self.optimizer,
@@ -419,9 +418,6 @@ class Miner:
             )
             if success:
                 load_success = True
-                loaded_model_state_dict = (
-                    _loaded_model_state_dict  # This should be a state_dict
-                )
                 loaded_optimizer_state_dict = (
                     _loaded_optimizer.state_dict() if _loaded_optimizer else None
                 )
@@ -440,7 +436,6 @@ class Miner:
         # Use broadcast_object for simplicity, for very large states, consider dist.broadcast for tensors
         load_results_list = [
             load_success,
-            loaded_model_state_dict,
             loaded_optimizer_state_dict,
             loaded_scheduler_state_dict,
             loaded_momentum_dict,
@@ -449,16 +444,15 @@ class Miner:
 
         # All ranks participate in broadcast_object_list
         if distrib.is_rank0():
-            distrib.broadcast_object_list(load_results_list, src=0)
+            distrib.broadcast_object(load_results_list, src=0)
         else:
             # Create placeholders for receiving objects
             placeholders = [None] * len(load_results_list)
-            distrib.broadcast_object_list(placeholders, src=0)
+            distrib.broadcast_object(placeholders, src=0)
             load_results_list = placeholders
 
         (
             load_success,
-            loaded_model_state_dict,
             loaded_optimizer_state_dict,
             loaded_scheduler_state_dict,
             loaded_momentum_dict,
@@ -607,7 +601,7 @@ class Miner:
         )
 
         # # Load checkpoint and synchronize across ranks
-        # await self._load_checkpoint_and_sync(self.start_window)
+        await self._load_checkpoint_and_sync(self.start_window)
 
         if tplr.distrib.is_rank0():  # Commitment fetcher only on rank 0
             self.comms.start_commitment_fetcher()

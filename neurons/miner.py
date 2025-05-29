@@ -440,7 +440,7 @@ class Miner:
         # Use broadcast_object for simplicity, for very large states, consider dist.broadcast for tensors
         load_results_list = [
             load_success,
-            loaded_model_state_dict,
+            #loaded_model_state_dict,
             loaded_optimizer_state_dict,
             loaded_scheduler_state_dict,
             loaded_momentum_dict,
@@ -458,7 +458,7 @@ class Miner:
 
         (
             load_success,
-            loaded_model_state_dict,
+            #loaded_model_state_dict,
             loaded_optimizer_state_dict,
             loaded_scheduler_state_dict,
             loaded_momentum_dict,

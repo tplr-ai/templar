@@ -99,6 +99,11 @@ class Miner:
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        parser.add_argument(
+            "--log_to_private_wandb",
+            action="store_true",
+            help="Log to private wandb",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)

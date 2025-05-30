@@ -2174,15 +2174,19 @@ class Comms(ChainManager):
 
     async def load_aggregation(self, window: int):
         """
-        Load aggregated gradients for a specified window from the aggregation server. Rank 0 only.
-        """
-        if not distrib.is_rank0():
-            return None
+        Load aggregated gradients for a specified window from the aggregation server.
 
+        Args:
+            window: Window number to load
+
+        Returns:
+            Processed aggregation data or None if failed
+        """
         try:
             bucket_config = BUCKET_SECRETS["aggregator"]
             credentials = bucket_config["credentials"]["read"]
 
+            # Create a Bucket object using specified credentials
             bucket = Bucket(
                 name=bucket_config["name"],
                 account_id=bucket_config["account_id"],
@@ -2194,20 +2198,26 @@ class Comms(ChainManager):
 
             tplr.logger.info(f"Attempting to download aggregation file: {filename}")
 
-            result = await self._get_bucket_checkpoint(bucket, self.uid, __version__)
-            if result:
-                self.last_checkpoint_data = result[0]
-                return result[0], result[1]
+            # Use shared async S3 logic instead of boto3 manually
+            result = await self.s3_get_object(
+                key=filename,
+                bucket=bucket,
+                timeout=40,
+            )
 
-            tplr.logger.info("No suitable checkpoint found.")
-            return None
+            if result is None:
+                tplr.logger.warning(f"No aggregation file found for window {window}")
+                return None
 
-        except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(bucket)
-            tplr.logger.warning("S3 connection error while getting latest checkpoint.")
-            return None
+            tplr.logger.info(
+                f"Successfully loaded aggregation data for window {window}"
+            )
+            return result
+
         except Exception as e:
-            tplr.logger.error(f"Error getting latest checkpoint: {e}", exc_info=True)
+            tplr.logger.error(
+                f"Error loading aggregation file for window {window}: {e}"
+            )
             return None
 
     async def get_debug_dict(self, window: int):

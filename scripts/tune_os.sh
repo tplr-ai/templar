@@ -11,7 +11,8 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 echo "Setting file descriptor limits..."
-cat >> /etc/security/limits.conf << 'EOF'
+if ! grep -qF "* soft nofile 1048576" /etc/security/limits.conf; then
+    cat >> /etc/security/limits.conf << 'EOF'
 
 # Performance tuning
 * soft nofile 1048576

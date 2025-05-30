@@ -38,6 +38,7 @@
     "recent_windows": 5,
     "power_normalisation": 2.2,
     "validator_sample_rate": 0.6,
+    "gather_peers_slash_threshold": 0.4,
     "catch_up_threshold": 15,
     "catch_up_batch_size": 5,
     "catch_up_timeout": 300,

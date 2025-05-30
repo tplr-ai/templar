@@ -2,7 +2,7 @@
     "spec_version": 5,
     "project": "dough",
     "sequence_length": 2048,
-    "pages_per_window": 6,
+    "pages_per_window": 20,
     "batch_size": 6,
     "learning_rate": 4e-4,
     "blocks_per_window": 8,

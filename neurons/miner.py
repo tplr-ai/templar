@@ -421,7 +421,7 @@ class Miner:
             )
 
             compress_start = tplr.T()
-            gradient, xshapes, totalks, _ = tplr.prepare_gradient_dict(
+            gradient, xshapes, totalks = tplr.prepare_gradient_dict(
                 self, pages, step_window
             )
             tplr.logger.info(

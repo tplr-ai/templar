@@ -52,12 +52,10 @@ def prepare_gradient_dict(miner, pages, step_window):
             gradient (dict): Contains keys for each parameter's compressed gradients and metadata.
             xshapes (dict): The computed shapes for each parameter.
             totalks (dict): Total length information for each parameter.
-            transmitted (dict): The estimated transmitted gradients per parameter.
     """
     gradient = {}
     xshapes = {}
     totalks = {}
-    transmitted = {}
     lr = miner.scheduler.get_last_lr()[0]
 
     # Use an internal iteration counter stored in miner if it doesn't exist already
@@ -78,17 +76,18 @@ def prepare_gradient_dict(miner, pages, step_window):
     is_early_iteration = miner.gradient_iteration_counter <= 5
 
     for n, p in miner.model.named_parameters():
-        # Apply weight decay.
+        # Apply weight decay
         p.data.mul_(1.0 - lr * miner.hparams.weight_decay)
+
         # Apply momentum decay.
         miner.momentum[n].mul_(miner.hparams.momentum_decay)
+
         # Ensure the gradient is on the same device as the parameter.
         grad = p.grad.to(p.device)
-        # Ensure the momentum tensor is on the same device.
         if miner.momentum[n].device != p.device:
             miner.momentum[n] = miner.momentum[n].to(p.device)
 
-        # Change 1: In the first iteration, set momentum = grad instead of adding
+        # Update momentum
         if is_first_iteration:
             # Set momentum directly to grad (multiplied by lr to maintain scale)
             miner.momentum[n] = grad.clone() * lr
@@ -96,33 +95,42 @@ def prepare_gradient_dict(miner, pages, step_window):
             # Normal behavior for later iterations
             miner.momentum[n].add_(grad, alpha=lr)
 
-        # Compress momentum via DCT-based compression.
+        # Compress momentum
+        encoded = miner.transformer.encode(miner.momentum[n])
         idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
-            miner.transformer.encode(miner.momentum[n]), miner.hparams.topk_compression
+            encoded, miner.hparams.topk_compression
         )
-        # Estimate the transmitted gradient via decompression.
-        transmit_grad = miner.transformer.decode(
-            miner.compressor.decompress(p, idxs, vals, xshape, totalk, quant_params)
-        )
+        del encoded  # Free the encoded tensor immediately
 
-        # Change 2: Skip subtracting transmitted gradient in the first 5 iterations
+        # Estimate transmitted gradient
+        decompressed = miner.compressor.decompress(
+            p, idxs, vals, xshape, totalk, quant_params
+        )
+        transmit_grad = miner.transformer.decode(decompressed)
+        del decompressed  # Free intermediate tensor
+
+        # Skip subtracting transmitted gradient in the first 5 iterations
         if not is_early_iteration:
-            # Only subtract transmitted gradient after the first 5 iterations
             miner.momentum[n].sub_(transmit_grad)
 
-        # Save compressed gradient information.
-        gradient[n + "idxs"] = idxs
-        gradient[n + "vals"] = vals
+        # Move compressed values to CPU to save GPU memory
+        gradient[n + "idxs"] = idxs.cpu() if isinstance(idxs, torch.Tensor) else idxs
+        gradient[n + "vals"] = vals.cpu() if isinstance(vals, torch.Tensor) else vals
         gradient[n + "quant_params"] = quant_params
         xshapes[n] = xshape
         totalks[n] = totalk
-        transmitted[n] = transmit_grad
 
-    # Attach metadata for pages info and window.
+        del transmit_grad
+
+        # Clear gradient to free memory
+        p.grad = None
+
+    torch.cuda.empty_cache()
+
     gradient["metadata"] = {"pages_info": pages, "window": step_window}
     logger.info(f"Attached metadata to gradient: {gradient['metadata']}")
 
-    return gradient, xshapes, totalks, transmitted
+    return gradient, xshapes, totalks
 
 
 async def update_peers(

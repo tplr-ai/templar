@@ -65,9 +65,9 @@ class DummyMiner:
 # Test 1: Return Structure and Types
 # ---------------------------------
 # - Call prepare_gradient_dict with valid inputs
-# - Verify it returns a tuple of length 4 containing (gradient, xshapes, totalks, transmitted)
+# - Verify it returns a tuple of length 3 containing (gradient, xshapes, totalks)
 # - Check gradient dict has expected keys (weightidxs, weightvals, metadata)
-# - Verify xshapes, totalks, transmitted are dicts with expected keys
+# - Verify xshapes, totalks, are dicts with expected keys
 # - Confirm metadata attachment is logged
 def test_return_structure_and_types(caplog):
     # Create dummy miner instance
@@ -82,8 +82,8 @@ def test_return_structure_and_types(caplog):
 
     # Check that we get exactly four items returned.
     assert isinstance(result, tuple)
-    assert len(result) == 4
-    gradient, xshapes, totalks, transmitted = result
+    assert len(result) == 3
+    gradient, xshapes, totalks = result
 
     # Check that gradient is a dict
     assert isinstance(gradient, dict)
@@ -97,14 +97,12 @@ def test_return_structure_and_types(caplog):
     expected_metadata = {"pages_info": pages, "window": step_window}
     assert gradient["metadata"] == expected_metadata
 
-    # Check that xshapes, totalks, transmitted are dictionaries.
+    # Check that xshapes, totalks, are dictionaries.
     assert isinstance(xshapes, dict)
     assert isinstance(totalks, dict)
-    assert isinstance(transmitted, dict)
     # And that they contain key "weight"
     assert "weight" in xshapes
     assert "weight" in totalks
-    assert "weight" in transmitted
 
     # Instead of checking miner.logger.messages, use captured logs.
     expected_log_fragment = "Attached metadata to gradient:"
@@ -128,9 +126,7 @@ def test_metadata_attachment():
     step_window = 42
 
     # Call prepare_gradient_dict.
-    gradient, xshapes, totalks, transmitted = prepare_gradient_dict(
-        miner, pages, step_window
-    )
+    gradient, xshapes, totalks = prepare_gradient_dict(miner, pages, step_window)
 
     # Verify that gradient["metadata"] exactly equals the expected dictionary.
     expected_metadata = {"pages_info": pages, "window": step_window}
@@ -278,9 +274,7 @@ def test_compressor_and_transformer_calls():
     step_window = 7
     # Call the helper so that compressor.compress and transformer.decode are invoked.
     # This is the first call, miner.gradient_iteration_counter becomes 1.
-    gradient, xshapes, totalks, transmitted = prepare_gradient_dict(
-        miner, pages, step_window
-    )
+    gradient, xshapes, totalks = prepare_gradient_dict(miner, pages, step_window)
 
     # Check that compressor.compress was called with the expected encoded tensor and topk.
     recorder_compressor = miner.compressor
@@ -315,14 +309,6 @@ def test_compressor_and_transformer_calls():
     assert gradient["weightvals"] == "recorded_dummy_vals"
     assert xshapes["weight"] == "recorded_dummy_xshape"
     assert totalks["weight"] == "recorded_dummy_totalk"
-    # Verify the transmitted gradient recorded matches the output
-    # The dummy transformer.decode returns [0.1, 0.1]
-    expected_transmitted_grad = torch.tensor([0.1, 0.1])
-    torch.testing.assert_close(
-        transmitted["weight"],
-        expected_transmitted_grad,
-        msg="Transmitted gradient in output dict does not match transformer.decode output.",
-    )
     # Verify metadata
     assert gradient["metadata"]["pages_info"] == pages
     assert gradient["metadata"]["window"] == step_window
@@ -332,7 +318,7 @@ def test_compressor_and_transformer_calls():
 # --------------------------------------
 # - Create a dummy model with two parameters, e.g., "weight1" and "weight2".
 # - Ensure that the returned gradient dict includes keys: "weight1idxs", "weight1vals", "weight2idxs", "weight2vals".
-# - Also verify that xshapes, totalks, and transmitted dicts have both "weight1" and "weight2" as keys.
+# - Also verify that xshapes, and totalks dicts have both "weight1" and "weight2" as keys.
 
 
 def test_handling_multiple_parameters():
@@ -341,7 +327,7 @@ def test_handling_multiple_parameters():
     --------------------------------------
     - Create a dummy model with two parameters, e.g., "weight1" and "weight2".
     - Ensure that the returned gradient dict includes keys: "weight1idxs", "weight1vals", "weight2idxs", "weight2vals".
-    - Also verify that xshapes, totalks, and transmitted dicts have both "weight1" and "weight2" as keys.
+    - Also verify that xshapes and totalks dicts have both "weight1" and "weight2" as keys.
     """
 
     class DummyMultiModel(torch.nn.Module):
@@ -361,9 +347,7 @@ def test_handling_multiple_parameters():
 
     pages = [["doc1", "page1"]]
     step_window = 10
-    gradient, xshapes, totalks, transmitted = prepare_gradient_dict(
-        miner, pages, step_window
-    )
+    gradient, xshapes, totalks = prepare_gradient_dict(miner, pages, step_window)
 
     # Check for gradient keys from both parameters.
     assert "weight1idxs" in gradient, "Missing key: weight1idxs"
@@ -373,11 +357,10 @@ def test_handling_multiple_parameters():
     assert "weight2vals" in gradient, "Missing key: weight2vals"
     assert "weight2quant_params" in gradient, "Missing key: weight2quant_params"
 
-    # Check that xshapes, totalks, and transmitted have both "weight1" and "weight2".
+    # Check that xshapes, and totalks have both "weight1" and "weight2".
     for key in ["weight1", "weight2"]:
         assert key in xshapes, f"Missing {key} in xshapes"
         assert key in totalks, f"Missing {key} in totalks"
-        assert key in transmitted, f"Missing {key} in transmitted"
 
 
 def test_behavior_when_p_grad_is_none():

@@ -618,8 +618,8 @@ class Validator:
                 for i, batch in enumerate(batches):
                     if i not in sampled_indices:
                         continue
-                    # TODO: Add validation for empty batches
-                    if not batch:
+                    # TODO: Add validation for empty batches - handle arrays/tensors properly
+                    if batch is None or len(batch) == 0:
                         tplr.log_with_context(
                             level="warning", 
                             message=f"Empty batch at index {i}, skipping",

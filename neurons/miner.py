@@ -138,6 +138,7 @@ class Miner:
         self.model = LlamaForCausalLM(self.hparams.model_config)
         self.model.to(self.config.device)  # type: ignore
         self.tokenizer = self.hparams.tokenizer
+        self.model.gradient_checkpointing_enable()
 
         # Init compression
         self.transformer = tplr.compress.TransformDCT(

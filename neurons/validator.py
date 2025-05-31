@@ -2828,8 +2828,9 @@ class Validator:
                 )
                 return None
 
+            chosen_page = [random.choice(local_pages)]
             # Log which pages we're using
-            page_ids = [p[1] for p in local_pages]
+            page_ids = [p[1] for p in chosen_page]
             tplr.log_with_context(
                 level="info",
                 message=f"Creating dataloader for {context_id} using pages: {page_ids}",
@@ -2842,7 +2843,7 @@ class Validator:
                 tplr.r2_dataset.R2DatasetLoader.create,
                 batch_size=self.hparams.batch_size,
                 sequence_length=self.hparams.sequence_length,
-                pages_info=local_pages,
+                pages_info=chosen_page,
                 tokenizer=self.tokenizer,
                 attempts=3,
                 delay=1,

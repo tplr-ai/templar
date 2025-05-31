@@ -264,7 +264,7 @@ class AggregationServer:
             uids=selected_uids,
             window=self.sync_window - 1,
             key="gradient",
-            timeout=15,
+            timeout=30,
             device="cpu",
             local=False,
             stale_retention=100,

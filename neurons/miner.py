@@ -514,7 +514,7 @@ class Miner:
                 uids=self.comms.peers,
                 window=step_window,
                 key="gradient",
-                timeout=35,
+                timeout=45,
                 device="cpu",
                 local=False,
                 stale_retention=100,

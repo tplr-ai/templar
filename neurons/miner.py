@@ -283,7 +283,6 @@ class Miner:
         # Proceed to load checkpoint
         (
             success,
-            loaded_momentum,
             loaded_checkpoint_window,
             loaded_optimizer,
             loaded_scheduler,
@@ -298,7 +297,6 @@ class Miner:
             else self.bootstrap_version,
         )
         if success:
-            self.momentum = loaded_momentum
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(

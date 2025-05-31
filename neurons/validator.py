@@ -165,15 +165,14 @@ class Validator:
             quantization_range=self.hparams.quantization_range,
         )
 
-        # Init optimizer and momentum
+        # Init optimizer
         self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
-        self.momentum = {}
         self.xshapes = {}
         self.totalks = {}
         for n, p in self.model.named_parameters():
-            self.momentum[n] = torch.zeros_like(p)
-            _, _, xshape, totalk, quant_params = self.compressor.compress(
-                self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
+            _, _, xshape, totalk, _ = self.compressor.compress(
+                self.transformer.encode(torch.zeros_like(p)),
+                self.hparams.topk_compression,
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
@@ -683,7 +682,6 @@ class Validator:
         # Proceed to load checkpoint
         (
             success,
-            loaded_momentum,
             loaded_checkpoint_window,
             loaded_optimizer,
             loaded_scheduler,
@@ -698,7 +696,6 @@ class Validator:
             else self.bootstrap_version,
         )
         if success:
-            self.momentum = loaded_momentum
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -722,9 +719,6 @@ class Validator:
 
         else:
             tplr.logger.info("Starting from scratch")
-            self.momentum = {
-                n: torch.zeros_like(p) for n, p in self.model.named_parameters()
-            }
             self.model.to(self.config.device)
 
         self.comms.start_commitment_fetcher()
@@ -2298,9 +2292,6 @@ class Validator:
                         for k, v in self.optimizer.state_dict().items()
                     },
                     "scheduler_state_dict": self.scheduler.state_dict(),
-                    "momentum": {
-                        n: torch.zeros_like(p) for n, p in self.model.named_parameters()
-                    },
                     "start_window": self.start_window,
                     "current_window": self.current_window,
                     "sync_window": self.sync_window,
@@ -2620,9 +2611,8 @@ class Validator:
         This method:
         1. Extracts the compressed gradients from the gather result
         2. Decompresses them using the DCT transformer and compressor
-        3. Stores the gradients in momentum for checkpointing
-        4. Applies sign operation for SignSGD optimization
-        5. Updates the model using the optimizer and scheduler
+        3. Applies sign operation for SignSGD optimization
+        4. Updates the model using the optimizer and scheduler
 
         Args:
             gather_result: The result object from a gather operation containing
@@ -2651,8 +2641,6 @@ class Validator:
                         quant_params,
                     )
                 )
-                # Store pre-sign gradient in momentum
-                self.momentum[n] = new_grad.clone()
                 if p.grad is None:
                     p.grad = new_grad
                 else:

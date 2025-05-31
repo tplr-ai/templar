@@ -1367,9 +1367,7 @@ class Comms(ChainManager):
         current_window: int,
         device: str,
         init_version: Optional[str] = None,
-    ) -> tuple[
-        bool, dict, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler
-    ]:
+    ) -> tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
         """
         Loads the latest checkpoint. No catchup or step simulation happens here.
         Returns:
@@ -1380,7 +1378,7 @@ class Comms(ChainManager):
         result = await self.get_latest_checkpoint(init_version)
         if not result:
             tplr.logger.info("No valid checkpoints found")
-            return False, {}, 0, optimizer, scheduler
+            return False, 0, optimizer, scheduler
 
         checkpoint_data, checkpoint_window = result
         try:
@@ -1400,7 +1398,6 @@ class Comms(ChainManager):
             optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
 
             scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
-            momentum = checkpoint_data["momentum"]
 
             checkpoint_start_window = checkpoint_data.get("start_window")
             checkpoint_current_window = checkpoint_data.get("current_window")
@@ -1420,14 +1417,14 @@ class Comms(ChainManager):
 
             self.last_checkpoint_data = checkpoint_data
 
-            return True, momentum, checkpoint_sync_window, optimizer, scheduler
+            return True, checkpoint_sync_window, optimizer, scheduler
 
         except KeyError as e:
             tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
-            return False, {}, 0, optimizer, scheduler
+            return False, 0, optimizer, scheduler
         except Exception as e:
             tplr.logger.error(f"Failed to load checkpoint: {e}")
-            return False, {}, 0, optimizer, scheduler
+            return False, 0, optimizer, scheduler
 
     async def post_peer_list(
         self,

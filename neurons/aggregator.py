@@ -28,7 +28,7 @@ from typing import cast
 import bittensor as bt
 import uvloop
 from bittensor.core.subtensor import ScaleObj
-from transformers import LlamaConfig, LlamaForCausalLM
+from transformers import LlamaForCausalLM
 
 # Import tplr functions
 import tplr
@@ -89,16 +89,8 @@ class AggregationServer:
             tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
         # Initialize model for gradient processing
-        self.model_config = LlamaConfig(
-            hidden_size=2048,
-            num_hidden_layers=16,
-            num_attention_heads=8,
-            intermediate_size=8192,
-            num_key_value_heads=8,
-            max_position_embeddings=2048,
-        )
-        self.model = LlamaForCausalLM(self.model_config)
-        self.model.to(self.config.device)  # Keep on CPU to save memory
+        self.model = LlamaForCausalLM(self.hparams.model_config)
+        self.model.to(self.config.device)
 
         # Initialize compression
         self.transformer = tplr.compress.TransformDCT(

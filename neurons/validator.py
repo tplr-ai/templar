@@ -1071,10 +1071,15 @@ class Validator:
                         self.binary_moving_averages[uid] *= self.sync_score_slash_rate
 
             # Slash peers failing to submit gradients
+            gather_peers_slash_rate = (
+                0
+                if success_rate < self.hparams.gather_peers_slash_threshold
+                else self.missing_gradient_slash_rate
+            )
             for uid in skipped_uids:
                 tplr.log_with_context(
                     level="info",
-                    message=f"No gradient gathered from UID {uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}.",
+                    message=f"No gradient gathered from UID {uid}. Slashing moving average score by {1 - gather_peers_slash_rate:.2%}.",
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
@@ -1083,10 +1088,8 @@ class Validator:
 
                     # Only reduce positive scores
                     if self.final_scores[uid] > 0:
-                        self.final_scores[uid] *= self.missing_gradient_slash_rate
-                        self.binary_moving_averages[uid] *= (
-                            self.missing_gradient_slash_rate
-                        )
+                        self.final_scores[uid] *= gather_peers_slash_rate
+                        self.binary_moving_averages[uid] *= gather_peers_slash_rate
 
                         new_score = self.final_scores[uid].item()
                         tplr.log_with_context(

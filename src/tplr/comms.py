@@ -46,6 +46,7 @@ import tplr as tplr
 from . import __version__
 from .chain import ChainManager
 from .compress import CompressDCT, TransformDCT
+from .compression import aggregator_compressor
 from .config import BUCKET_SECRETS, client_config
 from .schemas import Bucket
 
@@ -452,6 +453,22 @@ class Comms(ChainManager):
                 async with aiofiles.open(temp_file_path, "r") as f:
                     data = await f.read()
                     loaded_data = json.loads(data)
+            elif aggregator_compressor.is_compressed_file(key):
+                # Decompress zstd file
+                decompressed_file_path = aggregator_compressor.decompress_file(
+                    temp_file_path
+                )
+
+                # Load the decompressed data
+                loaded_data = torch.load(
+                    decompressed_file_path,
+                    map_location=self.config.device,
+                    weights_only=False,
+                )
+
+                # Clean up decompressed temp file
+                if os.path.exists(decompressed_file_path):
+                    os.remove(decompressed_file_path)
             else:
                 loaded_data = torch.load(
                     temp_file_path,
@@ -745,6 +762,15 @@ class Comms(ChainManager):
             # Save to temp file
             torch.save(save_data, temp_file_path)
 
+            # Compress aggregator files
+            if key == "aggregator":
+                compressed_file_path, _ = aggregator_compressor.compress_file(
+                    temp_file_path
+                )
+                # Update filename and file path for compressed file
+                filename = filename + ".zst"
+                temp_file_path = compressed_file_path
+
             if local:
                 # Local storage with per-uid directories
                 await self.cleanup_local_data(
@@ -764,8 +790,15 @@ class Comms(ChainManager):
                 )
 
         finally:
+            # Clean up temporary files
             if os.path.exists(temp_file_path):
                 os.remove(temp_file_path)
+
+            # If we compressed an aggregator file, also clean up the original uncompressed file
+            if key == "aggregator" and temp_file_path.endswith(".zst"):
+                original_file_path = temp_file_path.replace(".zst", "")
+                if os.path.exists(original_file_path):
+                    os.remove(original_file_path)
 
         put_end = tplr.T()
         tplr.logger.info(f"{tplr.P(window, put_end - put_start)} PUT {filename} <--")
@@ -1915,16 +1948,31 @@ class Comms(ChainManager):
                 secret_access_key=credentials["secret_access_key"],
             )
 
-            filename = f"aggregator-{window}-v{tplr.__version__}.pt"
+            # Try compressed file first, then fall back to uncompressed
+            compressed_filename = f"aggregator-{window}-v{tplr.__version__}.pt.zst"
+            uncompressed_filename = f"aggregator-{window}-v{tplr.__version__}.pt"
 
-            tplr.logger.info(f"Attempting to download aggregation file: {filename}")
+            tplr.logger.info(
+                f"Attempting to download compressed aggregation file: {compressed_filename}"
+            )
 
-            # Use shared async S3 logic instead of boto3 manually
+            # Try compressed file first
             result = await self.s3_get_object(
-                key=filename,
+                key=compressed_filename,
                 bucket=bucket,
                 timeout=20,
             )
+
+            if result is None:
+                tplr.logger.info(
+                    f"No compressed aggregation file found, trying uncompressed: {uncompressed_filename}"
+                )
+                # Fall back to uncompressed file
+                result = await self.s3_get_object(
+                    key=uncompressed_filename,
+                    bucket=bucket,
+                    timeout=20,
+                )
 
             if result is None:
                 tplr.logger.warning(f"No aggregation file found for window {window}")

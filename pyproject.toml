@@ -22,6 +22,7 @@ dependencies = [
     "wandb",
     "python-dotenv",
     "zstandard",
+    "zstd",
     "s3fs",
     "pyarrow",
     "scipy",

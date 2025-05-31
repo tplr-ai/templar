@@ -780,10 +780,33 @@ class Miner:
             else:
                 tplr.logger.info("Skipping checkpoint save this round")
 
+            await self.cleanup_window()
+
+            # Delete local variables to clear up memory
+            del loader, pages, gather_result, processed_state_dict, gradient
+
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
             while self.current_window == step_window:
                 await asyncio.sleep(0.1)
+
+    async def cleanup_window(self):
+        """Aggressive memory cleanup between windows"""
+        # Clear gradients more thoroughly
+        self.model.zero_grad(set_to_none=True)
+        self.optimizer.zero_grad(set_to_none=True)
+
+        # Empty CUDA cache
+        torch.cuda.empty_cache()
+        torch.clear_autocast_cache()
+
+        # Log memory status
+        tplr.logger.info(
+            f"After cleanup - GPU allocated: {torch.cuda.memory_allocated(self.config.device) / 1024**3:.2f} GB"
+        )
+        tplr.logger.info(
+            f"After cleanup - GPU reserved: {torch.cuda.memory_reserved(self.config.device) / 1024**3:.2f} GB"
+        )
 
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, _):

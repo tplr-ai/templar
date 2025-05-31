@@ -601,12 +601,33 @@ class Validator:
     ) -> tuple[float, int]:
         total_loss = 0.0
         n_batches = 0
+        
+        # TODO: Add validation for empty inputs
+        if not batches or not sampled_indices:
+            tplr.log_with_context(
+                level="warning",
+                message="Empty batches or sampled_indices provided to evaluate_model_on_batches",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            return 0.0, 0
+        
         with torch.no_grad():
             model.eval()
             with autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
                 for i, batch in enumerate(batches):
                     if i not in sampled_indices:
                         continue
+                    # TODO: Add validation for empty batches - handle arrays/tensors properly
+                    if batch is None or len(batch) == 0:
+                        tplr.log_with_context(
+                            level="warning", 
+                            message=f"Empty batch at index {i}, skipping",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+                        continue
+                        
                     input_ids = torch.tensor(batch, dtype=torch.long).to(model.device)
                     labels = input_ids.clone()
                     labels = torch.where(
@@ -1252,6 +1273,14 @@ class Validator:
                         current_window=self.current_window,
                         eval_uid=eval_uid,
                     )
+                    # TODO: Skip to next UID without penalizing current one for validator data loading issues
+                    next_uid = None
+                    next_uid_dataloader_task = None
+                    if evaluation_uids_queue:
+                        next_uid = evaluation_uids_queue.pop(0)
+                        next_uid_dataloader_task = asyncio.create_task(
+                            self.preload_dataloader(seed=next_uid)
+                        )
                     continue
 
                 tplr.log_with_context(
@@ -1296,12 +1325,20 @@ class Validator:
                 except Exception as e:
                     tplr.log_with_context(
                         level="error",
-                        message=f"Error loading data for UID {eval_uid}: {str(e)}",
+                        message=f"Error loading data for UID {eval_uid}: {str(e)}, skipping evaluation without penalty (validator data issue)",
                         sync_window=self.sync_window,
                         current_window=self.current_window,
                         eval_uid=eval_uid,
                     )
-                    loader_data = None
+                    # TODO: Skip to next UID without penalizing for validator data loading issues
+                    next_uid = None
+                    next_uid_dataloader_task = None
+                    if evaluation_uids_queue:
+                        next_uid = evaluation_uids_queue.pop(0)
+                        next_uid_dataloader_task = asyncio.create_task(
+                            self.preload_dataloader(seed=next_uid)
+                        )
+                    continue
 
                 if (
                     eval_result is not None
@@ -1337,11 +1374,12 @@ class Validator:
                     if local_pages is None or loader_own is None:
                         tplr.log_with_context(
                             level="warning",
-                            message=f"Invalid loader data for UID {eval_uid}, skipping",
+                            message=f"Invalid loader data for UID {eval_uid}, skipping evaluation without penalty (validator data issue)",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
                             eval_uid=eval_uid,
                         )
+                        # TODO: Skip evaluation without penalizing UID for validator data issues
                         continue
 
                     # Verify pages match if miner sent them
@@ -1395,16 +1433,24 @@ class Validator:
                             batches_own.append(batch)
 
                         total_batches_own = len(batches_own)
-                        sample_size_own = max(
-                            1,
-                            int(total_batches_own * self.hparams.validator_sample_rate),
-                        )
-                        sampled_indices_own = random.sample(
-                            range(total_batches_own), sample_size_own
-                        )
-                        sampled_indices_own = sorted(
-                            sampled_indices_own
-                        )  # Sort for sequential access
+                        
+                        # TODO: Skip evaluation without penalty if no batches available
+                        if total_batches_own == 0:
+                            tplr.log_with_context(
+                                level="warning",
+                                message=f"No batches available for UID {eval_uid}, skipping evaluation without penalty (validator data issue)",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=eval_uid,
+                            )
+                            continue
+                        
+                        sample_size_own = max(1, int(total_batches_own * self.hparams.validator_sample_rate))
+                        # TODO: Ensure sample size doesn't exceed population size
+                        sample_size_own = min(sample_size_own, total_batches_own)
+                        
+                        sampled_indices_own = random.sample(range(total_batches_own), sample_size_own)
+                        sampled_indices_own = sorted(sampled_indices_own)  # Sort for sequential access
 
                         tplr.log_with_context(
                             level="info",
@@ -1417,6 +1463,17 @@ class Validator:
                         loss_before_own, n_batches = self.evaluate_model_on_batches(
                             model_own_data_eval, batches_own, sampled_indices_own
                         )
+
+                    # TODO: Skip evaluation if no valid batches were processed
+                    if n_batches == 0:
+                        tplr.log_with_context(
+                            level="warning",
+                            message=f"No valid batches processed for UID {eval_uid}, skipping evaluation without penalty (validator data issue)",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
+                        )
+                        continue
 
                     self.loss_before_per_batch_own = (
                         loss_before_own / n_batches if n_batches > 0 else 0
@@ -1665,19 +1722,24 @@ class Validator:
                             batches_random.append(batch)
 
                         total_batches_random = len(batches_random)
-                        sample_size_random = max(
-                            1,
-                            int(
-                                total_batches_random
-                                * self.hparams.validator_sample_rate
-                            ),
-                        )
-                        sampled_indices_random = random.sample(
-                            range(total_batches_random), sample_size_random
-                        )
-                        sampled_indices_random = sorted(
-                            sampled_indices_random
-                        )  # Sort for sequential access
+                        
+                        # TODO: Skip evaluation without penalty if no random batches available
+                        if total_batches_random == 0:
+                            tplr.log_with_context(
+                                level="warning", 
+                                message=f"No random batches available for UID {eval_uid}, skipping evaluation without penalty (validator data issue)",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=eval_uid,
+                            )
+                            continue
+                        
+                        sample_size_random = max(1, int(total_batches_random * self.hparams.validator_sample_rate))
+                        # TODO: Ensure sample size doesn't exceed population size  
+                        sample_size_random = min(sample_size_random, total_batches_random)
+                        
+                        sampled_indices_random = random.sample(range(total_batches_random), sample_size_random)
+                        sampled_indices_random = sorted(sampled_indices_random)  # Sort for sequential access
 
                         tplr.log_with_context(
                             level="info",
@@ -1692,6 +1754,17 @@ class Validator:
                             batches_random,
                             sampled_indices_random,
                         )
+
+                    # TODO: Skip evaluation if no valid random batches were processed
+                    if n_batches == 0:
+                        tplr.log_with_context(
+                            level="warning",
+                            message=f"No valid random batches processed for UID {eval_uid}, skipping evaluation without penalty (validator data issue)",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                            eval_uid=eval_uid,
+                        )
+                        continue
 
                     self.loss_before_per_batch_random = (
                         loss_before_random / n_batches if n_batches > 0 else 0
@@ -1928,7 +2001,7 @@ class Validator:
                             eval_uid=eval_uid,
                         )
 
-                    # Ensure the UID is included in evaluated_uids
+                    # Ensure the UID is included in evaluated_uids only when penalized
                     self.evaluated_uids.add(eval_uid)
 
                     # Log updated scores

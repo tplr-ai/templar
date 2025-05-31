@@ -992,7 +992,9 @@ class Validator:
             skipped_uids: list[int] = []
             success_rate = 0.0
             gather_result = None
+            load_aggregation_start = tplr.T()
             aggregation_result = await self.comms.load_aggregation(self.sync_window)
+            load_aggregation_end = tplr.T()
             if aggregation_result is None:
                 gather_result = await self.comms.gather(
                     my_uid=self.uid,
@@ -1019,6 +1021,12 @@ class Validator:
                 skipped_uids = gather_result.skipped_uids
                 success_rate = gather_result.success_rate
             else:
+                tplr.log_with_context(
+                    level="info",
+                    message=f"{tplr.P(self.sync_window, load_aggregation_end - load_aggregation_start)} Loaded aggregation data.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
                 state_dict = cast(dict, aggregation_result.get("state_dict"))
                 skipped_uids = cast(list[int], state_dict.get("skipped_uids", []))
                 success_rate = cast(float, state_dict.get("success_rate", 0.0))

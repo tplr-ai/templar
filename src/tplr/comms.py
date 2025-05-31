@@ -1890,16 +1890,87 @@ class Comms(ChainManager):
                     f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
                 )
 
-    async def load_aggregation(self, window: int):
+    async def s3_get_object_size(self, bucket: Bucket, key: str) -> Optional[int]:
+        """Get the size of an S3 object without downloading it using HEAD request."""
+        try:
+            s3_client = await self._get_s3_client(bucket)
+
+            response = await s3_client.head_object(Bucket=bucket.name, Key=key)
+            file_size = response["ContentLength"]
+
+            tplr.logger.debug(f"Object {key} size: {file_size} bytes")
+            return file_size
+
+        except (ConnectionClosedError, ClientError) as e:
+            await self._purge_s3_client(bucket)
+            if "404" in str(e):
+                tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
+                return None
+            tplr.logger.error(f"Error getting object size for {key}: {e}")
+            return None
+        except Exception as e:
+            tplr.logger.error(f"Error getting object size for {key}: {e}")
+            return None
+
+    async def s3_get_object_range(
+        self, bucket: Bucket, key: str, start: int, end: int, timeout: int = 30
+    ) -> Optional[bytes]:
+        """Download a specific byte range from S3 object."""
+        try:
+            s3_client = await self._get_s3_client(bucket)
+
+            response = await asyncio.wait_for(
+                s3_client.get_object(
+                    Bucket=bucket.name, Key=key, Range=f"bytes={start}-{end}"
+                ),
+                timeout=timeout,
+            )
+
+            # Read the chunk data
+            async with response["Body"] as stream:
+                chunk_data = await asyncio.wait_for(stream.read(), timeout=timeout)
+
+            # Verify chunk size
+            expected_size = end - start + 1
+            if len(chunk_data) != expected_size:
+                raise Exception(
+                    f"Chunk size mismatch: got {len(chunk_data)}, expected {expected_size}"
+                )
+
+            return chunk_data
+
+        except asyncio.TimeoutError:
+            tplr.logger.error(f"Timeout downloading range {start}-{end} for {key}")
+            return None
+        except (ConnectionClosedError, ClientError) as e:
+            await self._purge_s3_client(bucket)
+            tplr.logger.error(
+                f"Client error downloading range {start}-{end} for {key}: {e}"
+            )
+            return None
+        except Exception as e:
+            tplr.logger.error(f"Error downloading range {start}-{end} for {key}: {e}")
+            return None
+
+    async def load_aggregation(
+        self,
+        window: int,
+        chunk_size: int = 50 * 1024 * 1024,
+        max_concurrent: int = 16,
+    ):
         """
         Load aggregated gradients for a specified window from the aggregation server.
 
         Args:
             window: Window number to load
+            chunk_size: Size of each chunk for multipart download (default 50MB)
+            max_concurrent: Maximum concurrent downloads (default 16)
 
         Returns:
             Processed aggregation data or None if failed
         """
+        import uuid
+
         try:
             bucket_config = BUCKET_SECRETS["aggregator"]
             credentials = bucket_config["credentials"]["read"]
@@ -1916,21 +1987,89 @@ class Comms(ChainManager):
 
             tplr.logger.info(f"Attempting to download aggregation file: {filename}")
 
-            # Use shared async S3 logic instead of boto3 manually
-            result = await self.s3_get_object(
-                key=filename,
-                bucket=bucket,
-                timeout=20,
-            )
-
-            if result is None:
+            # Get file size
+            file_size = await self.s3_get_object_size(bucket, filename)
+            if file_size is None:
                 tplr.logger.warning(f"No aggregation file found for window {window}")
                 return None
 
+            # For small files, use the existing s3_get_object method
+            if file_size <= 100 * 1024 * 1024:  # 100MB threshold
+                tplr.logger.info(
+                    f"File size {file_size} bytes, using standard download"
+                )
+                result = await self.s3_get_object(
+                    key=filename,
+                    bucket=bucket,
+                    timeout=45,  # Longer timeout for large files
+                )
+                if result is None:
+                    tplr.logger.warning(f"Failed to download {filename}")
+                    return None
+                tplr.logger.info(
+                    f"Successfully loaded aggregation data for window {window}"
+                )
+                return result
+
+            # For large files, use multipart download
+            tplr.logger.info(f"File size {file_size} bytes, using multipart download")
+
+            # Calculate chunks
+            chunks_info = []
+            for start in range(0, file_size, chunk_size):
+                end = min(start + chunk_size - 1, file_size - 1)
+                chunks_info.append((start, end))
+
             tplr.logger.info(
-                f"Successfully loaded aggregation data for window {window}"
+                f"Downloading {filename} in {len(chunks_info)} parallel chunks"
             )
-            return result
+
+            # Download chunks concurrently
+            semaphore = asyncio.Semaphore(max_concurrent)
+
+            async def download_chunk(start, end):
+                async with semaphore:
+                    return await self.s3_get_object_range(
+                        bucket=bucket, key=filename, start=start, end=end, timeout=45
+                    )
+
+            # Execute downloads
+            tasks = [download_chunk(start, end) for start, end in chunks_info]
+            chunks = await asyncio.gather(*tasks)
+
+            # Verify all chunks downloaded successfully
+            if None in chunks:
+                raise Exception("One or more chunks failed to download")
+
+            # Combine chunks in order
+            combined_bytes = b"".join(chunks)
+
+            # Create temporary file to deserialize
+            temp_file_path = os.path.join(
+                self.temp_dir, f"temp_aggregation_{window}_{uuid.uuid4().hex}.pt"
+            )
+
+            try:
+                # Write combined bytes to temporary file
+                async with aiofiles.open(temp_file_path, "wb") as f:
+                    await f.write(combined_bytes)
+
+                # Load the PyTorch data from the temporary file
+                loaded_data = torch.load(
+                    temp_file_path,
+                    map_location=self.config.device,
+                    weights_only=False,
+                )
+
+                tplr.logger.info(
+                    f"Successfully loaded aggregation data for window {window}"
+                )
+                return loaded_data
+
+            finally:
+                # Clean up temporary file
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path)
 
         except Exception as e:
             tplr.logger.error(

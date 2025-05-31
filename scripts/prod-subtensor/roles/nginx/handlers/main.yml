@@ -1,0 +1,14 @@
+---
+- name: restart nginx
+  systemd:
+    name: nginx
+    state: restarted
+
+- name: reload nginx
+  systemd:
+    name: nginx
+    state: reloaded
+
+- name: test nginx
+  command: nginx -t
+  changed_when: false

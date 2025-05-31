@@ -3761,6 +3761,7 @@ dependencies = [
     { name = "uvloop" },
     { name = "wandb" },
     { name = "zstandard" },
+    { name = "zstd" },
 ]
 
 [package.optional-dependencies]
@@ -3821,6 +3822,7 @@ requires-dist = [
     { name = "uvloop", specifier = ">=0.21.0" },
     { name = "wandb" },
     { name = "zstandard" },
+    { name = "zstd" },
 ]
 
 [[package]]
@@ -4358,4 +4360,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/02/90/2633473864f67a15526324b007a9f96c96f56d5f32ef2a56cc12f9548723/zstandard-0.23.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:fa6ce8b52c5987b3e34d5674b0ab529a4602b632ebab0a93b07bfb4dfc8f8a33", size = 5191299 },
     { url = "https://files.pythonhosted.org/packages/b0/4c/315ca5c32da7e2dc3455f3b2caee5c8c2246074a61aac6ec3378a97b7136/zstandard-0.23.0-cp313-cp313-win32.whl", hash = "sha256:a9b07268d0c3ca5c170a385a0ab9fb7fdd9f5fd866be004c4ea39e44edce47dd", size = 430862 },
     { url = "https://files.pythonhosted.org/packages/a2/bf/c6aaba098e2d04781e8f4f7c0ba3c7aa73d00e4c436bcc0cf059a66691d1/zstandard-0.23.0-cp313-cp313-win_amd64.whl", hash = "sha256:f3513916e8c645d0610815c257cbfd3242adfd5c4cfa78be514e5a3ebb42a41b", size = 495578 },
+]
+
+[[package]]
+name = "zstd"
+version = "1.5.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1b/dd/3146869d12758d12d487c25b433166e3105e8caf64632cb5118358d791df/zstd-1.5.7.0.tar.gz", hash = "sha256:afe4f5dc80ffaa3c97be48b2f74065883c4607610f9af3e8f7101c3a5047915a", size = 666101 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a4/cc/14594bed1f9c3813149a041d3a1da3bd20d95f0f34fbe8854ffa8f4f26b8/zstd-1.5.7.0-cp311-cp311-manylinux_2_4_i686.whl", hash = "sha256:7a841c812a043d58ce8c828e432ffd55f4174ea5a256c7b69bc1169d602a19d9", size = 263188 },
+    { url = "https://files.pythonhosted.org/packages/92/75/4892337dbf9a8a63d9e8ad0f3369607902abbfe63d0bbf08a3f8f12474eb/zstd-1.5.7.0-cp311-cp311-manylinux_2_4_x86_64.whl", hash = "sha256:75c89680703359dd62df4457e7d867b1a30174a74551ae7671d36b368a4bc254", size = 250780 },
+    { url = "https://files.pythonhosted.org/packages/d4/58/84d0abf1a5a8592cd5c793a7a52080dd192db498d60fcaad3b2dfa62db69/zstd-1.5.7.0-cp312-cp312-manylinux_2_4_i686.whl", hash = "sha256:b0fe6bcdfdfd2a28853943bea3bfbc6bec6b1361852c10211dca8d3ebbd7e152", size = 263394 },
 ]

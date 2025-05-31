@@ -165,15 +165,14 @@ class Validator:
             quantization_range=self.hparams.quantization_range,
         )
 
-        # Init optimizer and momentum
+        # Init optimizer
         self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
-        self.momentum = {}
         self.xshapes = {}
         self.totalks = {}
         for n, p in self.model.named_parameters():
-            self.momentum[n] = torch.zeros_like(p)
-            _, _, xshape, totalk, quant_params = self.compressor.compress(
-                self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
+            _, _, xshape, totalk, _ = self.compressor.compress(
+                self.transformer.encode(torch.zeros_like(p)),
+                self.hparams.topk_compression,
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
@@ -683,7 +682,6 @@ class Validator:
         # Proceed to load checkpoint
         (
             success,
-            loaded_momentum,
             loaded_checkpoint_window,
             loaded_optimizer,
             loaded_scheduler,
@@ -698,7 +696,6 @@ class Validator:
             else self.bootstrap_version,
         )
         if success:
-            self.momentum = loaded_momentum
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
             tplr.logger.info(
@@ -722,9 +719,6 @@ class Validator:
 
         else:
             tplr.logger.info("Starting from scratch")
-            self.momentum = {
-                n: torch.zeros_like(p) for n, p in self.model.named_parameters()
-            }
             self.model.to(self.config.device)
 
         self.comms.start_commitment_fetcher()
@@ -998,14 +992,16 @@ class Validator:
             skipped_uids: list[int] = []
             success_rate = 0.0
             gather_result = None
+            load_aggregation_start = tplr.T()
             aggregation_result = await self.comms.load_aggregation(self.sync_window)
+            load_aggregation_end = tplr.T()
             if aggregation_result is None:
                 gather_result = await self.comms.gather(
                     my_uid=self.uid,
                     uids=self.comms.peers,
                     window=self.sync_window,
                     key="gradient",
-                    timeout=35,
+                    timeout=45,
                     device=self.config.device,
                     local=False,
                     totalks=self.totalks,
@@ -1025,6 +1021,12 @@ class Validator:
                 skipped_uids = gather_result.skipped_uids
                 success_rate = gather_result.success_rate
             else:
+                tplr.log_with_context(
+                    level="info",
+                    message=f"{tplr.P(self.sync_window, load_aggregation_end - load_aggregation_start)} Loaded aggregation data.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
                 state_dict = cast(dict, aggregation_result.get("state_dict"))
                 skipped_uids = cast(list[int], state_dict.get("skipped_uids", []))
                 success_rate = cast(float, state_dict.get("success_rate", 0.0))
@@ -2298,9 +2300,6 @@ class Validator:
                         for k, v in self.optimizer.state_dict().items()
                     },
                     "scheduler_state_dict": self.scheduler.state_dict(),
-                    "momentum": {
-                        n: torch.zeros_like(p) for n, p in self.model.named_parameters()
-                    },
                     "start_window": self.start_window,
                     "current_window": self.current_window,
                     "sync_window": self.sync_window,
@@ -2620,9 +2619,8 @@ class Validator:
         This method:
         1. Extracts the compressed gradients from the gather result
         2. Decompresses them using the DCT transformer and compressor
-        3. Stores the gradients in momentum for checkpointing
-        4. Applies sign operation for SignSGD optimization
-        5. Updates the model using the optimizer and scheduler
+        3. Applies sign operation for SignSGD optimization
+        4. Updates the model using the optimizer and scheduler
 
         Args:
             gather_result: The result object from a gather operation containing
@@ -2651,8 +2649,6 @@ class Validator:
                         quant_params,
                     )
                 )
-                # Store pre-sign gradient in momentum
-                self.momentum[n] = new_grad.clone()
                 if p.grad is None:
                     p.grad = new_grad
                 else:

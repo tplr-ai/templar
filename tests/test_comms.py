@@ -875,7 +875,6 @@ async def test_load_checkpoint_success(monkeypatch):
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
-        "momentum": {"beta1": 0.9},
         "start_window": 0,
         "current_window": 1,
         "sync_window": 7,  # any int works
@@ -890,7 +889,7 @@ async def test_load_checkpoint_success(monkeypatch):
     monkeypatch.setattr(comms, "get_latest_checkpoint", _fake_get_latest_checkpoint)
 
     # --- Call & unpack (must be 5 returns) ---------------------------------
-    success, momentum, sync_window, opt_out, sched_out = await comms.load_checkpoint(
+    success, sync_window, opt_out, sched_out = await comms.load_checkpoint(
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
@@ -900,7 +899,6 @@ async def test_load_checkpoint_success(monkeypatch):
 
     # --- Assertions --------------------------------------------------------
     assert success is True
-    assert momentum == {"beta1": 0.9}
     assert sync_window == 7
     # Optimiser & scheduler objects are returned unchanged
     assert opt_out is optimizer

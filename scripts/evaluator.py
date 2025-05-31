@@ -221,8 +221,7 @@ class Evaluator:
         This method:
         1. Fetches the latest checkpoint from storage
         2. Verifies checkpoint validity
-        3. Loads model weights and momentum
-        4. Updates internal state trackers
+        3. Updates internal state trackers
 
         Returns:
             Tuple containing:
@@ -269,8 +268,6 @@ class Evaluator:
             }
         )
         self.model.to(self.config.device)  # type: ignore
-
-        self.momentum = checkpoint_data["momentum"]
 
         global_step = int(checkpoint_current_window) - int(checkpoint_start_window)
 

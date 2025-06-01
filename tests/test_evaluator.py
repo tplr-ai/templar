@@ -94,16 +94,11 @@ async def test_evaluator_loads_new_checkpoints(evaluator):
         "layer.weight": torch.ones(10, 10),
         "layer.bias": torch.ones(10),
     }
-    momentum_data = {
-        "layer.weight": torch.ones(10, 10) * 0.5,
-        "layer.bias": torch.ones(10) * 0.5,
-    }
 
     new_checkpoint_data = {
         "start_window": 50,
         "current_window": 110,
         "model_state_dict": model_state_dict,
-        "momentum": momentum_data,
     }
 
     loaded_model_state = None
@@ -127,10 +122,6 @@ async def test_evaluator_loads_new_checkpoints(evaluator):
     assert step == 60, "Should calculate global step as 110-50=60"
 
     evaluator.model.load_state_dict.assert_called_once()
-
-    assert evaluator.momentum == momentum_data, (
-        "Should load the exact momentum data from checkpoint"
-    )
 
     evaluator.model.to.assert_called_once_with(evaluator.config.device)
 

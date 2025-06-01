@@ -16,7 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 import torch
-from typing import Tuple, Dict
+from typing import Tuple
 from torch.optim import SGD
 from torch.optim.lr_scheduler import SequentialLR
 from transformers import LlamaForCausalLM
@@ -29,8 +29,14 @@ from ..compress import CompressDCT, TransformDCT
 
 class GradientManager:
     """Handles gradient-specific operations"""
-    
-    def __init__(self, storage_client: StorageClient, file_manager: FileManager, device: str, hparams):
+
+    def __init__(
+        self,
+        storage_client: StorageClient,
+        file_manager: FileManager,
+        device: str,
+        hparams,
+    ):
         """Initialize with storage and file management dependencies"""
         self.storage_client = storage_client
         self.file_manager = file_manager
@@ -40,22 +46,24 @@ class GradientManager:
     async def serialize_gradient(self, state_dict: dict, global_step: int) -> str:
         """Serialize gradient state dict to temporary file and return path"""
         temp_file_path = self.file_manager.create_temp_file("gradient_serialize")
-        
+
         save_data = {
             "state_dict": state_dict,
             "global_step": global_step,
         }
-        
+
         torch.save(save_data, temp_file_path)
         return temp_file_path
 
     async def deserialize_gradient(self, file_path: str) -> Tuple[dict, int]:
         """Deserialize gradient from file path"""
-        loaded_data = torch.load(file_path, map_location=self.device, weights_only=False)
-        
+        loaded_data = torch.load(
+            file_path, map_location=self.device, weights_only=False
+        )
+
         state_dict = loaded_data.get("state_dict", {})
         global_step = loaded_data.get("global_step", 0)
-        
+
         return state_dict, global_step
 
     def validate_gradient(self, state_dict: dict, totalks: dict) -> bool:
@@ -68,7 +76,7 @@ class GradientManager:
                     if totalk is None:
                         tplr.logger.warning(f"Missing totalk for parameter {base_name}")
                         return False
-                    
+
                     try:
                         self.check_compressed_indices(
                             param_name,
@@ -77,17 +85,22 @@ class GradientManager:
                             allowed_topk=self.hparams.topk_compression,
                         )
                     except Exception as e:
-                        tplr.logger.warning(f"Compressed indices check failed for {param_name}: {e}")
+                        tplr.logger.warning(
+                            f"Compressed indices check failed for {param_name}: {e}"
+                        )
                         return False
-                        
+
                 elif param_name.endswith("vals"):
                     tensor_to_check = tensor.to(self.device)
-                    if torch.isnan(tensor_to_check).any() or torch.isinf(tensor_to_check).any():
+                    if (
+                        torch.isnan(tensor_to_check).any()
+                        or torch.isinf(tensor_to_check).any()
+                    ):
                         tplr.logger.warning(f"NaN/Inf in {param_name}")
                         return False
-            
+
             return True
-            
+
         except Exception as e:
             tplr.logger.error(f"Error validating gradient: {e}")
             return False
@@ -271,4 +284,4 @@ class GradientManager:
     # TODO: Add gradient clipping functionality
     # TODO: Add gradient accumulation support
     # TODO: Add gradient compression ratio monitoring
-    # TODO: Add gradient statistics collection 
+    # TODO: Add gradient statistics collection

@@ -601,7 +601,7 @@ class Validator:
     ) -> tuple[float, int]:
         total_loss = 0.0
         n_batches = 0
-        
+
         # TODO: Add validation for empty inputs
         if not batches or not sampled_indices:
             tplr.log_with_context(
@@ -611,7 +611,7 @@ class Validator:
                 current_window=self.current_window,
             )
             return 0.0, 0
-        
+
         with torch.no_grad():
             model.eval()
             with autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
@@ -621,13 +621,13 @@ class Validator:
                     # TODO: Add validation for empty batches - handle arrays/tensors properly
                     if batch is None or len(batch) == 0:
                         tplr.log_with_context(
-                            level="warning", 
+                            level="warning",
                             message=f"Empty batch at index {i}, skipping",
                             sync_window=self.sync_window,
                             current_window=self.current_window,
                         )
                         continue
-                        
+
                     input_ids = torch.tensor(batch, dtype=torch.long).to(model.device)
                     labels = input_ids.clone()
                     labels = torch.where(
@@ -1433,7 +1433,7 @@ class Validator:
                             batches_own.append(batch)
 
                         total_batches_own = len(batches_own)
-                        
+
                         # TODO: Skip evaluation without penalty if no batches available
                         if total_batches_own == 0:
                             tplr.log_with_context(
@@ -1444,13 +1444,20 @@ class Validator:
                                 eval_uid=eval_uid,
                             )
                             continue
-                        
-                        sample_size_own = max(1, int(total_batches_own * self.hparams.validator_sample_rate))
+
+                        sample_size_own = max(
+                            1,
+                            int(total_batches_own * self.hparams.validator_sample_rate),
+                        )
                         # TODO: Ensure sample size doesn't exceed population size
                         sample_size_own = min(sample_size_own, total_batches_own)
-                        
-                        sampled_indices_own = random.sample(range(total_batches_own), sample_size_own)
-                        sampled_indices_own = sorted(sampled_indices_own)  # Sort for sequential access
+
+                        sampled_indices_own = random.sample(
+                            range(total_batches_own), sample_size_own
+                        )
+                        sampled_indices_own = sorted(
+                            sampled_indices_own
+                        )  # Sort for sequential access
 
                         tplr.log_with_context(
                             level="info",
@@ -1722,24 +1729,36 @@ class Validator:
                             batches_random.append(batch)
 
                         total_batches_random = len(batches_random)
-                        
+
                         # TODO: Skip evaluation without penalty if no random batches available
                         if total_batches_random == 0:
                             tplr.log_with_context(
-                                level="warning", 
+                                level="warning",
                                 message=f"No random batches available for UID {eval_uid}, skipping evaluation without penalty (validator data issue)",
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
                                 eval_uid=eval_uid,
                             )
                             continue
-                        
-                        sample_size_random = max(1, int(total_batches_random * self.hparams.validator_sample_rate))
-                        # TODO: Ensure sample size doesn't exceed population size  
-                        sample_size_random = min(sample_size_random, total_batches_random)
-                        
-                        sampled_indices_random = random.sample(range(total_batches_random), sample_size_random)
-                        sampled_indices_random = sorted(sampled_indices_random)  # Sort for sequential access
+
+                        sample_size_random = max(
+                            1,
+                            int(
+                                total_batches_random
+                                * self.hparams.validator_sample_rate
+                            ),
+                        )
+                        # TODO: Ensure sample size doesn't exceed population size
+                        sample_size_random = min(
+                            sample_size_random, total_batches_random
+                        )
+
+                        sampled_indices_random = random.sample(
+                            range(total_batches_random), sample_size_random
+                        )
+                        sampled_indices_random = sorted(
+                            sampled_indices_random
+                        )  # Sort for sequential access
 
                         tplr.log_with_context(
                             level="info",

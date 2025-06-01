@@ -17,14 +17,13 @@
 
 import asyncio
 import concurrent.futures
-import json
 import os
 import re
-import time
-from datetime import datetime, timezone
+from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
+import bittensor as bt
 import torch
 from torch.optim import SGD
 from torch.optim.lr_scheduler import SequentialLR
@@ -52,7 +51,7 @@ CPU_COUNT = os.cpu_count() or 4
 
 class Comms(ChainManager):
     """Main orchestration layer for distributed training communications"""
-    
+
     def __init__(
         self,
         wallet: "bt.wallet | None",
@@ -71,10 +70,10 @@ class Comms(ChainManager):
         # Create temp directory for this instance
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
         os.makedirs(self.temp_dir, exist_ok=True)
-        
+
         # Get the bucket directly
         self.bucket = self.get_own_bucket("gradients", "write")
-        
+
         # Initialize ChainManager with the bucket
         super().__init__(
             config=config,
@@ -104,28 +103,25 @@ class Comms(ChainManager):
         # Foundation components
         self.storage_client = StorageClient(self.temp_dir)
         self.file_manager = FileManager(self.temp_dir, str(self.uid))
-        
+
         # Domain-specific managers
         self.gradient_manager = GradientManager(
-            self.storage_client, 
-            self.file_manager, 
-            self.config.device if hasattr(self.config, 'device') else 'cpu',
-            self.hparams
-        )
-        
-        self.checkpoint_manager = CheckpointManager(
             self.storage_client,
             self.file_manager,
-            self.bucket,
-            str(self.uid)
+            self.config.device if hasattr(self.config, "device") else "cpu",
+            self.hparams,
         )
-        
+
+        self.checkpoint_manager = CheckpointManager(
+            self.storage_client, self.file_manager, self.bucket, str(self.uid)
+        )
+
         self.peer_manager = PeerManager(
             self,  # ChainManager
             self.storage_client,
-            self.hparams
+            self.hparams,
         )
-        
+
         # Aggregation and metadata managers
         self.aggregation_manager = AggregationManager(
             self.gradient_manager,
@@ -133,15 +129,15 @@ class Comms(ChainManager):
             self.storage_client,
             self.file_manager,
             self.hparams,
-            self.config.device if hasattr(self.config, 'device') else 'cpu'
+            self.config.device if hasattr(self.config, "device") else "cpu",
         )
-        
+
         self.metadata_manager = MetadataManager(
             self.storage_client,
             self.file_manager,
             self,  # ChainManager
             __version__,
-            self.bucket
+            self.bucket,
         )
 
     def get_own_bucket(
@@ -200,19 +196,19 @@ class Comms(ChainManager):
         try:
             # Stop peer tracking
             await self.peer_manager.stop_peer_tracking()
-            
+
             # Close storage clients
             await self.storage_client.close_all_clients()
-            
+
             # Cleanup temp files
             await self.file_manager.cleanup_temp_files()
-            
+
             # Close executor
             if self.executor:
                 self.executor.shutdown(wait=True)
-                
+
             tplr.logger.info("All resources closed successfully")
-            
+
         except Exception as e:
             tplr.logger.error(f"Error closing resources: {e}")
 
@@ -234,7 +230,7 @@ class Comms(ChainManager):
             filename = f"{key}-{window}-v{__version__}.pt"
         else:
             filename = f"{key}-{window}-{uid}-v{__version__}.pt"
-        
+
         tplr.logger.debug(f"PUT {filename} -->")
         put_start = tplr.T()
 
@@ -249,7 +245,9 @@ class Comms(ChainManager):
                 }
 
             # Create temp file and serialize
-            temp_file_path = await self.gradient_manager.serialize_gradient(save_data, global_step)
+            temp_file_path = await self.gradient_manager.serialize_gradient(
+                save_data, global_step
+            )
 
             if local:
                 # Local storage
@@ -259,25 +257,26 @@ class Comms(ChainManager):
                 local_dir = self.file_manager.get_local_storage_path(uid, window, "")
                 self.file_manager.ensure_directory_exists(local_dir)
                 final_path = os.path.join(local_dir, filename)
-                
+
                 import shutil
+
                 shutil.move(temp_file_path, final_path)
             else:
                 # Remote storage
                 with open(temp_file_path, "rb") as f:
                     data = f.read()
-                
-                success = await self.storage_client.put_object(filename, data, self.bucket)
+
+                success = await self.storage_client.put_object(
+                    filename, data, self.bucket
+                )
                 self.file_manager.delete_file(temp_file_path)
-                
+
                 if not success:
                     tplr.logger.error(f"Failed to upload {filename}")
                     return 0.0
-                
+
                 # Cleanup old data in background
-                asyncio.create_task(
-                    self._cleanup_s3_data(uid, window, stale_retention)
-                )
+                asyncio.create_task(self._cleanup_s3_data(uid, window, stale_retention))
 
         except Exception as e:
             tplr.logger.error(f"Error in put operation: {e}")
@@ -307,14 +306,19 @@ class Comms(ChainManager):
                 await self.file_manager.cleanup_local_data(
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
-                local_path = self.file_manager.get_local_storage_path(uid, window, filename)
-                
+                local_path = self.file_manager.get_local_storage_path(
+                    uid, window, filename
+                )
+
                 if not os.path.exists(local_path):
                     tplr.logger.debug(f"Local file not found: {local_path}")
                     return None
-                
-                state_dict, global_step = await self.gradient_manager.deserialize_gradient(local_path)
-                
+
+                (
+                    state_dict,
+                    global_step,
+                ) = await self.gradient_manager.deserialize_gradient(local_path)
+
                 if key == "checkpoint":
                     return state_dict, None
                 return state_dict, global_step
@@ -325,20 +329,28 @@ class Comms(ChainManager):
                     return None
 
                 # Use storage client to get object with time constraints
-                data = await self.storage_client.get_object(filename, peer_bucket, timeout=15)
+                data = await self.storage_client.get_object(
+                    filename, peer_bucket, timeout=15
+                )
                 if data is None:
                     return None
 
                 # Check for time markers
-                if isinstance(data, dict) and data.get("__status") in ["TOO_LATE", "TOO_EARLY"]:
+                if isinstance(data, dict) and data.get("__status") in [
+                    "TOO_LATE",
+                    "TOO_EARLY",
+                ]:
                     return data
 
                 # Save to temp file and deserialize
                 temp_file = self.file_manager.create_temp_file("get_temp")
                 with open(temp_file, "wb") as f:
                     f.write(data)
-                
-                state_dict, global_step = await self.gradient_manager.deserialize_gradient(temp_file)
+
+                (
+                    state_dict,
+                    global_step,
+                ) = await self.gradient_manager.deserialize_gradient(temp_file)
                 self.file_manager.delete_file(temp_file)
 
                 if key == "checkpoint":
@@ -391,7 +403,13 @@ class Comms(ChainManager):
     ) -> bool:
         """Save checkpoint - delegate to checkpoint manager"""
         return await self.checkpoint_manager.save_checkpoint(
-            model, optimizer, scheduler, momentum, global_step, current_window, start_window
+            model,
+            optimizer,
+            scheduler,
+            momentum,
+            global_step,
+            current_window,
+            start_window,
         )
 
     async def load_checkpoint(
@@ -417,7 +435,9 @@ class Comms(ChainManager):
         self, candidates: List[int], weights: List[int], k: int
     ) -> List[int]:
         """Weighted random sampling - delegate to peer manager"""
-        return self.peer_manager.weighted_random_sample_no_replacement(candidates, weights, k)
+        return self.peer_manager.weighted_random_sample_no_replacement(
+            candidates, weights, k
+        )
 
     # Metadata methods
     async def post_start_window(self, start_window: int) -> None:
@@ -452,7 +472,9 @@ class Comms(ChainManager):
         return await self.metadata_manager.get_debug_dict(window)
 
     # Aggregation methods
-    async def load_aggregation(self, window: int, chunk_size: int = 50_000_000) -> Optional[dict]:
+    async def load_aggregation(
+        self, window: int, chunk_size: int = 50_000_000
+    ) -> Optional[dict]:
         """Load aggregation - delegate to aggregation manager"""
         return await self.aggregation_manager.load_aggregation(window, chunk_size)
 
@@ -484,14 +506,24 @@ class Comms(ChainManager):
     ) -> Tuple[bool, int]:
         """Apply gathered gradients - delegate to gradient manager"""
         return await self.gradient_manager.apply_gradients_to_model(
-            gather_result, model, optimizer, scheduler, transformer, compressor, device, window, global_step
+            gather_result,
+            model,
+            optimizer,
+            scheduler,
+            transformer,
+            compressor,
+            device,
+            window,
+            global_step,
         )
 
     def check_compressed_indices(
         self, param_name: str, idxs, totalk: int, allowed_topk: int = None
     ) -> None:
         """Check compressed indices - delegate to gradient manager"""
-        self.gradient_manager.check_compressed_indices(param_name, idxs, totalk, allowed_topk)
+        self.gradient_manager.check_compressed_indices(
+            param_name, idxs, totalk, allowed_topk
+        )
 
     # Helper methods for cleanup
     async def _cleanup_s3_data(
@@ -503,7 +535,7 @@ class Comms(ChainManager):
             pattern = re.compile(rf"^gradient-(\d+)-{uid}-v{tplr.__version__}.pt$")
 
             keys = await self.storage_client.list_objects("gradient", self.bucket)
-            
+
             # Identify stale objects to delete
             stale_objects = []
             for key in keys:
@@ -522,10 +554,12 @@ class Comms(ChainManager):
             # Delete stale objects
             for key in stale_objects:
                 await self.storage_client.delete_object(key, self.bucket)
-                
+
             if stale_objects:
-                tplr.logger.debug(f"Removed {len(stale_objects)} stale S3 objects for {uid}")
-                
+                tplr.logger.debug(
+                    f"Removed {len(stale_objects)} stale S3 objects for {uid}"
+                )
+
         except Exception as e:
             tplr.logger.error(f"Error cleaning up S3 data: {e}")
 

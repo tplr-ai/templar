@@ -16,7 +16,6 @@
 # DEALINGS IN THE SOFTWARE.
 
 import os
-import re
 import time
 import uuid
 from typing import Optional
@@ -29,15 +28,15 @@ LOCAL_TMP_DIR = "/tmp/local_store"
 
 class FileManager:
     """Manages local file operations and cleanup"""
-    
+
     def __init__(self, base_temp_dir: str, uid: Optional[str] = None):
         """Initialize with base temporary directory"""
         self.base_temp_dir = base_temp_dir
         self.uid = uid
-        
+
         # Create base temp directory
         os.makedirs(self.base_temp_dir, exist_ok=True)
-        
+
         # Create uid-specific temp directory if uid provided
         if self.uid:
             self.uid_temp_dir = os.path.join(self.base_temp_dir, f"templar_{self.uid}")
@@ -72,7 +71,7 @@ class FileManager:
         try:
             if not os.path.exists(dir_path):
                 return True
-                
+
             for root, dirs, files in os.walk(dir_path, topdown=False):
                 for name in files:
                     os.remove(os.path.join(root, name))
@@ -84,7 +83,9 @@ class FileManager:
             tplr.logger.error(f"Error deleting directory {dir_path}: {e}")
             return False
 
-    async def cleanup_local_data(self, uid: str, current_window: int, stale_retention: int) -> None:
+    async def cleanup_local_data(
+        self, uid: str, current_window: int, stale_retention: int
+    ) -> None:
         """Clean up stale local data for a given uid."""
         user_dir = os.path.join(LOCAL_TMP_DIR, str(uid))
         if not os.path.exists(user_dir):
@@ -100,14 +101,16 @@ class FileManager:
                     try:
                         self.delete_directory(old_path)
                     except Exception as e:
-                        tplr.logger.debug(f"Error removing stale directory {old_path}: {e}")
+                        tplr.logger.debug(
+                            f"Error removing stale directory {old_path}: {e}"
+                        )
 
     async def cleanup_temp_files(self, max_age_hours: int = 24) -> None:
         """Clean up temporary files older than max_age_hours"""
         try:
             current_time = time.time()
             max_age_seconds = max_age_hours * 3600
-            
+
             for root, dirs, files in os.walk(self.uid_temp_dir):
                 for file in files:
                     file_path = os.path.join(root, file)
@@ -117,8 +120,10 @@ class FileManager:
                             tplr.logger.debug(f"Removing old temp file: {file_path}")
                             self.delete_file(file_path)
                     except Exception as e:
-                        tplr.logger.debug(f"Error checking/removing temp file {file_path}: {e}")
-                        
+                        tplr.logger.debug(
+                            f"Error checking/removing temp file {file_path}: {e}"
+                        )
+
         except Exception as e:
             tplr.logger.error(f"Error during temp file cleanup: {e}")
 
@@ -137,4 +142,4 @@ class FileManager:
     # TODO: Add file size monitoring and cleanup based on disk usage
     # TODO: Add file locking mechanisms for concurrent access
     # TODO: Add compression for old files before deletion
-    # TODO: Add metrics collection for file operations 
+    # TODO: Add metrics collection for file operations

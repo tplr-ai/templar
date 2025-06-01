@@ -18,7 +18,6 @@
 import asyncio
 import random
 from typing import Set, List
-from datetime import datetime, timezone
 
 import tplr
 from ..chain import ChainManager
@@ -27,17 +26,19 @@ from ..storage.client import StorageClient
 
 class PeerManager:
     """Manages peer discovery and activity tracking"""
-    
-    def __init__(self, chain_manager: ChainManager, storage_client: StorageClient, hparams):
+
+    def __init__(
+        self, chain_manager: ChainManager, storage_client: StorageClient, hparams
+    ):
         """Initialize with chain manager and configuration"""
         self.chain_manager = chain_manager
         self.storage_client = storage_client
         self.hparams = hparams
-        
+
         self.active_peers: Set[int] = set()
         self.active_check_interval = hparams.active_check_interval
         self.recent_windows = hparams.recent_windows
-        
+
         # Background task management
         self._peer_tracking_task = None
         self._stop_tracking = False
@@ -60,15 +61,15 @@ class PeerManager:
                 return
 
             active_peers = set()
-            
+
             # Check each peer in the metagraph
             for uid in range(len(self.chain_manager.metagraph.uids)):
                 if await self.is_peer_active(uid, self.recent_windows):
                     active_peers.add(uid)
-            
+
             self.active_peers = active_peers
             tplr.logger.debug(f"Updated active peers: {len(self.active_peers)} active")
-            
+
         except Exception as e:
             tplr.logger.error(f"Error updating active peers: {e}")
 
@@ -87,23 +88,31 @@ class PeerManager:
 
                 # Try to get peer's bucket and check for gradients
                 try:
-                    peer_bucket = self.chain_manager.get_bucket_for_uid(uid, "gradients", "read")
+                    peer_bucket = self.chain_manager.get_bucket_for_uid(
+                        uid, "gradients", "read"
+                    )
                     if peer_bucket is None:
                         continue
 
-                    gradient_key = f"gradient-{check_window}-{uid}-v{tplr.__version__}.pt"
-                    
+                    gradient_key = (
+                        f"gradient-{check_window}-{uid}-v{tplr.__version__}.pt"
+                    )
+
                     # Check if gradient exists (just HEAD request)
-                    size = await self.storage_client.get_object_size(gradient_key, peer_bucket)
+                    size = await self.storage_client.get_object_size(
+                        gradient_key, peer_bucket
+                    )
                     if size is not None:
                         return True
-                        
+
                 except Exception as e:
-                    tplr.logger.debug(f"Error checking activity for uid {uid}, window {check_window}: {e}")
+                    tplr.logger.debug(
+                        f"Error checking activity for uid {uid}, window {check_window}: {e}"
+                    )
                     continue
 
             return False
-            
+
         except Exception as e:
             tplr.logger.error(f"Error checking if peer {uid} is active: {e}")
             return False
@@ -112,20 +121,22 @@ class PeerManager:
         """Update peers that have valid bucket configurations"""
         try:
             peers_with_buckets = set()
-            
+
             for uid in range(len(self.chain_manager.metagraph.uids)):
                 try:
-                    bucket = self.chain_manager.get_bucket_for_uid(uid, "gradients", "read")
+                    bucket = self.chain_manager.get_bucket_for_uid(
+                        uid, "gradients", "read"
+                    )
                     if bucket is not None:
                         peers_with_buckets.add(uid)
                 except Exception:
                     continue
-            
+
             # Update active peers to only include those with buckets
             self.active_peers = self.active_peers.intersection(peers_with_buckets)
-            
+
             tplr.logger.debug(f"Peers with buckets: {len(peers_with_buckets)}")
-            
+
         except Exception as e:
             tplr.logger.error(f"Error updating peers with buckets: {e}")
 
@@ -234,4 +245,4 @@ class PeerManager:
     # TODO: Add peer performance metrics
     # TODO: Add peer blacklisting functionality
     # TODO: Add peer discovery optimization
-    # TODO: Add peer connection health monitoring 
+    # TODO: Add peer connection health monitoring

@@ -24,7 +24,6 @@ import aiofiles
 import torch
 
 import tplr
-from .. import __version__
 from ..storage.client import StorageClient
 from ..storage.file_manager import FileManager
 from ..chain import ChainManager
@@ -36,14 +35,14 @@ PEERS_FILE_PREFIX = "peers_"
 
 class MetadataManager:
     """Manages protocol metadata"""
-    
+
     def __init__(
-        self, 
-        storage_client: StorageClient, 
-        file_manager: FileManager, 
-        chain_manager: ChainManager, 
+        self,
+        storage_client: StorageClient,
+        file_manager: FileManager,
+        chain_manager: ChainManager,
         version: str,
-        bucket: Bucket
+        bucket: Bucket,
     ):
         """Initialize with dependencies"""
         self.storage_client = storage_client
@@ -60,24 +59,24 @@ class MetadataManager:
 
             # Create temporary JSON file
             temp_file = self.file_manager.create_temp_file("start_window", ".json")
-            
+
             async with aiofiles.open(temp_file, "w") as f:
                 await f.write(json.dumps(start_window_data))
 
             # Read the file and upload
             with open(temp_file, "rb") as f:
                 data = f.read()
-            
+
             success = await self.storage_client.put_object(key, data, self.bucket)
-            
+
             # Cleanup temp file
             self.file_manager.delete_file(temp_file)
-            
+
             if success:
                 tplr.logger.info(f"Successfully posted start_window: {start_window}")
             else:
                 tplr.logger.error(f"Failed to post start_window: {start_window}")
-                
+
         except Exception as e:
             tplr.logger.error(f"Error posting start_window: {e}")
 
@@ -86,7 +85,10 @@ class MetadataManager:
         attempt = 0
         while retries == -1 or attempt < retries:
             try:
-                validator_bucket, validator_uid = await self._get_highest_stake_validator_bucket()
+                (
+                    validator_bucket,
+                    validator_uid,
+                ) = await self._get_highest_stake_validator_bucket()
                 if validator_bucket is None:
                     tplr.logger.warning(
                         "No highest staked validator bucket found. Retrying in 10 seconds"
@@ -100,14 +102,16 @@ class MetadataManager:
                 )
 
                 key = f"start_window_v{self.version}.json"
-                data = await self.storage_client.get_object(key, validator_bucket, timeout=15)
+                data = await self.storage_client.get_object(
+                    key, validator_bucket, timeout=15
+                )
 
                 if data is not None:
                     # Parse JSON data
                     json_str = data.decode("utf-8")
                     start_window_json = json.loads(json_str)
                     start_window = start_window_json["start_window"]
-                    
+
                     tplr.logger.info(f"Fetched start_window: {start_window}")
                     return start_window
 
@@ -146,24 +150,28 @@ class MetadataManager:
 
             # Create temporary JSON file
             temp_file = self.file_manager.create_temp_file("peer_list", ".json")
-            
+
             async with aiofiles.open(temp_file, "w") as f:
                 await f.write(json.dumps(peers_and_weights))
 
             # Read and upload
             with open(temp_file, "rb") as f:
                 data = f.read()
-            
+
             success = await self.storage_client.put_object(key, data, self.bucket)
-            
+
             # Cleanup temp file
             self.file_manager.delete_file(temp_file)
-            
+
             if success:
-                tplr.logger.info(f"Successfully posted peer list for window {first_effective_window}")
+                tplr.logger.info(
+                    f"Successfully posted peer list for window {first_effective_window}"
+                )
             else:
-                tplr.logger.error(f"Failed to post peer list for window {first_effective_window}")
-                
+                tplr.logger.error(
+                    f"Failed to post peer list for window {first_effective_window}"
+                )
+
         except Exception as e:
             tplr.logger.error(f"Failed to upload peer list: {e}")
 
@@ -174,10 +182,13 @@ class MetadataManager:
         tplr.logger.info(
             f"Looking for a {'previous' if fetch_previous else 'current'} peer list on a validator bucket"
         )
-        
+
         while True:
             try:
-                validator_bucket, validator_uid = await self._get_highest_stake_validator_bucket()
+                (
+                    validator_bucket,
+                    validator_uid,
+                ) = await self._get_highest_stake_validator_bucket()
 
                 if validator_bucket is None:
                     tplr.logger.warning(
@@ -191,9 +202,11 @@ class MetadataManager:
                 )
 
                 # List all peer files
-                keys = await self.storage_client.list_objects(PEERS_FILE_PREFIX, validator_bucket)
+                keys = await self.storage_client.list_objects(
+                    PEERS_FILE_PREFIX, validator_bucket
+                )
                 pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{re.escape(self.version)}\.json$"
-                
+
                 valid_keys = []
                 for key in keys:
                     if re.match(pattern, key):
@@ -239,7 +252,9 @@ class MetadataManager:
                 selected_key = window_to_key[selected_window]
 
                 # Download and parse peer data
-                data = await self.storage_client.get_object(selected_key, validator_bucket)
+                data = await self.storage_client.get_object(
+                    selected_key, validator_bucket
+                )
                 if data is None:
                     tplr.logger.error(f"Failed to download peer list: {selected_key}")
                     await asyncio.sleep(10)
@@ -258,15 +273,18 @@ class MetadataManager:
     async def get_debug_dict(self, window: int) -> Optional[dict]:
         """
         Get debug dictionary from validator bucket for a specific window.
-        
+
         Args:
             window: Specific window to retrieve debug data for
-            
+
         Returns:
             Debug dictionary or None if not found
         """
         try:
-            validator_bucket, validator_uid = await self._get_highest_stake_validator_bucket()
+            (
+                validator_bucket,
+                validator_uid,
+            ) = await self._get_highest_stake_validator_bucket()
             if not validator_bucket or validator_uid is None:
                 tplr.logger.warning(
                     "No validator bucket - cannot proceed with debug fetch"
@@ -278,7 +296,9 @@ class MetadataManager:
                 f"Attempting to retrieve debug dictionary for window {window} from validator {validator_uid}"
             )
 
-            data = await self.storage_client.get_object(key, validator_bucket, timeout=20)
+            data = await self.storage_client.get_object(
+                key, validator_bucket, timeout=20
+            )
 
             if data is None:
                 tplr.logger.warning(f"No debug dictionary found for window {window}")
@@ -288,7 +308,7 @@ class MetadataManager:
             temp_file = self.file_manager.create_temp_file("debug_dict")
             with open(temp_file, "wb") as f:
                 f.write(data)
-            
+
             result = torch.load(temp_file, weights_only=False)
             self.file_manager.delete_file(temp_file)
 
@@ -303,7 +323,9 @@ class MetadataManager:
             )
             return None
 
-    async def _get_highest_stake_validator_bucket(self) -> Tuple[Optional[Bucket], Optional[int]]:
+    async def _get_highest_stake_validator_bucket(
+        self,
+    ) -> Tuple[Optional[Bucket], Optional[int]]:
         """Get the bucket for the validator with highest stake."""
         try:
             # Get validator with highest stake
@@ -322,7 +344,7 @@ class MetadataManager:
 
             tplr.logger.debug(f"Validator Bucket: {validator_bucket}")
             return validator_bucket, validator_uid
-            
+
         except Exception as e:
             tplr.logger.error(f"Error getting highest stake validator bucket: {e}")
             return None, None
@@ -331,27 +353,27 @@ class MetadataManager:
         """Post debug dictionary to storage"""
         try:
             key = f"debug-{window}-{uid}-v{self.version}.pt"
-            
+
             # Serialize to temp file
             temp_file = self.file_manager.create_temp_file("debug_post")
             torch.save(debug_data, temp_file)
-            
+
             # Upload
             with open(temp_file, "rb") as f:
                 data = f.read()
-            
+
             success = await self.storage_client.put_object(key, data, self.bucket)
-            
+
             # Cleanup
             self.file_manager.delete_file(temp_file)
-            
+
             if success:
                 tplr.logger.info(f"Successfully posted debug dict for window {window}")
             else:
                 tplr.logger.error(f"Failed to post debug dict for window {window}")
-            
+
             return success
-            
+
         except Exception as e:
             tplr.logger.error(f"Error posting debug dict: {e}")
             return False
@@ -360,4 +382,4 @@ class MetadataManager:
     # TODO: Add metadata integrity verification
     # TODO: Add metadata caching mechanisms
     # TODO: Add metadata compression for large datasets
-    # TODO: Add metadata backup and recovery 
+    # TODO: Add metadata backup and recovery

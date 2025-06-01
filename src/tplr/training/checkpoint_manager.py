@@ -31,8 +31,14 @@ from ..schemas import Bucket
 
 class CheckpointManager:
     """Manages model checkpoints"""
-    
-    def __init__(self, storage_client: StorageClient, file_manager: FileManager, bucket: Bucket, uid: str):
+
+    def __init__(
+        self,
+        storage_client: StorageClient,
+        file_manager: FileManager,
+        bucket: Bucket,
+        uid: str,
+    ):
         """Initialize with storage dependencies"""
         self.storage_client = storage_client
         self.file_manager = file_manager
@@ -68,36 +74,41 @@ class CheckpointManager:
             }
 
             filename = f"checkpoint-{current_window}-{self.uid}-v{__version__}.pt"
-            
+
             # Serialize to temp file
             temp_file_path = self.file_manager.create_temp_file("checkpoint")
             torch.save(checkpoint_data, temp_file_path)
-            
+
             # Save locally
             local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid), str(current_window))
             self.file_manager.ensure_directory_exists(local_dir)
             local_path = os.path.join(local_dir, filename)
-            
+
             # Copy to local storage
             import shutil
+
             shutil.copy2(temp_file_path, local_path)
-            
+
             # Upload to R2
             with open(temp_file_path, "rb") as f:
                 data = f.read()
-            
+
             success = await self.storage_client.put_object(filename, data, self.bucket)
-            
+
             # Cleanup temp file
             self.file_manager.delete_file(temp_file_path)
-            
+
             if success:
-                tplr.logger.info(f"Successfully saved checkpoint for window {current_window}")
+                tplr.logger.info(
+                    f"Successfully saved checkpoint for window {current_window}"
+                )
                 return True
             else:
-                tplr.logger.error(f"Failed to upload checkpoint for window {current_window}")
+                tplr.logger.error(
+                    f"Failed to upload checkpoint for window {current_window}"
+                )
                 return False
-                
+
         except Exception as e:
             tplr.logger.error(f"Error saving checkpoint: {e}")
             return False
@@ -143,8 +154,10 @@ class CheckpointManager:
 
             checkpoint_start_window = checkpoint_data.get("start_window")
             checkpoint_current_window = checkpoint_data.get("current_window")
-            checkpoint_sync_window = checkpoint_data.get("sync_window", checkpoint_current_window)
-            
+            checkpoint_sync_window = checkpoint_data.get(
+                "sync_window", checkpoint_current_window
+            )
+
             if checkpoint_start_window is None or checkpoint_current_window is None:
                 tplr.logger.warning(
                     "Checkpoint missing start_window or current_window info"
@@ -180,7 +193,7 @@ class CheckpointManager:
         try:
             # For now, we'll check self R2 bucket and local storage
             # TODO: Add validator bucket checking when ChainManager is available
-            
+
             # 1. Check self R2 bucket
             result = await self._get_bucket_checkpoint(self.bucket, self.uid, version)
             if result:
@@ -198,18 +211,19 @@ class CheckpointManager:
             tplr.logger.error(f"Error getting latest checkpoint: {e}")
             return None
 
-    async def _get_bucket_checkpoint(self, bucket: Bucket, uid: str, version: str) -> Optional[Tuple[dict, int]]:
+    async def _get_bucket_checkpoint(
+        self, bucket: Bucket, uid: str, version: str
+    ) -> Optional[Tuple[dict, int]]:
         """Helper to get checkpoint from a specific bucket."""
         try:
-            pattern = f"checkpoint-*-{uid}-v{version}.pt"
             keys = await self.storage_client.list_objects("checkpoint", bucket)
-            
+
             pat = re.compile(rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$")
-            
+
             # Find the latest checkpoint window
             latest_checkpoint = None
             max_window = -1
-            
+
             for key in keys:
                 match = pat.match(key)
                 if match:
@@ -217,7 +231,7 @@ class CheckpointManager:
                     if window_number > max_window:
                         max_window = window_number
                         latest_checkpoint = key
-            
+
             # If we found a valid checkpoint, fetch it
             if latest_checkpoint:
                 data = await self.storage_client.get_object(latest_checkpoint, bucket)
@@ -226,14 +240,14 @@ class CheckpointManager:
                     temp_file = self.file_manager.create_temp_file("checkpoint_load")
                     with open(temp_file, "wb") as f:
                         f.write(data)
-                    
+
                     loaded_data = torch.load(temp_file, weights_only=False)
                     self.file_manager.delete_file(temp_file)
-                    
+
                     return loaded_data, max_window
-            
+
             return None
-            
+
         except Exception as e:
             tplr.logger.error(f"Error getting bucket checkpoint: {e}")
             return None
@@ -284,25 +298,27 @@ class CheckpointManager:
         """
         try:
             keys = await self.storage_client.list_objects("checkpoint", self.bucket)
-            
+
             # Filter for this uid's checkpoints
             pattern = rf"^checkpoint-(\d+)-{self.uid}-v{re.escape(__version__)}\.pt$"
             checkpoint_files = []
-            
+
             for key in keys:
                 match = re.match(pattern, key)
                 if match:
                     window = int(match.group(1))
                     checkpoint_files.append({"key": key, "window": window})
-            
+
             # Sort by window number (descending)
             checkpoint_files.sort(key=lambda x: x["window"], reverse=True)
-            
+
             if len(checkpoint_files) > keep_last:
                 to_delete = checkpoint_files[keep_last:]
                 for checkpoint in to_delete:
-                    await self.storage_client.delete_object(checkpoint["key"], self.bucket)
-                
+                    await self.storage_client.delete_object(
+                        checkpoint["key"], self.bucket
+                    )
+
                 tplr.logger.info(f"Deleted {len(to_delete)} old checkpoints")
 
         except Exception as e:
@@ -311,4 +327,4 @@ class CheckpointManager:
     # TODO: Add checkpoint compression
     # TODO: Add checkpoint integrity verification
     # TODO: Add checkpoint metadata tracking
-    # TODO: Add checkpoint rollback functionality 
+    # TODO: Add checkpoint rollback functionality

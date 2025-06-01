@@ -930,7 +930,6 @@ async def test_load_checkpoint_missing_data(comms_instance):
     # load_checkpoint returns: success, momentum, sync_window, optimizer, scheduler
     (
         success,
-        momentum,
         sync_window,
         optimizer,
         scheduler,
@@ -943,7 +942,6 @@ async def test_load_checkpoint_missing_data(comms_instance):
     )
 
     assert not success
-    assert momentum == {}
     assert sync_window == 0
     assert (
         optimizer == mock_optimizer

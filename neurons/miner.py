@@ -51,6 +51,20 @@ import tplr
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
+
+def _to_cpu(obj: object):
+    """Recursively move tensors in an object to CPU."""
+    if torch.is_tensor(obj):
+        return obj.detach().cpu()
+    if isinstance(obj, dict):
+        return {k: _to_cpu(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_to_cpu(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_cpu(v) for v in obj)
+    return obj
+
+
 # GPU optimizations
 torch.manual_seed(42)
 torch.cuda.manual_seed_all(42)
@@ -303,21 +317,32 @@ class Miner:
 
     def broadcast_model_state(self):
         if torch.distributed.is_initialized():
-            state = [self.model.state_dict()]
+            if self.is_main:
+                cpu_state = _to_cpu(self.model.state_dict())
+                state = [cpu_state]
+            else:
+                state = [None]
             torch.distributed.broadcast_object_list(state, src=0)
             if not self.is_main:
                 self.model.load_state_dict(state[0])
 
     def broadcast_optimizer_state(self):
         if torch.distributed.is_initialized():
-            state = [self.optimizer.state_dict()]
+            if self.is_main:
+                cpu_state = _to_cpu(self.optimizer.state_dict())
+                state = [cpu_state]
+            else:
+                state = [None]
             torch.distributed.broadcast_object_list(state, src=0)
             if not self.is_main:
                 self.optimizer.load_state_dict(state[0])
 
     def broadcast_scheduler_state(self):
         if torch.distributed.is_initialized():
-            state = [self.scheduler.state_dict()]
+            if self.is_main:
+                state = [_to_cpu(self.scheduler.state_dict())]
+            else:
+                state = [None]
             torch.distributed.broadcast_object_list(state, src=0)
             if not self.is_main:
                 self.scheduler.load_state_dict(state[0])

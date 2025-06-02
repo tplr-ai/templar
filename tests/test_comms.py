@@ -906,6 +906,53 @@ async def test_load_checkpoint_success(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_load_checkpoint_prefix_handling(monkeypatch):
+    """Ensure load_checkpoint adapts checkpoint keys to the model."""
+    comms = Comms.__new__(Comms)
+    comms.wallet = MagicMock()
+
+    base_model = torch.nn.Linear(4, 2)
+    ddp_model = MagicMock()
+    ddp_model.state_dict.return_value = {
+        f"module.{k}": v for k, v in base_model.state_dict().items()
+    }
+
+    def capture(state_dict):
+        ddp_model.loaded_state = state_dict
+
+    ddp_model.load_state_dict.side_effect = capture
+
+    optimizer = torch.optim.SGD(base_model.parameters(), lr=0.01)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+
+    checkpoint_data = {
+        "model_state_dict": base_model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "start_window": 0,
+        "current_window": 1,
+        "sync_window": 3,
+    }
+
+    async def _fake_get_latest_checkpoint(version: str):
+        return checkpoint_data, 1
+
+    monkeypatch.setattr(comms, "get_latest_checkpoint", _fake_get_latest_checkpoint)
+
+    success, sync_window, _, _ = await comms.load_checkpoint(
+        model=ddp_model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        current_window=1,
+        device="cpu",
+    )
+
+    assert success is True
+    assert sync_window == 3
+    assert all(k.startswith("module.") for k in ddp_model.loaded_state)
+
+
+@pytest.mark.asyncio
 async def test_load_checkpoint_missing_data(comms_instance):
     """Test 16: Verify checkpoint loading with missing data
 

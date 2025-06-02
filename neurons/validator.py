@@ -156,6 +156,7 @@ class Validator:
         if self.config.world_size > 1:
             os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
             os.environ.setdefault("MASTER_PORT", "29500")
+            os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
             torch.distributed.init_process_group(
                 backend="nccl",
                 world_size=self.config.world_size,
@@ -173,13 +174,17 @@ class Validator:
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
+        if torch.distributed.is_initialized() and self.config.device != "cpu":
+            torch.cuda.set_device(torch.device(self.config.device))
         self.model.to(self.config.device)
         if torch.distributed.is_initialized():
             self.model = torch.nn.parallel.DistributedDataParallel(
                 self.model,
-                device_ids=None
-                if self.config.device == "cpu"
-                else [torch.cuda.current_device()],
+                device_ids=(
+                    None
+                    if self.config.device == "cpu"
+                    else [torch.cuda.current_device()]
+                ),
             )
         self.tokenizer = self.hparams.tokenizer
 
@@ -743,9 +748,9 @@ class Validator:
             scheduler=self.scheduler,
             current_window=self.current_window,
             device=self.config.device,
-            init_version=tplr.__version__
-            if has_new_checkpoint
-            else self.bootstrap_version,
+            init_version=(
+                tplr.__version__ if has_new_checkpoint else self.bootstrap_version
+            ),
         )
         if success:
             self.optimizer = loaded_optimizer
@@ -917,9 +922,9 @@ class Validator:
                 old_score = self.final_scores[uid].item()
                 new_score = old_score  # Initialize new_score with old_score value
                 if self.final_scores[uid] > 0:
-                    self.final_scores[uid] *= (
-                        0.75  # Apply flat 25% reduction for positive scores only
-                    )
+                    self.final_scores[
+                        uid
+                    ] *= 0.75  # Apply flat 25% reduction for positive scores only
 
                     new_score = self.final_scores[uid].item()
 
@@ -1986,11 +1991,12 @@ class Validator:
                     # new_avg = (1-alpha) * old_avg + alpha * new_value
                     # where alpha is binary_score_ma_alpha hyperparameter
                     self.binary_moving_averages[eval_uid] = (
-                        (1 - self.hparams.binary_score_ma_alpha)
-                        * self.binary_moving_averages[eval_uid]
-                        + self.hparams.binary_score_ma_alpha
-                        * self.binary_indicator_scores[eval_uid]
-                    )
+                        1 - self.hparams.binary_score_ma_alpha
+                    ) * self.binary_moving_averages[
+                        eval_uid
+                    ] + self.hparams.binary_score_ma_alpha * self.binary_indicator_scores[
+                        eval_uid
+                    ]
                     tplr.log_with_context(
                         level="debug",
                         message=f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}",
@@ -2032,9 +2038,9 @@ class Validator:
 
                     if self.final_scores[eval_uid] > 0:
                         self.final_scores[eval_uid] *= self.missing_gradient_slash_rate
-                        self.binary_moving_averages[eval_uid] *= (
-                            self.missing_gradient_slash_rate
-                        )
+                        self.binary_moving_averages[
+                            eval_uid
+                        ] *= self.missing_gradient_slash_rate
 
                         new_score = self.final_scores[eval_uid].item()
                         tplr.log_with_context(

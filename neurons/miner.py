@@ -156,6 +156,7 @@ class Miner:
         if self.config.world_size > 1:
             os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
             os.environ.setdefault("MASTER_PORT", "29500")
+            os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
             torch.distributed.init_process_group(
                 backend="nccl",
                 world_size=self.config.world_size,
@@ -169,13 +170,17 @@ class Miner:
         # `gradient_checkpointing_enable` method, so configure the base model
         # prior to wrapping.
         self.model.gradient_checkpointing_enable()
+        if torch.distributed.is_initialized() and self.config.device != "cpu":
+            torch.cuda.set_device(torch.device(self.config.device))
         self.model.to(self.config.device)  # type: ignore
         if torch.distributed.is_initialized():
             self.model = torch.nn.parallel.DistributedDataParallel(
                 self.model,
-                device_ids=None
-                if self.config.device == "cpu"
-                else [torch.cuda.current_device()],
+                device_ids=(
+                    None
+                    if self.config.device == "cpu"
+                    else [torch.cuda.current_device()]
+                ),
             )
         self.tokenizer = self.hparams.tokenizer
 
@@ -250,7 +255,9 @@ class Miner:
         self.stop_event = asyncio.Event()
         if self.is_main:
             self.current_block = self.subtensor.block
-            self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+            self.current_window = int(
+                self.current_block / self.hparams.blocks_per_window
+            )
         else:
             self.current_block = 0
             self.current_window = 0
@@ -376,9 +383,9 @@ class Miner:
                 scheduler=self.scheduler,
                 current_window=self.current_window,
                 device=cast(str, self.config.device),
-                init_version=tplr.__version__
-                if has_new_checkpoint
-                else self.bootstrap_version,
+                init_version=(
+                    tplr.__version__ if has_new_checkpoint else self.bootstrap_version
+                ),
             )
             if success:
                 self.optimizer = loaded_optimizer
@@ -412,7 +419,9 @@ class Miner:
                 tplr.logger.info(
                     f"Starting catchup from start window {self.start_window} to current window {self.current_window})..."
                 )
-                await tplr.neurons.catchup_with_aggregation_server(self, self.start_window)
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, self.start_window
+                )
         else:
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
@@ -573,7 +582,9 @@ class Miner:
                             "Timestamp", "Now", block=sync_block
                         )
                         if response is None or not isinstance(response, ScaleObj):
-                            raise ValueError(f"Could not query timestamp for {sync_block}")
+                            raise ValueError(
+                                f"Could not query timestamp for {sync_block}"
+                            )
                         ts_value = (
                             cast(int, response.value) / 1000
                         )  # convert milliseconds to seconds
@@ -597,14 +608,18 @@ class Miner:
                 )
 
                 # Log the time window we're using
-                tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
+                tplr.logger.info(
+                    f"Using time window for gather: {time_min} to {time_max}"
+                )
 
                 # Refresh the peers list immediately before gathering
                 tplr.logger.info("Refreshing peers before gather task...")
 
                 if self.config.test:
                     # In test mode, use all UIDs from metagraph except self
-                    tplr.logger.info("Test mode active: Using all peers from metagraph.")
+                    tplr.logger.info(
+                        "Test mode active: Using all peers from metagraph."
+                    )
                     all_uids = list(range(len(self.metagraph.S)))
                     self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
@@ -663,14 +678,14 @@ class Miner:
                         # Optimization metrics
                         "miner/learning_rate": self.scheduler.get_last_lr()[0],
                         # Gradient statistics as points
-                        "miner/mean_grad_norm": sum(grad_norms) / len(grad_norms)
-                        if grad_norms
-                        else 0,
+                        "miner/mean_grad_norm": (
+                            sum(grad_norms) / len(grad_norms) if grad_norms else 0
+                        ),
                         "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
                         "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                        "miner/grad_norm_std": torch.tensor(grad_norms).std().item()
-                        if grad_norms
-                        else 0,
+                        "miner/grad_norm_std": (
+                            torch.tensor(grad_norms).std().item() if grad_norms else 0
+                        ),
                         "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
                         "miner/mean_momentum_norm": sum(momentum_norms)
                         / len(momentum_norms),
@@ -687,7 +702,11 @@ class Miner:
             self.model.train()
             self.optimizer.zero_grad()
 
-            if self.is_main and gather_result is not None and gather_result.state_dict is not None:
+            if (
+                self.is_main
+                and gather_result is not None
+                and gather_result.state_dict is not None
+            ):
                 for n, p in self.model.named_parameters():
                     idxs_key = n + "idxs"
                     vals_key = n + "vals"
@@ -753,7 +772,9 @@ class Miner:
                     debug_dict["successful_peers"] = sorted(
                         list(set(self.comms.peers) - set(gather_result.skipped_uids))
                     )
-                    debug_dict["skipped_peers"] = sorted(list(gather_result.skipped_uids))
+                    debug_dict["skipped_peers"] = sorted(
+                        list(gather_result.skipped_uids)
+                    )
 
                 # Store the debug dictionary
                 asyncio.create_task(

@@ -328,6 +328,8 @@ DEBUG=false
 The validator also supports multi-GPU execution. Specify `WORLD_SIZE` and
 `RANK` for each process (or use the corresponding CLI flags) and start one
 process per GPU. The model will synchronize across GPUs using PyTorch DDP.
+If `MASTER_ADDR` and `MASTER_PORT` are not set, they default to
+`127.0.0.1` and `29500`.
 
 **Note**: The R2 permissions remain unchanged.
 

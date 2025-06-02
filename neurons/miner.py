@@ -154,6 +154,8 @@ class Miner:
             self.uid = 0
 
         if self.config.world_size > 1:
+            os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+            os.environ.setdefault("MASTER_PORT", "29500")
             torch.distributed.init_process_group(
                 backend="nccl",
                 world_size=self.config.world_size,

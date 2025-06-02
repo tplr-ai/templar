@@ -247,7 +247,8 @@ DEBUG=false
 Set `WORLD_SIZE` and `RANK` environment variables or pass `--world-size` and
 `--rank` arguments when launching multiple miner processes. Initialize each
 process on a different GPU and the miner will automatically synchronize using
-PyTorch Distributed Data Parallel (DDP).
+PyTorch Distributed Data Parallel (DDP). If `MASTER_ADDR` and `MASTER_PORT`
+are not specified, they default to `127.0.0.1` and `29500` respectively.
 
 **Note**: The R2 permissions remain unchanged from previous configurations.
 

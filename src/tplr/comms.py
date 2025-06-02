@@ -113,7 +113,6 @@ class Comms(ChainManager):
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
         self.gather_semaphore = asyncio.Semaphore(15)
 
-
     async def _get_s3_client(self, bucket: Bucket):
         """
         Returns a persistent s3_client for the given bucket credentials.

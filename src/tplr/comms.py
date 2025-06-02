@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 
 # from .hparams import HParams
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Iterable
 
 import aiofiles
 import bittensor as bt
@@ -1363,6 +1363,37 @@ class Comms(ChainManager):
             await self._purge_s3_client(bucket)
             return None
 
+    @staticmethod
+    def _strip_module_prefix(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Return a copy of ``state_dict`` with leading ``"module."`` removed
+        from all keys if they all share the prefix."""
+        if state_dict and all(k.startswith("module.") for k in state_dict):
+            return {k[len("module."):]: v for k, v in state_dict.items()}
+        return state_dict
+
+    @staticmethod
+    def _match_model_state_keys(
+        state_dict: Dict[str, torch.Tensor], model_keys: Iterable[str]
+    ) -> Dict[str, torch.Tensor]:
+        """Align checkpoint keys with those expected by the model."""
+        if not state_dict:
+            return state_dict
+
+        ckpt_first = next(iter(state_dict))
+        try:
+            model_first = next(iter(model_keys))
+        except StopIteration:
+            return state_dict
+
+        ckpt_has = ckpt_first.startswith("module.")
+        model_has = model_first.startswith("module.")
+
+        if ckpt_has and not model_has:
+            return {k[len("module."):]: v for k, v in state_dict.items()}
+        if not ckpt_has and model_has:
+            return {f"module.{k}": v for k, v in state_dict.items()}
+        return state_dict
+
     async def load_checkpoint(
         self,
         model,
@@ -1387,12 +1418,11 @@ class Comms(ChainManager):
         checkpoint_data, checkpoint_window = result
         try:
             # 1) Load model and optimizer state
-            model.load_state_dict(
-                {
-                    k: v.to(device)
-                    for k, v in checkpoint_data["model_state_dict"].items()
-                }
-            )
+            state_dict = {
+                k: v.to(device) for k, v in checkpoint_data["model_state_dict"].items()
+            }
+            state_dict = self._match_model_state_keys(state_dict, model.state_dict().keys())
+            model.load_state_dict(state_dict)
             model.to(device)
 
             for state in optimizer.state.values():
@@ -1655,7 +1685,8 @@ class Comms(ChainManager):
         """Save checkpoint to R2 and local storage."""
         checkpoint_data = {
             "model_state_dict": {
-                k: v.cpu().clone() for k, v in model.state_dict().items()
+                k: v.cpu().clone()
+                for k, v in self._strip_module_prefix(model.state_dict()).items()
             },
             "optimizer_state_dict": {
                 k: v.cpu().clone() if torch.is_tensor(v) else v

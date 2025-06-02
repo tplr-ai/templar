@@ -60,12 +60,10 @@ INFLUXDB_DATABASE: Final[str] = os.environ.get("INFLUXDB_DATABASE", DEFAULT_DATA
 INFLUXDB_ORG: Final[str] = os.environ.get("INFLUXDB_ORG", DEFAULT_ORG)
 
 
-class MertricsLoggerWriteOptions(WriteOptions):
-    """
-    Custom WriteOptions for InfluxDB client.
-    """
+class MetricsLoggerWriteOptions(WriteOptions):
+    """Custom ``WriteOptions`` with sane batching defaults."""
 
-    def __init__(self, batch_size: int = 5_000):
+    def __init__(self, batch_size: int = 5_000) -> None:
         super().__init__(
             write_type=WriteType.batching,
             batch_size=batch_size,
@@ -130,7 +128,7 @@ class MetricsLogger:
         url = f"https://{host}:{port}"
         self.client = InfluxDBClient(url=url, token=token, org=org)
         self.write_api = self.client.write_api(
-            write_options=MertricsLoggerWriteOptions(
+            write_options=MetricsLoggerWriteOptions(
                 batch_size=10_000 if role == "validator" else 1_000,
             ),
         )

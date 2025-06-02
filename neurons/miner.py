@@ -164,6 +164,11 @@ class Miner:
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
+        # Enable gradient checkpointing before wrapping the model with
+        # DistributedDataParallel. The DDP wrapper does not expose the
+        # `gradient_checkpointing_enable` method, so configure the base model
+        # prior to wrapping.
+        self.model.gradient_checkpointing_enable()
         self.model.to(self.config.device)  # type: ignore
         if torch.distributed.is_initialized():
             self.model = torch.nn.parallel.DistributedDataParallel(
@@ -173,7 +178,6 @@ class Miner:
                 else [torch.cuda.current_device()],
             )
         self.tokenizer = self.hparams.tokenizer
-        self.model.gradient_checkpointing_enable()
 
         # Init compression
         self.transformer = tplr.compress.TransformDCT(

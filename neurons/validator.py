@@ -3158,6 +3158,14 @@ class Validator:
                 time.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
 
+    async def cleanup_comms(self):
+        """Clean up communications resources before shutdown"""
+        try:
+            await self.comms.close_all_resources()
+            tplr.logger.info("Successfully cleaned up communications resources")
+        except Exception as e:
+            tplr.logger.error(f"Error cleaning up communications: {e}")
+
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):
     """Normalizes logits using a minimum power normalization approach.

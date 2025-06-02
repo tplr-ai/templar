@@ -56,19 +56,48 @@ class PeerManager:
     async def _update_active_peers(self) -> None:
         """Update the set of active peers"""
         try:
-            current_window = self.chain_manager.get_current_window()
-            if current_window is None:
+            # Get current window from the chain manager
+            try:
+                current_window = self.chain_manager.current_window
+                if current_window is None:
+                    # If no current_window attribute, we can't determine activity
+                    tplr.logger.debug(
+                        "No current_window available, skipping peer activity check"
+                    )
+                    return
+            except Exception as e:
+                tplr.logger.debug(f"Could not get current window: {e}")
                 return
+
+            # Check recent windows for activity
+            check_windows = [current_window - i for i in range(self.recent_windows)]
+            check_windows = [
+                w for w in check_windows if w >= 0
+            ]  # Filter out negative windows
 
             active_peers = set()
 
-            # Check each peer in the metagraph
-            for uid in range(len(self.chain_manager.metagraph.uids)):
-                if await self.is_peer_active(uid, self.recent_windows):
-                    active_peers.add(uid)
+            # Check each UID for activity in recent windows
+            if (
+                hasattr(self.chain_manager, "commitments")
+                and self.chain_manager.commitments
+            ):
+                for uid in self.chain_manager.commitments.keys():
+                    if await self._is_peer_active(uid, check_windows):
+                        active_peers.add(uid)
+            else:
+                # Fallback to metagraph UIDs if commitments not available
+                for uid in range(len(self.chain_manager.metagraph.uids)):
+                    if await self._is_peer_active(uid, check_windows):
+                        active_peers.add(uid)
 
+            # Update active peers and filter by bucket availability
             self.active_peers = active_peers
-            tplr.logger.debug(f"Updated active peers: {len(self.active_peers)} active")
+            self.update_peers_with_buckets()
+
+            tplr.logger.debug(
+                f"Updated active peers: {len(self.active_peers)} active out of {len(self.chain_manager.metagraph.uids)} total"
+            )
 
         except Exception as e:
             tplr.logger.error(f"Error updating active peers: {e}")
@@ -88,9 +117,7 @@ class PeerManager:
 
                 # Try to get peer's bucket and check for gradients
                 try:
-                    peer_bucket = self.chain_manager.get_bucket_for_uid(
-                        uid, "gradients", "read"
-                    )
+                    peer_bucket = self.chain_manager.get_bucket(uid)
                     if peer_bucket is None:
                         continue
 
@@ -122,15 +149,24 @@ class PeerManager:
         try:
             peers_with_buckets = set()
 
-            for uid in range(len(self.chain_manager.metagraph.uids)):
-                try:
-                    bucket = self.chain_manager.get_bucket_for_uid(
-                        uid, "gradients", "read"
-                    )
-                    if bucket is not None:
+            # Use commitments if available, otherwise fall back to metagraph
+            if (
+                hasattr(self.chain_manager, "commitments")
+                and self.chain_manager.commitments
+            ):
+                for uid in self.active_peers:
+                    if uid in self.chain_manager.commitments:
                         peers_with_buckets.add(uid)
-                except Exception:
-                    continue
+            else:
+                # Fallback method using get_bucket_for_uid if available
+                for uid in self.active_peers:
+                    try:
+                        if hasattr(self.chain_manager, "get_bucket"):
+                            bucket = self.chain_manager.get_bucket(uid)
+                            if bucket is not None:
+                                peers_with_buckets.add(uid)
+                    except Exception:
+                        continue
 
             # Update active peers to only include those with buckets
             self.active_peers = self.active_peers.intersection(peers_with_buckets)
@@ -240,6 +276,60 @@ class PeerManager:
     def is_peer_in_active_set(self, uid: int) -> bool:
         """Check if a specific peer is in the active set"""
         return uid in self.active_peers
+
+    async def _is_peer_active(self, uid: int, check_windows: List[int]) -> bool:
+        """Check if peer is active in any of the given windows"""
+        try:
+            if (
+                not hasattr(self.chain_manager, "commitments")
+                or not self.chain_manager.commitments
+            ):
+                return False
+
+            peer_bucket = self.chain_manager.commitments.get(uid)
+            if peer_bucket is None:
+                return False
+
+            for window in check_windows:
+                gradient_key = f"gradient-{window}-{uid}-v{tplr.__version__}.pt"
+                try:
+                    size = await self.storage_client.get_object_size(
+                        gradient_key, peer_bucket
+                    )
+                    if size is not None:
+                        return True
+                except Exception as e:
+                    tplr.logger.debug(
+                        f"Error checking gradient for uid {uid}, window {window}: {e}"
+                    )
+                    continue
+            return False
+        except Exception as e:
+            tplr.logger.error(f"Error checking if peer {uid} is active: {e}")
+            return False
+
+    async def _filter_peers_with_buckets(self) -> None:
+        """Filter active peers to only include those with valid buckets"""
+        try:
+            peers_with_buckets = set()
+
+            if (
+                hasattr(self.chain_manager, "commitments")
+                and self.chain_manager.commitments
+            ):
+                for uid in self.active_peers:
+                    if uid in self.chain_manager.commitments:
+                        peers_with_buckets.add(uid)
+
+            # Update active peers to only include those with buckets
+            self.active_peers = self.active_peers.intersection(peers_with_buckets)
+
+            tplr.logger.debug(
+                f"Filtered to peers with buckets: {len(self.active_peers)}"
+            )
+
+        except Exception as e:
+            tplr.logger.error(f"Error filtering peers with buckets: {e}")
 
     # TODO: Add peer reputation tracking
     # TODO: Add peer performance metrics

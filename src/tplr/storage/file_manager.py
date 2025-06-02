@@ -138,8 +138,3 @@ class FileManager:
     def get_temp_dir(self) -> str:
         """Get the temporary directory for this instance"""
         return self.uid_temp_dir
-
-    # TODO: Add file size monitoring and cleanup based on disk usage
-    # TODO: Add file locking mechanisms for concurrent access
-    # TODO: Add compression for old files before deletion
-    # TODO: Add metrics collection for file operations

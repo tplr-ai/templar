@@ -56,7 +56,7 @@ class CheckpointManager:
         current_window: int,
         start_window: int,
     ) -> bool:
-        """Save checkpoint to R2 and local storage."""
+        """Save checkpoint to R2 storage only."""
         try:
             checkpoint_data = {
                 "model_state_dict": {
@@ -78,16 +78,6 @@ class CheckpointManager:
             # Serialize to temp file
             temp_file_path = self.file_manager.create_temp_file("checkpoint")
             torch.save(checkpoint_data, temp_file_path)
-
-            # Save locally
-            local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid), str(current_window))
-            self.file_manager.ensure_directory_exists(local_dir)
-            local_path = os.path.join(local_dir, filename)
-
-            # Copy to local storage
-            import shutil
-
-            shutil.copy2(temp_file_path, local_path)
 
             # Upload to R2
             with open(temp_file_path, "rb") as f:
@@ -323,8 +313,3 @@ class CheckpointManager:
 
         except Exception as e:
             tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
-
-    # TODO: Add checkpoint compression
-    # TODO: Add checkpoint integrity verification
-    # TODO: Add checkpoint metadata tracking
-    # TODO: Add checkpoint rollback functionality

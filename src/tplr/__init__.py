@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "0.3.4"
+__version__ = "dev-aipcujnl"
 
 # Import package.
 from .chain import *

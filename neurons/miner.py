@@ -209,7 +209,10 @@ class Miner:
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         self.start_window = self.current_window  # Record the start window
         self.global_step = 0  # Initialize global_step to zero
+
+        # Set current window on comms to ensure proper propagation
         self.comms.current_window = self.current_window
+
         self.step_counter = 0
 
         # Add step tracking
@@ -262,6 +265,9 @@ class Miner:
 
         self.comms.commitments = await self.comms.get_commitments()
         tplr.logger.info("Loaded commitments")
+
+        # Start background tasks for the refactored comms
+        self.comms.start_background_tasks()
 
         # Fetch start_window from highest stake validator
         self.start_window = await self.comms.get_start_window()
@@ -788,6 +794,14 @@ class Miner:
             while self.current_window == step_window:
                 await asyncio.sleep(0.1)
 
+    async def cleanup_comms(self):
+        """Clean up communications resources before shutdown"""
+        try:
+            await self.comms.close_all_resources()
+            tplr.logger.info("Successfully cleaned up communications resources")
+        except Exception as e:
+            tplr.logger.error(f"Error cleaning up communications: {e}")
+
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""
         # Clear gradients more thoroughly
@@ -815,10 +829,12 @@ class Miner:
                 self.current_block = int(event["header"]["number"])
                 new_window = int(self.current_block / self.hparams.blocks_per_window)
                 if new_window != self.current_window:
+                    old_window = self.current_window
                     self.current_window = new_window
+                    # Ensure comms gets updated current window
                     self.comms.current_window = self.current_window
                     tplr.logger.info(
-                        f"New block received. Current window updated to: {self.current_window}"
+                        f"New block received. Current window updated: {old_window} -> {self.current_window}"
                     )
             except Exception as e:
                 tplr.logger.error(f"Error processing block event: {e}")

@@ -280,8 +280,3 @@ class GradientManager:
         except Exception as e:
             tplr.logger.error(f"Error validating tensor {param_name}: {e}")
             return False
-
-    # TODO: Add gradient clipping functionality
-    # TODO: Add gradient accumulation support
-    # TODO: Add gradient compression ratio monitoring
-    # TODO: Add gradient statistics collection

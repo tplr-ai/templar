@@ -74,7 +74,7 @@ class Comms(ChainManager):
         # Get the bucket directly
         self.bucket = self.get_own_bucket("gradients", "write")
 
-        # Initialize ChainManager with the bucket
+        # Initialize ChainManager with all required parameters
         super().__init__(
             config=config,
             netuid=netuid,
@@ -90,6 +90,9 @@ class Comms(ChainManager):
             self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
             os.makedirs(self.save_location, exist_ok=True)
         self.key_prefix = key_prefix
+
+        # Initialize current window tracking
+        self._current_window = 0
 
         # Initialize all managers
         self._initialize_managers()
@@ -573,6 +576,46 @@ class Comms(ChainManager):
     def last_checkpoint_data(self):
         """Get last checkpoint data from checkpoint manager"""
         return self.checkpoint_manager.last_checkpoint_data
+
+    @property
+    def current_window(self):
+        """Get current window"""
+        return getattr(self, "_current_window", 0)
+
+    @current_window.setter
+    def current_window(self, value):
+        """Set current window and propagate to managers"""
+        self._current_window = value
+
+    def get_current_window(self) -> Optional[int]:
+        """Get current window for peer manager"""
+        return self.current_window
+
+    def start_commitment_fetcher(self):
+        """Start commitment fetcher - delegate to parent"""
+        if hasattr(super(), "start_commitment_fetcher"):
+            super().start_commitment_fetcher()
+
+    async def get_commitments(self):
+        """Get commitments - delegate to parent"""
+        if hasattr(super(), "get_commitments"):
+            return await super().get_commitments()
+        return {}
+
+    def try_commit(self, wallet, bucket):
+        """Try commit - delegate to parent"""
+        if hasattr(super(), "try_commit"):
+            super().try_commit(wallet, bucket)
+
+    @property
+    def peers(self):
+        """Get peers list for miner compatibility"""
+        return getattr(self, "_peers", [])
+
+    @peers.setter
+    def peers(self, value):
+        """Set peers list"""
+        self._peers = value
 
     # TODO: Add performance monitoring and metrics collection
     # TODO: Add circuit breaker patterns for fault tolerance

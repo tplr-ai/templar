@@ -19,6 +19,7 @@ import asyncio
 import math
 import os
 from typing import Optional, List
+from datetime import datetime
 
 import aiofiles
 import torch
@@ -82,7 +83,12 @@ class StorageClient:
             del self._s3_clients[key]
 
     async def get_object(
-        self, key: str, bucket: Bucket, timeout: int = 15
+        self,
+        key: str,
+        bucket: Bucket,
+        timeout: int = 15,
+        time_min: datetime = None,
+        time_max: datetime = None,
     ) -> Optional[bytes]:
         """Download object from S3 using asynchronous streaming."""
         import uuid
@@ -101,6 +107,28 @@ class StorageClient:
                     timeout=timeout,
                 )
                 file_size = response["ContentLength"]
+
+                # Check timestamp constraints if provided
+                if time_min is not None or time_max is not None:
+                    last_modified = response.get("LastModified")
+                    if last_modified is not None:
+                        # Ensure timezone awareness
+                        if last_modified.tzinfo is None:
+                            from datetime import timezone
+
+                            last_modified = last_modified.replace(tzinfo=timezone.utc)
+
+                        if time_min is not None and last_modified < time_min:
+                            tplr.logger.debug(
+                                f"Object {key} too old: {last_modified} < {time_min}"
+                            )
+                            return None
+                        if time_max is not None and last_modified > time_max:
+                            tplr.logger.debug(
+                                f"Object {key} too new: {last_modified} > {time_max}"
+                            )
+                            return None
+
             except asyncio.TimeoutError:
                 tplr.logger.debug(f"Timeout checking for {key}")
                 return None
@@ -112,7 +140,7 @@ class StorageClient:
                 raise
 
             # Download the object
-            if file_size <= 5 * 1024 * 1024 * 1024:  # 5GB
+            if file_size <= 600 * 1024 * 1024:  # 600MB
                 response = await asyncio.wait_for(
                     s3_client.get_object(Bucket=bucket.name, Key=key),
                     timeout=timeout,
@@ -228,19 +256,13 @@ class StorageClient:
             return []
 
     async def get_object_size(self, key: str, bucket: Bucket) -> Optional[int]:
-        """Get the size of an S3 object without downloading it."""
+        """Get the size of an S3 object without downloading it using HEAD request."""
         try:
             s3_client = await self._get_s3_client(bucket)
             response = await s3_client.head_object(Bucket=bucket.name, Key=key)
             return response["ContentLength"]
-        except (ConnectionClosedError, ClientError) as e:
-            await self._purge_s3_client(bucket)
-            if "404" in str(e):
-                return None
-            tplr.logger.error(f"Error getting object size for {key}: {e}")
-            return None
         except Exception as e:
-            tplr.logger.error(f"Error getting object size for {key}: {e}")
+            tplr.logger.debug(f"Error getting object size for {key}: {e}")
             return None
 
     async def get_object_range(

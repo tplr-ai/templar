@@ -294,6 +294,9 @@ async def catchup_with_aggregation_server(
                         else:
                             param.grad.copy_(agg_tensor)
 
+                        del agg_tensor
+                        torch.cuda.empty_cache()
+
                 logger.info(
                     f"Window {current_step} - Set gradients in {time.time() - update_start:.2f}s"
                 )
@@ -357,6 +360,9 @@ async def catchup_with_aggregation_server(
                 # Still advance the optimizer and scheduler
                 instance.optimizer.step()
                 instance.scheduler.step()
+
+            del processed_agg_data
+            torch.cuda.empty_cache()
         else:
             logger.warning(f"No aggregation data found for window {current_step}")
             # Don't advance the optimizer and scheduler
@@ -496,18 +502,22 @@ def unpack_binary_tensor(packed_tensor: torch.Tensor, original_shape: torch.Size
     Returns:
         Unpacked tensor with original shape
     """
-    total_elements = int(torch.prod(torch.tensor(original_shape)).item())
+    device = packed_tensor.device
+    packed_flat = packed_tensor.to(device=device, dtype=torch.uint8).view(-1)
 
-    # Create a flat tensor to hold the unpacked values
-    unpacked = torch.zeros(total_elements, dtype=torch.float32)
+    n_vals = int(torch.tensor(original_shape).prod().item())
+    n_bytes = (n_vals + 7) // 8
+    packed_flat = packed_flat[:n_bytes]  # drop any padding
 
-    for i in range(8):
-        mask = 1 << i
-        bits = (packed_tensor & mask) >> i
-        # Convert 0/1 to -1/+1
-        unpacked[i::8] = (bits.float() * 2) - 1
+    bits = torch.stack(
+        [(packed_flat >> i) & 1 for i in range(8)],
+        dim=1,
+    ).reshape(-1)[:n_vals]
 
-    return unpacked.reshape(original_shape)
+    # {0,1} → {-1,+1}
+    bits = bits.to(torch.float32).mul_(2).sub_(1)
+
+    return bits.reshape(original_shape)
 
 
 # Function to pack signed weights into 1-bit representation

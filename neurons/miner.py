@@ -353,11 +353,9 @@ class Miner:
                 )
 
             tplr.logger.info(f"Using start_window: {self.start_window}")
-        else:
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
 
         if torch.distributed.is_initialized():
+            torch.distributed.barrier()
             start_win_list = [self.start_window if self.is_main else None]
             torch.distributed.broadcast_object_list(start_win_list, src=0)
             self.start_window = start_win_list[0]
@@ -422,11 +420,8 @@ class Miner:
                 await tplr.neurons.catchup_with_aggregation_server(
                     self, self.start_window
                 )
-        else:
-            if torch.distributed.is_initialized():
-                torch.distributed.barrier()
-
         if torch.distributed.is_initialized():
+            torch.distributed.barrier()
             self.broadcast_model_state()
             self.broadcast_optimizer_state()
             self.broadcast_scheduler_state()

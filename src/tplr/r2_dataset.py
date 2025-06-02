@@ -84,20 +84,15 @@ class R2DatasetLoader(DatasetLoader):
     # Class-level caches
     _metadata_cache = {}  # Cache for metadata by config
     _parquet_cache = {}  # Cache ParquetFile objects
+    _token_cache = {}  # Cache for tokenized results
     _fs = None  # Single filesystem instance
+    _prefetch_queue = None
 
     # Static configuration
     PREFETCH_SIZE = 3  # Number of pages to prefetch
     MAX_CONCURRENT_REQUESTS = 32  # Number of concurrent requests to R2
     BATCH_SIZE = 128  # Increased batch size for tokenization
     READ_BUFFER_SIZE = 32 * 1024 * 1024  # 32MB read buffer
-
-    # Class-level caches with size limits
-    _metadata_cache = {}
-    _parquet_cache = {}  # Cache for ParquetFile objects
-    _token_cache = {}  # Cache for tokenized results
-    _fs = None
-    _prefetch_queue = None
 
     _round_robin_index = 0  # global counter for dataset round-robin selection
     _fs_cache = {}  # maps account_id to a cached s3fs.S3FileSystem

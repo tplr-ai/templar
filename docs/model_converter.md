@@ -139,6 +139,7 @@ uv run scripts/model_converter.py \
 - **ModelConverter Class**: Main orchestrator for the conversion process
 - **CommsClass**: Handles network communication and checkpoint retrieval
 - **MetricsLogger**: Manages metrics submission for monitoring
+- **MetricsLoggerWriteOptions**: Configures batching for InfluxDB writes
 - **GGUF Script Integration**: Uses official llama.cpp conversion script
 - **Upload Integrations**: HuggingFace Hub and Ollama deployment handlers
 - **Authentication Manager**: Handles tokens and credentials for uploads

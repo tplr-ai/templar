@@ -16,6 +16,7 @@ The evaluator script (`scripts/evaluator.py`) performs:
 - **Automated Evaluation**: Continuously monitors for new model checkpoints
 - **Benchmark Suite**: Runs multiple evaluation tasks (ARC, Winogrande, MMLU, etc.)
 - **Metrics Logging**: Reports results to InfluxDB for monitoring
+- **Customizable Write Options**: Tune batching via `MetricsLoggerWriteOptions`
 - **Resource Management**: Handles GPU memory and temporary file cleanup
 - **Configurable Intervals**: Customizable evaluation frequency
 - **Multi-GPU Support**: Can run on specified GPU devices

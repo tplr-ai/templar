@@ -144,6 +144,10 @@ class Miner:
         self.is_main = self.config.rank == 0
         self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
 
+        tplr.logger.info(
+            f"Initialized miner rank {self.config.rank}/{self.config.world_size} using device {self.config.device}"
+        )
+
         if self.config.actual_batch_size is not None:
             tplr.logger.info(
                 f"Overriding hparams batch size: {self.hparams.batch_size} -> {self.config.actual_batch_size}"
@@ -176,6 +180,9 @@ class Miner:
                 world_size=self.config.world_size,
                 rank=self.config.rank,
             )
+            tplr.logger.info(
+                f"Process group initialized (rank {self.config.rank} / {self.config.world_size})"
+            )
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
@@ -195,6 +202,9 @@ class Miner:
                     if self.config.device == "cpu"
                     else [torch.cuda.current_device()]
                 ),
+            )
+            tplr.logger.info(
+                f"Distributed model ready on device {self.config.device}"
             )
         self.tokenizer = self.hparams.tokenizer
 

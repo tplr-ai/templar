@@ -3,7 +3,7 @@
     "project": "dough",
     "sequence_length": 2048,
     "pages_per_window": 24,
-    "batch_size": 8,
+    "batch_size": 6,
     "learning_rate": 4e-4,
     "blocks_per_window": 8,
     "windows_per_sync": 100,

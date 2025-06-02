@@ -88,7 +88,6 @@ class R2DatasetLoader(DatasetLoader):
     _fs = None  # Single filesystem instance
 
     # Static configuration
-    PREFETCH_SIZE = 3  # Number of pages to prefetch
     MAX_CONCURRENT_REQUESTS = 32  # Number of concurrent requests to R2
     BATCH_SIZE = 128  # Increased batch size for tokenization
     READ_BUFFER_SIZE = 32 * 1024 * 1024  # 32MB read buffer
@@ -98,7 +97,6 @@ class R2DatasetLoader(DatasetLoader):
     _parquet_cache = {}  # Cache for ParquetFile objects
     _token_cache = {}  # Cache for tokenized results
     _fs = None
-    _prefetch_queue = None
 
     _round_robin_index = 0  # global counter for dataset round-robin selection
     _fs_cache = {}  # maps account_id to a cached s3fs.S3FileSystem
@@ -134,12 +132,6 @@ class R2DatasetLoader(DatasetLoader):
         # Additional buffers from parent class
         self.used_buffer = []
         self.padded_buffer = []
-
-        # Prefetch setup
-        self._prefetch_task = None
-        self._current_batch = None
-        self._next_batch = None
-        self._prefetch_queue = asyncio.Queue(maxsize=self.PREFETCH_SIZE)
 
     @classmethod
     def get_executor(cls):
@@ -276,7 +268,10 @@ class R2DatasetLoader(DatasetLoader):
                 R2DatasetLoader._configs_data_cache, src=0
             )
         configs_data = R2DatasetLoader._configs_data_cache
-        sorted_keys = sorted(configs_data.keys())
+
+        if not hasattr(R2DatasetLoader, "_sorted_config_keys"):
+            R2DatasetLoader._sorted_config_keys = sorted(configs_data.keys())
+        sorted_keys = R2DatasetLoader._sorted_config_keys
 
         # 2) RNG (same on every rank)
         rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
@@ -284,27 +279,27 @@ class R2DatasetLoader(DatasetLoader):
 
         # ───────────────────────── single-GPU fast-path ───────────────────── #
         if world_size == 1:
-            out = []
-            for _ in range(n_pages):
+            out = [(None, None, None)] * n_pages
+            for i in range(n_pages):
                 cfg = rng.choice(sorted_keys)
                 meta = configs_data[cfg]
                 max_row = meta["num_rows"] - num_rows_per_page
                 row = 0 if max_row <= 0 else int(rng.integers(0, max_row))
-                out.append((str(cfg), row, meta["split"]))
-            return out
+                out[i] = (cfg, row, meta["split"])  # type: ignore # No str() conversion needed
+            return out  # type: ignore
 
         # ───────────────────────── multi-GPU guaranteed overlap path ─────────────────────────── #
 
         # STEP 1: Generate CORE pages that all ranks must include
         core_pages_count = max(1, n_pages // 3)  # At least 1/3 overlap
-        core_pages = []
+        core_pages = [(None, None, None)] * core_pages_count
 
-        for _ in range(core_pages_count):
+        for i in range(core_pages_count):
             cfg = rng.choice(sorted_keys)
             meta = configs_data[cfg]
             max_row = meta["num_rows"] - num_rows_per_page
             row = 0 if max_row <= 0 else int(rng.integers(0, max_row))
-            core_pages.append((str(cfg), row, meta["split"]))
+            core_pages[i] = (cfg, row, meta["split"])  # type: ignore # No str() conversion
 
         # STEP 2: Generate rank-specific pages for remaining slots
         remaining_slots = n_pages - core_pages_count
@@ -316,20 +311,20 @@ class R2DatasetLoader(DatasetLoader):
             offset + (rank + 1) * 10000
         )  # Large jump per rank
 
-        seen_core = set(core_pages)  # Avoid duplicating core pages
+        seen_core = frozenset(core_pages)
+
+        rank_specific_pages = []
 
         attempts = 0
-        while (
-            len(rank_specific_pages) < remaining_slots
-            and attempts < remaining_slots * 3
-        ):
+        max_attempts = remaining_slots * 3
+        while len(rank_specific_pages) < remaining_slots and attempts < max_attempts:
             cfg = rank_rng.choice(sorted_keys)
             meta = configs_data[cfg]
             max_row = meta["num_rows"] - num_rows_per_page
             row = 0 if max_row <= 0 else int(rank_rng.integers(0, max_row))
-            page = (str(cfg), row, meta["split"])
+            page = (cfg, row, meta["split"])  # No str() conversion
 
-            if page not in seen_core:  # Don't duplicate core pages
+            if page not in seen_core:
                 rank_specific_pages.append(page)
             attempts += 1
 
@@ -339,7 +334,7 @@ class R2DatasetLoader(DatasetLoader):
             meta = configs_data[cfg]
             max_row = meta["num_rows"] - num_rows_per_page
             row = 0 if max_row <= 0 else int(rank_rng.integers(0, max_row))
-            rank_specific_pages.append((str(cfg), row, meta["split"]))
+            rank_specific_pages.append((cfg, row, meta["split"]))  # No str() conversion
 
         # STEP 3: Combine core + rank-specific pages
         all_rank_pages = core_pages + rank_specific_pages[:remaining_slots]
@@ -547,25 +542,6 @@ class R2DatasetLoader(DatasetLoader):
                 R2DatasetLoader._fs_cache[fs_cache_key] = fs
             return R2DatasetLoader._fs_cache[fs_cache_key]
 
-    async def _get_next_page(self):
-        """Get next page from the queue"""
-        if not self.pages:
-            return None
-        return self.pages.pop(0)
-
-    async def _prefetch_pages(self):
-        """Background task to prefetch pages"""
-        try:
-            while True:
-                page = await self._get_next_page()
-                if page is None:
-                    break
-                await self._prefetch_queue.put(page)  # type: ignore
-        except Exception as e:
-            _log.error(f"Prefetch error: {e}")
-        finally:
-            await self._prefetch_queue.put(None)  # type: ignore # Signal completion
-
     @_timer_profiler.profile("_process_page")
     async def _process_page(self, page, sem):
         """Process page with deterministic shard selection"""
@@ -757,27 +733,28 @@ class R2DatasetLoader(DatasetLoader):
 
     def __next__(self):
         """Get next batch, exactly matching DatasetLoader's logic"""
-        batch = []
+        batch = [None] * self.batch_size  # type: ignore
+        batch_idx = 0
 
-        while len(self.padded_buffer) >= self.sequence_length:
-            # Extract sequence_length tokens
-            sequence = self.padded_buffer[: self.sequence_length]
-            self.padded_buffer = self.padded_buffer[self.sequence_length :]
+        seq_len = self.sequence_length
+        batch_size = self.batch_size
+        padded_buffer = self.padded_buffer
 
-            batch.append(sequence)
+        while len(padded_buffer) >= seq_len and batch_idx < batch_size:  # type: ignore
+            batch[batch_idx] = padded_buffer[:seq_len]
+            self.padded_buffer = padded_buffer[seq_len:]
+            padded_buffer = self.padded_buffer
 
-            # Return batch when we have batch_size sequences
-            if len(batch) == self.batch_size:
-                self._refill_padded_buffer()  # Refill after creating batch
-                return np.stack(batch)
+            batch_idx += 1
 
-            # Refill if needed
-            if len(self.padded_buffer) < self.sequence_length:
+            if batch_idx < batch_size and len(padded_buffer) < seq_len:  # type: ignore
                 self._refill_padded_buffer()
+                padded_buffer = self.padded_buffer
 
-        # No more complete batches
-        if batch:  # Partial batch - should not happen with current logic
-            raise StopIteration
+        if batch_idx == batch_size:
+            self._refill_padded_buffer()
+            return np.stack(batch)
+
         raise StopIteration
 
     def _read_parquet_table(self, fs, path):
@@ -798,19 +775,7 @@ class R2DatasetLoader(DatasetLoader):
 
     def __del__(self):
         """Cleanup resources"""
-        if self._prefetch_task:
-            self._prefetch_task.cancel()
-
-        for pf_data in self._parquet_cache.values():
-            with pf_data["lock"]:
-                if pf_data["file"] and not pf_data["file"].closed:
-                    try:
-                        pf_data["file"].close()  # type: ignore
-                    except Exception as e:
-                        _log.debug(f"Error closing parquet file: {e}")
-
-        self._parquet_cache.clear()
-        self._token_cache.clear()
+        pass
 
     @staticmethod
     @_timer_profiler.profile("_get_parquet_file")

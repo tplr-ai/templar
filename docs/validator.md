@@ -323,6 +323,12 @@ NODE_TYPE=validator
 DEBUG=false
 ```
 
+### Multi-GPU Usage
+
+The validator also supports multi-GPU execution. Specify `WORLD_SIZE` and
+`RANK` for each process (or use the corresponding CLI flags) and start one
+process per GPU. The model will synchronize across GPUs using PyTorch DDP.
+
 **Note**: The R2 permissions remain unchanged.
 
 ### Hardware Requirements

@@ -332,15 +332,41 @@ class R2DatasetLoader(DatasetLoader):
             if not local_paths["shard_sizes"].exists():
                 logger.info("Downloading shard sizes from R2...")
                 fs.get(r2_paths["shard_sizes"], str(local_paths["shard_sizes"]))
-            with open(local_paths["shard_sizes"]) as f:
-                R2DatasetLoader._shard_sizes = json.load(f)
+
+            for attempt in range(2):
+                try:
+                    with open(local_paths["shard_sizes"]) as f:
+                        R2DatasetLoader._shard_sizes = json.load(f)
+                    break
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        f"Invalid shard sizes cache (attempt {attempt + 1}): {e}"
+                    )
+                    local_paths["shard_sizes"].unlink(missing_ok=True)
+                    logger.info("Redownloading shard sizes from R2...")
+                    fs.get(r2_paths["shard_sizes"], str(local_paths["shard_sizes"]))
+            else:
+                raise RuntimeError("Failed to load valid shard sizes metadata")
 
             # Download and load metadata config
             if not local_paths["metadata"].exists():
                 logger.info("Downloading metadata config from R2...")
                 fs.get(r2_paths["metadata"], str(local_paths["metadata"]))
-            with open(local_paths["metadata"]) as f:
-                R2DatasetLoader._metadata_config = yaml.safe_load(f)
+
+            for attempt in range(2):
+                try:
+                    with open(local_paths["metadata"]) as f:
+                        R2DatasetLoader._metadata_config = yaml.safe_load(f)
+                    break
+                except yaml.YAMLError as e:
+                    logger.warning(
+                        f"Invalid metadata cache (attempt {attempt + 1}): {e}"
+                    )
+                    local_paths["metadata"].unlink(missing_ok=True)
+                    logger.info("Redownloading metadata config from R2...")
+                    fs.get(r2_paths["metadata"], str(local_paths["metadata"]))
+            else:
+                raise RuntimeError("Failed to load valid metadata config")
 
             R2DatasetLoader._shard_index = ShardIndex(R2DatasetLoader._shard_sizes)
 

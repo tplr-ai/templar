@@ -95,6 +95,18 @@ class Validator:
         parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
         )
+        parser.add_argument(
+            "--world-size",
+            type=int,
+            default=int(os.getenv("WORLD_SIZE", "1")),
+            help="Number of processes participating in distributed training",
+        )
+        parser.add_argument(
+            "--rank",
+            type=int,
+            default=int(os.getenv("RANK", "0")),
+            help="Rank of the current process",
+        )
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
         parser.add_argument("--trace", action="store_true", help="Enable trace logging")
         parser.add_argument(
@@ -141,6 +153,13 @@ class Validator:
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
 
+        if self.config.world_size > 1:
+            torch.distributed.init_process_group(
+                backend="nccl",
+                world_size=self.config.world_size,
+                rank=self.config.rank,
+            )
+
         try:
             version = tplr.__version__
             tplr.logger = tplr.setup_loki_logger(
@@ -153,6 +172,13 @@ class Validator:
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
         self.model.to(self.config.device)
+        if torch.distributed.is_initialized():
+            self.model = torch.nn.parallel.DistributedDataParallel(
+                self.model,
+                device_ids=None
+                if self.config.device == "cpu"
+                else [torch.cuda.current_device()],
+            )
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
@@ -651,6 +677,9 @@ class Validator:
             target=self.block_listener, args=(self.loop,), daemon=True
         ).start()
 
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
         # Use config peers if provided
         if self.config.peers:
             self.comms.peers = self.config.peers
@@ -748,6 +777,8 @@ class Validator:
         self.last_peer_update_window = None
         self.last_peer_post_window = None
         while True:
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
             # 1. Wait for the validator window offset
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
@@ -2416,6 +2447,8 @@ class Validator:
             self.global_step += 1
 
             torch.cuda.empty_cache()
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
 
     def select_initial_peers(self) -> list[int] | None:
         """

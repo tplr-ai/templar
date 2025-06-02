@@ -242,6 +242,13 @@ CUDA_DEVICE=cuda:0
 DEBUG=false
 ```
 
+### Multi-GPU Usage
+
+Set `WORLD_SIZE` and `RANK` environment variables or pass `--world-size` and
+`--rank` arguments when launching multiple miner processes. Initialize each
+process on a different GPU and the miner will automatically synchronize using
+PyTorch Distributed Data Parallel (DDP).
+
 **Note**: The R2 permissions remain unchanged from previous configurations.
 
 ### Hardware Requirements

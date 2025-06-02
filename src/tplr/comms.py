@@ -97,9 +97,9 @@ class Comms(ChainManager):
 
         ## a single aiobotocore session and a dictionary of clients
         self.session = get_session()
-        self._s3_clients: dict[
-            tuple[str, str, str], AioBaseClient
-        ] = {}  # (acc_key, sec_key, account_id) -> s3_client
+        self._s3_clients: dict[tuple[str, str, str], AioBaseClient] = (
+            {}
+        )  # (acc_key, sec_key, account_id) -> s3_client
 
         self.lock = asyncio.Lock()
         self.active_peers = set()  # Set to store active peers
@@ -1217,7 +1217,12 @@ class Comms(ChainManager):
         if not validator_bucket:
             return None, None
 
-        tplr.logger.info(f"Validator Bucket: {validator_bucket}")
+        try:
+            redacted = validator_bucket.model_dump(exclude={"secret_access_key"})
+        except AttributeError:
+            # pydantic v1 fallback
+            redacted = validator_bucket.dict(exclude={"secret_access_key"})
+        tplr.logger.info(f"Validator Bucket: {redacted}")
         return validator_bucket, validator_uid
 
     async def get_latest_checkpoint(self, version):
@@ -1364,11 +1369,13 @@ class Comms(ChainManager):
             return None
 
     @staticmethod
-    def _strip_module_prefix(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def _strip_module_prefix(
+        state_dict: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
         """Return a copy of ``state_dict`` with leading ``"module."`` removed
         from all keys if they all share the prefix."""
         if state_dict and all(k.startswith("module.") for k in state_dict):
-            return {k[len("module."):]: v for k, v in state_dict.items()}
+            return {k[len("module.") :]: v for k, v in state_dict.items()}
         return state_dict
 
     @staticmethod
@@ -1389,7 +1396,7 @@ class Comms(ChainManager):
         model_has = model_first.startswith("module.")
 
         if ckpt_has and not model_has:
-            return {k[len("module."):]: v for k, v in state_dict.items()}
+            return {k[len("module.") :]: v for k, v in state_dict.items()}
         if not ckpt_has and model_has:
             return {f"module.{k}": v for k, v in state_dict.items()}
         return state_dict
@@ -1421,7 +1428,9 @@ class Comms(ChainManager):
             state_dict = {
                 k: v.to(device) for k, v in checkpoint_data["model_state_dict"].items()
             }
-            state_dict = self._match_model_state_keys(state_dict, model.state_dict().keys())
+            state_dict = self._match_model_state_keys(
+                state_dict, model.state_dict().keys()
+            )
             model.load_state_dict(state_dict)
             model.to(device)
 

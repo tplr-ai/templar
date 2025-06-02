@@ -391,7 +391,6 @@ class Miner:
         loaded_model_state_dict = None
         loaded_optimizer_state_dict = None
         loaded_scheduler_state_dict = None
-        loaded_momentum_dict = None  # This is self.momentum
         loaded_checkpoint_window_val = 0
         load_success = False
 
@@ -402,7 +401,6 @@ class Miner:
             model_to_load = self.model.module if self.world_size > 1 else self.model
             (
                 success,
-                _loaded_momentum,
                 _loaded_checkpoint_window,
                 _loaded_optimizer,
                 _loaded_scheduler,
@@ -424,7 +422,6 @@ class Miner:
                 loaded_scheduler_state_dict = (
                     _loaded_scheduler.state_dict() if _loaded_scheduler else None
                 )
-                loaded_momentum_dict = _loaded_momentum  # This is self.momentum
                 loaded_checkpoint_window_val = _loaded_checkpoint_window
                 tplr.logger.info(
                     f"[Rank 0] Checkpoint loaded successfully. Window: {loaded_checkpoint_window_val}"
@@ -438,7 +435,6 @@ class Miner:
             load_success,
             loaded_optimizer_state_dict,
             loaded_scheduler_state_dict,
-            loaded_momentum_dict,
             loaded_checkpoint_window_val,
         ]
 
@@ -455,7 +451,6 @@ class Miner:
             load_success,
             loaded_optimizer_state_dict,
             loaded_scheduler_state_dict,
-            loaded_momentum_dict,
             loaded_checkpoint_window_val,
         ) = load_results_list
 
@@ -490,11 +485,6 @@ class Miner:
 
             if loaded_scheduler_state_dict:
                 self.scheduler.load_state_dict(loaded_scheduler_state_dict)
-
-            if loaded_momentum_dict:  # self.momentum
-                self.momentum = {
-                    k: v.to(self.device) for k, v in loaded_momentum_dict.items()
-                }
 
             tplr.logger.info(
                 f"[Rank {self.rank}] Loaded checkpoint. Global Step: {self.global_step}, "

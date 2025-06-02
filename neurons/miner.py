@@ -156,7 +156,7 @@ class Miner:
         if self.config.world_size > 1:
             os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
             os.environ.setdefault("MASTER_PORT", "29500")
-            os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
+            os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
             torch.distributed.init_process_group(
                 backend="nccl",
                 world_size=self.config.world_size,

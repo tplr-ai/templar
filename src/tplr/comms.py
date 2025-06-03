@@ -116,7 +116,12 @@ class Comms(ChainManager):
         )
 
         self.checkpoint_manager = CheckpointManager(
-            self.storage_client, self.file_manager, self.bucket, str(self.uid)
+            self.storage_client,
+            self.file_manager,
+            self.bucket,
+            str(self.uid),
+            self.metagraph,
+            self.commitments,
         )
 
         self.peer_manager = PeerManager(
@@ -590,7 +595,9 @@ class Comms(ChainManager):
     async def get_commitments(self):
         """Get commitments - delegate to parent"""
         if hasattr(super(), "get_commitments"):
-            return await super().get_commitments()
+            commitments = await super().get_commitments()
+            self.checkpoint_manager.commitments = commitments
+            return commitments
         return {}
 
     def try_commit(self, wallet, bucket):

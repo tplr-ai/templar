@@ -238,18 +238,9 @@ class Comms(ChainManager):
         put_start = tplr.T()
 
         try:
-            # Serialize the data
-            if key == "checkpoint":
-                save_data = state_dict
-            else:
-                save_data = {
-                    "state_dict": state_dict,
-                    "global_step": global_step,
-                }
-
             # Create temp file and serialize
             temp_file_path = await self.gradient_manager.serialize_gradient(
-                save_data, global_step
+                state_dict, global_step
             )
 
             if local:

@@ -201,23 +201,6 @@ class AggregationManager:
                         f"UID {uid} state_dict_resp keys: {list(state_dict_resp.keys()) if isinstance(state_dict_resp, dict) else type(state_dict_resp)}"
                     )
                     tplr.logger.debug(f"UID {uid} global_step_resp: {global_step_resp}")
-
-                    # Extract the actual state_dict from the nested structure
-                    if (
-                        isinstance(state_dict_resp, dict)
-                        and "state_dict" in state_dict_resp
-                    ):
-                        actual_state_dict = state_dict_resp["state_dict"]
-                        actual_global_step = state_dict_resp["global_step"]
-                        tplr.logger.debug(
-                            f"UID {uid} actual state_dict keys: {list(actual_state_dict.keys()) if isinstance(actual_state_dict, dict) else type(actual_state_dict)}"
-                        )
-                    else:
-                        tplr.logger.warning(
-                            f"Unexpected state_dict structure from UID {uid}"
-                        )
-                        skipped_uids.append(uid)
-                        continue
                 else:
                     # Fallback for unexpected format
                     tplr.logger.warning(
@@ -227,32 +210,32 @@ class AggregationManager:
                     continue
 
                 tplr.logger.debug(
-                    f"Received state dict and global step {actual_global_step} from UID {uid}"
+                    f"Received state dict and global step {state_dict_resp} from UID {uid}"
                 )
             except (TypeError, ValueError, AttributeError) as e:
                 tplr.logger.debug(f"Invalid response from UID {uid}: {e}")
                 skipped_uids.append(uid)
                 continue
 
-            if actual_state_dict is None:
+            if state_dict_resp is None:
                 tplr.logger.debug(f"Empty state dict from UID {uid}")
                 skipped_uids.append(uid)
                 continue
 
             # Validate the gradient
             if not self._validate_gradient_response(
-                actual_state_dict, uid, device, totalks
+                state_dict_resp, uid, device, totalks
             ):
                 skipped_uids.append(uid)
                 continue
 
             # Process valid tensors
             self._process_gradient_tensors(
-                actual_state_dict, uid, device, aggregated_state_dict, metrics
+                state_dict_resp, uid, device, aggregated_state_dict, metrics
             )
 
             valid_uids.append(uid)
-            global_steps.append(actual_global_step)
+            global_steps.append(global_step_resp)
 
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")

@@ -113,10 +113,6 @@ class Comms(ChainManager):
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
         self.gather_semaphore = asyncio.Semaphore(15)
 
-        # keep a reference to the *whole* ckpt that was loaded once, so
-        # miners / validators can consult keys such as `start_window`.
-        self.last_checkpoint_data: dict[str, Any] | None = None
-
     async def _get_s3_client(self, bucket: Bucket):
         """
         Returns a persistent s3_client for the given bucket credentials.
@@ -1422,8 +1418,6 @@ class Comms(ChainManager):
                 f"checkpoint_sync_window={checkpoint_sync_window}, "
                 f"local_current_window={current_window}"
             )
-
-            self.last_checkpoint_data = checkpoint_data
 
             return True, checkpoint_sync_window, optimizer, scheduler
 

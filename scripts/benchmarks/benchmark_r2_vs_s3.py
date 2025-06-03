@@ -35,6 +35,7 @@ from tqdm import tqdm
 
 def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0):
     """Decorator to retry operations with exponential backoff."""
+
     def decorator(func):
         async def wrapper(*args, **kwargs):
             last_exception = None
@@ -45,13 +46,17 @@ def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0):
                     last_exception = e
                     if attempt == max_retries - 1:
                         raise last_exception
-                    
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                    print(f"Connection error on attempt {attempt + 1}, retrying in {delay:.1f}s: {str(e)[:100]}")
+
+                    delay = base_delay * (2**attempt) + random.uniform(0, 1)
+                    print(
+                        f"Connection error on attempt {attempt + 1}, retrying in {delay:.1f}s: {str(e)[:100]}"
+                    )
                     await asyncio.sleep(delay)
-            
+
             raise last_exception
+
         return wrapper
+
     return decorator
 
 
@@ -106,7 +111,7 @@ class GradientFileGenerator:
             unit="chunks",
             unit_scale=True,
             leave=False,
-            colour="yellow"
+            colour="yellow",
         ) as progress:
             with open(temp_path, "wb") as f:
                 written = 0
@@ -143,7 +148,7 @@ class UnifiedStorageClient:
         self.account_id = account_id
         self.session = get_session()
         self.multipart_threshold = 100 * 1024 * 1024
-        
+
         # Enhanced connection configuration for stability
         self.client_config = Config(
             max_pool_connections=10,  # Reduced to prevent connection issues
@@ -151,7 +156,7 @@ class UnifiedStorageClient:
             read_timeout=600,  # Increased timeout for large uploads
             connect_timeout=30,
             region_name=self.region,
-            parameter_validation=False  # Slight performance improvement
+            parameter_validation=False,  # Slight performance improvement
         )
 
         if self.provider == "R2":
@@ -204,7 +209,7 @@ class UnifiedStorageClient:
         chunk_size = 50 * 1024 * 1024  # 50MB chunks for better stability
         file_size = os.path.getsize(file_path)
         total_parts = (file_size + chunk_size - 1) // chunk_size
-        
+
         response = await client.create_multipart_upload(
             Bucket=self.bucket_name, Key=key
         )
@@ -213,20 +218,20 @@ class UnifiedStorageClient:
         try:
             parts = []
             part_number = 1
-            
+
             with tqdm(
                 total=total_parts,
                 desc=f"Uploading {self.provider} multipart",
                 unit="parts",
                 leave=False,
-                colour="magenta"
+                colour="magenta",
             ) as upload_progress:
                 with open(file_path, "rb") as f:
                     while True:
                         chunk = f.read(chunk_size)
                         if not chunk:
                             break
-                        
+
                         # Retry individual part uploads with better error handling
                         part_uploaded = False
                         for attempt in range(5):  # Increased retries
@@ -239,21 +244,30 @@ class UnifiedStorageClient:
                                     Body=chunk,
                                 )
                                 parts.append(
-                                    {"ETag": part_response["ETag"], "PartNumber": part_number}
+                                    {
+                                        "ETag": part_response["ETag"],
+                                        "PartNumber": part_number,
+                                    }
                                 )
                                 part_uploaded = True
                                 break
                             except (ConnectionError, OSError, Exception) as e:
                                 if attempt == 4:  # Last attempt
-                                    print(f"Part {part_number} failed after 5 attempts: {str(e)}")
+                                    print(
+                                        f"Part {part_number} failed after 5 attempts: {str(e)}"
+                                    )
                                     raise e
-                                delay = 2 ** attempt + random.uniform(0, 1)
-                                print(f"Part {part_number} failed (attempt {attempt + 1}), retrying in {delay:.1f}s")
+                                delay = 2**attempt + random.uniform(0, 1)
+                                print(
+                                    f"Part {part_number} failed (attempt {attempt + 1}), retrying in {delay:.1f}s"
+                                )
                                 await asyncio.sleep(delay)
-                        
+
                         if not part_uploaded:
-                            raise Exception(f"Failed to upload part {part_number} after all retries")
-                        
+                            raise Exception(
+                                f"Failed to upload part {part_number} after all retries"
+                            )
+
                         part_number += 1
                         upload_progress.update(1)
 
@@ -408,7 +422,7 @@ class BenchmarkRunner:
     ) -> List[BenchmarkResult]:
         """Run multiple concurrent operations to test throughput."""
         temp_file = GradientFileGenerator.create_temp_file(file_size_gb)
-        
+
         try:
             client = self.get_client(provider)
             tasks = []
@@ -453,11 +467,11 @@ class BenchmarkRunner:
                 desc=f"{progress_desc or f'{provider} {operation} ops'}",
                 unit="ops",
                 leave=False,
-                colour="green"
+                colour="green",
             ) as op_progress:
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 op_progress.update(len(tasks))
-                
+
             # Filter out exceptions and log them
             benchmark_results = []
             for result in results:
@@ -465,7 +479,7 @@ class BenchmarkRunner:
                     benchmark_results.append(result)
                 elif isinstance(result, Exception):
                     print(f"Operation failed: {str(result)[:100]}")
-                    
+
             return benchmark_results
         finally:
             if os.path.exists(temp_file):
@@ -517,7 +531,9 @@ class BenchmarkRunner:
             len(scenario["concurrent"]) * 4 for scenario in scenarios
         )
 
-        print(f"\nStarting GB-scale gradient benchmark with {total_operations} test configurations")
+        print(
+            f"\nStarting GB-scale gradient benchmark with {total_operations} test configurations"
+        )
         print("=" * 70)
 
         with tqdm(
@@ -525,12 +541,12 @@ class BenchmarkRunner:
             desc="Overall Benchmark Progress",
             unit="tests",
             colour="cyan",
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
         ) as main_progress:
             for scenario in scenarios:
                 scenario_desc = f"{scenario['name']}"
                 main_progress.set_description(scenario_desc)
-                
+
                 for num_concurrent in scenario["concurrent"]:
                     for operation in ["PUT", "GET"]:
                         for provider in ["R2", "S3"]:
@@ -543,7 +559,7 @@ class BenchmarkRunner:
                                 num_concurrent=num_concurrent,
                                 file_size_gb=scenario["file_size_gb"],
                                 test_multipart=True,
-                                progress_desc=test_desc
+                                progress_desc=test_desc,
                             )
                             self.results.extend(results)
 
@@ -557,8 +573,10 @@ class BenchmarkRunner:
                                     f"avg {avg_throughput:.3f} GB/s"
                                 )
                             else:
-                                main_progress.write(f"FAILED {test_desc}: All operations failed")
-                            
+                                main_progress.write(
+                                    f"FAILED {test_desc}: All operations failed"
+                                )
+
                             main_progress.update(1)
 
         print(f"\nBenchmark completed! Total operations: {len(self.results)}")

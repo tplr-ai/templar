@@ -387,34 +387,34 @@ class Comms(ChainManager):
     # Backward compatibility methods (delegate to managers)
     async def save_checkpoint(
         self,
-        model,
-        optimizer,
-        scheduler,
-        momentum,
-        global_step,
-        current_window,
-        start_window,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
+        global_step: int,
+        current_window: int,
+        start_window: int,
+        sync_window: int,
     ) -> bool:
         """Save checkpoint - delegate to checkpoint manager"""
         return await self.checkpoint_manager.save_checkpoint(
             model,
             optimizer,
             scheduler,
-            momentum,
             global_step,
             current_window,
             start_window,
+            sync_window,
         )
 
     async def load_checkpoint(
         self,
-        model,
-        optimizer,
-        scheduler,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
         current_window: int,
         device: str,
         init_version: Optional[str] = None,
-    ) -> Tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
+    ) -> Tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
         """Load checkpoint - delegate to checkpoint manager"""
         return await self.checkpoint_manager.load_checkpoint(
             model, optimizer, scheduler, current_window, device, init_version

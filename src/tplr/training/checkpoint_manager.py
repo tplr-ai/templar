@@ -65,11 +65,11 @@ class CheckpointManager:
         self,
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
-        scheduler: torch.optim.lr_scheduler._LRScheduler,
-        momentum: Dict[str, Any],
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
         global_step: int,
         current_window: int,
         start_window: int,
+        sync_window: int,
     ) -> bool:
         """Save checkpoint to R2 storage."""
         temp_file = None
@@ -86,16 +86,14 @@ class CheckpointManager:
                 },
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
-                "momentum": self._move_to_cpu(
-                    momentum
-                ),  # Use helper method for nested structures
                 "start_window": start_window,
                 "current_window": current_window,
                 "global_step": global_step,
+                "sync_window": sync_window,
             }
 
             # Move optimizer state to CPU
-            for param_id, param_state in checkpoint_data["optimizer_state_dict"][
+            for _, param_state in checkpoint_data["optimizer_state_dict"][
                 "state"
             ].items():
                 for key, value in param_state.items():
@@ -134,9 +132,9 @@ class CheckpointManager:
 
     async def load_checkpoint(
         self,
-        model,
-        optimizer,
-        scheduler,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
         current_window: int,
         device: str,
         init_version: Optional[str] = None,
@@ -152,7 +150,7 @@ class CheckpointManager:
             tplr.logger.info("No valid checkpoints found")
             return False, 0, optimizer, scheduler
 
-        checkpoint_data, checkpoint_window = result
+        checkpoint_data, _ = result
         try:
             # 1) Load model state - this might fail if keys don't match
             model.load_state_dict(
@@ -188,11 +186,9 @@ class CheckpointManager:
             # 3) Load scheduler state
             scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
 
-            checkpoint_start_window = checkpoint_data.get("start_window")
-            checkpoint_current_window = checkpoint_data.get("current_window")
-            checkpoint_sync_window = checkpoint_data.get(
-                "current_window"
-            )  # Use current_window as sync_window
+            checkpoint_start_window = checkpoint_data.get("start_window", 0)
+            checkpoint_current_window = checkpoint_data.get("current_window", 0)
+            checkpoint_sync_window = checkpoint_data.get("sync_window", 0)
 
             if checkpoint_start_window is None or checkpoint_current_window is None:
                 tplr.logger.warning(

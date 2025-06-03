@@ -763,27 +763,6 @@ class Miner:
                 tplr.logger.info("Logging performance profiling summary...")
                 tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
 
-            # Save checkpoint logic
-            if self.global_step % self.hparams.checkpoint_frequency == 0:
-                tplr.logger.info(
-                    f"Creating checkpoint at global_step {self.global_step}"
-                )
-
-                # asyncio checkpoint saving task
-                asyncio.create_task(
-                    self.comms.save_checkpoint(
-                        model=self.model,
-                        optimizer=self.optimizer,
-                        scheduler=self.scheduler,
-                        momentum=self.momentum,
-                        global_step=self.global_step,
-                        current_window=self.current_window,
-                        start_window=self.start_window,
-                    )
-                )
-            else:
-                tplr.logger.info("Skipping checkpoint save this round")
-
             await self.cleanup_window()
 
             # Delete local variables to clear up memory

@@ -267,7 +267,7 @@ class StorageClient:
 
     async def get_object_range(
         self, key: str, start: int, end: int, bucket: Bucket
-    ) -> Optional[bytes]:
+    ) -> bytes | None:
         """Download a specific byte range from S3 object."""
         try:
             s3_client = await self._get_s3_client(bucket)

@@ -502,7 +502,7 @@ class Comms(ChainManager):
         device: str,
         window: int,
         global_step: int,
-    ) -> Tuple[bool, int]:
+    ) -> tuple[bool, int]:
         """Apply gathered gradients - delegate to gradient manager"""
         return await self.gradient_manager.apply_gradients_to_model(
             gather_result,

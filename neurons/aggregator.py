@@ -117,7 +117,6 @@ class AggregationServer:
         # Initialize comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
             key_prefix="aggregator",
             config=self.config,
             netuid=self.config.netuid,
@@ -263,11 +262,9 @@ class AggregationServer:
             my_uid=self.comms.uid,
             uids=selected_uids,
             window=self.sync_window - 1,
-            key="gradient",
             timeout=45,
             device="cpu",
             local=False,
-            stale_retention=100,
             totalks=self.param_totalks,
             time_min=time_min,
             time_max=time_max,
@@ -342,7 +339,6 @@ class AggregationServer:
                     window=self.sync_window - 1,
                     key="aggregator",
                     local=False,
-                    stale_retention=100,
                 )
             except Exception:
                 tplr.logger.warning(

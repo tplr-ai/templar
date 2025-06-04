@@ -31,3 +31,6 @@ bistro:
 cov:
     uv run pytest tests/ -v --cov=src --cov-report=xml --cov-report=term
 
+types:
+    uv run pyright src/
+

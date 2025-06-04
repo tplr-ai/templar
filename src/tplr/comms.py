@@ -419,7 +419,7 @@ class Comms(ChainManager):
         current_window: int,
         device: str,
         init_version: Optional[str] = None,
-    ) -> Tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
+    ) -> tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
         """Load checkpoint - delegate to checkpoint manager"""
         return await self.checkpoint_manager.load_checkpoint(
             model, optimizer, scheduler, current_window, device, init_version

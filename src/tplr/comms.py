@@ -337,7 +337,7 @@ class Comms(ChainManager):
                 if file_path:
                     async with aiofiles.open(file_path, "r") as f:
                         data = await f.read()
-                        data_bytes = json.dumps(json.loads(data)).encode("utf-8")
+                        data_bytes = data.encode("utf-8")
                 else:
                     raise ValueError(f"file_path required for JSON file: {key}")
 

@@ -218,7 +218,7 @@ class CheckpointManager:
             tplr.logger.error(f"Failed to load checkpoint: {e}")
             return False, 0, optimizer, scheduler
 
-    async def get_latest_checkpoint(self, version: str) -> Optional[Tuple[dict, int]]:
+    async def get_latest_checkpoint(self, version: str) -> tuple[dict, int] | None:
         """
         Sequentially check:
         1. Whether the highest-staked validator has a checkpoint.

@@ -37,7 +37,7 @@ class CheckpointManager:
         storage_client: StorageClient,
         file_manager: FileManager,
         bucket: Bucket,
-        uid: str,
+        uid: int,
         metagraph=None,  # Add metagraph for validator lookup
         commitments=None,  # Add commitments for peer buckets
     ):

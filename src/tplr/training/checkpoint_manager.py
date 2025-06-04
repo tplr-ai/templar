@@ -383,7 +383,7 @@ class CheckpointManager:
 
     async def _get_highest_stake_validator_bucket(
         self,
-    ) -> Tuple[Optional[Bucket], Optional[int]]:
+    ) -> tuple[Bucket, int] | tuple[None, None]:
         """Get the bucket for the validator with highest stake."""
         if not self.metagraph:
             tplr.logger.warning("No metagraph available for validator lookup")

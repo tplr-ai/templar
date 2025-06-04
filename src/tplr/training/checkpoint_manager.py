@@ -48,7 +48,7 @@ class CheckpointManager:
         self.uid = uid
         self.metagraph = metagraph
         self.commitments = commitments or {}
-        self.last_checkpoint_data: Optional[Dict[str, Any]] = None
+        self.last_checkpoint_data: dict[str, Any] | None = None
 
     def _move_to_cpu(self, obj):
         """Recursively move tensors to CPU, handling nested structures"""

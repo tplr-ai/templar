@@ -27,7 +27,7 @@ import bittensor as bt
 import torch
 from torch.optim import SGD
 from torch.optim.lr_scheduler import SequentialLR
-from transformers import LlamaForCausalLM
+from transformers.models.llama import LlamaForCausalLM
 
 import tplr as tplr
 from . import __version__

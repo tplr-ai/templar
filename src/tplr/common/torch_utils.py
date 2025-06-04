@@ -15,23 +15,30 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-# ruff: noqa
-# pylint: disable=all
-# mypy: ignore-errors
-# type: ignore
+import os
+import random
+import numpy as np
+import torch
 
-__version__ = "dev-xhe6j58a"
+# Global constant for CPU count
+CPU_COUNT = os.cpu_count() or 4
 
-# Import package.
-from .chain import *
-from .comms import *
-from .compress import *
-from .dataset import *
-from .r2_dataset import *
-from .hparams import *
-from .logging import *
-from .schemas import *
-from .wandb import initialize_wandb
-from .metrics import *
-from .shard_index import ShardIndex
 
+def setup_gpu_optimizations(seed: int = 42) -> None:
+    """
+    Set up GPU optimizations and reproducibility settings.
+    
+    Args:
+        seed: Random seed for reproducibility
+    """
+    # Set random seeds for reproducibility
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    
+    # Configure CUDA settings
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True 

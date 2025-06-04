@@ -15,23 +15,11 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-# ruff: noqa
-# pylint: disable=all
-# mypy: ignore-errors
-# type: ignore
+import asyncio
+import uvloop
+from src.tplr.miner.miner_core import MinerCore
 
-__version__ = "dev-xhe6j58a"
-
-# Import package.
-from .chain import *
-from .comms import *
-from .compress import *
-from .dataset import *
-from .r2_dataset import *
-from .hparams import *
-from .logging import *
-from .schemas import *
-from .wandb import initialize_wandb
-from .metrics import *
-from .shard_index import ShardIndex
-
+if __name__ == "__main__":
+    uvloop.install()
+    miner_instance = MinerCore()
+    asyncio.run(miner_instance.run()) 

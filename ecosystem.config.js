@@ -6,7 +6,7 @@ module.exports = {
     apps: [
         {
             name: "TM1",
-            script: "neurons/miner.py",
+            script: "miner.py",
             interpreter: "python3",
             env: {
                 ...process.env,
@@ -16,7 +16,7 @@ module.exports = {
         },
         {
             name: "TM2",
-            script: "neurons/miner.py",
+            script: "miner.py",
             interpreter: "python3",
             env: {
                 ...process.env,
@@ -26,7 +26,7 @@ module.exports = {
         },
         {
             name: "TV1",
-            script: "neurons/validator.py",
+            script: "validator.py",
             interpreter: "python3",
             env: {
                 ...process.env,
@@ -42,7 +42,7 @@ module.exports = {
                 ...process.env,
                 PROJECT_NAME: PROJECT_NAME
             },
-            args: "--netuid 3 --device cuda:4 --project templar"
+            args: "--netuid 2 --device cuda:4 --project templar  --subtensor.network local"
         }
     ]
 }

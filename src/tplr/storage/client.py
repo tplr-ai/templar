@@ -18,15 +18,51 @@
 import asyncio
 import math
 import os
-from typing import Optional, List
+from typing import Optional, List, Dict, Tuple, Any, TYPE_CHECKING
 from datetime import datetime
 
 import aiofiles
 import torch
-from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
+from aiobotocore.config import AioConfig
 from botocore.exceptions import ClientError, ConnectionClosedError
 from tqdm import tqdm as std_tqdm
+
+# Enhanced type imports for better LSP support
+if TYPE_CHECKING:
+    from types_aiobotocore_s3.client import S3Client
+    from types_aiobotocore_s3.type_defs import (
+        GetObjectOutputTypeDef,
+        HeadObjectOutputTypeDef,
+        PutObjectOutputTypeDef,
+        DeleteObjectOutputTypeDef,
+        ListObjectsV2OutputTypeDef,
+        CreateMultipartUploadOutputTypeDef,
+        UploadPartOutputTypeDef,
+        CompleteMultipartUploadOutputTypeDef,
+        AbortMultipartUploadOutputTypeDef,
+        CompletedPartTypeDef,
+        MultipartUploadTypeDef,
+    )
+else:
+    # Runtime imports
+    try:
+        from types_aiobotocore_s3.client import S3Client
+    except ImportError:
+        from aiobotocore.client import AioBaseClient as S3Client
+
+    # Type aliases for runtime fallback
+    GetObjectOutputTypeDef = Dict[str, Any]
+    HeadObjectOutputTypeDef = Dict[str, Any]
+    PutObjectOutputTypeDef = Dict[str, Any]
+    DeleteObjectOutputTypeDef = Dict[str, Any]
+    ListObjectsV2OutputTypeDef = Dict[str, Any]
+    CreateMultipartUploadOutputTypeDef = Dict[str, Any]
+    UploadPartOutputTypeDef = Dict[str, Any]
+    CompleteMultipartUploadOutputTypeDef = Dict[str, Any]
+    AbortMultipartUploadOutputTypeDef = Dict[str, Any]
+    CompletedPartTypeDef = Dict[str, Any]
+    MultipartUploadTypeDef = Dict[str, Any]
 
 import tplr
 from ..config import client_config
@@ -39,12 +75,12 @@ CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
 
 class StorageClient:
-    """Handles all S3/R2 storage operations"""
+    """Handles all S3/R2 storage operations with improved type hints"""
 
-    def __init__(self, temp_dir: str):
+    def __init__(self, temp_dir: str) -> None:
         """Initialize with aiobotocore session and temp directory"""
         self.session = get_session()
-        self._s3_clients: dict[tuple[str, str, str], AioBaseClient] = {}
+        self._s3_clients: Dict[Tuple[str, str, str], S3Client] = {}
         self.temp_dir = temp_dir
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
 
@@ -55,7 +91,7 @@ class StorageClient:
         """Constructs the base URL for the R2 storage endpoint."""
         return f"https://{account_id}.r2.cloudflarestorage.com"
 
-    async def _get_s3_client(self, bucket: Bucket) -> AioBaseClient:
+    async def _get_s3_client(self, bucket: Bucket) -> S3Client:
         """Returns a persistent s3_client for the given bucket credentials."""
         key = (bucket.access_key_id, bucket.secret_access_key, bucket.account_id)
         if key in self._s3_clients:
@@ -63,11 +99,20 @@ class StorageClient:
 
         endpoint_url = self.get_base_url(bucket.account_id)
 
+        # Convert botocore.config.Config to AioConfig
+        aio_config = AioConfig(
+            max_pool_connections=getattr(client_config, "max_pool_connections", 256),
+            tcp_keepalive=getattr(client_config, "tcp_keepalive", True),
+            retries=getattr(
+                client_config, "retries", {"max_attempts": 10, "mode": "adaptive"}
+            ),
+        )
+
         new_client = self.session.create_client(
             "s3",
             endpoint_url=endpoint_url,
             region_name=CF_REGION_NAME,
-            config=client_config,
+            config=aio_config,
             aws_access_key_id=bucket.access_key_id,
             aws_secret_access_key=bucket.secret_access_key,
         )
@@ -87,9 +132,10 @@ class StorageClient:
         key: str,
         bucket: Bucket,
         timeout: int = 15,
-        time_min: datetime | None = None,
-        time_max: datetime | None = None,
-    ) -> bytes | None:
+        time_min: Optional[datetime] = None,
+        time_max: Optional[datetime] = None,
+        show_progress: bool = True,
+    ) -> Optional[bytes]:
         """Download object from S3 using asynchronous streaming."""
         import uuid
 
@@ -102,15 +148,15 @@ class StorageClient:
 
             # HEAD the object first
             try:
-                response = await asyncio.wait_for(
+                head_response: HeadObjectOutputTypeDef = await asyncio.wait_for(
                     s3_client.head_object(Bucket=bucket.name, Key=key),
                     timeout=timeout,
                 )
-                file_size = response["ContentLength"]
+                file_size: int = head_response["ContentLength"]
 
                 # Check timestamp constraints if provided
                 if time_min is not None or time_max is not None:
-                    last_modified = response.get("LastModified")
+                    last_modified = head_response.get("LastModified")
                     if last_modified is not None:
                         # Ensure timezone awareness
                         if last_modified.tzinfo is None:
@@ -141,16 +187,18 @@ class StorageClient:
 
             # Download the object
             if file_size <= 600 * 1024 * 1024:  # 600MB
-                response = await asyncio.wait_for(
+                get_response: GetObjectOutputTypeDef = await asyncio.wait_for(
                     s3_client.get_object(Bucket=bucket.name, Key=key),
                     timeout=timeout,
                 )
                 async with aiofiles.open(temp_file_path, "wb") as f:
-                    async with response["Body"] as stream:
+                    async with get_response["Body"] as stream:
                         data = await asyncio.wait_for(stream.read(), timeout=timeout)
                         await f.write(data)
             else:
-                success = await self.multipart_download(key, temp_file_path, bucket)
+                success = await self.multipart_download(
+                    key, temp_file_path, bucket, show_progress=show_progress
+                )
                 if not success:
                     return None
 
@@ -219,15 +267,15 @@ class StorageClient:
             tplr.logger.error(f"Error deleting {key}: {e}")
             return False
 
-    async def list_objects(self, prefix: str, bucket: Bucket) -> list[str]:
+    async def list_objects(self, prefix: str, bucket: Bucket) -> List[str]:
         """List objects with given prefix."""
         try:
             s3_client = await self._get_s3_client(bucket)
-            keys = []
-            continuation_token = None
+            keys: List[str] = []
+            continuation_token: Optional[str] = None
 
             while True:
-                list_args = {
+                list_args: Dict[str, Any] = {
                     "Bucket": bucket.name,
                     "Prefix": prefix,
                     "MaxKeys": 1000,
@@ -235,11 +283,14 @@ class StorageClient:
                 if continuation_token:
                     list_args["ContinuationToken"] = continuation_token
 
-                response = await s3_client.list_objects_v2(**list_args)
+                response: ListObjectsV2OutputTypeDef = await s3_client.list_objects_v2(
+                    **list_args
+                )
                 contents = response.get("Contents", [])
 
                 for obj in contents:
-                    keys.append(obj["Key"])
+                    if "Key" in obj:
+                        keys.append(obj["Key"])
 
                 if response.get("IsTruncated"):
                     continuation_token = response.get("NextContinuationToken")
@@ -255,11 +306,13 @@ class StorageClient:
             tplr.logger.error(f"Error listing objects with prefix {prefix}: {e}")
             return []
 
-    async def get_object_size(self, key: str, bucket: Bucket) -> int | None:
+    async def get_object_size(self, key: str, bucket: Bucket) -> Optional[int]:
         """Get the size of an S3 object without downloading it using HEAD request."""
         try:
             s3_client = await self._get_s3_client(bucket)
-            response = await s3_client.head_object(Bucket=bucket.name, Key=key)
+            response: HeadObjectOutputTypeDef = await s3_client.head_object(
+                Bucket=bucket.name, Key=key
+            )
             return response["ContentLength"]
         except Exception as e:
             tplr.logger.debug(f"Error getting object size for {key}: {e}")
@@ -267,12 +320,12 @@ class StorageClient:
 
     async def get_object_range(
         self, key: str, start: int, end: int, bucket: Bucket
-    ) -> bytes | None:
+    ) -> Optional[bytes]:
         """Download a specific byte range from S3 object."""
         try:
             s3_client = await self._get_s3_client(bucket)
 
-            response = await asyncio.wait_for(
+            response: GetObjectOutputTypeDef = await asyncio.wait_for(
                 s3_client.get_object(
                     Bucket=bucket.name, Key=key, Range=f"bytes={start}-{end}"
                 ),
@@ -300,9 +353,11 @@ class StorageClient:
             tplr.logger.error(f"Error downloading range {start}-{end} for {key}: {e}")
             return None
 
-    async def multipart_upload(self, key: str, file_path: str, bucket: Bucket) -> bool | None:
+    async def multipart_upload(
+        self, key: str, file_path: str, bucket: Bucket
+    ) -> Optional[bool]:
         """Uploads a large file to S3 using asynchronous multipart upload."""
-        upload_id = None
+        upload_id: Optional[str] = None
         MAX_RETRIES = 3
         PART_SIZE = 5 * 1024 * 1024  # 5MB
 
@@ -313,8 +368,10 @@ class StorageClient:
                 # Create multipart upload
                 for attempt in range(MAX_RETRIES):
                     try:
-                        response = await s3_client.create_multipart_upload(
-                            Bucket=bucket.name, Key=key
+                        response: CreateMultipartUploadOutputTypeDef = (
+                            await s3_client.create_multipart_upload(
+                                Bucket=bucket.name, Key=key
+                            )
                         )
                         upload_id = response["UploadId"]
                         break
@@ -325,9 +382,11 @@ class StorageClient:
 
                 file_size = os.path.getsize(file_path)
                 total_parts = math.ceil(file_size / PART_SIZE)
-                parts = []
+                parts: List[CompletedPartTypeDef] = []
 
-                async def upload_part(part_number: int):
+                async def upload_part(
+                    part_number: int,
+                ) -> Optional[CompletedPartTypeDef]:
                     byte_range_start = (part_number - 1) * PART_SIZE
                     byte_range_end = min(byte_range_start + PART_SIZE, file_size)
 
@@ -337,12 +396,17 @@ class StorageClient:
                                 await f.seek(byte_range_start)
                                 data = await f.read(byte_range_end - byte_range_start)
 
-                            response = await s3_client.upload_part(
-                                Bucket=bucket.name,
-                                Key=key,
-                                PartNumber=part_number,
-                                UploadId=upload_id,
-                                Body=data,
+                            if upload_id is None:
+                                raise ValueError("Upload ID is None")
+
+                            response: UploadPartOutputTypeDef = (
+                                await s3_client.upload_part(
+                                    Bucket=bucket.name,
+                                    Key=key,
+                                    PartNumber=part_number,
+                                    UploadId=upload_id,
+                                    Body=data,
+                                )
                             )
                             return {
                                 "ETag": response["ETag"],
@@ -353,8 +417,10 @@ class StorageClient:
                                 tplr.logger.error(
                                     f"Failed to upload part {part_number}: {e}"
                                 )
-                                raise
+                                return None
                             await asyncio.sleep(2**attempt)
+
+                    return None
 
                 # Upload all parts
                 part_results = await asyncio.gather(
@@ -363,12 +429,22 @@ class StorageClient:
                         for part_number in range(1, total_parts + 1)
                     ]
                 )
-                parts.extend(part_results)
-                parts.sort(key=lambda x: x["PartNumber"])
+                # Filter out None results
+                valid_parts = [part for part in part_results if part is not None]
+                if len(valid_parts) != total_parts:
+                    raise Exception(
+                        f"Failed to upload some parts: {total_parts - len(valid_parts)} failed"
+                    )
+
+                parts.extend(valid_parts)
+                parts.sort(key=lambda x: x.get("PartNumber", 0))
 
                 # Complete multipart upload
                 for attempt in range(MAX_RETRIES):
                     try:
+                        if upload_id is None:
+                            raise ValueError("Upload ID is None")
+
                         await s3_client.complete_multipart_upload(
                             Bucket=bucket.name,
                             Key=key,
@@ -398,31 +474,51 @@ class StorageClient:
             return False
 
     async def multipart_download(
-        self, key: str, file_path: str, bucket: Bucket
+        self,
+        key: str,
+        file_path: str,
+        bucket: Bucket,
+        show_progress: bool = True,
+        chunk_size: Optional[int] = None,
+        max_workers: Optional[int] = None,
     ) -> bool:
-        """Download large file using multipart download with concurrent chunks."""
+        """Download large file using multipart download with concurrent chunks.
+
+        Args:
+            key: S3 object key
+            file_path: Local file path to save
+            bucket: Bucket configuration
+            show_progress: Whether to show progress bar (default: True)
+            chunk_size: Chunk size in bytes (default: auto-calculate)
+            max_workers: Max concurrent workers (default: auto-calculate)
+        """
         try:
             # Get file size
             file_size = await self.get_object_size(key, bucket)
             if file_size is None:
                 return False
 
-            # Determine optimal chunk size and concurrency
-            gpu_available = torch.cuda.is_available()
-            if gpu_available:
-                gpu_mem = torch.cuda.get_device_properties(0).total_memory
-                max_workers = min(torch.cuda.device_count() * 4, 16)
-                chunk_size = min(
-                    max(5 * 1024 * 1024, gpu_mem // (max_workers * 4)),
-                    5 * 1024 * 1024 * 1024,
-                )
-            else:
-                cpu_count = os.cpu_count() or 1
-                max_workers = min(cpu_count * 4, 16)
-                chunk_size = min(
-                    max(5 * 1024 * 1024, file_size // (max_workers * 2)),
-                    5 * 1024 * 1024 * 1024,
-                )
+            # Use provided chunk_size or auto-calculate
+            if chunk_size is None:
+                gpu_available = torch.cuda.is_available()
+                if gpu_available:
+                    gpu_mem = torch.cuda.get_device_properties(0).total_memory
+                    chunk_size = min(
+                        max(5 * 1024 * 1024, gpu_mem // 64),  # More conservative
+                        50 * 1024 * 1024,  # 50MB max default
+                    )
+                else:
+                    chunk_size = min(
+                        max(5 * 1024 * 1024, file_size // 32),
+                        50 * 1024 * 1024,  # 50MB max default
+                    )
+
+            # Use provided max_workers or auto-calculate
+            if max_workers is None:
+                if torch.cuda.is_available():
+                    max_workers = min(torch.cuda.device_count() * 4, 16)
+                else:
+                    max_workers = min((os.cpu_count() or 1) * 4, 16)
 
             total_chunks = math.ceil(file_size / chunk_size)
             max_workers = min(max_workers, total_chunks)
@@ -432,17 +528,19 @@ class StorageClient:
             async with aiofiles.open(file_path, "wb") as f:
                 await f.truncate(file_size)
 
-            # Progress tracking
-            pbar = std_tqdm(
-                total=file_size,
-                unit="B",
-                unit_scale=True,
-                desc=f"Downloading {key} ({max_workers} workers)",
-            )
+            # Optional progress tracking
+            pbar = None
+            if show_progress:
+                pbar = std_tqdm(
+                    total=file_size,
+                    unit="B",
+                    unit_scale=True,
+                    desc=f"Downloading {key} ({max_workers} workers)",
+                )
 
-            downloaded_chunks = {}
+            downloaded_chunks: Dict[int, Dict[str, int]] = {}
 
-            async def download_chunk(chunk_number: int, max_retries: int = 3):
+            async def download_chunk(chunk_number: int, max_retries: int = 3) -> int:
                 for attempt in range(max_retries):
                     async with semaphore:
                         start = chunk_number * chunk_size
@@ -459,7 +557,9 @@ class StorageClient:
                                 await f2.seek(start)
                                 await f2.write(chunk_data)
 
-                            pbar.update(len(chunk_data))
+                            if pbar:
+                                pbar.update(len(chunk_data))
+
                             downloaded_chunks[chunk_number] = {
                                 "start": start,
                                 "end": end + 1,
@@ -474,6 +574,9 @@ class StorageClient:
                             if attempt == max_retries - 1:
                                 raise
                             await asyncio.sleep(1 * (attempt + 1))
+
+                # This should never be reached due to the raise above, but included for type safety
+                return chunk_number
 
             try:
                 tasks = [
@@ -498,7 +601,8 @@ class StorageClient:
                 return True
 
             finally:
-                pbar.close()
+                if pbar:
+                    pbar.close()
 
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(bucket)

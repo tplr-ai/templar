@@ -183,7 +183,6 @@ class Evaluator:
         self.tokenizer = self.hparams.tokenizer
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
             key_prefix="model",
             config=self.config,
             netuid=self.netuid,

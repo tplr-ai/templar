@@ -362,7 +362,10 @@ async def catchup_with_aggregation_server(
             # Don't advance the optimizer and scheduler
 
         # Update global step and move to next window
-        instance.global_step = current_step - instance.start_window
+        if instance.start_window is not None:
+            instance.global_step = current_step - instance.start_window
+        else:
+            instance.global_step = current_step
         current_step += 1
 
         # Check if current_window has changed during processing
@@ -373,7 +376,10 @@ async def catchup_with_aggregation_server(
             )
 
     # Update global step after catchup
-    instance.global_step = target_window - instance.start_window
+    if instance.start_window is not None:
+        instance.global_step = target_window - instance.start_window
+    else:
+        instance.global_step = target_window
     logger.info(f"Catchup complete. Global step updated to {instance.global_step}")
 
 

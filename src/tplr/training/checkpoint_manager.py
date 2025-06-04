@@ -18,7 +18,7 @@
 import re
 import torch
 import pickle
-from typing import Optional, Tuple, Any, Dict
+from typing import Any
 import asyncio
 import bittensor as bt
 
@@ -110,7 +110,7 @@ class CheckpointManager:
                 checkpoint_bytes = f.read()
 
             # Generate filename
-            uid_part = self.uid.replace("/", "_").replace("\\", "_")
+            uid_part = str(self.uid).replace("/", "_").replace("\\", "_")
             filename = f"checkpoint-{current_window}-{uid_part}-v{__version__}.pt"
 
             # Upload to R2

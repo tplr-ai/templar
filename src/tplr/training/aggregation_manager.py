@@ -19,7 +19,7 @@
 
 import asyncio
 import torch
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional, List, Dict
 import os
@@ -70,6 +70,7 @@ class AggregationManager:
         time_min: datetime | None = None,
         time_max: datetime | None = None,
         stale_retention: int = 10,
+        show_progress: bool = False,
     ) -> SimpleNamespace | None:
         """
         Gather gradients from multiple UIDs for a specific window.
@@ -91,13 +92,14 @@ class AggregationManager:
         async with self.gather_semaphore:
             batch_tasks = [
                 self._get_with_retry(
-                    str(uid),
+                    uid,
                     window,
                     "gradient",
                     timeout,
                     local=local,
                     time_min=time_min,
                     time_max=time_max,
+                    show_progress=show_progress,
                 )
                 for uid in uids
             ]
@@ -330,7 +332,9 @@ class AggregationManager:
             f"Processed gradient tensors for UID {uid}, final aggregated keys: {list(aggregated_state_dict.keys())}"
         )
 
-    def _move_to_device_recursive(self, obj: torch.Tensor | dict | list | tuple, device: str) -> torch.Tensor | dict | list | tuple:
+    def _move_to_device_recursive(
+        self, obj: torch.Tensor | dict | list | tuple, device: str
+    ) -> torch.Tensor | dict | list | tuple:
         """Recursively move all tensors in a nested structure to the target device."""
         if isinstance(obj, torch.Tensor):
             return obj.to(device)
@@ -347,13 +351,14 @@ class AggregationManager:
 
     async def _get_with_retry(
         self,
-        uid: str,
+        uid: int,
         window: int,
         key: str,
         timeout: int,
         local: bool = True,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
+        show_progress: bool = False,
         **kwargs,
     ) -> tuple | None:
         """Get gradient with retry logic - returns tuple (state_dict, global_step)"""
@@ -364,12 +369,13 @@ class AggregationManager:
             try:
                 # Use the chain manager to get the gradient
                 result = await self._get_gradient_from_uid(
-                    uid,
+                    str(uid),
                     window,
                     timeout,
                     local=local,
                     time_min=time_min,
                     time_max=time_max,
+                    show_progress=show_progress,
                     **kwargs,
                 )
                 if result is not None:
@@ -394,6 +400,7 @@ class AggregationManager:
         local: bool = True,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
+        show_progress: bool = False,
         **kwargs,
     ) -> tuple | None:
         """Get gradient from a specific UID - returns tuple (state_dict, global_step)"""
@@ -429,6 +436,7 @@ class AggregationManager:
                 timeout=timeout,
                 time_min=time_min,
                 time_max=time_max,
+                show_progress=show_progress,
             )
 
             if data is None:
@@ -485,8 +493,6 @@ class AggregationManager:
 
             # Check file timestamp against time constraints
             if time_min is not None or time_max is not None:
-                from datetime import datetime, timezone
-
                 file_mtime = datetime.fromtimestamp(
                     os.path.getmtime(local_path), tz=timezone.utc
                 )
@@ -610,46 +616,3 @@ class AggregationManager:
                 f"Error loading aggregation file for window {window}: {e}"
             )
             return None
-
-    async def gather_window_batch(
-        self,
-        batch_windows: List[int],
-        uid: str,
-        peers: List[int],
-        device: str,
-        totalks: dict,
-        global_step: int,
-    ) -> Dict[int, SimpleNamespace]:
-        """Gather gradients for multiple windows in parallel."""
-        try:
-            gather_tasks = [
-                self.gather_gradients(
-                    my_uid=int(uid),
-                    uids=peers,
-                    window=w,
-                    timeout=30,
-                    device=device,
-                    totalks=totalks,
-                    local=False,
-                )
-                for w in batch_windows
-            ]
-
-            # Wait for all gather tasks to complete
-            batch_results = await asyncio.gather(*gather_tasks, return_exceptions=True)
-
-            # Filter out exceptions and create window->result mapping
-            result_dict = {w: None for w in batch_windows}  # Initialize with None
-            for window, result in zip(batch_windows, batch_results):
-                if not isinstance(result, Exception) and result is not None:
-                    result_dict[window] = result
-
-            return result_dict
-
-        except Exception as e:
-            tplr.logger.error(
-                f"Failed to gather window batch {batch_windows}: {str(e)}"
-            )
-            return {
-                w: None for w in batch_windows
-            }  # Return dict with None values on failure

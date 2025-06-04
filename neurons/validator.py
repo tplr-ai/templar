@@ -210,7 +210,6 @@ class Validator:
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
             key_prefix="model",
             config=self.config,
             netuid=self.config.netuid,
@@ -1297,7 +1296,6 @@ class Validator:
                     window=self.sync_window,
                     key="gradient",
                     local=False,
-                    stale_retention=10,
                     time_max=time_max,
                     time_min=time_min,
                 )
@@ -2551,7 +2549,6 @@ class Validator:
             window=self.sync_window - 1,
             key="debug",
             local=False,
-            stale_retention=10,
         )
 
         # Check if we got a valid result

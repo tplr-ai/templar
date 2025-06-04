@@ -21,8 +21,7 @@ import os
 import re
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Dict, List, Literal, Optional, Tuple
-
+from typing import List, Literal, Optional
 import bittensor as bt
 import torch
 from torch.optim import SGD
@@ -55,14 +54,12 @@ class Comms(ChainManager):
     def __init__(
         self,
         wallet: "bt.wallet | None",
-        save_location: str = "/tmp",
         key_prefix: str = "model",
         config=None,
         netuid=None,
         metagraph=None,
         hparams=None,
         uid=None,
-        **kwargs,
     ):
         self.uid = uid
         self.wallet = wallet
@@ -105,7 +102,7 @@ class Comms(ChainManager):
         """Initialize all manager components"""
         # Foundation components
         self.storage_client = StorageClient(self.temp_dir)
-        self.file_manager = FileManager(self.temp_dir, str(self.uid))
+        self.file_manager = FileManager(self.temp_dir, self.uid)
 
         # Domain-specific managers
         self.gradient_manager = GradientManager(
@@ -119,7 +116,7 @@ class Comms(ChainManager):
             self.storage_client,
             self.file_manager,
             self.bucket,
-            str(self.uid),
+            self.uid if self.uid is not None else 0,
             self.metagraph,
             self.commitments,
         )
@@ -197,7 +194,7 @@ class Comms(ChainManager):
         self.loop.set_default_executor(self.executor)
 
         # Start peer tracking
-        self.peer_manager.start_peer_tracking()
+        asyncio.create_task(self.peer_manager.start_peer_tracking())
 
     async def close_all_resources(self) -> None:
         """Close all resources and cleanup"""
@@ -224,7 +221,7 @@ class Comms(ChainManager):
     async def put(
         self,
         state_dict: dict,
-        uid: str | None,
+        uid: int | None,
         window: int,
         key: Literal["checkpoint", "debug", "gradient", "aggregator"],
         global_step: int = 0,
@@ -240,7 +237,7 @@ class Comms(ChainManager):
             filename = f"{key}-{window}-{uid}-v{__version__}.pt"
 
         tplr.logger.debug(f"PUT {filename} -->")
-        put_start = tplr.T()
+        put_start: float = tplr.T()
 
         try:
             # Create temp file and serialize
@@ -251,9 +248,13 @@ class Comms(ChainManager):
             if local:
                 # Local storage
                 await self.file_manager.cleanup_local_data(
-                    uid=uid, current_window=window, stale_retention=stale_retention
+                    uid=str(uid) if uid is not None else "0",
+                    current_window=window,
+                    stale_retention=stale_retention,
                 )
-                local_dir = self.file_manager.get_local_storage_path(uid, window, "")
+                local_dir = self.file_manager.get_local_storage_path(
+                    str(uid) if uid is not None else "0", window, ""
+                )
                 self.file_manager.ensure_directory_exists(local_dir)
                 final_path = os.path.join(local_dir, filename)
 
@@ -281,9 +282,10 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error in put operation: {e}")
             return 0.0
 
-        put_end = tplr.T()
-        tplr.logger.info(f"{tplr.P(window, put_end - put_start)} PUT {filename} <--")
-        return put_end - put_start
+        put_end: float = tplr.T()
+        duration: float = put_end - put_start
+        tplr.logger.info(f"{tplr.P(window, duration)} PUT {filename} <--")
+        return duration
 
     async def get(
         self,
@@ -294,7 +296,7 @@ class Comms(ChainManager):
         stale_retention: int = 10,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
-    ) -> tuple[dict, int] | None:
+    ) -> tuple[dict, int | None] | None:
         """GET operation."""
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         tplr.logger.debug(f"GET {filename} -->")
@@ -329,7 +331,11 @@ class Comms(ChainManager):
 
                 # Use storage client to get object with time constraints
                 data = await self.storage_client.get_object(
-                    filename, peer_bucket, timeout=15
+                    filename,
+                    peer_bucket,
+                    timeout=15,
+                    time_min=time_min,
+                    time_max=time_max,
                 )
                 if data is None:
                     return None
@@ -339,7 +345,7 @@ class Comms(ChainManager):
                     "TOO_LATE",
                     "TOO_EARLY",
                 ]:
-                    return data
+                    return data  # type: ignore
 
                 # Save to temp file and deserialize
                 temp_file = self.file_manager.create_temp_file("get_temp")
@@ -367,16 +373,17 @@ class Comms(ChainManager):
         my_uid: int | None,
         uids: List[int],
         window: int,
-        key: str,
         timeout: int,
         device: str,
         totalks: dict,
         local: bool = True,
-        stale_retention: int = 10,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
-    ) -> Optional[SimpleNamespace]:
+        show_progress: bool = False,
+    ) -> SimpleNamespace | None:
         """Gather operation - delegate to aggregation manager"""
+        if my_uid is None:
+            return None
         return await self.aggregation_manager.gather_gradients(
             my_uid=my_uid,
             uids=uids,
@@ -387,6 +394,7 @@ class Comms(ChainManager):
             local=local,
             time_min=time_min,
             time_max=time_max,
+            show_progress=show_progress,
         )
 
     # Backward compatibility methods (delegate to managers)
@@ -443,13 +451,13 @@ class Comms(ChainManager):
         """Post start window - delegate to metadata manager"""
         await self.metadata_manager.post_start_window(start_window)
 
-    async def get_start_window(self, retries: int = -1) -> Optional[int]:
+    async def get_start_window(self, retries: int = -1) -> int | None:
         """Get start window - delegate to metadata manager"""
         return await self.metadata_manager.get_start_window(retries)
 
     async def post_peer_list(
         self,
-        peers: List[int],
+        peers: list[int],
         first_effective_window: int,
         sync_window: int,
         weights: torch.Tensor,
@@ -462,11 +470,11 @@ class Comms(ChainManager):
 
     async def get_peer_list(
         self, fetch_previous: bool = False
-    ) -> Optional[Tuple[List[int], int]]:
+    ) -> tuple[list[int], int] | None:
         """Get peer list - delegate to metadata manager"""
         return await self.metadata_manager.get_peer_list(fetch_previous)
 
-    async def get_debug_dict(self, window: int) -> Optional[dict]:
+    async def get_debug_dict(self, window: int) -> dict | None:
         """Get debug dict - delegate to metadata manager"""
         return await self.metadata_manager.get_debug_dict(window)
 
@@ -476,20 +484,6 @@ class Comms(ChainManager):
     ) -> dict | None:
         """Load aggregation - delegate to aggregation manager"""
         return await self.aggregation_manager.load_aggregation(window, chunk_size)
-
-    async def _gather_window_batch(
-        self,
-        batch_windows: List[int],
-        uid: str,
-        peers: List[int],
-        device: str,
-        totalks: dict,
-        global_step: int,
-    ) -> Dict[int, SimpleNamespace]:
-        """Gather window batch - delegate to aggregation manager"""
-        return await self.aggregation_manager.gather_window_batch(
-            batch_windows, uid, peers, device, totalks, global_step
-        )
 
     async def _apply_gathered_gradients(
         self,
@@ -521,17 +515,24 @@ class Comms(ChainManager):
     ) -> None:
         """Check compressed indices - delegate to gradient manager"""
         self.gradient_manager.check_compressed_indices(
-            param_name, idxs, totalk, allowed_topk
+            param_name,
+            idxs,
+            totalk,
+            allowed_topk if allowed_topk is not None else totalk,
         )
 
     # Helper methods for cleanup
     async def _cleanup_s3_data(
-        self, uid: str, current_window: int, stale_retention: int
+        self, uid: int | None, current_window: int, stale_retention: int
     ):
         """Clean up stale S3 data for a given uid."""
+        if uid is None:
+            return
+
+        uid_str = str(uid)
         try:
             min_allowed_window = current_window - stale_retention
-            pattern = re.compile(rf"^gradient-(\d+)-{uid}-v{tplr.__version__}.pt$")
+            pattern = re.compile(rf"^gradient-(\d+)-{uid_str}-v{tplr.__version__}.pt$")
 
             keys = await self.storage_client.list_objects("gradient", self.bucket)
 
@@ -556,7 +557,7 @@ class Comms(ChainManager):
 
             if stale_objects:
                 tplr.logger.debug(
-                    f"Removed {len(stale_objects)} stale S3 objects for {uid}"
+                    f"Removed {len(stale_objects)} stale S3 objects for {uid_str}"
                 )
 
         except Exception as e:
@@ -592,10 +593,10 @@ class Comms(ChainManager):
         if hasattr(super(), "start_commitment_fetcher"):
             super().start_commitment_fetcher()
 
-    async def get_commitments(self):
+    async def get_commitments(self, block: int | None = None):
         """Get commitments - delegate to parent"""
         if hasattr(super(), "get_commitments"):
-            commitments = await super().get_commitments()
+            commitments = await super().get_commitments(block)
             self.checkpoint_manager.commitments = commitments
             return commitments
         return {}
@@ -614,8 +615,3 @@ class Comms(ChainManager):
     def peers(self, value):
         """Set peers list"""
         self._peers = value
-
-    # TODO: Add performance monitoring and metrics collection
-    # TODO: Add circuit breaker patterns for fault tolerance
-    # TODO: Add request rate limiting and throttling
-    # TODO: Add comprehensive error recovery mechanisms

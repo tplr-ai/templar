@@ -17,7 +17,7 @@
 
 import asyncio
 import random
-from typing import Set, List
+from typing import Set
 
 import tplr
 from ..chain import ChainManager
@@ -87,16 +87,28 @@ class PeerManager:
                         active_peers.add(uid)
             else:
                 # Fallback to metagraph UIDs if commitments not available
-                for uid in range(len(self.chain_manager.metagraph.uids)):
-                    if await self._is_peer_active(uid, check_windows):
-                        active_peers.add(uid)
+                if (
+                    self.chain_manager.metagraph
+                    and self.chain_manager.metagraph.uids is not None
+                ):
+                    for uid in range(len(self.chain_manager.metagraph.uids)):
+                        if await self._is_peer_active(uid, check_windows):
+                            active_peers.add(uid)
 
             # Update active peers and filter by bucket availability
             self.active_peers = active_peers
             self.update_peers_with_buckets()
 
+            if (
+                self.chain_manager.metagraph
+                and self.chain_manager.metagraph.uids is not None
+            ):
+                total_peers = len(self.chain_manager.metagraph.uids)
+            else:
+                total_peers = 0
+
             tplr.logger.debug(
-                f"Updated active peers: {len(self.active_peers)} active out of {len(self.chain_manager.metagraph.uids)} total"
+                f"Updated active peers: {len(self.active_peers)} active out of {total_peers} total"
             )
 
         except Exception as e:
@@ -105,7 +117,8 @@ class PeerManager:
     async def is_peer_active(self, uid: int, recent_windows: int = 3) -> bool:
         """Check if a peer is active by looking for recent gradient uploads"""
         try:
-            current_window = self.chain_manager.get_current_window()
+            # Get current window from the chain manager or comms object
+            current_window = getattr(self.chain_manager, "current_window", None)
             if current_window is None:
                 return False
 
@@ -183,8 +196,13 @@ class PeerManager:
     def get_inactive_peers(self) -> Set[int]:
         """Get the set of inactive peers"""
         try:
-            all_peers = set(range(len(self.chain_manager.metagraph.uids)))
-            return all_peers - self.active_peers
+            if (
+                self.chain_manager.metagraph
+                and self.chain_manager.metagraph.uids is not None
+            ):
+                all_peers = set(range(len(self.chain_manager.metagraph.uids)))
+                return all_peers - self.active_peers
+            return set()
         except Exception:
             return set()
 
@@ -244,7 +262,7 @@ class PeerManager:
         tplr.logger.debug(f"Final selected items: {selected}")
         return selected
 
-    def start_peer_tracking(self) -> None:
+    async def start_peer_tracking(self) -> None:
         """Start the background peer tracking task"""
         if self._peer_tracking_task is None or self._peer_tracking_task.done():
             self._stop_tracking = False
@@ -265,7 +283,12 @@ class PeerManager:
     def get_peer_count(self) -> int:
         """Get total number of peers in metagraph"""
         try:
-            return len(self.chain_manager.metagraph.uids)
+            if (
+                self.chain_manager.metagraph
+                and self.chain_manager.metagraph.uids is not None
+            ):
+                return len(self.chain_manager.metagraph.uids)
+            return 0
         except Exception:
             return 0
 
@@ -330,9 +353,3 @@ class PeerManager:
 
         except Exception as e:
             tplr.logger.error(f"Error filtering peers with buckets: {e}")
-
-    # TODO: Add peer reputation tracking
-    # TODO: Add peer performance metrics
-    # TODO: Add peer blacklisting functionality
-    # TODO: Add peer discovery optimization
-    # TODO: Add peer connection health monitoring

@@ -190,7 +190,6 @@ class Miner:
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
             key_prefix="model",
             config=self.config,
             netuid=self.config.netuid,
@@ -450,7 +449,6 @@ class Miner:
                 key="gradient",
                 global_step=self.global_step,
                 local=False,
-                stale_retention=100,
             )
             tplr.logger.info("Put task completed!")
 
@@ -519,11 +517,9 @@ class Miner:
                 my_uid=self.uid,
                 uids=self.comms.peers,
                 window=step_window,
-                key="gradient",
                 timeout=45,
                 device="cpu",
                 local=False,
-                stale_retention=100,
                 totalks=self.totalks,
                 time_min=time_min,
                 time_max=time_max,

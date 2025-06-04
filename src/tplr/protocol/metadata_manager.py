@@ -18,7 +18,7 @@
 import asyncio
 import json
 import re
-from typing import Optional, Tuple, List
+from typing import Optional
 
 import aiofiles
 import torch
@@ -177,7 +177,7 @@ class MetadataManager:
 
     async def get_peer_list(
         self, fetch_previous: bool = False
-    ) -> tuple[list[int], int]] | None:
+    ) -> tuple[list[int], int] | None:
         """Get peer list from validator bucket"""
         tplr.logger.info(
             f"Looking for a {'previous' if fetch_previous else 'current'} peer list on a validator bucket"
@@ -328,6 +328,11 @@ class MetadataManager:
     ) -> tuple[Bucket, int] | tuple[None, None]:
         """Get the bucket for the validator with highest stake."""
         try:
+            # Check if metagraph is available
+            if self.chain_manager.metagraph is None:
+                tplr.logger.warning("Metagraph is not available")
+                return None, None
+
             # Get validator with highest stake
             validator_uid = self.chain_manager.metagraph.S.argmax().item()
             tplr.logger.debug(f"Found validator with highest stake: {validator_uid}")
@@ -377,9 +382,3 @@ class MetadataManager:
         except Exception as e:
             tplr.logger.error(f"Error posting debug dict: {e}")
             return False
-
-    # TODO: Add metadata versioning and migration
-    # TODO: Add metadata integrity verification
-    # TODO: Add metadata caching mechanisms
-    # TODO: Add metadata compression for large datasets
-    # TODO: Add metadata backup and recovery

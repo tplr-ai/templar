@@ -15,11 +15,11 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+
 import torch
-from typing import Tuple
 from torch.optim import SGD
 from torch.optim.lr_scheduler import SequentialLR
-from transformers import LlamaForCausalLM
+from transformers.models.llama import LlamaForCausalLM
 
 import tplr
 from ..storage.client import StorageClient
@@ -106,7 +106,7 @@ class GradientManager:
             return False
 
     def check_compressed_indices(
-        self, param_name: str, idxs, totalk: int, allowed_topk: int = None
+        self, param_name: str, idxs, totalk: int, allowed_topk: int | None = None
     ) -> None:
         """
         Validates that the compressed indices for a given parameter meet the conditions:
@@ -117,8 +117,11 @@ class GradientManager:
         """
         if allowed_topk is None:
             allowed_topk = self.hparams.topk_compression
+        # Ensure allowed_topk is an int and provide a default if None
+        if allowed_topk is None:
+            allowed_topk = totalk  # Default to full size if no compression specified
         # Only allow up to the maximum available columns.
-        allowed_topk = min(allowed_topk, totalk)
+        allowed_topk = min(int(allowed_topk), totalk)
 
         def validate_list(indices):
             # Expected flat list length must equal allowed_topk.
@@ -196,6 +199,8 @@ class GradientManager:
         device: str,
         window: int,
         global_step: int,
+        shapes: dict | None = None,
+        totalks: dict | None = None,
     ) -> tuple[bool, int]:
         """Apply gathered gradients to model parameters.
 
@@ -209,12 +214,18 @@ class GradientManager:
             device: Computing device
             window: Current window number
             global_step: Global step counter
+            shapes: Parameter shapes dict (required for reconstruction)
+            totalks: Total parameters dict (required for reconstruction)
 
         Returns:
             Tuple[bool, int]: (success, new_global_step)
         """
         try:
             if not gather_result or not gather_result.state_dict:
+                return False, global_step
+
+            if shapes is None or totalks is None:
+                tplr.logger.error("shapes and totalks parameters are required")
                 return False, global_step
 
             model.train()
@@ -232,13 +243,19 @@ class GradientManager:
                     if not isinstance(vals, (list, tuple)):
                         vals = [vals]
 
+                    if n not in shapes or n not in totalks:
+                        tplr.logger.warning(
+                            f"Missing shape or totalk for parameter {n}"
+                        )
+                        continue
+
                     new_grad = transformer.decode(
                         compressor.batch_decompress(
                             p.to(device),
                             idxs,
                             vals,
-                            transformer.shapes[n],
-                            transformer.totalks[n],
+                            shapes[n],
+                            totalks[n],
                         )
                     )
                     if p.grad is None:

@@ -121,11 +121,16 @@ def trace() -> None:
     TRACE_LEVEL_NUM = 5
     logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
 
-    def trace_method(self, message, *args, **kws) -> None:
-        if self.isEnabledFor(TRACE_LEVEL_NUM):
-            self._log(TRACE_LEVEL_NUM, message, args, **kws)
+    # Check if trace method already exists before adding it
+    if not hasattr(logging.Logger, "trace"):
+        setattr(
+            logging.Logger,
+            "trace",
+            lambda self, message, *args, **kwargs: self._log(
+                TRACE_LEVEL_NUM, message, args, **kwargs
+            ),
+        )
 
-    logging.Logger.trace = trace_method
     logger.setLevel(TRACE_LEVEL_NUM)
 
 

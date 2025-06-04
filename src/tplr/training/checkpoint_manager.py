@@ -257,7 +257,7 @@ class CheckpointManager:
 
     async def _get_bucket_checkpoint(
         self, bucket: Bucket, uid: int, version: str
-    ) -> Optional[Tuple[dict, int]]:
+    ) -> tuple[dict, int] | None:
         """
         Helper to get checkpoint from a specific bucket.
         Enhanced with proper pagination support and error handling.

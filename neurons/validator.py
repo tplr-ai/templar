@@ -690,11 +690,6 @@ class Validator:
                 "Could not find a valid start window. This should not be possible."
             )
 
-        self.global_step = self.current_window - self.start_window
-        tplr.logger.info(
-            f"Using start_window: {self.start_window}, global_step: {self.global_step}"
-        )
-
         checkpoint_window_buffer = 5
         has_new_checkpoint = (
             self.global_step
@@ -719,6 +714,7 @@ class Validator:
         if success:
             self.optimizer = loaded_optimizer
             self.scheduler = loaded_scheduler
+            self.global_step = self.scheduler.last_epoch
             tplr.logger.info(
                 f"Loaded checkpoint with global_step={self.global_step}, "
                 f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
@@ -2395,6 +2391,7 @@ class Validator:
                     "start_window": self.start_window,
                     "current_window": self.current_window,
                     "sync_window": self.sync_window,
+                    "global_step": self.global_step,
                 }
                 asyncio.create_task(
                     self.comms.put(

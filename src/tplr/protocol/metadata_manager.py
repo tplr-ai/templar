@@ -177,7 +177,7 @@ class MetadataManager:
 
     async def get_peer_list(
         self, fetch_previous: bool = False
-    ) -> Optional[Tuple[List[int], int]]:
+    ) -> tuple[list[int], int]] | None:
         """Get peer list from validator bucket"""
         tplr.logger.info(
             f"Looking for a {'previous' if fetch_previous else 'current'} peer list on a validator bucket"

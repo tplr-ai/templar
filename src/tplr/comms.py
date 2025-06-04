@@ -21,7 +21,7 @@ import os
 import re
 from datetime import datetime
 from types import SimpleNamespace
-from typing import List, Literal, Optional
+from typing import Any, List, Literal, Optional
 import bittensor as bt
 import torch
 from torch.optim import SGD

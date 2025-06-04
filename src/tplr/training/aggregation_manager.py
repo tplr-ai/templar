@@ -522,7 +522,7 @@ class AggregationManager:
 
     async def load_aggregation(
         self, window: int, chunk_size: int = 50_000_000
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """
         Load aggregated gradients for a specified window from the aggregation server.
 

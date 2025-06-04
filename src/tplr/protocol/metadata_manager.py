@@ -270,7 +270,7 @@ class MetadataManager:
                 tplr.logger.error(f"Error fetching peer list: {e}")
                 await asyncio.sleep(10)
 
-    async def get_debug_dict(self, window: int) -> Optional[dict]:
+    async def get_debug_dict(self, window: int) -> dict | None:
         """
         Get debug dictionary from validator bucket for a specific window.
 

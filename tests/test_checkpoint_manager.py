@@ -158,10 +158,9 @@ import torch
 import asyncio
 import tempfile
 import shutil
-from unittest.mock import Mock, AsyncMock, patch, MagicMock
+from unittest.mock import Mock, AsyncMock, patch
 from pathlib import Path
 import pickle
-from typing import Dict, Any, Optional, Tuple
 
 from src.tplr.training.checkpoint_manager import CheckpointManager
 from src.tplr.schemas import Bucket
@@ -169,22 +168,23 @@ from src.tplr.schemas import Bucket
 
 # === Core Fixtures ===
 
+
 @pytest.fixture
 def mock_storage_client():
     """Mock storage client with configurable success/failure responses"""
     client = AsyncMock()
-    
+
     # Default successful responses
     client.put_object.return_value = True
     client.get_object.return_value = b"mock_checkpoint_data"
     client.list_objects.return_value = []
     client.delete_object.return_value = True
-    
+
     # Add method to configure responses
     def configure_responses(**kwargs):
         for method, response in kwargs.items():
             getattr(client, method).return_value = response
-    
+
     client.configure_responses = configure_responses
     return client
 
@@ -193,11 +193,11 @@ def mock_storage_client():
 def mock_file_manager():
     """Mock file manager with temp file creation/deletion tracking"""
     manager = Mock()
-    
+
     # Track created and deleted files
     manager.created_files = []
     manager.deleted_files = []
-    
+
     def create_temp_file(prefix="test", suffix=".tmp"):
         # Create actual temp file for realistic testing
         temp_file = tempfile.NamedTemporaryFile(
@@ -207,17 +207,17 @@ def mock_file_manager():
         temp_file.close()
         manager.created_files.append(temp_path)
         return temp_path
-    
+
     def delete_file(filepath):
         manager.deleted_files.append(filepath)
         try:
             Path(filepath).unlink(missing_ok=True)
         except Exception:
             pass
-    
+
     manager.create_temp_file.side_effect = create_temp_file
     manager.delete_file.side_effect = delete_file
-    
+
     return manager
 
 
@@ -235,7 +235,7 @@ def mock_bucket():
 def mock_model():
     """Mock torch.nn.Module with controllable state_dict"""
     model = Mock(spec=torch.nn.Module)
-    
+
     # Default state dict with various tensor types
     default_state = {
         "layer1.weight": torch.randn(10, 5),
@@ -243,15 +243,15 @@ def mock_model():
         "layer2.weight": torch.randn(1, 10),
         "layer2.bias": torch.randn(1),
     }
-    
+
     model.state_dict.return_value = default_state
     model.load_state_dict = Mock()
     model.to = Mock(return_value=model)
-    
+
     # Method to customize state dict
     def set_state_dict(state_dict):
         model.state_dict.return_value = state_dict
-    
+
     model.set_state_dict = set_state_dict
     return model
 
@@ -260,7 +260,7 @@ def mock_model():
 def mock_optimizer():
     """Mock torch.optim.Optimizer with nested tensor states"""
     optimizer = Mock(spec=torch.optim.Optimizer)
-    
+
     # Create realistic optimizer state with nested tensors
     param_state = {
         0: {
@@ -269,12 +269,12 @@ def mock_optimizer():
             "exp_avg_sq": torch.randn(10, 5),
         },
         1: {
-            "step": torch.tensor(100), 
+            "step": torch.tensor(100),
             "exp_avg": torch.randn(10),
             "exp_avg_sq": torch.randn(10),
-        }
+        },
     }
-    
+
     optimizer_state = {
         "state": param_state,
         "param_groups": [
@@ -287,38 +287,38 @@ def mock_optimizer():
             }
         ],
     }
-    
+
     optimizer.state_dict.return_value = optimizer_state
     optimizer.load_state_dict = Mock()
     optimizer.state = {}  # Will be populated during load
-    
+
     # Method to customize optimizer state
     def set_state_dict(state_dict):
         optimizer.state_dict.return_value = state_dict
-    
+
     optimizer.set_state_dict = set_state_dict
     return optimizer
 
 
-@pytest.fixture  
+@pytest.fixture
 def mock_scheduler():
     """Mock torch.optim.lr_scheduler.LRScheduler"""
     scheduler = Mock(spec=torch.optim.lr_scheduler.LRScheduler)
-    
+
     scheduler_state = {
         "last_epoch": 99,
         "_step_count": 100,
         "_get_lr_called_within_step": False,
         "_last_lr": [0.001],
     }
-    
+
     scheduler.state_dict.return_value = scheduler_state
     scheduler.load_state_dict = Mock()
-    
+
     # Method to customize scheduler state
     def set_state_dict(state_dict):
         scheduler.state_dict.return_value = state_dict
-        
+
     scheduler.set_state_dict = set_state_dict
     return scheduler
 
@@ -327,15 +327,15 @@ def mock_scheduler():
 def mock_metagraph():
     """Mock metagraph with configurable stake values"""
     metagraph = Mock()
-    
+
     # Default stakes - validator 0 has highest stake
     stakes = torch.tensor([100.0, 50.0, 75.0, 25.0])
     metagraph.S = stakes
-    
+
     # Method to configure stakes
     def set_stakes(new_stakes):
         metagraph.S = torch.tensor(new_stakes)
-    
+
     metagraph.set_stakes = set_stakes
     return metagraph
 
@@ -374,17 +374,26 @@ def sample_checkpoint_data():
         "global_step": 500,
         "sync_window": 8,
     }
-    
+
     # Variants for testing different scenarios
     variants = {
         "complete": base_data,
-        "missing_start_window": {k: v for k, v in base_data.items() if k != "start_window"},
-        "missing_current_window": {k: v for k, v in base_data.items() if k != "current_window"},
-        "missing_sync_window": {k: v for k, v in base_data.items() if k != "sync_window"},
+        "missing_start_window": {
+            k: v for k, v in base_data.items() if k != "start_window"
+        },
+        "missing_current_window": {
+            k: v for k, v in base_data.items() if k != "current_window"
+        },
+        "missing_sync_window": {
+            k: v for k, v in base_data.items() if k != "sync_window"
+        },
         "empty_model_state": {**base_data, "model_state_dict": {}},
-        "empty_optimizer_state": {**base_data, "optimizer_state_dict": {"state": {}, "param_groups": []}},
+        "empty_optimizer_state": {
+            **base_data,
+            "optimizer_state_dict": {"state": {}, "param_groups": []},
+        },
     }
-    
+
     return variants
 
 
@@ -407,6 +416,7 @@ def device_fixture():
 
 
 # === Specialized Mock Fixtures ===
+
 
 @pytest.fixture
 def failing_storage_client():
@@ -437,12 +447,12 @@ def multiple_checkpoints_storage():
     client.put_object.return_value = True
     client.list_objects.return_value = [
         "checkpoint-10-123-v1.0.0.pt",
-        "checkpoint-5-123-v1.0.0.pt", 
+        "checkpoint-5-123-v1.0.0.pt",
         "checkpoint-15-123-v1.0.0.pt",
         "checkpoint-8-456-v1.0.0.pt",  # Different UID
         "other-file.txt",  # Non-checkpoint file
     ]
-    
+
     # Mock get_object to return valid data for the highest checkpoint
     async def mock_get_object(key, bucket):
         if "checkpoint-15-123" in key:
@@ -462,7 +472,7 @@ def multiple_checkpoints_storage():
             Path(temp_file.name).unlink()
             return data
         return None
-    
+
     client.get_object.side_effect = mock_get_object
     client.delete_object.return_value = True
     return client
@@ -473,25 +483,28 @@ def mismatched_model():
     """Model with incompatible state dict for testing load failures"""
     model = Mock(spec=torch.nn.Module)
     model.state_dict.return_value = {"different_layer.weight": torch.randn(5, 3)}
-    
+
     # Simulate RuntimeError on load_state_dict with wrong keys
     def failing_load(state_dict):
-        raise RuntimeError("Error(s) in loading state_dict: Missing key(s) in state_dict")
-    
+        raise RuntimeError(
+            "Error(s) in loading state_dict: Missing key(s) in state_dict"
+        )
+
     model.load_state_dict.side_effect = failing_load
     model.to = Mock(return_value=model)
     return model
 
 
-@pytest.fixture 
+@pytest.fixture
 def checkpoint_manager_factory(
-    mock_storage_client, 
-    mock_file_manager, 
-    mock_bucket, 
-    mock_metagraph, 
-    mock_commitments
+    mock_storage_client,
+    mock_file_manager,
+    mock_bucket,
+    mock_metagraph,
+    mock_commitments,
 ):
     """Factory to create CheckpointManager with different configurations"""
+
     def create_manager(
         uid=123,
         storage_client=None,
@@ -508,11 +521,12 @@ def checkpoint_manager_factory(
             metagraph=metagraph if metagraph is not None else mock_metagraph,
             commitments=commitments if commitments is not None else mock_commitments,
         )
-    
+
     return create_manager
 
 
 # === Torch Mock Patches ===
+
 
 @pytest.fixture
 def mock_torch_save():
@@ -520,15 +534,15 @@ def mock_torch_save():
     with patch("torch.save") as mock_save:
         # Default success
         mock_save.return_value = None
-        
+
         # Method to make it fail
         def make_fail():
             mock_save.side_effect = Exception("Disk full")
-        
+
         def make_succeed():
             mock_save.side_effect = None
             mock_save.return_value = None
-        
+
         mock_save.make_fail = make_fail
         mock_save.make_succeed = make_succeed
         yield mock_save
@@ -548,19 +562,19 @@ def mock_torch_load():
             "sync_window": 3,
         }
         mock_load.return_value = default_data
-        
+
         # Method to customize return data
         def set_return_data(data):
             mock_load.return_value = data
-        
+
         # Method to make it fail
         def make_fail():
             mock_load.side_effect = Exception("Corrupted file")
-        
+
         def make_succeed():
             mock_load.side_effect = None
             mock_load.return_value = default_data
-        
+
         mock_load.set_return_data = set_return_data
         mock_load.make_fail = make_fail
         mock_load.make_succeed = make_succeed
@@ -568,6 +582,7 @@ def mock_torch_load():
 
 
 # === Cleanup Fixture ===
+
 
 @pytest.fixture(autouse=True)
 def cleanup_temp_files(mock_file_manager):
@@ -590,9 +605,9 @@ class TestCheckpointManagerInit:
             storage_client=mock_storage_client,
             file_manager=mock_file_manager,
             bucket=mock_bucket,
-            uid=123
+            uid=123,
         )
-        
+
         assert manager.storage_client == mock_storage_client
         assert manager.file_manager == mock_file_manager
         assert manager.bucket == mock_bucket
@@ -602,8 +617,12 @@ class TestCheckpointManagerInit:
         assert manager.last_checkpoint_data is None
 
     def test_initialization_with_optional_metagraph_and_commitments(
-        self, mock_storage_client, mock_file_manager, mock_bucket, 
-        mock_metagraph, mock_commitments
+        self,
+        mock_storage_client,
+        mock_file_manager,
+        mock_bucket,
+        mock_metagraph,
+        mock_commitments,
     ):
         """Test initialization with optional metagraph and commitments"""
         manager = CheckpointManager(
@@ -612,9 +631,9 @@ class TestCheckpointManagerInit:
             bucket=mock_bucket,
             uid=456,
             metagraph=mock_metagraph,
-            commitments=mock_commitments
+            commitments=mock_commitments,
         )
-        
+
         assert manager.metagraph == mock_metagraph
         assert manager.commitments == mock_commitments
         assert manager.uid == 456
@@ -629,14 +648,12 @@ class TestCheckpointManagerInit:
             file_manager=mock_file_manager,
             bucket=mock_bucket,
             uid=789,
-            commitments=empty_commitments
+            commitments=empty_commitments,
         )
-        
+
         assert manager.commitments == {}
 
-    def test_last_checkpoint_data_initializes_to_none(
-        self, checkpoint_manager_factory
-    ):
+    def test_last_checkpoint_data_initializes_to_none(self, checkpoint_manager_factory):
         """Test last_checkpoint_data initializes to None"""
         manager = checkpoint_manager_factory()
         assert manager.last_checkpoint_data is None
@@ -646,10 +663,12 @@ class TestMoveToCpu:
     def test_moving_single_tensor_to_cpu(self, checkpoint_manager_factory):
         """Test moving single tensor to CPU"""
         manager = checkpoint_manager_factory()
-        tensor = torch.randn(3, 4).cuda() if torch.cuda.is_available() else torch.randn(3, 4)
-        
+        tensor = (
+            torch.randn(3, 4).cuda() if torch.cuda.is_available() else torch.randn(3, 4)
+        )
+
         result = manager._move_to_cpu(tensor)
-        
+
         assert torch.is_tensor(result)
         assert result.device.type == "cpu"
         assert torch.equal(tensor.cpu(), result)
@@ -661,15 +680,13 @@ class TestMoveToCpu:
         nested_dict = {
             "layer1": {
                 "weight": torch.randn(2, 3).to(device),
-                "bias": torch.randn(2).to(device)
+                "bias": torch.randn(2).to(device),
             },
-            "layer2": {
-                "weight": torch.randn(1, 2).to(device)
-            }
+            "layer2": {"weight": torch.randn(1, 2).to(device)},
         }
-        
+
         result = manager._move_to_cpu(nested_dict)
-        
+
         assert result["layer1"]["weight"].device.type == "cpu"
         assert result["layer1"]["bias"].device.type == "cpu"
         assert result["layer2"]["weight"].device.type == "cpu"
@@ -679,9 +696,9 @@ class TestMoveToCpu:
         manager = checkpoint_manager_factory()
         device = "cuda" if torch.cuda.is_available() else "cpu"
         tensor_list = [torch.randn(2, 2).to(device), torch.randn(3).to(device)]
-        
+
         result = manager._move_to_cpu(tensor_list)
-        
+
         assert isinstance(result, list)
         assert len(result) == 2
         assert all(t.device.type == "cpu" for t in result)
@@ -691,9 +708,9 @@ class TestMoveToCpu:
         manager = checkpoint_manager_factory()
         device = "cuda" if torch.cuda.is_available() else "cpu"
         tensor_tuple = (torch.randn(2, 2).to(device), torch.randn(3).to(device))
-        
+
         result = manager._move_to_cpu(tensor_tuple)
-        
+
         assert isinstance(result, tuple)
         assert len(result) == 2
         assert all(t.device.type == "cpu" for t in result)
@@ -704,14 +721,11 @@ class TestMoveToCpu:
         device = "cuda" if torch.cuda.is_available() else "cpu"
         mixed_structure = {
             "tensors": [torch.randn(2, 2).to(device), torch.randn(3).to(device)],
-            "nested": {
-                "more_tensors": (torch.randn(1).to(device),),
-                "scalar": 42
-            }
+            "nested": {"more_tensors": (torch.randn(1).to(device),), "scalar": 42},
         }
-        
+
         result = manager._move_to_cpu(mixed_structure)
-        
+
         assert all(t.device.type == "cpu" for t in result["tensors"])
         assert result["nested"]["more_tensors"][0].device.type == "cpu"
         assert result["nested"]["scalar"] == 42
@@ -719,7 +733,7 @@ class TestMoveToCpu:
     def test_moving_non_tensor_objects(self, checkpoint_manager_factory):
         """Test moving non-tensor objects (strings, ints, None) - should return unchanged"""
         manager = checkpoint_manager_factory()
-        
+
         assert manager._move_to_cpu("string") == "string"
         assert manager._move_to_cpu(42) == 42
         assert manager._move_to_cpu(None) is None
@@ -728,7 +742,7 @@ class TestMoveToCpu:
     def test_moving_empty_containers(self, checkpoint_manager_factory):
         """Test moving empty dict/list/tuple"""
         manager = checkpoint_manager_factory()
-        
+
         assert manager._move_to_cpu({}) == {}
         assert manager._move_to_cpu([]) == []
         assert manager._move_to_cpu(()) == ()
@@ -738,29 +752,27 @@ class TestMoveToCpu:
         manager = checkpoint_manager_factory()
         device = "cuda" if torch.cuda.is_available() else "cpu"
         deep_structure = {
-            "level1": {
-                "level2": {
-                    "level3": {
-                        "tensor": torch.randn(2, 2).to(device)
-                    }
-                }
-            }
+            "level1": {"level2": {"level3": {"tensor": torch.randn(2, 2).to(device)}}}
         }
-        
+
         result = manager._move_to_cpu(deep_structure)
-        
+
         assert result["level1"]["level2"]["level3"]["tensor"].device.type == "cpu"
 
 
 class TestSaveCheckpoint:
     @pytest.mark.asyncio
     async def test_successful_checkpoint_save(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, mock_torch_save
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        mock_torch_save,
     ):
         """Test successful checkpoint save with all parameters"""
         manager = checkpoint_manager_factory()
-        
+
         result = await manager.save_checkpoint(
             model=mock_model,
             optimizer=mock_optimizer,
@@ -768,33 +780,37 @@ class TestSaveCheckpoint:
             global_step=1000,
             current_window=5,
             start_window=0,
-            sync_window=3
+            sync_window=3,
         )
-        
+
         assert result is True
         manager.storage_client.put_object.assert_called_once()
         mock_torch_save.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_cpu_tensor_conversion_for_model_state(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, mock_torch_save
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        mock_torch_save,
     ):
         """Test CPU tensor conversion for model state dict"""
         manager = checkpoint_manager_factory()
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        
+
         # Set model state with GPU tensors
         gpu_state = {
             "layer.weight": torch.randn(2, 3).to(device),
-            "layer.bias": torch.randn(2).to(device)
+            "layer.bias": torch.randn(2).to(device),
         }
         mock_model.set_state_dict(gpu_state)
-        
+
         await manager.save_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 1000, 5, 0, 3
         )
-        
+
         # Verify torch.save was called with CPU tensors
         save_call_args = mock_torch_save.call_args[0][0]
         for tensor in save_call_args["model_state_dict"].values():
@@ -802,13 +818,17 @@ class TestSaveCheckpoint:
 
     @pytest.mark.asyncio
     async def test_cpu_tensor_conversion_for_optimizer_state(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, mock_torch_save
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        mock_torch_save,
     ):
         """Test CPU tensor conversion for optimizer state dict with nested tensors"""
         manager = checkpoint_manager_factory()
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        
+
         # Set optimizer state with GPU tensors
         gpu_optimizer_state = {
             "state": {
@@ -817,14 +837,14 @@ class TestSaveCheckpoint:
                     "exp_avg": torch.randn(2, 3).to(device),
                 }
             },
-            "param_groups": [{"lr": 0.001}]
+            "param_groups": [{"lr": 0.001}],
         }
         mock_optimizer.set_state_dict(gpu_optimizer_state)
-        
+
         await manager.save_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 1000, 5, 0, 3
         )
-        
+
         # Verify optimizer state tensors moved to CPU
         save_call_args = mock_torch_save.call_args[0][0]
         optimizer_state = save_call_args["optimizer_state_dict"]["state"]
@@ -835,16 +855,20 @@ class TestSaveCheckpoint:
 
     @pytest.mark.asyncio
     async def test_temp_file_creation_and_cleanup_on_success(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, mock_file_manager
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        mock_file_manager,
     ):
         """Test temp file creation and cleanup on success"""
         manager = checkpoint_manager_factory()
-        
+
         await manager.save_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 1000, 5, 0, 3
         )
-        
+
         # Verify temp file was created and deleted
         assert len(mock_file_manager.created_files) == 1
         assert len(mock_file_manager.deleted_files) == 1
@@ -852,17 +876,22 @@ class TestSaveCheckpoint:
 
     @pytest.mark.asyncio
     async def test_temp_file_cleanup_on_failure(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, mock_torch_save, mock_file_manager
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        mock_torch_save,
+        mock_file_manager,
     ):
         """Test temp file cleanup on failure"""
         manager = checkpoint_manager_factory()
         mock_torch_save.make_fail()
-        
+
         result = await manager.save_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 1000, 5, 0, 3
         )
-        
+
         assert result is False
         # Verify temp file was still cleaned up despite failure
         assert len(mock_file_manager.created_files) == 1
@@ -870,16 +899,20 @@ class TestSaveCheckpoint:
 
     @pytest.mark.asyncio
     async def test_torch_save_with_highest_protocol(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, mock_torch_save
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        mock_torch_save,
     ):
         """Test torch.save with pickle.HIGHEST_PROTOCOL"""
         manager = checkpoint_manager_factory()
-        
+
         await manager.save_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 1000, 5, 0, 3
         )
-        
+
         # Verify pickle protocol used
         call_kwargs = mock_torch_save.call_args[1]
         assert call_kwargs["pickle_protocol"] == pickle.HIGHEST_PROTOCOL
@@ -891,11 +924,11 @@ class TestSaveCheckpoint:
         """Test R2 upload success"""
         manager = checkpoint_manager_factory()
         manager.storage_client.put_object.return_value = True
-        
+
         result = await manager.save_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 1000, 5, 0, 3
         )
-        
+
         assert result is True
         manager.storage_client.put_object.assert_called_once()
 
@@ -906,30 +939,35 @@ class TestSaveCheckpoint:
         """Test R2 upload failure"""
         manager = checkpoint_manager_factory()
         manager.storage_client.put_object.return_value = False
-        
+
         result = await manager.save_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 1000, 5, 0, 3
         )
-        
+
         assert result is False
 
     @pytest.mark.asyncio
     async def test_filename_generation_with_special_characters(
-        self, mock_storage_client, mock_file_manager, mock_bucket,
-        mock_model, mock_optimizer, mock_scheduler
+        self,
+        mock_storage_client,
+        mock_file_manager,
+        mock_bucket,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
     ):
         """Test filename generation with special characters in uid"""
         manager = CheckpointManager(
             storage_client=mock_storage_client,
             file_manager=mock_file_manager,
             bucket=mock_bucket,
-            uid="test/uid\\with_special"
+            uid="test/uid\\with_special",
         )
-        
+
         await manager.save_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 1000, 5, 0, 3
         )
-        
+
         # Verify filename has special characters replaced
         call_args = mock_storage_client.put_object.call_args[0]
         filename = call_args[0]
@@ -944,33 +982,39 @@ class TestSaveCheckpoint:
         """Test exception during checkpoint data preparation"""
         manager = checkpoint_manager_factory()
         mock_model.state_dict.side_effect = Exception("Model error")
-        
+
         result = await manager.save_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 1000, 5, 0, 3
         )
-        
+
         assert result is False
 
 
 class TestLoadCheckpoint:
     @pytest.mark.asyncio
     async def test_successful_checkpoint_load_with_device_movement(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, sample_checkpoint_data, mock_torch_load, device_fixture
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        sample_checkpoint_data,
+        mock_torch_load,
+        device_fixture,
     ):
         """Test successful checkpoint load with device movement"""
         manager = checkpoint_manager_factory()
         mock_torch_load.set_return_data(sample_checkpoint_data["complete"])
-        
+
         # Mock get_latest_checkpoint to return data
         manager.get_latest_checkpoint = AsyncMock(
             return_value=(sample_checkpoint_data["complete"], 10)
         )
-        
+
         success, sync_window, opt, sched = await manager.load_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 5, device_fixture["cpu"]
         )
-        
+
         assert success is True
         assert sync_window == 8  # From sample data
         mock_model.load_state_dict.assert_called_once()
@@ -984,11 +1028,11 @@ class TestLoadCheckpoint:
         """Test no checkpoints found scenario"""
         manager = checkpoint_manager_factory()
         manager.get_latest_checkpoint = AsyncMock(return_value=None)
-        
+
         success, sync_window, opt, sched = await manager.load_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 5, "cpu"
         )
-        
+
         assert success is False
         assert sync_window == 0
         assert opt == mock_optimizer
@@ -996,79 +1040,92 @@ class TestLoadCheckpoint:
 
     @pytest.mark.asyncio
     async def test_invalid_checkpoint_format_missing_keys(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, sample_checkpoint_data
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        sample_checkpoint_data,
     ):
         """Test invalid checkpoint format (missing keys)"""
         manager = checkpoint_manager_factory()
         incomplete_data = {"model_state_dict": {}}  # Missing required keys
-        manager.get_latest_checkpoint = AsyncMock(
-            return_value=(incomplete_data, 10)
-        )
-        
+        manager.get_latest_checkpoint = AsyncMock(return_value=(incomplete_data, 10))
+
         success, sync_window, opt, sched = await manager.load_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 5, "cpu"
         )
-        
+
         assert success is False
         assert sync_window == 0
 
     @pytest.mark.asyncio
     async def test_model_load_state_dict_failure(
-        self, checkpoint_manager_factory, mismatched_model, mock_optimizer, 
-        mock_scheduler, sample_checkpoint_data
+        self,
+        checkpoint_manager_factory,
+        mismatched_model,
+        mock_optimizer,
+        mock_scheduler,
+        sample_checkpoint_data,
     ):
         """Test model.load_state_dict failure (key mismatch)"""
         manager = checkpoint_manager_factory()
         manager.get_latest_checkpoint = AsyncMock(
             return_value=(sample_checkpoint_data["complete"], 10)
         )
-        
+
         success, sync_window, opt, sched = await manager.load_checkpoint(
             mismatched_model, mock_optimizer, mock_scheduler, 5, "cpu"
         )
-        
+
         assert success is False
         assert sync_window == 0
 
     @pytest.mark.asyncio
     async def test_optimizer_state_loading_and_device_movement(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, sample_checkpoint_data, device_fixture
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        sample_checkpoint_data,
+        device_fixture,
     ):
         """Test optimizer state loading and device movement"""
         manager = checkpoint_manager_factory()
         manager.get_latest_checkpoint = AsyncMock(
             return_value=(sample_checkpoint_data["complete"], 10)
         )
-        
+
         # Add state to optimizer to test device movement
-        mock_optimizer.state = {
-            0: {"exp_avg": torch.randn(2, 3)}
-        }
-        
+        mock_optimizer.state = {0: {"exp_avg": torch.randn(2, 3)}}
+
         success, sync_window, opt, sched = await manager.load_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 5, device_fixture["cpu"]
         )
-        
+
         assert success is True
         mock_optimizer.load_state_dict.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_missing_window_info_in_checkpoint(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, sample_checkpoint_data
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        sample_checkpoint_data,
     ):
         """Test missing start_window in checkpoint data - should use default value and succeed"""
         manager = checkpoint_manager_factory()
         manager.get_latest_checkpoint = AsyncMock(
             return_value=(sample_checkpoint_data["missing_start_window"], 10)
         )
-        
+
         success, sync_window, opt, sched = await manager.load_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 5, "cpu"
         )
-        
+
         # Should succeed with default start_window=0, sync_window should be 8 (from test data)
         assert success is True
         assert sync_window == 8  # This checkpoint still has sync_window=8
@@ -1076,19 +1133,23 @@ class TestLoadCheckpoint:
 
     @pytest.mark.asyncio
     async def test_missing_sync_window_in_checkpoint(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, sample_checkpoint_data
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        sample_checkpoint_data,
     ):
         """Test missing sync_window in checkpoint data - should use default value and succeed"""
         manager = checkpoint_manager_factory()
         manager.get_latest_checkpoint = AsyncMock(
             return_value=(sample_checkpoint_data["missing_sync_window"], 10)
         )
-        
+
         success, sync_window, opt, sched = await manager.load_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 5, "cpu"
         )
-        
+
         # Should succeed with default sync_window=0
         assert success is True
         assert sync_window == 0  # Missing sync_window should default to 0
@@ -1096,26 +1157,31 @@ class TestLoadCheckpoint:
 
     @pytest.mark.asyncio
     async def test_missing_both_windows_in_checkpoint(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, sample_checkpoint_data
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        sample_checkpoint_data,
     ):
         """Test missing both start_window and sync_window - should use defaults and succeed"""
         manager = checkpoint_manager_factory()
-        
+
         # Create checkpoint data missing both windows
         checkpoint_missing_both = {
-            k: v for k, v in sample_checkpoint_data["complete"].items() 
+            k: v
+            for k, v in sample_checkpoint_data["complete"].items()
             if k not in ["start_window", "sync_window"]
         }
-        
+
         manager.get_latest_checkpoint = AsyncMock(
             return_value=(checkpoint_missing_both, 10)
         )
-        
+
         success, sync_window, opt, sched = await manager.load_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 5, "cpu"
         )
-        
+
         # Should succeed with both defaults: start_window=0, sync_window=0
         assert success is True
         assert sync_window == 0
@@ -1123,44 +1189,50 @@ class TestLoadCheckpoint:
 
     @pytest.mark.asyncio
     async def test_checkpoint_with_none_window_values(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, sample_checkpoint_data
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        sample_checkpoint_data,
     ):
         """Test checkpoint with explicit None values for windows - should fail"""
         manager = checkpoint_manager_factory()
-        
+
         # Create checkpoint data with explicit None values
         checkpoint_with_none = sample_checkpoint_data["complete"].copy()
         checkpoint_with_none["start_window"] = None
         checkpoint_with_none["current_window"] = None
-        
+
         manager.get_latest_checkpoint = AsyncMock(
             return_value=(checkpoint_with_none, 10)
         )
-        
+
         success, sync_window, opt, sched = await manager.load_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 5, "cpu"
         )
-        
+
         assert success is False
         assert sync_window == 0
 
     @pytest.mark.asyncio
     async def test_last_checkpoint_data_is_set(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, sample_checkpoint_data
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        sample_checkpoint_data,
     ):
         """Test last_checkpoint_data is set after successful load"""
         manager = checkpoint_manager_factory()
         checkpoint_data = sample_checkpoint_data["complete"]
-        manager.get_latest_checkpoint = AsyncMock(
-            return_value=(checkpoint_data, 10)
-        )
-        
+        manager.get_latest_checkpoint = AsyncMock(return_value=(checkpoint_data, 10))
+
         success, _, _, _ = await manager.load_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 5, "cpu"
         )
-        
+
         assert success is True
         assert manager.last_checkpoint_data == checkpoint_data
 
@@ -1171,11 +1243,11 @@ class TestLoadCheckpoint:
         """Test with custom init_version parameter"""
         manager = checkpoint_manager_factory()
         manager.get_latest_checkpoint = AsyncMock(return_value=None)
-        
+
         await manager.load_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 5, "cpu", init_version="2.0.0"
         )
-        
+
         manager.get_latest_checkpoint.assert_called_once_with("2.0.0")
 
 
@@ -1186,7 +1258,7 @@ class TestGetLatestCheckpoint:
     ):
         """Test validator checkpoint found and returned"""
         manager = checkpoint_manager_factory()
-        
+
         # Mock validator bucket lookup
         manager._get_highest_stake_validator_bucket = AsyncMock(
             return_value=(mock_bucket, 0)
@@ -1194,9 +1266,9 @@ class TestGetLatestCheckpoint:
         manager._get_bucket_checkpoint = AsyncMock(
             return_value=(sample_checkpoint_data["complete"], 10)
         )
-        
+
         result = await manager.get_latest_checkpoint("1.0.0")
-        
+
         assert result is not None
         checkpoint_data, window = result
         assert window == 10
@@ -1209,7 +1281,7 @@ class TestGetLatestCheckpoint:
     ):
         """Test validator not found, self R2 checkpoint found"""
         manager = checkpoint_manager_factory()
-        
+
         # Mock validator not found
         manager._get_highest_stake_validator_bucket = AsyncMock(
             return_value=(None, None)
@@ -1218,62 +1290,62 @@ class TestGetLatestCheckpoint:
         manager._get_bucket_checkpoint = AsyncMock(
             return_value=(sample_checkpoint_data["complete"], 5)
         )
-        
+
         result = await manager.get_latest_checkpoint("1.0.0")
-        
+
         assert result is not None
         checkpoint_data, window = result
         assert window == 5
 
     @pytest.mark.asyncio
-    async def test_no_checkpoints_found_anywhere(
-        self, checkpoint_manager_factory
-    ):
+    async def test_no_checkpoints_found_anywhere(self, checkpoint_manager_factory):
         """Test validator not found, self R2 not found, returns None"""
         manager = checkpoint_manager_factory()
-        
+
         manager._get_highest_stake_validator_bucket = AsyncMock(
             return_value=(None, None)
         )
         manager._get_bucket_checkpoint = AsyncMock(return_value=None)
-        
+
         result = await manager.get_latest_checkpoint("1.0.0")
-        
+
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_exception_during_validator_lookup(
-        self, checkpoint_manager_factory
-    ):
+    async def test_exception_during_validator_lookup(self, checkpoint_manager_factory):
         """Test exception handling during validator lookup"""
         manager = checkpoint_manager_factory()
-        
+
         manager._get_highest_stake_validator_bucket = AsyncMock(
             side_effect=Exception("Validator lookup failed")
         )
-        
+
         result = await manager.get_latest_checkpoint("1.0.0")
-        
+
         assert result is None
 
 
 class TestGetBucketCheckpoint:
     @pytest.mark.asyncio
     async def test_successful_checkpoint_retrieval(
-        self, checkpoint_manager_factory, mock_bucket, sample_checkpoint_data, mock_torch_load
+        self,
+        checkpoint_manager_factory,
+        mock_bucket,
+        sample_checkpoint_data,
+        mock_torch_load,
     ):
         """Test successful checkpoint retrieval with highest window number"""
         manager = checkpoint_manager_factory()
         manager.storage_client.list_objects.return_value = [
             "checkpoint-10-123-v1.0.0.pt",
-            "checkpoint-5-123-v1.0.0.pt"
+            "checkpoint-5-123-v1.0.0.pt",
         ]
-        
+
         # Mock torch.load to return valid data
         mock_torch_load.set_return_data(sample_checkpoint_data["complete"])
-        
+
         result = await manager._get_bucket_checkpoint(mock_bucket, 123, "1.0.0")
-        
+
         assert result is not None
         checkpoint_data, window = result
         assert window == 10  # Should pick highest window
@@ -1286,37 +1358,42 @@ class TestGetBucketCheckpoint:
         manager = checkpoint_manager_factory()
         manager.storage_client.list_objects.return_value = [
             "other-file.txt",
-            "checkpoint-5-456-v1.0.0.pt"  # Different UID
+            "checkpoint-5-456-v1.0.0.pt",  # Different UID
         ]
-        
+
         result = await manager._get_bucket_checkpoint(mock_bucket, 123, "1.0.0")
-        
+
         assert result is None
 
     @pytest.mark.asyncio
     async def test_corrupted_checkpoint_fallback(
-        self, checkpoint_manager_factory, mock_bucket, sample_checkpoint_data, mock_torch_load
+        self,
+        checkpoint_manager_factory,
+        mock_bucket,
+        sample_checkpoint_data,
+        mock_torch_load,
     ):
         """Test corrupted checkpoint file, falls back to next valid one"""
         manager = checkpoint_manager_factory()
         manager.storage_client.list_objects.return_value = [
             "checkpoint-10-123-v1.0.0.pt",  # This will be corrupted
-            "checkpoint-5-123-v1.0.0.pt"   # This will be valid
+            "checkpoint-5-123-v1.0.0.pt",  # This will be valid
         ]
-        
+
         # First load fails, second succeeds
         load_call_count = 0
+
         def mock_load_side_effect(*args, **kwargs):
             nonlocal load_call_count
             load_call_count += 1
             if load_call_count == 1:
                 raise Exception("Corrupted file")
             return sample_checkpoint_data["complete"]
-        
+
         mock_torch_load.side_effect = mock_load_side_effect
-        
+
         result = await manager._get_bucket_checkpoint(mock_bucket, 123, "1.0.0")
-        
+
         assert result is not None
         checkpoint_data, window = result
         assert window == 5  # Should fallback to window 5
@@ -1328,14 +1405,18 @@ class TestGetBucketCheckpoint:
         """Test storage client list_objects failure"""
         manager = checkpoint_manager_factory()
         manager.storage_client.list_objects.side_effect = Exception("Storage error")
-        
+
         result = await manager._get_bucket_checkpoint(mock_bucket, 123, "1.0.0")
-        
+
         assert result is None
 
     @pytest.mark.asyncio
     async def test_regex_pattern_with_special_characters(
-        self, checkpoint_manager_factory, mock_bucket, sample_checkpoint_data, mock_torch_load
+        self,
+        checkpoint_manager_factory,
+        mock_bucket,
+        sample_checkpoint_data,
+        mock_torch_load,
     ):
         """Test regex pattern with special characters in uid"""
         manager = checkpoint_manager_factory()
@@ -1343,9 +1424,9 @@ class TestGetBucketCheckpoint:
             "checkpoint-10-test.uid-v1.0.0.pt"
         ]
         mock_torch_load.set_return_data(sample_checkpoint_data["complete"])
-        
+
         result = await manager._get_bucket_checkpoint(mock_bucket, "test.uid", "1.0.0")
-        
+
         assert result is not None
 
 
@@ -1361,12 +1442,12 @@ class TestCleanupOldCheckpoints:
             "checkpoint-5-123-v1.0.0.pt",
             "checkpoint-15-123-v1.0.0.pt",
             "checkpoint-8-123-v1.0.0.pt",
-            "checkpoint-12-123-v1.0.0.pt"
+            "checkpoint-12-123-v1.0.0.pt",
         ]
         manager.storage_client.delete_object.return_value = True
-        
+
         await manager.cleanup_old_checkpoints(keep_last=3)
-        
+
         # Should delete 2 oldest checkpoints (5 and 8)
         assert manager.storage_client.delete_object.call_count == 2
 
@@ -1379,9 +1460,9 @@ class TestCleanupOldCheckpoints:
         manager.storage_client.list_objects.return_value = [
             "checkpoint-10-123-v1.0.0.pt"
         ]
-        
+
         await manager.cleanup_old_checkpoints(keep_last=3)
-        
+
         # Should not delete anything
         manager.storage_client.delete_object.assert_not_called()
 
@@ -1395,50 +1476,47 @@ class TestCleanupOldCheckpoints:
             "checkpoint-10-123-v1.0.0.pt",
             "checkpoint-5-123-v1.0.0.pt",
             "checkpoint-8-456-v1.0.0.pt",  # Different UID - should not be deleted
-            "other-file.txt"
+            "other-file.txt",
         ]
         manager.storage_client.delete_object.return_value = True
-        
+
         await manager.cleanup_old_checkpoints(keep_last=1)
-        
+
         # Should only delete one checkpoint (window 5) for uid 123
         assert manager.storage_client.delete_object.call_count == 1
         deleted_file = manager.storage_client.delete_object.call_args[0][0]
         assert "checkpoint-5-123" in deleted_file
 
     @pytest.mark.asyncio
-    async def test_partial_deletion_failures(
-        self, checkpoint_manager_factory
-    ):
+    async def test_partial_deletion_failures(self, checkpoint_manager_factory):
         """Test partial deletion failures (some succeed, some fail)"""
         manager = checkpoint_manager_factory()
         manager.storage_client.list_objects.return_value = [
             "checkpoint-10-123-v1.0.0.pt",
             "checkpoint-5-123-v1.0.0.pt",
-            "checkpoint-8-123-v1.0.0.pt"
+            "checkpoint-8-123-v1.0.0.pt",
         ]
-        
+
         # First deletion succeeds, second fails
         delete_call_count = 0
+
         def delete_side_effect(*args):
             nonlocal delete_call_count
             delete_call_count += 1
             return delete_call_count == 1
-        
+
         manager.storage_client.delete_object.side_effect = delete_side_effect
-        
+
         await manager.cleanup_old_checkpoints(keep_last=1)
-        
+
         assert manager.storage_client.delete_object.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_storage_list_objects_failure(
-        self, checkpoint_manager_factory
-    ):
+    async def test_storage_list_objects_failure(self, checkpoint_manager_factory):
         """Test storage client list_objects failure"""
         manager = checkpoint_manager_factory()
         manager.storage_client.list_objects.side_effect = Exception("Storage error")
-        
+
         # Should not raise exception
         await manager.cleanup_old_checkpoints()
 
@@ -1452,21 +1530,19 @@ class TestGetHighestStakeValidatorBucket:
         manager = checkpoint_manager_factory(
             metagraph=mock_metagraph, commitments=mock_commitments
         )
-        
+
         bucket, uid = await manager._get_highest_stake_validator_bucket()
-        
+
         assert bucket is not None
         assert uid == 0  # Highest stake validator from mock
 
     @pytest.mark.asyncio
-    async def test_no_metagraph_available(
-        self, checkpoint_manager_factory
-    ):
+    async def test_no_metagraph_available(self, checkpoint_manager_factory):
         """Test no metagraph available"""
         manager = checkpoint_manager_factory(metagraph=None, commitments={})
-        
+
         bucket, uid = await manager._get_highest_stake_validator_bucket()
-        
+
         assert bucket is None
         assert uid is None
 
@@ -1479,24 +1555,22 @@ class TestGetHighestStakeValidatorBucket:
         manager = checkpoint_manager_factory(
             metagraph=mock_metagraph, commitments=empty_commitments
         )
-        
+
         bucket, uid = await manager._get_highest_stake_validator_bucket()
-        
+
         assert bucket is None
         assert uid is None
 
     @pytest.mark.asyncio
-    async def test_exception_during_metagraph_access(
-        self, checkpoint_manager_factory
-    ):
+    async def test_exception_during_metagraph_access(self, checkpoint_manager_factory):
         """Test exception during metagraph.S.argmax()"""
         bad_metagraph = Mock()
         bad_metagraph.S.argmax.side_effect = Exception("Metagraph error")
-        
+
         manager = checkpoint_manager_factory(metagraph=bad_metagraph)
-        
+
         bucket, uid = await manager._get_highest_stake_validator_bucket()
-        
+
         assert bucket is None
         assert uid is None
 
@@ -1504,29 +1578,35 @@ class TestGetHighestStakeValidatorBucket:
 class TestIntegration:
     @pytest.mark.asyncio
     async def test_complete_save_load_cycle(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, mock_torch_save, mock_torch_load, sample_checkpoint_data
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        mock_torch_save,
+        mock_torch_load,
+        sample_checkpoint_data,
     ):
         """Test complete save -> load cycle"""
         manager = checkpoint_manager_factory()
-        
+
         # Save checkpoint
         save_result = await manager.save_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 1000, 5, 0, 3
         )
         assert save_result is True
-        
+
         # For load, directly mock get_latest_checkpoint to return saved data
         # This simulates finding the checkpoint we just saved
         manager.get_latest_checkpoint = AsyncMock(
             return_value=(sample_checkpoint_data["complete"], 5)
         )
-        
+
         # Load checkpoint
         success, sync_window, opt, sched = await manager.load_checkpoint(
             mock_model, mock_optimizer, mock_scheduler, 5, "cpu"
         )
-        
+
         assert success is True
         assert sync_window == 8  # From sample data
         assert opt == mock_optimizer
@@ -1539,32 +1619,39 @@ class TestIntegration:
     ):
         """Test multiple concurrent checkpoint operations"""
         manager = checkpoint_manager_factory()
-        
+
         # Run multiple save operations concurrently
         tasks = [
-            manager.save_checkpoint(mock_model, mock_optimizer, mock_scheduler, i*100, i, 0, i-1)
+            manager.save_checkpoint(
+                mock_model, mock_optimizer, mock_scheduler, i * 100, i, 0, i - 1
+            )
             for i in range(1, 4)
         ]
-        
+
         results = await asyncio.gather(*tasks)
-        
+
         assert all(results)
         assert manager.storage_client.put_object.call_count == 3
 
     @pytest.mark.asyncio
     async def test_checkpoint_fallback_chain(
-        self, checkpoint_manager_factory, mock_model, mock_optimizer, 
-        mock_scheduler, sample_checkpoint_data
+        self,
+        checkpoint_manager_factory,
+        mock_model,
+        mock_optimizer,
+        mock_scheduler,
+        sample_checkpoint_data,
     ):
         """Test load from validator -> fallback to self -> fallback to None"""
         manager = checkpoint_manager_factory()
-        
+
         # Mock validator bucket exists but no checkpoint
         manager._get_highest_stake_validator_bucket = AsyncMock(
             return_value=(manager.bucket, 0)
         )
-        
+
         call_count = 0
+
         async def mock_get_bucket_checkpoint(bucket, uid, version):
             nonlocal call_count
             call_count += 1
@@ -1573,13 +1660,11 @@ class TestIntegration:
             elif call_count == 2:
                 return (sample_checkpoint_data["complete"], 10)  # Self has checkpoint
             return None
-        
+
         manager._get_bucket_checkpoint = mock_get_bucket_checkpoint
-        
+
         result = await manager.get_latest_checkpoint("1.0.0")
-        
+
         assert result is not None
         checkpoint_data, window = result
         assert window == 10
-
-

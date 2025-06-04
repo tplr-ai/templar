@@ -255,6 +255,13 @@ class AggregationManager:
         self, state_dict_resp: dict, uid: int, device: str, totalks: dict
     ) -> bool:
         """Validate gradient response from a UID."""
+        # Check if state_dict_resp is actually a dictionary
+        if not isinstance(state_dict_resp, dict):
+            tplr.logger.warning(
+                f"Invalid state_dict type from UID {uid}: expected dict, got {type(state_dict_resp)}"
+            )
+            return False
+
         for param_name, tensor in state_dict_resp.items():
             if param_name.endswith("idxs"):
                 base_name = param_name[:-4]

@@ -330,7 +330,7 @@ class AggregationManager:
             f"Processed gradient tensors for UID {uid}, final aggregated keys: {list(aggregated_state_dict.keys())}"
         )
 
-    def _move_to_device_recursive(self, obj, device: str):
+    def _move_to_device_recursive(self, obj: torch.Tensor | dict | list | tuple, device: str) -> torch.Tensor | dict | list | tuple:
         """Recursively move all tensors in a nested structure to the target device."""
         if isinstance(obj, torch.Tensor):
             return obj.to(device)

@@ -395,7 +395,7 @@ class AggregationManager:
         time_min: datetime | None = None,
         time_max: datetime | None = None,
         **kwargs,
-    ) -> Optional[tuple]:
+    ) -> tuple | None:
         """Get gradient from a specific UID - returns tuple (state_dict, global_step)"""
         try:
             # Get the bucket for this UID through the peer manager's chain manager

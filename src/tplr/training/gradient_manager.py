@@ -196,7 +196,7 @@ class GradientManager:
         device: str,
         window: int,
         global_step: int,
-    ) -> Tuple[bool, int]:
+    ) -> tuple[bool, int]:
         """Apply gathered gradients to model parameters.
 
         Args:

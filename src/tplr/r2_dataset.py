@@ -63,18 +63,18 @@ class R2DatasetLoader(DatasetLoader):
         _local_cache_dir (Path): Local directory for caching metadata files
     """
 
-    rows_base_url: str = ""  # Empty string to match parent class type
-    size_base_url: str = ""  # Empty string to match parent class type
+    rows_base_url = None
+    size_base_url = None
     _configs_data_cache = None
     DATASET_SUBFOLDER = "mlfoundations-dclm-baseline-1.0-parquet-optimized"
     CF_REGION_NAME = "enam"
 
     # Cache for metadata
-    _shard_sizes: dict | None = None
-    _metadata_config: dict | None = None
+    _shard_sizes = None
+    _metadata_config = None
     _local_cache_dir = Path(".cache/tplr")
 
-    _shard_index: "ShardIndex | None" = None
+    _shard_index: ShardIndex = None
 
     # Add class-level caching for filesystem and tokenizer results
     _fs_instance = None
@@ -122,10 +122,6 @@ class R2DatasetLoader(DatasetLoader):
             tokenizer: Tokenizer instance to use
             pack_samples (bool): Whether to pack samples without padding
         """
-        # Validate tokenizer is not None before calling super().__init__
-        if tokenizer is None:
-            raise ValueError("tokenizer cannot be None")
-
         super().__init__(
             batch_size=batch_size,
             sequence_length=sequence_length,
@@ -144,9 +140,6 @@ class R2DatasetLoader(DatasetLoader):
         self._next_batch = None
         self._prefetch_queue = asyncio.Queue(maxsize=self.PREFETCH_SIZE)
 
-        # Add missing attributes
-        self.fs = self._get_fs()
-
     @classmethod
     def get_executor(cls):
         """Get or create a shared ThreadPoolExecutor"""
@@ -157,12 +150,12 @@ class R2DatasetLoader(DatasetLoader):
             )
         return cls._executor
 
-    def _get_pad_size(self, input_ids=None):
+    def _get_pad_size(self, input_ids):
         """
         Calculate padding size needed for a sequence.
 
         Args:
-            input_ids: Optional input IDs (for compatibility with parent class)
+            input_ids (list): Token IDs to pad
 
         Returns:
             int: Number of padding tokens needed
@@ -170,62 +163,40 @@ class R2DatasetLoader(DatasetLoader):
         if self.pack_samples:
             return 1
 
-        if self.sequence_length is None:
-            return 0
-
-        sample_size = len(self.token_buffer)
+        sample_size = len(input_ids)
         remainder = sample_size % self.sequence_length
         pad_size = self.sequence_length - remainder
         return pad_size % self.sequence_length
 
-    def _get_shard_path(self, shard_key: str) -> str:
-        """Get full R2 path for a shard"""
-        dataset_config = BUCKET_SECRETS["dataset"]
-        if "multiple" in dataset_config:
-            bucket_name = dataset_config["multiple"][0]["name"]
-        else:
-            bucket_name = dataset_config["name"]
-        return f"{bucket_name}/{self.DATASET_SUBFOLDER}/{shard_key}"
-
     def _refill_padded_buffer(self):
-        """Refill buffer with padded sequences."""
-        # Check for None values early
-        if self.sequence_length is None or self.batch_size is None:
-            return
+        """Match DatasetLoader's buffer refill logic exactly"""
+        while (
+            self.buffer
+            and len(self.padded_buffer) < self.sequence_length * self.batch_size
+        ):
+            try:
+                # Find next EOS token
+                eos_index = self.buffer.index(self.tokenizer.eos_token_id)
 
-        # Get padding size first
-        pad_size = self._get_pad_size()
-        if self.padded_buffer and len(self.padded_buffer) >= pad_size:
-            return
+                # Get sequence up to and including EOS
+                input_ids = self.buffer[: eos_index + 1]
+                self.buffer = self.buffer[eos_index + 1 :]
 
-        # Get tokens from buffer
-        if not self.token_buffer:
-            return
+                # Track used tokens
+                self.used_buffer.extend(input_ids)
 
-        # Determine EOS token ID with proper attribute checking
-        eos_token_id = None
-        if self.tokenizer and hasattr(self.tokenizer, "eos_token_id"):
-            eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
+                # Add to padded buffer without the EOS token
+                self.padded_buffer.extend(input_ids[:-1])
 
-        # Pad with EOS tokens if available, otherwise use pad tokens
-        if eos_token_id is not None:
-            pad_token_id = eos_token_id
-        elif self.tokenizer and hasattr(self.tokenizer, "pad_token_id"):
-            pad_token_id = getattr(self.tokenizer, "pad_token_id", 0)
-        else:
-            pad_token_id = 0
+                # Add padding using EOS tokens (not pad tokens)
+                pad_size = self._get_pad_size(input_ids[:-1])
+                self.padded_buffer.extend([self.tokenizer.eos_token_id] * pad_size)
 
-        # Create padded buffer
-        remaining_tokens = self.token_buffer[: pad_size - len(self.padded_buffer)]
-        self.padded_buffer.extend(remaining_tokens)
-
-        # Pad to required size
-        tokens_needed = pad_size - len(self.padded_buffer)
-        if tokens_needed > 0:
-            self.padded_buffer.extend([pad_token_id] * tokens_needed)
-
-        # Remove processed tokens from buffer
-        self.token_buffer = self.token_buffer[len(remaining_tokens) :]
+            except ValueError:  # No EOS token found
+                if self.buffer:  # Add remaining tokens if any
+                    self.padded_buffer.extend(self.buffer)
+                    self.used_buffer.extend(self.buffer)
+                    self.buffer = []
 
     @staticmethod
     async def fetch_dataset_configs() -> dict:
@@ -274,17 +245,7 @@ class R2DatasetLoader(DatasetLoader):
 
         # Create RNG with same method as DatasetLoader
         rng = np.random.default_rng(hash(seed) & 0xFFFFFFFF)
-
-        # Safely advance the bit generator if supported
-        try:
-            # Use getattr to avoid direct attribute access
-            advance_method = getattr(rng.bit_generator, "advance", None)
-            if advance_method is not None:
-                advance_method(offset)  # Skip ahead by offset
-        except (AttributeError, TypeError):
-            # Fallback: manually advance by generating and discarding values
-            for _ in range(offset):
-                rng.random()
+        rng.bit_generator.advance(offset)  # Skip ahead by offset
 
         # Sort config keys for consistent ordering
         sorted_keys = sorted(configs_data.keys())
@@ -485,10 +446,6 @@ class R2DatasetLoader(DatasetLoader):
                     self._metadata_cache[config_name] = metadata
 
                 try:
-                    # Check if _shard_index is not None before calling find_shard
-                    if R2DatasetLoader._shard_index is None:
-                        raise ValueError("Shard index not initialized")
-
                     chosen_shard, shard_offset, _ = (
                         R2DatasetLoader._shard_index.find_shard(
                             config_name, page_number
@@ -596,7 +553,6 @@ class R2DatasetLoader(DatasetLoader):
 
         # Retry logic for closed file handles
         max_retries = 3
-        result = None
         for attempt in range(max_retries):
             try:
                 result = await asyncio.get_event_loop().run_in_executor(
@@ -614,9 +570,6 @@ class R2DatasetLoader(DatasetLoader):
                 else:
                     raise
 
-        if result is None:
-            raise RuntimeError(f"Failed to read row group after {max_retries} attempts")
-
         elapsed = shard_profiler.end_read(
             timer_id,
             shard_path,
@@ -629,58 +582,34 @@ class R2DatasetLoader(DatasetLoader):
         return result
 
     @_timer_profiler.profile("_batch_tokenize")
-    async def _batch_tokenize(self, texts: list[str]) -> list[int]:
-        """
-        Tokenizes a batch of texts and concatenates them.
-        Returns a flat list of token IDs.
-        """
-        result = []  # Initialize result
+    async def _batch_tokenize(self, texts):
+        """Batch tokenization for better performance"""
 
-        if self.tokenizer is None:
-            return result
+        def _tokenize_batch():
+            all_tokens = []
 
-        # Tokenize all texts in batch - handle tokenizer safely
-        try:
-            # Use getattr to check if tokenizer is callable
-            tokenizer_call = getattr(self.tokenizer, "__call__", None)
-            if tokenizer_call is not None:
-                encoded = tokenizer_call(
-                    texts,
-                    truncation=False,
+            chunk_size = 128
+            for i in range(0, len(texts), chunk_size):
+                chunk = texts[i : i + chunk_size]
+
+                batch_tokens = self.tokenizer(
+                    chunk,
                     padding=False,
-                    add_special_tokens=False,
-                    return_attention_mask=False,
-                )
-            else:
-                raise AttributeError("Tokenizer is not callable")
-        except (TypeError, AttributeError):
-            # Fallback for tokenizers without __call__
-            encoded = {"input_ids": []}
-            for text in texts:
-                try:
-                    # Use getattr to safely access encode method
-                    encode_method = getattr(self.tokenizer, "encode", None)
-                    if encode_method is not None:
-                        tokens = encode_method(
-                            text,
-                            add_special_tokens=False,
-                        )
-                        encoded["input_ids"].append(tokens)
-                    else:
-                        encoded["input_ids"].append([])
-                except (AttributeError, TypeError):
-                    # Last resort: empty token list
-                    encoded["input_ids"].append([])
+                    truncation=True,
+                    max_length=self.sequence_length,
+                    return_tensors=None,
+                )  # type: ignore
 
-        # Concatenate all sequences with EOS tokens
-        for input_ids in encoded["input_ids"]:
-            result.extend(input_ids)
-            # Safely get EOS token ID
-            eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
-            if eos_token_id is not None:
-                result.append(eos_token_id)
+                for tokens in batch_tokens["input_ids"]:
+                    if tokens:
+                        all_tokens.extend(tokens)
+                        if tokens[-1] != self.tokenizer.eos_token_id:  # type: ignore
+                            all_tokens.append(self.tokenizer.eos_token_id)  # type: ignore
 
-        return result
+            return all_tokens
+
+        executor = self.get_executor()
+        return await asyncio.get_event_loop().run_in_executor(executor, _tokenize_batch)
 
     def __iter__(self):
         """Reset buffers and prepare for iteration"""
@@ -693,10 +622,6 @@ class R2DatasetLoader(DatasetLoader):
     def __next__(self):
         """Get next batch, exactly matching DatasetLoader's logic"""
         batch = []
-
-        # Add null checks for comparison operators
-        if self.sequence_length is None or self.batch_size is None:
-            raise StopIteration
 
         while len(self.padded_buffer) >= self.sequence_length:
             # Extract sequence_length tokens
@@ -719,37 +644,21 @@ class R2DatasetLoader(DatasetLoader):
             raise StopIteration
         raise StopIteration
 
-    async def _read_parquet_table(self, shard_key: str, start_row: int) -> list[str]:
-        """Read and return rows from a parquet file."""
-        loop = asyncio.get_event_loop()
+    def _read_parquet_table(self, fs, path):
+        """
+        Helper method to read parquet data.
 
-        # Add null checks for comparison operators
-        if self.batch_size is None or self.sequence_length is None:
-            return []
+        Args:
+            fs: Filesystem instance
+            path (str): Path to parquet file
 
-        def _read_chunk() -> list[str]:
-            shard_path = self._get_shard_path(shard_key)
-            table = pq.read_table(
-                shard_path,
-                filesystem=self.fs,
-                columns=["text"],
-            )
-
-            # Validate start_row and batch_size before comparisons
-            total_rows = len(table)
-            if start_row >= total_rows:
-                return []
-
-            # Calculate actual batch size with null check
-            batch_size = self.batch_size if self.batch_size is not None else 1
-            end_row = min(start_row + batch_size, total_rows)
-
-            chunk_table = table.slice(start_row, end_row - start_row)
-            df = chunk_table.to_pandas()
-
-            return df["text"].tolist()
-
-        return await loop.run_in_executor(self.get_executor(), _read_chunk)
+        Returns:
+            pyarrow.Table: Table containing text data
+        """
+        with fs.open(path, "rb") as f:
+            pf = pq.ParquetFile(f)
+            table = pf.read(columns=["text"])
+        return table
 
     def __del__(self):
         """Cleanup resources"""

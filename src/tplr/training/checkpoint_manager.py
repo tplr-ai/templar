@@ -137,7 +137,7 @@ class CheckpointManager:
         scheduler: torch.optim.lr_scheduler.LRScheduler,
         current_window: int,
         device: str,
-        init_version: Optional[str] = None,
+        init_version: str | None = None,
     ) -> tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
         """
         Loads the latest checkpoint. No catchup or step simulation happens here.

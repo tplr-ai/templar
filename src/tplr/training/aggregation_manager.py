@@ -473,7 +473,7 @@ class AggregationManager:
         time_min: datetime | None = None,
         time_max: datetime | None = None,
         **kwargs,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Check for gradient in local storage"""
         try:
             local_path = self.file_manager.get_local_storage_path(

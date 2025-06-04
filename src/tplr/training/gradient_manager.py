@@ -55,7 +55,7 @@ class GradientManager:
         torch.save(save_data, temp_file_path)
         return temp_file_path
 
-    async def deserialize_gradient(self, file_path: str) -> Tuple[dict, int]:
+    async def deserialize_gradient(self, file_path: str) -> tuple[dict, int]:
         """Deserialize gradient from file path"""
         loaded_data = torch.load(
             file_path, map_location=self.device, weights_only=False

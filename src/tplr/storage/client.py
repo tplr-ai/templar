@@ -219,7 +219,7 @@ class StorageClient:
             tplr.logger.error(f"Error deleting {key}: {e}")
             return False
 
-    async def list_objects(self, prefix: str, bucket: Bucket) -> List[str]:
+    async def list_objects(self, prefix: str, bucket: Bucket) -> list[str]:
         """List objects with given prefix."""
         try:
             s3_client = await self._get_s3_client(bucket)

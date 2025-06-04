@@ -113,10 +113,6 @@ class Comms(ChainManager):
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
         self.gather_semaphore = asyncio.Semaphore(15)
 
-        # keep a reference to the *whole* ckpt that was loaded once, so
-        # miners / validators can consult keys such as `start_window`.
-        self.last_checkpoint_data: dict[str, Any] | None = None
-
     async def _get_s3_client(self, bucket: Bucket):
         """
         Returns a persistent s3_client for the given bucket credentials.
@@ -341,7 +337,7 @@ class Comms(ChainManager):
                 if file_path:
                     async with aiofiles.open(file_path, "r") as f:
                         data = await f.read()
-                        data_bytes = json.dumps(json.loads(data)).encode("utf-8")
+                        data_bytes = data.encode("utf-8")
                 else:
                     raise ValueError(f"file_path required for JSON file: {key}")
 
@@ -1422,8 +1418,6 @@ class Comms(ChainManager):
                 f"checkpoint_sync_window={checkpoint_sync_window}, "
                 f"local_current_window={current_window}"
             )
-
-            self.last_checkpoint_data = checkpoint_data
 
             return True, checkpoint_sync_window, optimizer, scheduler
 

@@ -61,7 +61,7 @@ class AggregationManager:
     async def gather_gradients(
         self,
         my_uid: int,
-        uids: List[int],
+        uids: list[int],
         window: int,
         timeout: int,
         device: str,

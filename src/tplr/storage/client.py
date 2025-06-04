@@ -300,7 +300,7 @@ class StorageClient:
             tplr.logger.error(f"Error downloading range {start}-{end} for {key}: {e}")
             return None
 
-    async def multipart_upload(self, key: str, file_path: str, bucket: Bucket) -> bool:
+    async def multipart_upload(self, key: str, file_path: str, bucket: Bucket) -> bool | None:
         """Uploads a large file to S3 using asynchronous multipart upload."""
         upload_id = None
         MAX_RETRIES = 3

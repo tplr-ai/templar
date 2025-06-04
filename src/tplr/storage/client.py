@@ -87,8 +87,8 @@ class StorageClient:
         key: str,
         bucket: Bucket,
         timeout: int = 15,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
     ) -> Optional[bytes]:
         """Download object from S3 using asynchronous streaming."""
         import uuid

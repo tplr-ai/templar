@@ -583,7 +583,7 @@ class Comms(ChainManager):
         """Set current window and propagate to managers"""
         self._current_window = value
 
-    def get_current_window(self) -> Optional[int]:
+    def get_current_window(self) -> int | None:
         """Get current window for peer manager"""
         return self.current_window
 

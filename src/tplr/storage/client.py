@@ -255,7 +255,7 @@ class StorageClient:
             tplr.logger.error(f"Error listing objects with prefix {prefix}: {e}")
             return []
 
-    async def get_object_size(self, key: str, bucket: Bucket) -> Optional[int]:
+    async def get_object_size(self, key: str, bucket: Bucket) -> int | None:
         """Get the size of an S3 object without downloading it using HEAD request."""
         try:
             s3_client = await self._get_s3_client(bucket)

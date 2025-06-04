@@ -392,8 +392,8 @@ class AggregationManager:
         window: int,
         timeout: int,
         local: bool = True,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
         **kwargs,
     ) -> Optional[tuple]:
         """Get gradient from a specific UID - returns tuple (state_dict, global_step)"""

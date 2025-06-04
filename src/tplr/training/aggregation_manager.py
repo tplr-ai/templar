@@ -70,7 +70,7 @@ class AggregationManager:
         time_min: datetime | None = None,
         time_max: datetime | None = None,
         stale_retention: int = 10,
-    ) -> Optional[SimpleNamespace]:
+    ) -> SimpleNamespace | None:
         """
         Gather gradients from multiple UIDs for a specific window.
         Equivalent to the original gather method with proper aggregation logic.

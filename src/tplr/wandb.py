@@ -12,13 +12,14 @@
 # OF CONTRACT, TORT OR OTHERWISE,
 import os
 import wandb
+from typing import Any
 from wandb.sdk.wandb_run import Run
 from . import __version__
 from .logging import logger
 
 
 def initialize_wandb(
-    run_prefix: str, uid: str, config: any, group: str, job_type: str
+    run_prefix: str, uid: str, config: Any, group: str, job_type: str
 ) -> Run:
     """Initialize WandB run with version tracking for unified workspace management."""
     wandb_dir = os.path.join(os.getcwd(), "wandb")
@@ -56,7 +57,6 @@ def initialize_wandb(
         tags=[f"v{__version__}"],
         settings=wandb.Settings(
             init_timeout=300,
-            _disable_stats=True,
         ),
     )
 

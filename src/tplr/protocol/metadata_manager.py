@@ -18,7 +18,7 @@
 import asyncio
 import json
 import re
-from typing import Optional, Tuple, List
+from typing import Optional
 
 import aiofiles
 import torch
@@ -131,7 +131,7 @@ class MetadataManager:
 
     async def post_peer_list(
         self,
-        peers: List[int],
+        peers: list[int],
         first_effective_window: int,
         sync_window: int,
         weights: torch.Tensor,
@@ -177,7 +177,7 @@ class MetadataManager:
 
     async def get_peer_list(
         self, fetch_previous: bool = False
-    ) -> Optional[Tuple[List[int], int]]:
+    ) -> tuple[list[int], int] | None:
         """Get peer list from validator bucket"""
         tplr.logger.info(
             f"Looking for a {'previous' if fetch_previous else 'current'} peer list on a validator bucket"
@@ -270,7 +270,7 @@ class MetadataManager:
                 tplr.logger.error(f"Error fetching peer list: {e}")
                 await asyncio.sleep(10)
 
-    async def get_debug_dict(self, window: int) -> Optional[dict]:
+    async def get_debug_dict(self, window: int) -> dict | None:
         """
         Get debug dictionary from validator bucket for a specific window.
 
@@ -325,9 +325,14 @@ class MetadataManager:
 
     async def _get_highest_stake_validator_bucket(
         self,
-    ) -> Tuple[Optional[Bucket], Optional[int]]:
+    ) -> tuple[Bucket, int] | tuple[None, None]:
         """Get the bucket for the validator with highest stake."""
         try:
+            # Check if metagraph is available
+            if self.chain_manager.metagraph is None:
+                tplr.logger.warning("Metagraph is not available")
+                return None, None
+
             # Get validator with highest stake
             validator_uid = self.chain_manager.metagraph.S.argmax().item()
             tplr.logger.debug(f"Found validator with highest stake: {validator_uid}")
@@ -377,9 +382,3 @@ class MetadataManager:
         except Exception as e:
             tplr.logger.error(f"Error posting debug dict: {e}")
             return False
-
-    # TODO: Add metadata versioning and migration
-    # TODO: Add metadata integrity verification
-    # TODO: Add metadata caching mechanisms
-    # TODO: Add metadata compression for large datasets
-    # TODO: Add metadata backup and recovery

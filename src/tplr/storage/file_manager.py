@@ -18,7 +18,6 @@
 import os
 import time
 import uuid
-from typing import Optional
 
 import tplr
 
@@ -29,7 +28,7 @@ LOCAL_TMP_DIR = "/tmp/local_store"
 class FileManager:
     """Manages local file operations and cleanup"""
 
-    def __init__(self, base_temp_dir: str, uid: Optional[str] = None):
+    def __init__(self, base_temp_dir: str, uid: int | None = None):
         """Initialize with base temporary directory"""
         self.base_temp_dir = base_temp_dir
         self.uid = uid
@@ -38,7 +37,7 @@ class FileManager:
         os.makedirs(self.base_temp_dir, exist_ok=True)
 
         # Create uid-specific temp directory if uid provided
-        if self.uid:
+        if self.uid is not None:
             self.uid_temp_dir = os.path.join(self.base_temp_dir, f"templar_{self.uid}")
             os.makedirs(self.uid_temp_dir, exist_ok=True)
         else:
@@ -72,6 +71,7 @@ class FileManager:
             if not os.path.exists(dir_path):
                 return True
 
+            # TODO: Handle permission errors and edge cases more robustly
             for root, dirs, files in os.walk(dir_path, topdown=False):
                 for name in files:
                     os.remove(os.path.join(root, name))
@@ -93,7 +93,8 @@ class FileManager:
 
         min_allowed_window = current_window - stale_retention
         for wdir in os.listdir(user_dir):
-            if wdir.isdigit():
+            # Handle both positive and negative window numbers
+            try:
                 w = int(wdir)
                 if w < min_allowed_window:
                     old_path = os.path.join(user_dir, wdir)
@@ -104,6 +105,9 @@ class FileManager:
                         tplr.logger.debug(
                             f"Error removing stale directory {old_path}: {e}"
                         )
+            except ValueError:
+                # Skip directories that aren't numeric
+                continue
 
     async def cleanup_temp_files(self, max_age_hours: int = 24) -> None:
         """Clean up temporary files older than max_age_hours"""

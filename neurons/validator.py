@@ -210,7 +210,6 @@ class Validator:
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
             key_prefix="model",
             config=self.config,
             netuid=self.config.netuid,
@@ -1297,7 +1296,6 @@ class Validator:
                     window=self.sync_window,
                     key="gradient",
                     local=False,
-                    stale_retention=10,
                     time_max=time_max,
                     time_min=time_min,
                 )
@@ -2377,34 +2375,14 @@ class Validator:
                 self.global_step % self.hparams.checkpoint_frequency == 0
                 and self.global_step != 0
             ):
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Creating checkpoint at global_step {self.global_step}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                checkpoint_data = {
-                    "model_state_dict": {
-                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                    },
-                    "optimizer_state_dict": {
-                        k: v.cpu().clone() if torch.is_tensor(v) else v
-                        for k, v in self.optimizer.state_dict().items()
-                    },
-                    "scheduler_state_dict": self.scheduler.state_dict(),
-                    "start_window": self.start_window,
-                    "current_window": self.current_window,
-                    "sync_window": self.sync_window,
-                }
-                asyncio.create_task(
-                    self.comms.put(
-                        state_dict=checkpoint_data,
-                        uid=str(self.uid),
-                        window=self.sync_window,
-                        key="checkpoint",
-                        global_step=self.global_step,
-                        local=False,
-                    )
+                await self.comms.save_checkpoint(
+                    self.model,
+                    self.optimizer,
+                    self.scheduler,
+                    self.global_step,
+                    self.current_window,
+                    self.start_window,
+                    self.sync_window,
                 )
 
             # 18. Log profiling summary every 10 windows
@@ -2571,7 +2549,6 @@ class Validator:
             window=self.sync_window - 1,
             key="debug",
             local=False,
-            stale_retention=10,
         )
 
         # Check if we got a valid result

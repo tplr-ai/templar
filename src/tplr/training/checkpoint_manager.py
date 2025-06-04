@@ -18,7 +18,7 @@
 import re
 import torch
 import pickle
-from typing import Optional, Tuple, Any, Dict
+from typing import Any
 import asyncio
 import bittensor as bt
 
@@ -37,7 +37,7 @@ class CheckpointManager:
         storage_client: StorageClient,
         file_manager: FileManager,
         bucket: Bucket,
-        uid: str,
+        uid: int,
         metagraph=None,  # Add metagraph for validator lookup
         commitments=None,  # Add commitments for peer buckets
     ):
@@ -48,7 +48,7 @@ class CheckpointManager:
         self.uid = uid
         self.metagraph = metagraph
         self.commitments = commitments or {}
-        self.last_checkpoint_data: Optional[Dict[str, Any]] = None
+        self.last_checkpoint_data: dict[str, Any] | None = None
 
     def _move_to_cpu(self, obj):
         """Recursively move tensors to CPU, handling nested structures"""
@@ -65,11 +65,11 @@ class CheckpointManager:
         self,
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
-        scheduler: torch.optim.lr_scheduler._LRScheduler,
-        momentum: Dict[str, Any],
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
         global_step: int,
         current_window: int,
         start_window: int,
+        sync_window: int,
     ) -> bool:
         """Save checkpoint to R2 storage."""
         temp_file = None
@@ -86,16 +86,14 @@ class CheckpointManager:
                 },
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
-                "momentum": self._move_to_cpu(
-                    momentum
-                ),  # Use helper method for nested structures
                 "start_window": start_window,
                 "current_window": current_window,
                 "global_step": global_step,
+                "sync_window": sync_window,
             }
 
             # Move optimizer state to CPU
-            for param_id, param_state in checkpoint_data["optimizer_state_dict"][
+            for _, param_state in checkpoint_data["optimizer_state_dict"][
                 "state"
             ].items():
                 for key, value in param_state.items():
@@ -112,7 +110,7 @@ class CheckpointManager:
                 checkpoint_bytes = f.read()
 
             # Generate filename
-            uid_part = self.uid.replace("/", "_").replace("\\", "_")
+            uid_part = str(self.uid).replace("/", "_").replace("\\", "_")
             filename = f"checkpoint-{current_window}-{uid_part}-v{__version__}.pt"
 
             # Upload to R2
@@ -134,12 +132,12 @@ class CheckpointManager:
 
     async def load_checkpoint(
         self,
-        model,
-        optimizer,
-        scheduler,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
         current_window: int,
         device: str,
-        init_version: Optional[str] = None,
+        init_version: str | None = None,
     ) -> tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
         """
         Loads the latest checkpoint. No catchup or step simulation happens here.
@@ -152,7 +150,7 @@ class CheckpointManager:
             tplr.logger.info("No valid checkpoints found")
             return False, 0, optimizer, scheduler
 
-        checkpoint_data, checkpoint_window = result
+        checkpoint_data, _ = result
         try:
             # 1) Load model state - this might fail if keys don't match
             model.load_state_dict(
@@ -188,11 +186,9 @@ class CheckpointManager:
             # 3) Load scheduler state
             scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
 
-            checkpoint_start_window = checkpoint_data.get("start_window")
-            checkpoint_current_window = checkpoint_data.get("current_window")
-            checkpoint_sync_window = checkpoint_data.get(
-                "current_window"
-            )  # Use current_window as sync_window
+            checkpoint_start_window = checkpoint_data.get("start_window", 0)
+            checkpoint_current_window = checkpoint_data.get("current_window", 0)
+            checkpoint_sync_window = checkpoint_data.get("sync_window", 0)
 
             if checkpoint_start_window is None or checkpoint_current_window is None:
                 tplr.logger.warning(
@@ -222,7 +218,7 @@ class CheckpointManager:
             tplr.logger.error(f"Failed to load checkpoint: {e}")
             return False, 0, optimizer, scheduler
 
-    async def get_latest_checkpoint(self, version: str) -> Optional[Tuple[dict, int]]:
+    async def get_latest_checkpoint(self, version: str) -> tuple[dict, int] | None:
         """
         Sequentially check:
         1. Whether the highest-staked validator has a checkpoint.
@@ -260,8 +256,8 @@ class CheckpointManager:
             return None
 
     async def _get_bucket_checkpoint(
-        self, bucket: Bucket, uid: str, version: str
-    ) -> Optional[Tuple[dict, int]]:
+        self, bucket: Bucket, uid: int, version: str
+    ) -> tuple[dict, int] | None:
         """
         Helper to get checkpoint from a specific bucket.
         Enhanced with proper pagination support and error handling.
@@ -387,7 +383,7 @@ class CheckpointManager:
 
     async def _get_highest_stake_validator_bucket(
         self,
-    ) -> Tuple[Optional[Bucket], Optional[int]]:
+    ) -> tuple[Bucket, int] | tuple[None, None]:
         """Get the bucket for the validator with highest stake."""
         if not self.metagraph:
             tplr.logger.warning("No metagraph available for validator lookup")

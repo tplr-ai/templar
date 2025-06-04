@@ -190,7 +190,6 @@ class Miner:
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
             key_prefix="model",
             config=self.config,
             netuid=self.config.netuid,
@@ -450,7 +449,6 @@ class Miner:
                 key="gradient",
                 global_step=self.global_step,
                 local=False,
-                stale_retention=100,
             )
             tplr.logger.info("Put task completed!")
 
@@ -519,11 +517,9 @@ class Miner:
                 my_uid=self.uid,
                 uids=self.comms.peers,
                 window=step_window,
-                key="gradient",
                 timeout=45,
                 device="cpu",
                 local=False,
-                stale_retention=100,
                 totalks=self.totalks,
                 time_min=time_min,
                 time_max=time_max,
@@ -762,27 +758,6 @@ class Miner:
             if self.current_window % 10 == 0:
                 tplr.logger.info("Logging performance profiling summary...")
                 tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
-
-            # Save checkpoint logic
-            if self.global_step % self.hparams.checkpoint_frequency == 0:
-                tplr.logger.info(
-                    f"Creating checkpoint at global_step {self.global_step}"
-                )
-
-                # asyncio checkpoint saving task
-                asyncio.create_task(
-                    self.comms.save_checkpoint(
-                        model=self.model,
-                        optimizer=self.optimizer,
-                        scheduler=self.scheduler,
-                        momentum=self.momentum,
-                        global_step=self.global_step,
-                        current_window=self.current_window,
-                        start_window=self.start_window,
-                    )
-                )
-            else:
-                tplr.logger.info("Skipping checkpoint save this round")
 
             await self.cleanup_window()
 

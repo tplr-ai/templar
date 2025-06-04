@@ -34,6 +34,8 @@ dependencies = [
     "uvloop>=0.21.0",
     "openskill>=6.0.2",
     "dnspython>=2.7.0",
+    "types-aiobotocore-s3>=2.22.0",
+    "types-aiobotocore>=2.22.0",
 ]
 
 [project.optional-dependencies]
@@ -90,4 +92,9 @@ exclude = [
     "eggs",
     ".eggs",
     "influxdb_data"
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.401",
 ]

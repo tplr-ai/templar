@@ -19,7 +19,7 @@
 
 import asyncio
 import torch
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional, List, Dict
 import os
@@ -61,16 +61,17 @@ class AggregationManager:
     async def gather_gradients(
         self,
         my_uid: int,
-        uids: List[int],
+        uids: list[int],
         window: int,
         timeout: int,
         device: str,
         totalks: dict,
         local: bool = True,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
         stale_retention: int = 10,
-    ) -> Optional[SimpleNamespace]:
+        show_progress: bool = False,
+    ) -> SimpleNamespace | None:
         """
         Gather gradients from multiple UIDs for a specific window.
         Equivalent to the original gather method with proper aggregation logic.
@@ -91,13 +92,14 @@ class AggregationManager:
         async with self.gather_semaphore:
             batch_tasks = [
                 self._get_with_retry(
-                    str(uid),
+                    uid,
                     window,
                     "gradient",
                     timeout,
                     local=local,
                     time_min=time_min,
                     time_max=time_max,
+                    show_progress=show_progress,
                 )
                 for uid in uids
             ]
@@ -169,8 +171,8 @@ class AggregationManager:
         return result
 
     def _aggregate_gradients(
-        self, raw_responses: List[dict], device: str, totalks: dict, metrics: dict
-    ) -> Optional[dict]:
+        self, raw_responses: list[dict], device: str, totalks: dict, metrics: dict
+    ) -> dict | None:
         """
         Aggregate gradients from raw responses with validation.
         """
@@ -201,23 +203,6 @@ class AggregationManager:
                         f"UID {uid} state_dict_resp keys: {list(state_dict_resp.keys()) if isinstance(state_dict_resp, dict) else type(state_dict_resp)}"
                     )
                     tplr.logger.debug(f"UID {uid} global_step_resp: {global_step_resp}")
-
-                    # Extract the actual state_dict from the nested structure
-                    if (
-                        isinstance(state_dict_resp, dict)
-                        and "state_dict" in state_dict_resp
-                    ):
-                        actual_state_dict = state_dict_resp["state_dict"]
-                        actual_global_step = state_dict_resp["global_step"]
-                        tplr.logger.debug(
-                            f"UID {uid} actual state_dict keys: {list(actual_state_dict.keys()) if isinstance(actual_state_dict, dict) else type(actual_state_dict)}"
-                        )
-                    else:
-                        tplr.logger.warning(
-                            f"Unexpected state_dict structure from UID {uid}"
-                        )
-                        skipped_uids.append(uid)
-                        continue
                 else:
                     # Fallback for unexpected format
                     tplr.logger.warning(
@@ -227,32 +212,32 @@ class AggregationManager:
                     continue
 
                 tplr.logger.debug(
-                    f"Received state dict and global step {actual_global_step} from UID {uid}"
+                    f"Received state dict and global step {state_dict_resp} from UID {uid}"
                 )
             except (TypeError, ValueError, AttributeError) as e:
                 tplr.logger.debug(f"Invalid response from UID {uid}: {e}")
                 skipped_uids.append(uid)
                 continue
 
-            if actual_state_dict is None:
+            if state_dict_resp is None:
                 tplr.logger.debug(f"Empty state dict from UID {uid}")
                 skipped_uids.append(uid)
                 continue
 
             # Validate the gradient
             if not self._validate_gradient_response(
-                actual_state_dict, uid, device, totalks
+                state_dict_resp, uid, device, totalks
             ):
                 skipped_uids.append(uid)
                 continue
 
             # Process valid tensors
             self._process_gradient_tensors(
-                actual_state_dict, uid, device, aggregated_state_dict, metrics
+                state_dict_resp, uid, device, aggregated_state_dict, metrics
             )
 
             valid_uids.append(uid)
-            global_steps.append(actual_global_step)
+            global_steps.append(global_step_resp)
 
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")
@@ -270,6 +255,13 @@ class AggregationManager:
         self, state_dict_resp: dict, uid: int, device: str, totalks: dict
     ) -> bool:
         """Validate gradient response from a UID."""
+        # Check if state_dict_resp is actually a dictionary
+        if not isinstance(state_dict_resp, dict):
+            tplr.logger.warning(
+                f"Invalid state_dict type from UID {uid}: expected dict, got {type(state_dict_resp)}"
+            )
+            return False
+
         for param_name, tensor in state_dict_resp.items():
             if param_name.endswith("idxs"):
                 base_name = param_name[:-4]
@@ -347,7 +339,9 @@ class AggregationManager:
             f"Processed gradient tensors for UID {uid}, final aggregated keys: {list(aggregated_state_dict.keys())}"
         )
 
-    def _move_to_device_recursive(self, obj, device: str):
+    def _move_to_device_recursive(
+        self, obj: torch.Tensor | dict | list | tuple, device: str
+    ) -> torch.Tensor | dict | list | tuple:
         """Recursively move all tensors in a nested structure to the target device."""
         if isinstance(obj, torch.Tensor):
             return obj.to(device)
@@ -364,15 +358,16 @@ class AggregationManager:
 
     async def _get_with_retry(
         self,
-        uid: str,
+        uid: int,
         window: int,
         key: str,
         timeout: int,
         local: bool = True,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
+        show_progress: bool = False,
         **kwargs,
-    ) -> Optional[tuple]:  # Change return type to tuple
+    ) -> tuple | None:
         """Get gradient with retry logic - returns tuple (state_dict, global_step)"""
         max_retries = 3
         base_delay = 1.0
@@ -381,18 +376,16 @@ class AggregationManager:
             try:
                 # Use the chain manager to get the gradient
                 result = await self._get_gradient_from_uid(
-                    uid,
+                    str(uid),
                     window,
                     timeout,
                     local=local,
                     time_min=time_min,
                     time_max=time_max,
+                    show_progress=show_progress,
                     **kwargs,
                 )
                 if result is not None:
-                    # result is now a tuple (state_dict, global_step)
-                    state_dict, global_step = result
-
                     return result
 
             except Exception as e:
@@ -412,10 +405,11 @@ class AggregationManager:
         window: int,
         timeout: int,
         local: bool = True,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
+        show_progress: bool = False,
         **kwargs,
-    ) -> Optional[tuple]:
+    ) -> tuple | None:
         """Get gradient from a specific UID - returns tuple (state_dict, global_step)"""
         try:
             # Get the bucket for this UID through the peer manager's chain manager
@@ -449,6 +443,7 @@ class AggregationManager:
                 timeout=timeout,
                 time_min=time_min,
                 time_max=time_max,
+                show_progress=show_progress,
             )
 
             if data is None:
@@ -490,10 +485,10 @@ class AggregationManager:
         self,
         uid: str,
         window: int,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
         **kwargs,
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Check for gradient in local storage"""
         try:
             local_path = self.file_manager.get_local_storage_path(
@@ -505,8 +500,6 @@ class AggregationManager:
 
             # Check file timestamp against time constraints
             if time_min is not None or time_max is not None:
-                from datetime import datetime, timezone
-
                 file_mtime = datetime.fromtimestamp(
                     os.path.getmtime(local_path), tz=timezone.utc
                 )
@@ -542,7 +535,7 @@ class AggregationManager:
 
     async def load_aggregation(
         self, window: int, chunk_size: int = 50_000_000
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """
         Load aggregated gradients for a specified window from the aggregation server.
 
@@ -630,46 +623,3 @@ class AggregationManager:
                 f"Error loading aggregation file for window {window}: {e}"
             )
             return None
-
-    async def gather_window_batch(
-        self,
-        batch_windows: List[int],
-        uid: str,
-        peers: List[int],
-        device: str,
-        totalks: dict,
-        global_step: int,
-    ) -> Dict[int, SimpleNamespace]:
-        """Gather gradients for multiple windows in parallel."""
-        try:
-            gather_tasks = [
-                self.gather_gradients(
-                    my_uid=int(uid),
-                    uids=peers,
-                    window=w,
-                    timeout=30,
-                    device=device,
-                    totalks=totalks,
-                    local=False,
-                )
-                for w in batch_windows
-            ]
-
-            # Wait for all gather tasks to complete
-            batch_results = await asyncio.gather(*gather_tasks, return_exceptions=True)
-
-            # Filter out exceptions and create window->result mapping
-            result_dict = {w: None for w in batch_windows}  # Initialize with None
-            for window, result in zip(batch_windows, batch_results):
-                if not isinstance(result, Exception) and result is not None:
-                    result_dict[window] = result
-
-            return result_dict
-
-        except Exception as e:
-            tplr.logger.error(
-                f"Failed to gather window batch {batch_windows}: {str(e)}"
-            )
-            return {
-                w: None for w in batch_windows
-            }  # Return dict with None values on failure

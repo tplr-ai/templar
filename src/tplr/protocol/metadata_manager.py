@@ -325,7 +325,7 @@ class MetadataManager:
 
     async def _get_highest_stake_validator_bucket(
         self,
-    ) -> Tuple[Optional[Bucket], Optional[int]]:
+    ) -> tuple[Bucket, int] | tuple[None, None]:
         """Get the bucket for the validator with highest stake."""
         try:
             # Get validator with highest stake

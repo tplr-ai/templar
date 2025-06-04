@@ -131,7 +131,7 @@ class MetadataManager:
 
     async def post_peer_list(
         self,
-        peers: List[int],
+        peers: list[int],
         first_effective_window: int,
         sync_window: int,
         weights: torch.Tensor,

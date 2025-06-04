@@ -473,7 +473,7 @@ class Comms(ChainManager):
     # Aggregation methods
     async def load_aggregation(
         self, window: int, chunk_size: int = 50_000_000
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Load aggregation - delegate to aggregation manager"""
         return await self.aggregation_manager.load_aggregation(window, chunk_size)
 

@@ -373,8 +373,8 @@ class Comms(ChainManager):
         totalks: dict,
         local: bool = True,
         stale_retention: int = 10,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
     ) -> Optional[SimpleNamespace]:
         """Gather operation - delegate to aggregation manager"""
         return await self.aggregation_manager.gather_gradients(

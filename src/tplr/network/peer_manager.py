@@ -277,7 +277,7 @@ class PeerManager:
         """Check if a specific peer is in the active set"""
         return uid in self.active_peers
 
-    async def _is_peer_active(self, uid: int, check_windows: List[int]) -> bool:
+    async def _is_peer_active(self, uid: int, check_windows: list[int]) -> bool:
         """Check if peer is active in any of the given windows"""
         try:
             if (

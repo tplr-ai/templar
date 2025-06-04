@@ -29,7 +29,7 @@ LOCAL_TMP_DIR = "/tmp/local_store"
 class FileManager:
     """Manages local file operations and cleanup"""
 
-    def __init__(self, base_temp_dir: str, uid: Optional[str] = None):
+    def __init__(self, base_temp_dir: str, uid: int | None = None):
         """Initialize with base temporary directory"""
         self.base_temp_dir = base_temp_dir
         self.uid = uid

@@ -292,8 +292,8 @@ class Comms(ChainManager):
         key: str,
         local: bool = True,
         stale_retention: int = 10,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
     ) -> Optional[Tuple[dict, int]]:
         """GET operation."""
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"

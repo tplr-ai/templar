@@ -67,8 +67,8 @@ class AggregationManager:
         device: str,
         totalks: dict,
         local: bool = True,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
         stale_retention: int = 10,
     ) -> Optional[SimpleNamespace]:
         """

@@ -373,9 +373,6 @@ class AggregationManager:
                     **kwargs,
                 )
                 if result is not None:
-                    # result is now a tuple (state_dict, global_step)
-                    state_dict, global_step = result
-
                     return result
 
             except Exception as e:

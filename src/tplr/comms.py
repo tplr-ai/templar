@@ -294,7 +294,7 @@ class Comms(ChainManager):
         stale_retention: int = 10,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
-    ) -> Optional[Tuple[dict, int]]:
+    ) -> tuple[dict, int] | None:
         """GET operation."""
         filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         tplr.logger.debug(f"GET {filename} -->")

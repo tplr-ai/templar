@@ -470,8 +470,8 @@ class AggregationManager:
         self,
         uid: str,
         window: int,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
         **kwargs,
     ) -> Optional[dict]:
         """Check for gradient in local storage"""

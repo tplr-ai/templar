@@ -511,7 +511,11 @@ class Comms(ChainManager):
         )
 
     def check_compressed_indices(
-        self, param_name: str, idxs, totalk: int, allowed_topk: int | None = None
+        self,
+        param_name: str,
+        idxs: Any,
+        totalk: int,
+        allowed_topk: int | None = None,
     ) -> None:
         """Check compressed indices - delegate to gradient manager"""
         self.gradient_manager.check_compressed_indices(

@@ -352,8 +352,8 @@ class AggregationManager:
         key: str,
         timeout: int,
         local: bool = True,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
         **kwargs,
     ) -> Optional[tuple]:  # Change return type to tuple
         """Get gradient with retry logic - returns tuple (state_dict, global_step)"""

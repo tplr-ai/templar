@@ -189,8 +189,8 @@ class PeerManager:
             return set()
 
     def weighted_random_sample_no_replacement(
-        self, candidates: List[int], weights: List[int], k: int
-    ) -> List[int]:
+        self, candidates: list[int], weights: list[int], k: int
+    ) -> list[int]:
         """
         Perform a weighted random sample (without replacement) of size k.
         candidates: list of items (uids).

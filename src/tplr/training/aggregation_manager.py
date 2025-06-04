@@ -169,8 +169,8 @@ class AggregationManager:
         return result
 
     def _aggregate_gradients(
-        self, raw_responses: List[dict], device: str, totalks: dict, metrics: dict
-    ) -> Optional[dict]:
+        self, raw_responses: list[dict], device: str, totalks: dict, metrics: dict
+    ) -> dict | None:
         """
         Aggregate gradients from raw responses with validation.
         """

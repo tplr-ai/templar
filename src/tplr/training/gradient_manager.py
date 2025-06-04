@@ -16,10 +16,8 @@
 # DEALINGS IN THE SOFTWARE.
 
 
+from typing import Any
 import torch
-from torch.optim import SGD
-from torch.optim.lr_scheduler import SequentialLR
-from transformers.models.llama import LlamaForCausalLM
 
 import tplr
 from ..storage.client import StorageClient
@@ -106,94 +104,84 @@ class GradientManager:
             return False
 
     def check_compressed_indices(
-        self, param_name: str, idxs, totalk: int, allowed_topk: int | None = None
+        self,
+        param_name: str,
+        idxs: Any,
+        totalk: int,
+        allowed_topk: int | None = None,
     ) -> None:
-        """
-        Validates that the compressed indices for a given parameter meet the conditions:
-          1. If indices are provided as a flat list/tensor, the length must equal min(self.hparams.topk_compression, totalk).
-          2. If the indices are multi-dimensional (typically when compressed per row),
-             then the size of the last dimension must equal min(self.hparams.topk_compression, totalk).
-          3. Every index must be in the valid range [0, totalk-1].
-        """
-        if allowed_topk is None:
-            allowed_topk = self.hparams.topk_compression
-        # Ensure allowed_topk is an int and provide a default if None
-        if allowed_topk is None:
-            allowed_topk = totalk  # Default to full size if no compression specified
-        # Only allow up to the maximum available columns.
-        allowed_topk = min(int(allowed_topk), totalk)
+        allowed_topk = (
+            min(self.hparams.topk_compression, totalk)
+            if allowed_topk is None
+            else min(allowed_topk, totalk)
+        )
 
-        def validate_list(indices):
-            # Expected flat list length must equal allowed_topk.
-            if len(indices) != allowed_topk:
+        def _bounds_check(t: torch.Tensor):
+            """fast min/max bounds check"""
+            if t.numel() == 0:
+                raise ValueError(f"[{param_name}] empty index list")
+            if t.min().item() < 0 or t.max().item() >= totalk:
+                bad = t[(t < 0) | (t >= totalk)][0].item()
                 raise ValueError(
-                    f"[{param_name}] Invalid number of indices: got {len(indices)} but expected {allowed_topk}"
+                    f"[{param_name}] Index {bad} out of bounds (totalk = {totalk})"
                 )
-            for idx in indices:
-                try:
-                    idx_int = int(idx)
-                except Exception as e:
-                    raise ValueError(
-                        f"[{param_name}] Failed to convert index {idx} to int: {e}"
-                    )
-                if idx_int < 0 or idx_int >= totalk:
-                    raise ValueError(
-                        f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
-                    )
 
-        # If idxs is a tensor:
-        if torch.is_tensor(idxs):
-            if idxs.ndim == 1:
-                # Flat tensor: expect exactly allowed_topk elements.
-                if idxs.size(0) != allowed_topk:
-                    raise ValueError(
-                        f"[{param_name}] Invalid number of indices: got {idxs.size(0)} but expected {allowed_topk}"
-                    )
-                for idx in idxs.tolist():
-                    if not (0 <= int(idx) < totalk):
-                        raise ValueError(
-                            f"[{param_name}] Index {int(idx)} out of bounds (totalk = {totalk})"
-                        )
-            else:
-                # Multi-dimensional: check that the last dimension equals allowed_topk.
-                if idxs.size(-1) != allowed_topk:
-                    raise ValueError(
-                        f"[{param_name}] Last dimension size invalid: got {idxs.size(-1)} but expected {allowed_topk}"
-                    )
-                # Check all indices in the tensor.
-                for idx in idxs.flatten().tolist():
-                    if not (0 <= int(idx) < totalk):
-                        raise ValueError(
-                            f"[{param_name}] Index {int(idx)} out of bounds (totalk = {totalk})"
-                        )
-        # If idxs is a list or tuple
-        elif isinstance(idxs, (list, tuple)):
-            if idxs and isinstance(idxs[0], (list, tuple)):
-                # Nested structure: check each sub-list.
-                for sublist in idxs:
-                    validate_list(sublist)
-            else:
-                # Flat list.
-                validate_list(list(idxs))
-        else:
-            # Single value provided.
-            try:
-                idx_int = int(idxs)
-            except Exception as e:
-                raise ValueError(
-                    f"[{param_name}] Failed to convert index {idxs} to int: {e}"
-                )
-            if idx_int < 0 or idx_int >= totalk:
+        if isinstance(idxs, (int, float)) or (torch.is_tensor(idxs) and idxs.ndim == 0):
+            idx_int = int(idxs)
+            if not (0 <= idx_int < totalk):
                 raise ValueError(
                     f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
                 )
+            return  # single scalar is always length-independent
+
+        if (
+            isinstance(idxs, (list, tuple))
+            and idxs
+            and isinstance(idxs[0], (list, tuple))
+        ):
+            for sub in idxs:
+                if len(sub) != allowed_topk:
+                    raise ValueError(
+                        f"[{param_name}] Invalid number of indices: "
+                        f"got {len(sub)} but expected {allowed_topk}"
+                    )
+                # vectorised bounds check on each sub-tensor
+                t = torch.as_tensor(sub, dtype=torch.long)
+                _bounds_check(t)
+            return
+
+        try:
+            t = (
+                idxs
+                if torch.is_tensor(idxs)
+                else torch.as_tensor(idxs, dtype=torch.long)
+            )
+        except Exception as e:
+            raise ValueError(f"[{param_name}] Failed to convert indices to tensor: {e}")
+
+        if t.ndim == 1:  # flat
+            if t.numel() != allowed_topk:
+                raise ValueError(
+                    f"[{param_name}] Invalid number of indices: "
+                    f"{t.numel()} but expected {allowed_topk}"
+                )
+            _bounds_check(t)
+            return
+
+        # n-D compressed: last dim must be allowed_topk
+        if t.size(-1) != allowed_topk:
+            raise ValueError(
+                f"[{param_name}] Last dimension size invalid: "
+                f"{t.size(-1)} but expected {allowed_topk}"
+            )
+        _bounds_check(t)
 
     async def apply_gradients_to_model(
         self,
         gather_result,
-        model: LlamaForCausalLM,
-        optimizer: SGD,
-        scheduler: SequentialLR,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        scheduler: torch.optim.lr_scheduler.LRScheduler,
         transformer: TransformDCT,
         compressor: CompressDCT,
         device: str,
@@ -278,11 +266,6 @@ class GradientManager:
                 f"Failed to apply gradients for window {window}: {str(e)}"
             )
             return False, global_step
-
-    def normalize_gradient_values(self, vals: torch.Tensor) -> torch.Tensor:
-        """Normalize gradient values to prevent overflow"""
-        # TODO: Implement gradient value normalization
-        return vals
 
     def validate_gradient_tensor(self, tensor: torch.Tensor, param_name: str) -> bool:
         """Validate individual gradient tensor"""

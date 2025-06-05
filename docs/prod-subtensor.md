@@ -5,9 +5,10 @@ Ansible-based deployment for production-ready Subtensor infrastructure with moni
 ## Overview
 
 The prod-subtensor deployment provides:
+
 - Dockerized Subtensor nodes with automatic health checks
 - Nginx reverse proxy with SSL termination
-- Prometheus monitoring with Grafana dashboards
+- Prometheus monitoring with AlertManager and Discord integration
 - Automated backup and maintenance scripts
 - Security hardening with fail2ban
 
@@ -43,14 +44,14 @@ subtensor_memory_limit: "8g"
 subtensor_cpu_limit: "4"
 
 # Monitoring
-enable_monitoring: true
-grafana_admin_password: "{{ vault_grafana_password }}"
+monitoring_enabled: true
+discord_webhook_enabled: true
 ```
 
 ### Secrets (`group_vars/vault.yml`)
 
 ```yaml
-vault_grafana_password: "secure_password"
+vault_discord_webhook_url: "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
 vault_ssl_email: "admin@example.com"
 vault_backup_s3_key: "backup_access_key"
 ```
@@ -92,14 +93,18 @@ docker-compose -f /opt/subtensor/docker-compose.yml logs -f
 ### Health Monitoring
 
 ```bash
-# Run health check
+# Run Subtensor health check
 /opt/subtensor/scripts/health_check.sh
 
-# Check node sync status
-curl -s http://localhost:9944/health | jq .
+# Run monitoring health check (includes Discord alerts)
+/opt/monitoring/subtensor_health_check.sh
 
-# View metrics
-curl -s http://localhost:9615/metrics
+# Check individual node status
+curl -s -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"system_health","params":[],"id":1}' http://localhost:9933
+
+# View Prometheus metrics
+curl -s http://localhost:9090/metrics
+curl -s http://localhost:8080/metrics  # Custom Subtensor metrics
 ```
 
 ## Backup and Maintenance
@@ -107,6 +112,7 @@ curl -s http://localhost:9615/metrics
 ### Automated Backups
 
 Backups run daily via cron:
+
 ```bash
 # View backup status
 /opt/subtensor/scripts/backup.sh --status
@@ -130,28 +136,49 @@ Backups run daily via cron:
 
 ## Monitoring and Alerting
 
-### Grafana Dashboards
+### Monitoring Stack
 
-Access Grafana at `https://your-domain/grafana`
-- Subtensor Node Dashboard
-- System Metrics Dashboard
-- Network Health Dashboard
+Access monitoring interfaces:
+
+- **Prometheus**: `http://your-server:9090` - Metrics collection and querying
+- **AlertManager**: `http://your-server:9093` - Alert routing and management
+- **Node Exporter**: `http://your-server:9100` - System metrics
+- **Custom Metrics**: `http://your-server:8080` - Subtensor-specific metrics
+
+### Discord Integration
+
+Real-time alerts sent to Discord with severity levels:
+
+- 🚨 **Critical**: All nodes down, major service failures
+- ⚠️ **Warning**: Individual node issues, high resource usage
+- ℹ️ **Info**: Service restarts, maintenance notifications
+
+```bash
+# Test Discord webhook manually
+python3 /opt/monitoring/discord_notifier.py \
+  --webhook-url "YOUR_WEBHOOK_URL" \
+  --severity "info" \
+  --title "Test Alert" \
+  --message "Testing Discord integration"
+```
 
 ### Key Metrics
 
-- Block height and sync status
-- Memory and CPU usage
-- Network connections
-- Transaction pool size
-- Database size and performance
+- **Blockchain Metrics**: Best block height, finalized blocks, sync status
+- **Network Metrics**: Peer count, RPC latency, network connectivity
+- **System Metrics**: Memory/CPU usage, disk space, network I/O
+- **Custom Metrics**: Subtensor-specific blockchain metrics
 
 ### Alerting Rules
 
 Configured alerts for:
-- Node offline/unhealthy
-- High memory usage (>80%)
-- Sync lag (>10 blocks behind)
-- SSL certificate expiration
+
+- All Subtensor nodes offline (Critical)
+- Individual node failures (Warning)
+- High block lag (>10 blocks behind)
+- Low peer count (<5 peers)
+- High resource usage (CPU/Memory/Disk >80%)
+- RPC endpoint failures
 
 ## Security Features
 
@@ -178,6 +205,7 @@ Configured alerts for:
 ### Common Issues
 
 1. **Node not syncing**
+
    ```bash
    # Check network connectivity
    curl -s https://entrypoint-finney.opentensor.ai:443
@@ -187,6 +215,7 @@ Configured alerts for:
    ```
 
 2. **High memory usage**
+
    ```bash
    # Check database size
    du -sh /opt/subtensor/data/
@@ -196,6 +225,7 @@ Configured alerts for:
    ```
 
 3. **SSL certificate issues**
+
    ```bash
    # Renew certificates
    certbot renew --dry-run
@@ -204,12 +234,43 @@ Configured alerts for:
    openssl x509 -in /etc/letsencrypt/live/domain/cert.pem -text -noout
    ```
 
+4. **Discord alerts not working**
+
+   ```bash
+   # Check Discord webhook URL in vault
+   ansible-vault view group_vars/vault.yml
+   
+   # Test webhook manually
+   python3 /opt/monitoring/discord_notifier.py \
+     --webhook-url "YOUR_URL" --severity info --title "Test" --message "Test"
+   
+   # Check monitoring service status
+   systemctl status subtensor-monitor
+   journalctl -u subtensor-monitor -n 50
+   ```
+
+5. **Monitoring services not starting**
+
+   ```bash
+   # Check all monitoring services
+   systemctl status prometheus alertmanager node-exporter subtensor-monitor
+   
+   # Validate Prometheus configuration
+   /usr/local/bin/promtool check config /opt/monitoring/config/prometheus.yml
+   
+   # Check monitoring logs
+   journalctl -u subtensor-monitor -f
+   ```
+
 ### Log Locations
 
-- Subtensor logs: `/var/log/subtensor/`
-- Nginx logs: `/var/log/nginx/`
-- System logs: `journalctl -u subtensor`
-- Docker logs: `docker-compose logs`
+- **Subtensor logs**: `journalctl -u subtensor -f`
+- **Monitoring logs**: `journalctl -u subtensor-monitor -f`
+- **Prometheus logs**: `journalctl -u prometheus -f`
+- **AlertManager logs**: `journalctl -u alertmanager -f`
+- **Nginx logs**: `/var/log/nginx/access.log` and `/var/log/nginx/error.log`
+- **Docker logs**: `docker-compose -f /opt/subtensor/docker-compose.yml logs -f`
+- **Health check logs**: `/opt/monitoring/health_check.log`
 
 ## Performance Tuning
 
@@ -250,6 +311,7 @@ ansible-playbook -i inventory playbook.yml --tags subtensor --check
 ### Staging Environment
 
 Copy production configuration for staging:
+
 ```bash
 cp group_vars/all.yml group_vars/staging.yml
 # Modify staging-specific settings
@@ -259,5 +321,6 @@ ansible-playbook -i staging_inventory playbook.yml -e @group_vars/staging.yml
 ## Related Documentation
 
 - [Validator Setup](validator.md) - For validator-specific configuration
-- [Monitoring Setup](../telemetry/README.md) - For detailed monitoring configuration
+- [Monitoring Details](../scripts/prod-subtensor/MONITORING.md) - Complete monitoring and Discord setup guide
+- [Telemetry System](../telemetry/README.md) - General telemetry and metrics collection
 - [Local Development](localnet.md) - For local testing setup

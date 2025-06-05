@@ -1,0 +1,52 @@
+---
+- name: Download Prometheus
+  get_url:
+    url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+    dest: "/tmp/prometheus-{{ prometheus_version }}.tar.gz"
+    mode: '0644'
+
+- name: Extract Prometheus
+  unarchive:
+    src: "/tmp/prometheus-{{ prometheus_version }}.tar.gz"
+    dest: /tmp
+    remote_src: yes
+    creates: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64"
+
+- name: Install Prometheus binaries
+  copy:
+    src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    mode: '0755'
+    owner: root
+    group: root
+    remote_src: yes
+  loop:
+    - prometheus
+    - promtool
+
+- name: Create Prometheus configuration
+  template:
+    src: prometheus.yml.j2
+    dest: "{{ monitoring_config_path }}/prometheus.yml"
+    owner: monitoring
+    group: monitoring
+    mode: '0644'
+  notify: restart prometheus
+
+- name: Create Prometheus rules
+  template:
+    src: subtensor_rules.yml.j2
+    dest: "{{ monitoring_config_path }}/subtensor_rules.yml"
+    owner: monitoring
+    group: monitoring
+    mode: '0644'
+  notify: restart prometheus
+
+- name: Create Prometheus systemd service
+  template:
+    src: prometheus.service.j2
+    dest: /etc/systemd/system/prometheus.service
+    mode: '0644'
+  notify: 
+    - reload systemd
+    - restart prometheus

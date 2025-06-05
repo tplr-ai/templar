@@ -1,0 +1,130 @@
+groups:
+  - name: subtensor.rules
+    interval: 30s
+    rules:
+      # Service availability alerts
+      - alert: SubtensorNodeDown
+        expr: up{job="subtensor-nodes"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Subtensor node {% raw %}{{ $labels.instance }}{% endraw %} is down"
+          description: "Subtensor node {% raw %}{{ $labels.instance }}{% endraw %} has been down for more than 1 minute."
+
+      - alert: SubtensorAllNodesDown
+        expr: count(up{job="subtensor-nodes"} == 1) == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "All Subtensor nodes are down"
+          description: "All Subtensor nodes are unreachable. Service is completely unavailable."
+
+      # Blockchain sync alerts
+      - alert: SubtensorHighBlockLag
+        expr: (subtensor_best_block_number - subtensor_finalized_block_number) > {{ subtensor_monitoring.block_lag_threshold }}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Subtensor node {% raw %}{{ $labels.instance }}{% endraw %} has high block lag"
+          description: "Block lag is {% raw %}{{ $value }}{% endraw %} blocks, which exceeds threshold of {{ subtensor_monitoring.block_lag_threshold }}."
+
+      - alert: SubtensorSyncStalled
+        expr: increase(subtensor_best_block_number[10m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Subtensor node {% raw %}{{ $labels.instance }}{% endraw %} sync has stalled"
+          description: "No new blocks have been processed in the last 10 minutes."
+
+      # Peer connectivity alerts
+      - alert: SubtensorLowPeerCount
+        expr: subtensor_peer_count < {{ subtensor_monitoring.peer_count_threshold }}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Subtensor node {% raw %}{{ $labels.instance }}{% endraw %} has low peer count"
+          description: "Peer count is {% raw %}{{ $value }}{% endraw %}, which is below threshold of {{ subtensor_monitoring.peer_count_threshold }}."
+
+      - alert: SubtensorNoPeers
+        expr: subtensor_peer_count == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Subtensor node {% raw %}{{ $labels.instance }}{% endraw %} has no peers"
+          description: "Node is isolated with 0 peers connected."
+
+      # Resource usage alerts
+      - alert: SubtensorHighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100 > {{ subtensor_monitoring.memory_usage_threshold }}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage on {% raw %}{{ $labels.instance }}{% endraw %}"
+          description: "Memory usage is {% raw %}{{ $value | humanizePercentage }}{% endraw %}, which exceeds {{ subtensor_monitoring.memory_usage_threshold }}%."
+
+      - alert: SubtensorHighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > {{ subtensor_monitoring.cpu_usage_threshold }}
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage on {% raw %}{{ $labels.instance }}{% endraw %}"
+          description: "CPU usage is {% raw %}{{ $value | humanizePercentage }}{% endraw %}, which exceeds {{ subtensor_monitoring.cpu_usage_threshold }}%."
+
+      - alert: SubtensorHighDiskUsage
+        expr: (node_filesystem_size_bytes{fstype!="tmpfs"} - node_filesystem_avail_bytes{fstype!="tmpfs"}) / node_filesystem_size_bytes{fstype!="tmpfs"} * 100 > {{ subtensor_monitoring.disk_usage_threshold }}
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High disk usage on {% raw %}{{ $labels.instance }}{% endraw %}"
+          description: "Disk usage is {% raw %}{{ $value | humanizePercentage }}{% endraw %} on {% raw %}{{ $labels.mountpoint }}{% endraw %}."
+
+      # NGINX/Load balancer alerts
+      - alert: NginxDown
+        expr: up{job="nginx"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NGINX load balancer is down"
+          description: "NGINX load balancer has been down for more than 1 minute."
+
+      # Service restart detection
+      - alert: SubtensorServiceRestarted
+        expr: changes(node_boot_time_seconds[10m]) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "Subtensor service restarted on {% raw %}{{ $labels.instance }}{% endraw %}"
+          description: "System has been restarted. Please verify all services are running correctly."
+
+  - name: custom.rules
+    interval: 15s
+    rules:
+      # Custom metrics from subtensor monitor
+      - alert: SubtensorRPCLatencyHigh
+        expr: subtensor_rpc_latency_seconds > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High RPC latency on {% raw %}{{ $labels.instance }}{% endraw %}"
+          description: "RPC latency is {% raw %}{{ $value }}{% endraw %}s, which may indicate performance issues."
+
+      - alert: SubtensorRPCErrorRate
+        expr: rate(subtensor_rpc_errors_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High RPC error rate on {% raw %}{{ $labels.instance }}{% endraw %}"
+          description: "RPC error rate is {% raw %}{{ $value | humanizePercentage }}{% endraw %}, indicating potential issues."

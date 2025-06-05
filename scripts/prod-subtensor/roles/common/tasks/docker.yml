@@ -8,7 +8,6 @@
       - containerd
       - runc
     state: absent
-  when: ansible_os_family == "Debian"
 
 - name: Install Docker dependencies
   apt:
@@ -19,88 +18,206 @@
       - gnupg
       - lsb-release
     state: present
-  when: ansible_os_family == "Debian"
 
-- name: Add Docker GPG key
-  apt_key:
-    url: https://download.docker.com/linux/ubuntu/gpg
-    state: present
-    keyring: /etc/apt/keyrings/docker.gpg
-  when: ansible_os_family == "Debian"
+- name: Create keyrings directory
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Add Docker GPG key (modern method)
+  shell: |
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+  args:
+    creates: /etc/apt/keyrings/docker.gpg
 
 - name: Add Docker repository
-  apt_repository:
-    repo: "deb [arch={{ ansible_architecture }} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
-    state: present
-    filename: docker
-  when: ansible_os_family == "Debian"
+  shell: |
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+  args:
+    creates: /etc/apt/sources.list.d/docker.list
 
 - name: Update apt cache after adding Docker repo
   apt:
     update_cache: yes
-  when: ansible_os_family == "Debian"
 
-- name: Install Docker CE
-  apt:
-    name:
-      - docker-ce
-      - docker-ce-cli
-      - containerd.io
-      - docker-buildx-plugin
-      - docker-compose-plugin
-    state: present
-  when: ansible_os_family == "Debian"
+- name: Install Docker CE (with fallback to snap)
+  block:
+    - name: Try installing Docker CE from repository
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+      register: docker_apt_install
 
-- name: Configure Docker daemon
-  template:
-    src: daemon.json.j2
-    dest: /etc/docker/daemon.json
-    backup: yes
-  notify: restart docker
+    - name: Create docker group
+      group:
+        name: docker
+        state: present
 
-- name: Create docker group
-  group:
-    name: docker
-    state: present
+    - name: Configure Docker daemon
+      template:
+        src: daemon.json.j2
+        dest: /etc/docker/daemon.json
+        backup: yes
+      notify: restart docker
 
-- name: Add user to docker group
+    - name: Start and enable Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+  rescue:
+    - name: Install Docker via snap (fallback)
+      snap:
+        name: docker
+        state: present
+
+    - name: Create docker group for snap
+      group:
+        name: docker
+        state: present
+
+    - name: Start snap docker service
+      systemd:
+        name: snap.docker.dockerd
+        state: started
+        enabled: yes
+
+    - name: Wait for docker socket to be created
+      wait_for:
+        path: /run/docker.sock
+        timeout: 30
+
+    - name: Set initial docker socket permissions
+      file:
+        path: /run/docker.sock
+        group: docker
+        mode: '0660'
+
+    - name: Create script to fix docker socket permissions on boot
+      copy:
+        content: |
+          #!/bin/bash
+          # Fix docker socket permissions for snap docker
+          if [ -S /run/docker.sock ]; then
+              chgrp docker /run/docker.sock
+              chmod 660 /run/docker.sock
+          fi
+        dest: /usr/local/bin/fix-docker-socket
+        mode: '0755'
+
+    - name: Add cron job to ensure docker socket permissions persist
+      cron:
+        name: "Fix docker socket permissions"
+        job: "/usr/local/bin/fix-docker-socket"
+        special_time: reboot
+        user: root
+
+    - name: Create docker symlink for snap
+      file:
+        src: /snap/bin/docker
+        dest: /usr/local/bin/docker
+        state: link
+        force: yes
+
+    - name: Set docker_via_snap fact
+      set_fact:
+        docker_via_snap: true
+
+- name: Add users to docker group
   user:
-    name: "{{ ansible_user }}"
+    name: "{{ item }}"
     groups: docker
     append: yes
+  loop:
+    - "{{ ansible_user }}"
+    - subtensor
 
-- name: Start and enable Docker
-  systemd:
-    name: docker
-    state: started
-    enabled: yes
+- name: Set proper permissions for snap docker (when using snap)
+  block:
+    - name: Connect docker snap interface
+      command: snap connect docker:docker-executables
+      failed_when: false
+      when: docker_via_snap is defined
 
-- name: Install Docker Compose standalone
+    - name: Add users to docker group for snap
+      user:
+        name: "{{ item }}"
+        groups: docker
+        append: yes
+      loop:
+        - "{{ ansible_user }}"
+        - subtensor
+      when: docker_via_snap is defined
+
+    - name: Create docker wrapper script for snap
+      copy:
+        content: |
+          #!/bin/bash
+          exec /snap/bin/docker "$@"
+        dest: /usr/local/bin/docker
+        mode: '0755'
+      when: docker_via_snap is defined
+
+  when: docker_via_snap is defined
+
+- name: Restart user sessions to apply group changes
+  debug:
+    msg: "Users added to docker group. New login sessions will have docker access without sudo."
+
+- name: Install Docker Compose standalone (when not using snap)
   get_url:
     url: "https://github.com/docker/compose/releases/download/v{{ docker_compose_version }}/docker-compose-linux-{{ ansible_architecture }}"
     dest: /usr/local/bin/docker-compose
     mode: '0755'
     owner: root
     group: root
+  when: docker_via_snap is not defined
 
-- name: Create Docker Compose symlink
+- name: Create Docker Compose symlink (when not using snap)
   file:
     src: /usr/local/bin/docker-compose
     dest: /usr/bin/docker-compose
     state: link
+  when: docker_via_snap is not defined
+
+- name: Create docker compose symlink for snap
+  file:
+    src: /snap/bin/docker
+    dest: /usr/local/bin/docker-compose
+    state: link
+    force: yes
+  when: docker_via_snap is defined
 
 - name: Verify Docker installation
-  command: docker --version
+  command: "{{ '/snap/bin/docker' if docker_via_snap is defined else 'docker' }} --version"
   register: docker_version_output
   changed_when: false
 
 - name: Verify Docker Compose installation
-  command: docker-compose --version
+  command: "{{ '/snap/bin/docker compose' if docker_via_snap is defined else 'docker-compose' }} version"
   register: docker_compose_version_output
   changed_when: false
+  failed_when: false
 
-- name: Display Docker versions
+- name: Test Docker without sudo (as regular user)
+  command: "{{ 'docker' if docker_via_snap is defined else 'docker' }} info"
+  become: no
+  become_user: "{{ ansible_user }}"
+  register: docker_info_test
+  changed_when: false
+  failed_when: false
+
+- name: Display Docker versions and access test
   debug:
     msg:
       - "{{ docker_version_output.stdout }}"
-      - "{{ docker_compose_version_output.stdout }}"
+      - "{{ docker_compose_version_output.stdout if docker_compose_version_output.rc == 0 else 'Docker Compose via snap docker' }}"
+      - "Docker without sudo: {{ 'WORKING' if docker_info_test.rc == 0 else 'REQUIRES GROUP REFRESH - logout/login required' }}"

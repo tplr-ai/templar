@@ -27,9 +27,10 @@ docker_daemon_options:
   storage-driver: "overlay2"
 
 # Subtensor configuration
-subtensor_version: "latest"
+subtensor_version: "v3.0.0-amd64"
 subtensor_image: "ghcr.io/opentensor/subtensor"
 subtensor_network: "finney"  # finney for mainnet, test for testnet
+# Chainspec is downloaded from official repo: https://raw.githubusercontent.com/opentensor/subtensor/refs/heads/main/chainspecs/raw_spec_finney.json
 subtensor_chain_spec: "raw_spec_finney.json"
 subtensor_bootnodes: "/dns/bootnode.finney.chain.opentensor.ai/tcp/30333/ws/p2p/12D3KooWRwbMb85RWnT8DSXSYMWQtuDwh4LJzndoRrTDotTR5gDC"
 
@@ -44,10 +45,10 @@ subtensor_p2p_port_start: 30333
 subtensor_rpc_port_start: 9933
 subtensor_ws_port_start: 9944
 
-# Resource limits
+# Resource limits (matching official docker-compose)
 subtensor_cpu_limit: "4"
-subtensor_memory_limit: "8g"
-subtensor_memory_swap_limit: "16g"
+subtensor_memory_limit: "40g"
+subtensor_memory_swap_limit: "80g"
 
 # NGINX configuration
 nginx_enabled: true
@@ -95,3 +96,19 @@ backup_storage_path: "{{ subtensor_base_path }}/backups"
 enable_auto_updates: false
 maintenance_window: "02:00-04:00"
 restart_policy: "unless-stopped"
+
+# Monitoring configuration
+monitoring_enabled: true
+discord_webhook_enabled: true
+discord_channel_name: "subtensor-alerts"
+discord_username: "Subtensor Monitor"
+
+# Monitoring thresholds
+subtensor_monitoring:
+  rpc_health_check_interval: "30s"
+  sync_status_check_interval: "60s"
+  peer_count_threshold: 5
+  block_lag_threshold: 10
+  memory_usage_threshold: 80
+  cpu_usage_threshold: 80
+  disk_usage_threshold: 85

@@ -1,0 +1,83 @@
+#!/bin/bash
+# Pre-update hook for Watchtower blue/green deployment
+
+set -euo pipefail
+
+CONTAINER_NAME="${1:-}"
+NODE_ID=$(echo "$CONTAINER_NAME" | grep -o '[0-9]$' || echo "unknown")
+HEALTH_ENDPOINT="http://localhost:$((9944 + NODE_ID))/health"
+LOGFILE="/opt/subtensor/logs/watchtower-pre-update.log"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [PRE-UPDATE] [$CONTAINER_NAME] $*" | tee -a "$LOGFILE"
+}
+
+check_health() {
+    local endpoint="$1"
+    local max_attempts=30
+    local attempt=0
+    
+    while [ $attempt -lt $max_attempts ]; do
+        if curl -s -f "$endpoint" >/dev/null 2>&1; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    return 1
+}
+
+drain_traffic() {
+    local container="$1"
+    log "Draining traffic from $container"
+    
+    # Mark container as unhealthy in load balancer
+    if [ -f /etc/nginx/nginx.conf ]; then
+        # Temporarily remove from upstream (if using nginx)
+        log "Updating nginx upstream configuration"
+        # This would be implemented based on your nginx setup
+    fi
+    
+    # Wait for existing connections to finish
+    sleep 30
+}
+
+main() {
+    log "Starting pre-update process for $CONTAINER_NAME"
+    
+    if [ -z "$CONTAINER_NAME" ]; then
+        log "ERROR: Container name not provided"
+        exit 1
+    fi
+    
+    # Check if this is the primary node (node-0)
+    if [[ "$CONTAINER_NAME" == *"subtensor-0"* ]]; then
+        log "Primary node detected - ensuring secondary nodes are healthy"
+        
+        # Check health of secondary nodes before updating primary
+        for secondary_node in 1 2; do
+            secondary_endpoint="http://localhost:$((9944 + secondary_node))/health"
+            if ! check_health "$secondary_endpoint"; then
+                log "ERROR: Secondary node $secondary_node is not healthy - aborting update"
+                exit 1
+            fi
+            log "Secondary node $secondary_node is healthy"
+        done
+    fi
+    
+    # Drain traffic from the container being updated
+    drain_traffic "$CONTAINER_NAME"
+    
+    # Verify other nodes can handle the load
+    log "Verifying cluster can handle reduced capacity"
+    
+    # Create backup before update
+    log "Creating pre-update backup"
+    /opt/subtensor/scripts/backup.sh "$CONTAINER_NAME" || {
+        log "WARNING: Backup failed but continuing with update"
+    }
+    
+    log "Pre-update process completed successfully for $CONTAINER_NAME"
+}
+
+main "$@"

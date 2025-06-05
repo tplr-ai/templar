@@ -44,6 +44,15 @@
     reload: yes
   loop: "{{ kernel_params | default([]) }}"
 
+- name: Enable memory overcommit for virtual memory usage
+  sysctl:
+    name: vm.overcommit_memory
+    value: "1"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-subtensor.conf
+    reload: yes
+  when: subtensor_enable_overcommit | default(false)
+
 - name: Enable TCP BBR
   block:
     - name: Add TCP BBR module

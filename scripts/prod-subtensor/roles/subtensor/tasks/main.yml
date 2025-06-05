@@ -19,6 +19,46 @@
     - /opt/subtensor/data/node-0
     - /opt/subtensor/data/node-1
     - /opt/subtensor/data/node-2
+    - /opt/subtensor/chainspecs
+    - /opt/subtensor/scripts
+    - /opt/subtensor/logs
+    - /opt/subtensor/backups
+
+# Note: Chainspec is now downloaded at runtime inside containers
+# This local download serves as backup/validation only
+- name: Download official chainspec (backup)
+  get_url:
+    url: "{{ subtensor_chainspec_url }}"
+    dest: /opt/subtensor/chainspecs/raw_spec_finney.json
+    owner: subtensor
+    group: subtensor
+    mode: '0644'
+  register: chainspec_download
+
+- name: Verify chainspec downloaded successfully
+  stat:
+    path: /opt/subtensor/chainspecs/raw_spec_finney.json
+  register: chainspec_file
+  failed_when: not chainspec_file.stat.exists or chainspec_file.stat.size < 1000
+
+- name: Deploy Watchtower lifecycle scripts
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: subtensor
+    group: subtensor
+    mode: '0755'
+  loop:
+    - { src: 'pre-update.sh.j2', dest: '/opt/subtensor/scripts/pre-update.sh' }
+    - { src: 'post-update.sh.j2', dest: '/opt/subtensor/scripts/post-update.sh' }
+
+- name: Deploy Watchtower management script
+  copy:
+    src: watchtower-manage.sh
+    dest: /opt/subtensor/scripts/watchtower-manage.sh
+    owner: subtensor
+    group: subtensor
+    mode: '0755'
 
 - name: Generate Docker Compose
   template:
@@ -57,3 +97,4 @@
     - 9933
     - 9934
     - 9935
+  when: not ansible_check_mode

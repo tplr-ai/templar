@@ -24,7 +24,7 @@ subtensor_node_types:
 
 subtensor_env_vars:
   RUST_BACKTRACE: "1"
-  CARGO_HOME: "/var/cache/cargo"
+  CARGO_HOME: "/var/www/node-subtensor/.cargo"
 
 subtensor_health_check:
   interval: "30s"
@@ -39,3 +39,15 @@ subtensor_backup_volumes:
 
 subtensor_monitoring_enabled: true
 subtensor_metrics_port: 9615
+subtensor_metrics_port_start: 9615
+
+# Chainspec configuration
+subtensor_chainspec_url: "https://raw.githubusercontent.com/opentensor/subtensor/refs/heads/main/chainspecs/raw_spec_finney.json"
+
+# Enhanced peer connectivity settings
+subtensor_sync_mode: "warp"
+subtensor_max_parallel_downloads: 8
+subtensor_in_peers: 50
+subtensor_out_peers: 50
+subtensor_log_level: "info"
+subtensor_bootnodes: "/dns/bootnode.finney.chain.opentensor.ai/tcp/30333/ws/p2p/12D3KooWRwbMb85RWnT8DSXSYMWQtuDwh4LJzndoRrTDotTR5gDC"

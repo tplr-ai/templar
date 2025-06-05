@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+
+import time
+import json
+import requests
+import logging
+from typing import Dict, List, Optional
+from prometheus_client import start_http_server, Gauge, Counter, Histogram
+from discord_webhook import DiscordWebhook, DiscordEmbed
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+subtensor_best_block = Gauge('subtensor_best_block_number', 'Best block number', ['instance'])
+subtensor_finalized_block = Gauge('subtensor_finalized_block_number', 'Finalized block number', ['instance'])
+subtensor_peer_count = Gauge('subtensor_peer_count', 'Number of connected peers', ['instance'])
+subtensor_rpc_latency = Histogram('subtensor_rpc_latency_seconds', 'RPC request latency', ['instance', 'method'])
+subtensor_rpc_errors = Counter('subtensor_rpc_errors_total', 'RPC errors', ['instance', 'method', 'error'])
+subtensor_sync_status = Gauge('subtensor_sync_status', 'Sync status (1=syncing, 0=synced)', ['instance'])
+
+class SubtensorMonitor:
+    def __init__(self):
+        self.nodes = [
+{% for i in range(subtensor_replicas | int) %}
+            {
+                'name': 'node-{{ i }}',
+                'rpc_url': 'http://localhost:{{ subtensor_rpc_port_start | int + i }}',
+                'instance': 'localhost:{{ subtensor_rpc_port_start | int + i }}'
+            },
+{% endfor %}
+        ]
+        self.discord_webhook_url = "{{ discord_webhook_url }}"
+        self.check_interval = {{ subtensor_monitoring.rpc_health_check_interval.rstrip('s') }}
+        
+    def rpc_call(self, url: str, method: str, params: List = None) -> Optional[Dict]:
+        if params is None:
+            params = []
+            
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": 1
+        }
+        
+        start_time = time.time()
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=10,
+                headers={'Content-Type': 'application/json'}
+            )
+            latency = time.time() - start_time
+            
+            instance = url.split('//')[1]
+            subtensor_rpc_latency.labels(instance=instance, method=method).observe(latency)
+            
+            response.raise_for_status()
+            result = response.json()
+            
+            if 'error' in result:
+                subtensor_rpc_errors.labels(
+                    instance=instance, 
+                    method=method, 
+                    error=result['error'].get('code', 'unknown')
+                ).inc()
+                logger.error(f"RPC error on {instance}: {result['error']}")
+                return None
+                
+            return result.get('result')
+            
+        except Exception as e:
+            instance = url.split('//')[1]
+            subtensor_rpc_errors.labels(
+                instance=instance, 
+                method=method, 
+                error=type(e).__name__
+            ).inc()
+            logger.error(f"RPC call failed for {instance}: {e}")
+            return None
+    
+    def check_node_health(self, node: Dict) -> Dict:
+        health_data = {
+            'name': node['name'],
+            'instance': node['instance'],
+            'status': 'unknown',
+            'best_block': None,
+            'finalized_block': None,
+            'peer_count': None,
+            'sync_state': None
+        }
+        
+        try:
+            # Get system health
+            health = self.rpc_call(node['rpc_url'], 'system_health')
+            if health:
+                health_data['status'] = 'healthy' if not health.get('shouldHavePeers', True) or health.get('peers', 0) > 0 else 'unhealthy'
+                health_data['peer_count'] = health.get('peers', 0)
+                subtensor_peer_count.labels(instance=node['instance']).set(health.get('peers', 0))
+            
+            # Get sync state
+            sync_state = self.rpc_call(node['rpc_url'], 'system_syncState')
+            if sync_state:
+                health_data['sync_state'] = sync_state
+                is_syncing = sync_state.get('currentBlock', 0) < sync_state.get('highestBlock', 0)
+                subtensor_sync_status.labels(instance=node['instance']).set(1 if is_syncing else 0)
+            
+            # Get chain info
+            header = self.rpc_call(node['rpc_url'], 'chain_getHeader')
+            if header:
+                best_block = int(header.get('number', '0x0'), 16)
+                health_data['best_block'] = best_block
+                subtensor_best_block.labels(instance=node['instance']).set(best_block)
+            
+            # Get finalized block
+            finalized_hash = self.rpc_call(node['rpc_url'], 'chain_getFinalizedHead')
+            if finalized_hash:
+                finalized_header = self.rpc_call(node['rpc_url'], 'chain_getHeader', [finalized_hash])
+                if finalized_header:
+                    finalized_block = int(finalized_header.get('number', '0x0'), 16)
+                    health_data['finalized_block'] = finalized_block
+                    subtensor_finalized_block.labels(instance=node['instance']).set(finalized_block)
+                    
+        except Exception as e:
+            logger.error(f"Health check failed for {node['name']}: {e}")
+            health_data['status'] = 'error'
+            
+        return health_data
+    
+    def send_discord_alert(self, severity: str, message: str, details: Dict = None):
+        if not self.discord_webhook_url:
+            return
+            
+        try:
+            webhook = DiscordWebhook(url=self.discord_webhook_url, username="{{ discord_username }}")
+            
+            colors = {
+                'critical': 0xFF0000,
+                'warning': 0xFFA500,
+                'info': 0x0099FF
+            }
+            
+            embed = DiscordEmbed(
+                title=f"{severity.upper()}: Subtensor Alert",
+                description=message,
+                color=colors.get(severity, 0x808080)
+            )
+            
+            if details:
+                for key, value in details.items():
+                    embed.add_embed_field(name=key.title(), value=str(value), inline=True)
+                    
+            embed.set_timestamp()
+            webhook.add_embed(embed)
+            
+            response = webhook.execute()
+            if response.status_code == 200:
+                logger.info(f"Discord alert sent: {message}")
+            else:
+                logger.error(f"Failed to send Discord alert: {response.status_code}")
+                
+        except Exception as e:
+            logger.error(f"Discord webhook error: {e}")
+    
+    def monitor_loop(self):
+        logger.info("Starting Subtensor monitor...")
+        last_alert_times = {}
+        
+        while True:
+            try:
+                all_nodes_down = True
+                unhealthy_nodes = []
+                
+                for node in self.nodes:
+                    health = self.check_node_health(node)
+                    
+                    if health['status'] == 'healthy':
+                        all_nodes_down = False
+                    elif health['status'] in ['unhealthy', 'error']:
+                        unhealthy_nodes.append(health)
+                    
+                    # Log health status
+                    logger.info(f"Node {health['name']}: {health['status']} "
+                              f"(peers: {health['peer_count']}, "
+                              f"block: {health['best_block']})")
+                
+                current_time = time.time()
+                if all_nodes_down:
+                    alert_key = "all_nodes_down"
+                    if current_time - last_alert_times.get(alert_key, 0) > 3600:
+                        self.send_discord_alert(
+                            'critical',
+                            '🚨 ALL SUBTENSOR NODES ARE DOWN!',
+                            {'Status': 'All nodes unreachable', 'Time': time.strftime('%Y-%m-%d %H:%M:%S')}
+                        )
+                        last_alert_times[alert_key] = current_time
+                
+                for node_health in unhealthy_nodes:
+                    alert_key = f"node_{node_health['name']}_unhealthy"
+                    if current_time - last_alert_times.get(alert_key, 0) > 1800:
+                        self.send_discord_alert(
+                            'warning',
+                            f"Node {node_health['name']} is {node_health['status']}",
+                            {
+                                'Node': node_health['name'],
+                                'Instance': node_health['instance'],
+                                'Peers': node_health['peer_count'],
+                                'Status': node_health['status']
+                            }
+                        )
+                        last_alert_times[alert_key] = current_time
+                
+                time.sleep(self.check_interval)
+                
+            except KeyboardInterrupt:
+                logger.info("Monitor stopped by user")
+                break
+            except Exception as e:
+                logger.error(f"Monitor loop error: {e}")
+                time.sleep(30)
+
+if __name__ == '__main__':
+    start_http_server(8088)
+    logger.info("Prometheus metrics server started on :8088")
+    monitor = SubtensorMonitor()
+    monitor.monitor_loop()

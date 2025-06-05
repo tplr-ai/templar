@@ -1,0 +1,71 @@
+---
+- name: Wait for Prometheus to start
+  wait_for:
+    port: "{{ prometheus_port }}"
+    host: localhost
+    timeout: 60
+  when: not ansible_check_mode
+
+- name: Wait for AlertManager to start
+  wait_for:
+    port: "{{ alertmanager_port }}"
+    host: localhost
+    timeout: 60
+    delay: 5
+  when: not ansible_check_mode
+  ignore_errors: true
+  register: alertmanager_wait_result
+
+- name: Check AlertManager service status if wait failed
+  command: systemctl status alertmanager
+  register: alertmanager_status
+  when: not ansible_check_mode and alertmanager_wait_result.failed | default(false)
+  ignore_errors: true
+
+- name: Show AlertManager logs if service failed
+  command: journalctl -u alertmanager -n 20 --no-pager
+  register: alertmanager_logs
+  when: not ansible_check_mode and alertmanager_wait_result.failed | default(false)
+  ignore_errors: true
+
+- name: Display AlertManager debug info if failed
+  debug:
+    msg:
+      - "AlertManager failed to start within timeout"
+      - "Service status: {{ alertmanager_status.stdout if alertmanager_status is defined else 'Unknown' }}"
+      - "Recent logs: {{ alertmanager_logs.stdout_lines if alertmanager_logs is defined else 'No logs available' }}"
+  when: not ansible_check_mode and alertmanager_wait_result.failed | default(false)
+
+- name: Wait for Node Exporter to start
+  wait_for:
+    port: "{{ node_exporter_port }}"
+    host: localhost
+    timeout: 60
+  when: not ansible_check_mode
+
+- name: Test Prometheus API
+  uri:
+    url: "http://localhost:{{ prometheus_port }}/api/v1/status/config"
+    method: GET
+    status_code: 200
+  register: prometheus_test
+  when: not ansible_check_mode
+
+- name: Test AlertManager API
+  uri:
+    url: "http://localhost:{{ alertmanager_port }}/-/healthy"
+    method: GET
+    status_code: 200
+  register: alertmanager_test
+  when: not ansible_check_mode
+
+- name: Display monitoring status
+  debug:
+    msg:
+      - "Prometheus: {{ 'Running' if prometheus_test.status == 200 else 'Failed' }}"
+      - "AlertManager: {{ 'Running' if alertmanager_test.status == 200 else 'Failed' }}"
+      - "Monitoring endpoints:"
+      - "  - Prometheus: http://{{ ansible_host }}:{{ prometheus_port }}"
+      - "  - AlertManager: http://{{ ansible_host }}:{{ alertmanager_port }}"
+      - "  - Node Exporter: http://{{ ansible_host }}:{{ node_exporter_port }}"
+  when: not ansible_check_mode

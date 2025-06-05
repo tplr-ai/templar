@@ -20,8 +20,9 @@ import urllib.request
 from typing import Optional, Tuple
 
 import torch
-import tplr
 from transformers.models.llama import LlamaForCausalLM
+
+import tplr
 
 try:
     from huggingface_hub import HfApi, create_repo
@@ -51,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
+        default="cuda:0",
         help="Device to use for model loading",
     )
     parser.add_argument(
@@ -141,8 +142,13 @@ def load_checkpoint(checkpoint_path: str, device: str) -> Tuple[LlamaForCausalLM
         model_state = checkpoint
         metadata = {}
 
-    model.load_state_dict(model_state)
-    model.to(device)  # type: ignore
+    model.load_state_dict(
+        {
+            k: v.to("cpu")
+            for k, v in model_state.items()  # type: ignore
+        }
+    )
+    model.to("cpu")  # type: ignore
 
     tplr.logger.info("Model loaded successfully")
     return model, metadata

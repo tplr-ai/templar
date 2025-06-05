@@ -529,7 +529,7 @@ class Evaluator:
             exit_code, benchmark_runtime = self._run_lm_eval(
                 tasks="mmlu",
                 output_dir=results_dir,
-                model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH},torch_dtype=bfloat16",
+                model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}",
                 batch_size="auto",
                 limit="0.15",
                 num_fewshot=5,

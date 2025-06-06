@@ -1,0 +1,57 @@
+---
+- name: Create subtensor monitoring script
+  template:
+    src: subtensor_monitor.py.j2
+    dest: "{{ monitoring_base_path }}/subtensor_monitor.py"
+    owner: monitoring
+    group: monitoring
+    mode: '0755'
+
+- name: Install system Python packages
+  apt:
+    name:
+      - python3-requests
+      - python3-pip
+      - python3-venv
+    state: present
+
+- name: Create virtual environment for monitoring
+  command: python3 -m venv {{ monitoring_base_path }}/venv
+  args:
+    creates: "{{ monitoring_base_path }}/venv"
+  become_user: monitoring
+
+- name: Install Python dependencies in virtual environment
+  pip:
+    name:
+      - prometheus_client
+      - discord-webhook
+    virtualenv: "{{ monitoring_base_path }}/venv"
+    virtualenv_command: python3 -m venv
+  become_user: monitoring
+
+- name: Create subtensor monitor systemd service
+  template:
+    src: subtensor-monitor.service.j2
+    dest: /etc/systemd/system/subtensor-monitor.service
+    mode: '0644'
+  notify:
+    - reload systemd
+    - restart subtensor-monitor
+
+- name: Create subtensor health check script
+  template:
+    src: health_check.sh.j2
+    dest: "{{ monitoring_base_path }}/subtensor_health_check.sh"
+    owner: monitoring
+    group: monitoring
+    mode: '0755'
+
+
+- name: Create Discord notification script
+  template:
+    src: discord_notifier.py.j2
+    dest: "{{ monitoring_base_path }}/discord_notifier.py"
+    owner: monitoring
+    group: monitoring
+    mode: '0755'

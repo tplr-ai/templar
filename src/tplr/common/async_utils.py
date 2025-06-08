@@ -16,7 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 import asyncio
-from typing import Any, Callable, TypeVar
+from typing import Callable, TypeVar
 
 import tplr
 

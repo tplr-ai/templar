@@ -44,7 +44,7 @@ def process_inactive_peers(validator_instance: "ValidatorCore") -> None:
         
         if windows_inactive > 0:
             # Apply inactivity penalty
-            penalty = validator_instance.hparams.inactivity_slash_rate ** windows_inactive
+            penalty = validator_instance.inactivity_slash_rate ** windows_inactive
             new_score = last_score * penalty
             
             # Update final score
@@ -67,20 +67,19 @@ def process_inactive_peers(validator_instance: "ValidatorCore") -> None:
 
 
 def _reset_peer(validator_instance: "ValidatorCore", inactive_since: int, uid: int) -> bool:
-    """Helper function to reset a peer if inactive too long."""
-    if validator_instance.sync_window - inactive_since > validator_instance.hparams.reset_inactivity_windows:
+    """Check if peer should be fully reset and reset if needed."""
+    if validator_instance.sync_window - inactive_since > validator_instance.reset_inactivity_windows:
         validator_instance.final_scores[uid] = 0.0
         validator_instance.weights[uid] = 0.0
         validator_instance.gradient_scores[uid] = 0.0
         validator_instance.binary_moving_averages[uid] = 0.0
         validator_instance.binary_indicator_scores[uid] = 0.0
         validator_instance.sync_scores[uid] = 0.0
-        
         if uid in validator_instance.openskill_ratings:
             del validator_instance.openskill_ratings[uid]
-        if uid in validator_instance.eval_peers:
-            del validator_instance.eval_peers[uid]
-            
+        if uid in validator_instance.eval_peers_rank_counters:
+            del validator_instance.eval_peers_rank_counters[uid]
+        
         log_with_context(
             "info",
             f"UID {uid} fully reset after extended inactivity",
@@ -105,6 +104,17 @@ def process_sync_evaluations_and_slash(
         sync_eval_results: Results from sync evaluations
     """
     for uid, sync_result in zip(evaluated_peer_uids, sync_eval_results):
+        # Handle None results from failed evaluations
+        if sync_result is None:
+            validator_instance.sync_scores[uid] = 0.1
+            log_with_context(
+                "info",
+                f"UID {uid} failed sync evaluation",
+                sync_window=validator_instance.sync_window,
+                current_window=validator_instance.current_window,
+            )
+            continue
+            
         if sync_result and sync_result.get("success", False):
             sync_score = float(sync_result.get("sync_score", 0.0))
             avg_steps_behind = float(sync_result.get("avg_steps_behind", 0.0))
@@ -113,8 +123,8 @@ def process_sync_evaluations_and_slash(
             validator_instance.sync_scores[uid] = sync_score
             
             # Apply penalty if too far behind
-            if avg_steps_behind > validator_instance.hparams.max_allowed_steps_behind:
-                penalty_factor = validator_instance.hparams.sync_score_slash_rate
+            if avg_steps_behind > validator_instance.max_allowed_steps_behind:
+                penalty_factor = validator_instance.sync_score_slash_rate
                 validator_instance.final_scores[uid] *= penalty_factor
                 
                 log_with_context(
@@ -128,7 +138,7 @@ def process_sync_evaluations_and_slash(
             validator_instance.sync_scores[uid] = 0.1
             
             log_with_context(
-                "warning",
+                "info",
                 f"UID {uid} failed sync evaluation",
                 sync_window=validator_instance.sync_window,
                 current_window=validator_instance.current_window,
@@ -151,7 +161,7 @@ def slash_peers_missing_gradients(
     if not skipped_uids_from_gather:
         return
         
-    penalty_factor = validator_instance.hparams.missing_gradient_slash_rate
+    penalty_factor = validator_instance.missing_gradient_slash_rate
     
     for uid in skipped_uids_from_gather:
         # Apply penalty to final score
@@ -210,17 +220,23 @@ def update_scores_after_evaluation(
     loss_random_after: float
 ) -> None:
     """
-    Calculate and update gradient_scores[eval_uid], binary_indicator_scores[eval_uid], 
-    binary_moving_averages[eval_uid]. Add gradient score to current_window_gradient_scores.
+    Update gradient score, binary indicator, and binary moving average for evaluated peer.
+    Store relative improvements in validator instance for logging.
     
     Args:
         validator_instance: ValidatorCore instance
-        eval_uid: UID being evaluated
+        eval_uid: UID of evaluated peer
         loss_own_before: Loss before applying gradient on UID-specific data
         loss_own_after: Loss after applying gradient on UID-specific data
         loss_random_before: Loss before applying gradient on random data
         loss_random_after: Loss after applying gradient on random data
     """
+    # Initialize or update OpenSkill rating for this peer (like original validator)
+    if eval_uid not in validator_instance.openskill_ratings:
+        validator_instance.openskill_ratings[eval_uid] = validator_instance.openskill_model.rating(
+            name=str(eval_uid)
+        )
+
     # Calculate improvements
     improvement_own = loss_own_before - loss_own_after
     improvement_random = loss_random_before - loss_random_after
@@ -229,20 +245,25 @@ def update_scores_after_evaluation(
     relative_improvement_own = improvement_own / max(loss_own_before, 1e-8)
     relative_improvement_random = improvement_random / max(loss_random_before, 1e-8)
     
-    # Calculate gradient score as average of improvements
-    gradient_score = (improvement_own + improvement_random) / 2.0
+    # Store in validator instance for logging compatibility (these will be overwritten per UID)
+    validator_instance.relative_improvement_own = relative_improvement_own
+    validator_instance.relative_improvement_random = relative_improvement_random
+    
+    # Calculate gradient score as relative improvement on random data (like original validator)
+    gradient_score = improvement_random / max(loss_random_before, 1e-8)
     
     # Update gradient score
     validator_instance.gradient_scores[eval_uid] = gradient_score
     
-    # Update binary indicator (1 if improvement, 0 otherwise)
-    binary_indicator = 1.0 if gradient_score > 0 else 0.0
+    # Update binary indicator using LOCAL relative improvement comparison (like original validator)
+    # Compare relative improvements: own vs random data performance
+    binary_indicator = 1.0 if relative_improvement_own > relative_improvement_random else -1.0
     validator_instance.binary_indicator_scores[eval_uid] = binary_indicator
     
-    # Update binary moving average with decay
-    alpha = validator_instance.hparams.binary_moving_average_alpha
+    # Update binary moving average with decay (using hparams parameter name)
+    alpha = validator_instance.hparams.binary_score_ma_alpha
     current_avg = float(validator_instance.binary_moving_averages[eval_uid])
-    new_avg = alpha * binary_indicator + (1 - alpha) * current_avg
+    new_avg = (1 - alpha) * current_avg + alpha * binary_indicator
     validator_instance.binary_moving_averages[eval_uid] = new_avg
     
     # Add to current window scores for OpenSkill update
@@ -250,7 +271,9 @@ def update_scores_after_evaluation(
     
     log_with_context(
         "info",
-        f"Updated scores for UID {eval_uid}: gradient={gradient_score:.6f}, binary_avg={new_avg:.4f}",
+        f"Updated scores for UID {eval_uid}: gradient={gradient_score:.6f}, binary_avg={new_avg:.4f}, "
+        f"rel_improve_own={relative_improvement_own:.4f}, "
+        f"rel_improve_random={relative_improvement_random:.4f}",
         sync_window=validator_instance.sync_window,
         current_window=validator_instance.current_window,
         eval_uid=eval_uid,
@@ -258,6 +281,8 @@ def update_scores_after_evaluation(
         binary_indicator=binary_indicator,
         improvement_own=improvement_own,
         improvement_random=improvement_random,
+        relative_improvement_own=relative_improvement_own,
+        relative_improvement_random=relative_improvement_random,
     )
 
 
@@ -304,11 +329,11 @@ def update_openskill_ratings_and_final_scores(validator_instance: "ValidatorCore
             openskill_ordinal = float(validator_instance.openskill_ratings[uid].ordinal())
             binary_avg = max(0, validator_instance.binary_moving_averages[uid].item())
             sync_score = float(
-                validator_instance.sync_scores[uid].item() if uid in validator_instance.evaluated_uids else 1.0
+                validator_instance.sync_scores[uid].item() if uid in validator_instance.evaluated_uids else 0.0
             )
 
             # Calculate final score
-            final_score = openskill_ordinal * binary_avg * sync_score
+            final_score = openskill_ordinal * max(0, binary_avg) * sync_score
             validator_instance.final_scores[uid] = final_score
 
             log_with_context(
@@ -451,7 +476,7 @@ def update_final_validator_weights(validator_instance: "ValidatorCore") -> None:
         # Apply power normalization to only the positive scores
         normalized_weights = min_power_normalization(
             positive_scores,
-            power=validator_instance.hparams.power_normalisation,
+            power=validator_instance.power_normalisation,
         )
 
         # Assign weights only to peers with positive scores
@@ -614,7 +639,7 @@ async def set_weights_on_subnet(validator_instance: "ValidatorCore") -> None:
         validator_instance: ValidatorCore instance
     """
     # Only set weights if this is the appropriate window
-    if validator_instance.sync_window % validator_instance.hparams.weight_setting_frequency != 0:
+    if validator_instance.sync_window % validator_instance.weight_setting_frequency != 0:
         return
 
     # Get UIDs and weights for peers with positive weights

@@ -17,7 +17,7 @@
 
 import asyncio
 import uvloop
-from src.tplr.miner.miner_core import MinerCore
+from src.tplr.miner import MinerCore
 
 if __name__ == "__main__":
     uvloop.install()

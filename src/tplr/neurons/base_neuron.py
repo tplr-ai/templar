@@ -18,8 +18,6 @@
 import asyncio
 import concurrent.futures
 import sys
-import threading
-import time
 from abc import ABC, abstractmethod
 from typing import cast
 
@@ -32,7 +30,6 @@ from torch.optim.lr_scheduler import (
     SequentialLR,
 )
 from transformers import LlamaForCausalLM
-import websockets.exceptions
 
 import tplr
 from ..common import config as common_config
@@ -102,6 +99,15 @@ class BaseNeuron(ABC):
             sys.exit()
             
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+        
+        # Initialize ChainManager early as it's needed by Comms
+        self.chain_manager = tplr.chain.ChainManager(
+            config=self.config,
+            netuid=self.config.netuid,
+            metagraph=self.metagraph,
+            hparams=self.hparams,
+            wallet=self.wallet,
+        )
         
         # Setup enhanced logging with UID if available
         try:
@@ -209,13 +215,10 @@ class BaseNeuron(ABC):
     def _init_comms(self) -> None:
         """Initialize communications."""
         self.comms = tplr.comms.Comms(
+            chain_manager=self.chain_manager,
             wallet=self.wallet,
-            save_location="/tmp",
-            key_prefix="model",
-            config=self.config,
-            netuid=self.config.netuid,
-            metagraph=self.metagraph,
             hparams=self.hparams,
+            key_prefix="model",
             uid=self.uid,
         )
 
@@ -230,59 +233,18 @@ class BaseNeuron(ABC):
         self.start_window = self.current_window
         self.global_step = 0
         
-        # Set current window on comms
-        self.comms.current_window = self.current_window
-        
         # Initialize peer state
         self.next_peers: list[int] | None = None
         self.peers_update_window = -1
 
-    def _block_listener_loop(self, loop_for_thread: asyncio.AbstractEventLoop) -> None:
-        """Core logic for the block listener thread."""
-        def handler(event):
-            try:
-                self.current_block = int(event["header"]["number"])
-                new_window = int(self.current_block / self.hparams.blocks_per_window)
-                if new_window != self.current_window:
-                    old_window = self.current_window
-                    self.current_window = new_window
-                    self.comms.current_window = self.current_window
-                    tplr.logger.info(
-                        f"New block received. Current window updated: {old_window} -> {self.current_window}"
-                    )
-            except Exception as e:
-                tplr.logger.error(f"Error processing block event: {e}")
-
-        backoff = 1
-        max_backoff = 60
-
-        while not self.stop_event.is_set():
-            try:
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(handler)
-                backoff = 1
-            except websockets.exceptions.ConnectionClosedError as e:
-                tplr.logger.warning(
-                    f"Websocket ConnectionClosedError caught: {e}. Retrying in {backoff} seconds."
-                )
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
-            except Exception as e:
-                tplr.logger.error(
-                    f"Block subscription error: {e}. Retrying in {backoff} seconds."
-                )
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
-
     def _start_background_tasks(self) -> None:
-        """Initialize and start the executor and listener thread."""
+        """Initialize and start the executor and centralized block listener."""
         self.loop = asyncio.get_running_loop()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
         self.loop.set_default_executor(self.executor)
 
-        self.listener_thread = threading.Thread(
-            target=self._block_listener_loop, args=(self.loop,), daemon=True
-        )
-        self.listener_thread.start()
+        # Start centralized block listener through ChainManager
+        self.chain_manager.start_block_listener()
 
         # Use config peers if provided
         if self.config.peers:
@@ -293,29 +255,58 @@ class BaseNeuron(ABC):
 
     async def _determine_start_window(self) -> None:
         """Logic to fetch or post the start_window."""
-        # Fetch commitments first
-        self.comms.commitments = await self.comms.get_commitments()
-        tplr.logger.info("Loaded commitments")
+        # Fetch commitments first with retry logic
+        max_retries = 5
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                self.comms.commitments = await self.comms.get_commitments()
+                # Also propagate to chain_manager so MetadataManager can find them
+                if self.comms.commitments:
+                    self.chain_manager.commitments = self.comms.commitments
+                    tplr.logger.info(f"Loaded {len(self.comms.commitments)} commitments")
+                    break
+                else:
+                    tplr.logger.warning("No commitments loaded, retrying...")
+            except Exception as e:
+                tplr.logger.warning(f"Error loading commitments: {e}")
+            
+            retry_count += 1
+            if retry_count < max_retries:
+                await asyncio.sleep(10)
+                tplr.logger.info(f"Retrying commitment loading ({retry_count}/{max_retries})...")
 
         # Handle start window logic
         if self.neuron_type == "validator" and self.uid == self.metagraph.S.argmax().item():
             # Validator: only post start window if highest stake validator
-            try:
-                existing_start_window = await self.comms.get_start_window(retries=2)
-            except Exception as e:
-                tplr.logger.warning(f"Error fetching existing start_window: {e}")
-                existing_start_window = None
-
-            if existing_start_window is not None:
-                self.start_window = existing_start_window
-                tplr.logger.info(
-                    f"Highest staked validator found existing start_window: {self.start_window}"
+            tplr.logger.info(f"This validator (UID {self.uid}) is the highest staked validator")
+            
+            # Check if this validator has a bucket committed
+            if not self.comms.commitments or self.uid not in self.comms.commitments:
+                tplr.logger.warning(
+                    f"Highest staked validator (UID {self.uid}) doesn't have a bucket committed yet. "
+                    f"Available UIDs: {list(self.comms.commitments.keys()) if self.comms.commitments else 'None'}"
                 )
+                # Fall back to fetching start window from another validator
+                self.start_window = await self.comms.get_start_window()
             else:
-                await self.comms.post_start_window(self.start_window)
-                tplr.logger.info(
-                    f"This validator is the highest staked. Posted start_window: {self.start_window}"
-                )
+                try:
+                    existing_start_window = await self.comms.get_start_window(retries=2)
+                except Exception as e:
+                    tplr.logger.warning(f"Error fetching existing start_window: {e}")
+                    existing_start_window = None
+
+                if existing_start_window is not None:
+                    self.start_window = existing_start_window
+                    tplr.logger.info(
+                        f"Highest staked validator found existing start_window: {self.start_window}"
+                    )
+                else:
+                    await self.comms.post_start_window(self.start_window)
+                    tplr.logger.info(
+                        f"This validator is the highest staked. Posted start_window: {self.start_window}"
+                    )
         else:
             # Miner or non-highest stake validator: fetch start window
             if self.neuron_type == "validator":
@@ -365,7 +356,7 @@ class BaseNeuron(ABC):
                 f"scheduler_step={self.scheduler.last_epoch}"
             )
             
-            # Only catch up if we're behind
+            # Only catch up if we're behind using new Comms orchestration
             if (
                 loaded_checkpoint_window < self.current_window
                 and self.global_step > checkpoint_window_buffer
@@ -373,9 +364,18 @@ class BaseNeuron(ABC):
                 tplr.logger.info(
                     f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
                 )
-                await tplr.neurons.catchup_with_aggregation_server(
-                    self, max(loaded_checkpoint_window, self.start_window)
+                # Don't try to catch up to current active window - only catch up to previous completed window
+                target_catchup_window = max(self.current_window - 1, self.start_window)
+                # Use new Comms orchestration method
+                new_global_step = await self.comms.perform_model_catchup(
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                    last_known_sync_window=max(loaded_checkpoint_window, self.start_window),
+                    current_chain_window=target_catchup_window,  # Catch up to previous window, not current
+                    start_neuron_window=self.start_window
                 )
+                self.global_step = new_global_step
             else:
                 tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
         else:
@@ -386,11 +386,21 @@ class BaseNeuron(ABC):
                 }
                 self.model.to(self.config.device)
                 
-                # Catch up with aggregation server from start window
+                # Catch up with aggregation server from start window using new method
                 tplr.logger.info(
                     f"Starting catchup from start window {self.start_window} to current window {self.current_window})..."
                 )
-                await tplr.neurons.catchup_with_aggregation_server(self, self.start_window)
+                # Don't try to catch up to current active window - only catch up to previous completed window
+                target_catchup_window = max(self.current_window - 1, self.start_window)
+                new_global_step = await self.comms.perform_model_catchup(
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                    last_known_sync_window=self.start_window - 1,  # Start before start_window
+                    current_chain_window=target_catchup_window,  # Catch up to previous window, not current
+                    start_neuron_window=self.start_window
+                )
+                self.global_step = new_global_step
             else:
                 tplr.logger.info("Starting from scratch")
                 self.model.to(self.config.device)
@@ -422,9 +432,13 @@ class BaseNeuron(ABC):
         pass
 
     async def cleanup_resources(self) -> None:
-        """Close comms resources."""
+        """Close comms resources and stop block listener."""
         try:
+            # Stop centralized block listener
+            await self.chain_manager.stop_block_listener()
+            tplr.logger.info("Stopped block listener")
+            
             await self.comms.close_all_resources()
             tplr.logger.info("Successfully cleaned up communications resources")
         except Exception as e:
-            tplr.logger.error(f"Error cleaning up communications: {e}") 
+            tplr.logger.error(f"Error cleaning up resources: {e}") 

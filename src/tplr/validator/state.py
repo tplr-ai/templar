@@ -88,6 +88,9 @@ class ValidatorStateManager:
                     state[tensor_name].float().to(self.validator_instance.config.device),
                 )
 
+        # Load inactive_scores tracking dict
+        self.validator_instance.inactive_scores = state.get("inactive_scores", {})
+
         # Load OpenSkill ratings
         try:
             saved_openskill = state.get("openskill_ratings", {})
@@ -139,6 +142,8 @@ class ValidatorStateManager:
             "final_scores": self.validator_instance.final_scores.cpu(),
             "binary_moving_averages": self.validator_instance.binary_moving_averages.cpu(),
             "weights": self.validator_instance.weights.cpu(),
+            # Store inactive_scores tracking dict
+            "inactive_scores": self.validator_instance.inactive_scores,
             # Store OpenSkill statistics per-uid for full restoration
             "openskill_ratings": {
                 int(uid): {

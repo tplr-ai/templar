@@ -19,9 +19,9 @@ import asyncio
 import concurrent.futures
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, List, Literal, Optional
+from typing import Any, List, Literal, Optional, Tuple
 import bittensor as bt
 import torch
 from torch.optim import SGD
@@ -48,21 +48,31 @@ from .protocol.metadata_manager import MetadataManager
 CPU_COUNT = os.cpu_count() or 4
 
 
-class Comms(ChainManager):
+class Comms:
     """Main orchestration layer for distributed training communications"""
 
     def __init__(
         self,
+        chain_manager: ChainManager,
         wallet: "bt.wallet | None",
-        key_prefix: str = "model",
-        config=None,
-        netuid=None,
-        metagraph=None,
         hparams=None,
+        key_prefix: str = "model",
         uid=None,
     ):
+        """
+        Initialize Comms with composition over inheritance.
+        
+        Args:
+            chain_manager: ChainManager instance for blockchain interactions
+            wallet: Wallet for signing transactions
+            hparams: Hyperparameters for configuration
+            key_prefix: Prefix for model keys
+            uid: Unique identifier for this neuron
+        """
+        self.chain_manager = chain_manager
         self.uid = uid
         self.wallet = wallet
+        self.hparams = hparams or chain_manager.hparams
 
         # Create temp directory for this instance
         self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
@@ -71,25 +81,12 @@ class Comms(ChainManager):
         # Get the bucket directly
         self.bucket = self.get_own_bucket("gradients", "write")
 
-        # Initialize ChainManager with all required parameters
-        super().__init__(
-            config=config,
-            netuid=netuid,
-            metagraph=metagraph,
-            hparams=hparams,
-            wallet=self.wallet,
-            bucket=self.bucket,
-        )
-
         # Use the hotkey directly in the save_location
         if self.wallet is not None:
             hotkey = self.wallet.hotkey.ss58_address
             self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
             os.makedirs(self.save_location, exist_ok=True)
         self.key_prefix = key_prefix
-
-        # Initialize current window tracking
-        self._current_window = 0
 
         # Initialize all managers
         self._initialize_managers()
@@ -108,7 +105,7 @@ class Comms(ChainManager):
         self.gradient_manager = GradientManager(
             self.storage_client,
             self.file_manager,
-            self.config.device if hasattr(self.config, "device") else "cpu",
+            self.chain_manager.config.device if hasattr(self.chain_manager.config, "device") else "cpu",
             self.hparams,
         )
 
@@ -117,12 +114,12 @@ class Comms(ChainManager):
             self.file_manager,
             self.bucket,
             self.uid if self.uid is not None else 0,
-            self.metagraph,
-            self.commitments,
+            self.chain_manager.metagraph,
+            self.chain_manager.commitments,
         )
 
         self.peer_manager = PeerManager(
-            self,  # ChainManager
+            self.chain_manager,
             self.storage_client,
             self.hparams,
         )
@@ -134,13 +131,13 @@ class Comms(ChainManager):
             self.storage_client,
             self.file_manager,
             self.hparams,
-            self.config.device if hasattr(self.config, "device") else "cpu",
+            self.chain_manager.config.device if hasattr(self.chain_manager.config, "device") else "cpu",
         )
 
         self.metadata_manager = MetadataManager(
             self.storage_client,
             self.file_manager,
-            self,  # ChainManager
+            self.chain_manager,
             __version__,
             self.bucket,
         )
@@ -325,7 +322,7 @@ class Comms(ChainManager):
                 return state_dict, global_step
             else:
                 # Remote storage
-                peer_bucket = self.commitments.get(int(uid))
+                peer_bucket = self.chain_manager.commitments.get(int(uid))
                 if not peer_bucket:
                     return None
 
@@ -371,19 +368,42 @@ class Comms(ChainManager):
     async def gather(
         self,
         my_uid: int | None,
-        uids: List[int],
-        window: int,
-        timeout: int,
-        device: str,
-        totalks: dict,
+        uids: List[int] | None = None,
+        window: int = None,
+        timeout: int = None,
+        device: str = None,
+        totalks: dict = None,
         local: bool = True,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
         show_progress: bool = False,
     ) -> SimpleNamespace | None:
-        """Gather operation - delegate to aggregation manager"""
+        """
+        Gather operation - delegate to aggregation manager.
+        Can use internal gather target peers if uids not provided.
+        """
         if my_uid is None:
             return None
+            
+        # Use internal gather target peers if uids not provided
+        if uids is None:
+            uids = self.peer_manager.gather_target_peers
+            if not uids:
+                tplr.logger.warning("No gather target peers available and no uids provided")
+                return None
+                
+        # Use current window if not provided
+        if window is None:
+            window = self.chain_manager.current_window
+            
+        # Default values for other parameters
+        if timeout is None:
+            timeout = getattr(self.hparams, 'gather_timeout', 30)
+        if device is None:
+            device = getattr(self.chain_manager.config, 'device', 'cpu')
+        if totalks is None:
+            totalks = {}
+            
         return await self.aggregation_manager.gather_gradients(
             my_uid=my_uid,
             uids=uids,
@@ -581,12 +601,12 @@ class Comms(ChainManager):
     @property
     def current_window(self):
         """Get current window"""
-        return getattr(self, "_current_window", 0)
+        return getattr(self.chain_manager, "_current_window", 0)
 
     @current_window.setter
     def current_window(self, value):
         """Set current window and propagate to managers"""
-        self._current_window = value
+        setattr(self.chain_manager, "_current_window", value)
 
     def get_current_window(self) -> int | None:
         """Get current window for peer manager"""
@@ -594,28 +614,126 @@ class Comms(ChainManager):
 
     def start_commitment_fetcher(self):
         """Start commitment fetcher - delegate to parent"""
-        if hasattr(super(), "start_commitment_fetcher"):
-            super().start_commitment_fetcher()
+        if hasattr(self.chain_manager, "start_commitment_fetcher"):
+            self.chain_manager.start_commitment_fetcher()
 
     async def get_commitments(self, block: int | None = None):
         """Get commitments - delegate to parent"""
-        if hasattr(super(), "get_commitments"):
-            commitments = await super().get_commitments(block)
+        if hasattr(self.chain_manager, "get_commitments"):
+            commitments = await self.chain_manager.get_commitments(block)
+            # Ensure commitments are available in both places
+            self.chain_manager.commitments = commitments
             self.checkpoint_manager.commitments = commitments
             return commitments
         return {}
 
     def try_commit(self, wallet, bucket):
         """Try commit - delegate to parent"""
-        if hasattr(super(), "try_commit"):
-            super().try_commit(wallet, bucket)
+        if hasattr(self.chain_manager, "try_commit"):
+            self.chain_manager.try_commit(wallet, bucket)
 
     @property
     def peers(self):
         """Get peers list for miner compatibility"""
-        return getattr(self, "_peers", [])
+        return getattr(self.chain_manager, "_peers", [])
 
     @peers.setter
     def peers(self, value):
         """Set peers list"""
-        self._peers = value
+        setattr(self.chain_manager, "_peers", value)
+
+    async def get_activity_time_window(self, reference_block_window: int) -> Optional[Tuple[datetime, datetime]]:
+        """
+        Get activity time window for protocol-specific operations.
+        Centralizes time window calculation logic from neurons.
+        
+        Args:
+            reference_block_window: Window number to base time calculation on
+            
+        Returns:
+            Tuple of (time_min, time_max) or None if calculation fails
+        """
+        try:
+            # Calculate the block number for the reference window
+            reference_block = reference_block_window * self.hparams.blocks_per_window
+            
+            # Get blockchain timestamp for the reference block
+            time_min = await self.chain_manager.get_block_timestamp(reference_block)
+            
+            if time_min is None:
+                tplr.logger.error(f"Could not get timestamp for block {reference_block}")
+                return None
+            
+            # Calculate time_max using configured delta
+            time_max = time_min + timedelta(seconds=self.hparams.time_window_delta_seconds)
+            
+            tplr.logger.debug(
+                f"Activity time window for window {reference_block_window}: "
+                f"{time_min} to {time_max}"
+            )
+            
+            return (time_min, time_max)
+            
+        except Exception as e:
+            tplr.logger.error(f"Failed to calculate activity time window: {e}")
+            return None
+
+    async def refresh_gather_targets(self) -> None:
+        """Refresh gather target peers using PeerManager."""
+        await self.peer_manager.refresh_gather_targets(
+            self.chain_manager.current_window, 
+            self.metadata_manager
+        )
+
+    async def perform_model_catchup(
+        self, 
+        model: torch.nn.Module, 
+        optimizer: torch.optim.Optimizer, 
+        scheduler: torch.optim.lr_scheduler.LRScheduler, 
+        last_known_sync_window: int, 
+        current_chain_window: int, 
+        start_neuron_window: int
+    ) -> int:
+        """
+        Orchestrate model catchup with aggregation server.
+        
+        Args:
+            model: Model to catchup
+            optimizer: Optimizer for parameter updates
+            scheduler: Learning rate scheduler
+            last_known_sync_window: Last window the model was synced to
+            current_chain_window: Current blockchain window
+            start_neuron_window: Starting window for this neuron
+            
+        Returns:
+            New global step after catchup
+        """
+        # Check if catchup is needed
+        if last_known_sync_window >= current_chain_window:
+            tplr.logger.info("Model is already up-to-date, no catchup needed")
+            return current_chain_window - start_neuron_window
+        
+        tplr.logger.info(
+            f"Performing model catchup from window {last_known_sync_window} to {current_chain_window}"
+        )
+        
+        # Use AggregationManager to apply catchup aggregations
+        last_processed_window = await self.aggregation_manager.apply_catchup_aggregations(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            start_catchup_window=last_known_sync_window,
+            target_window=current_chain_window,
+            metadata_manager=self.metadata_manager,
+            chain_manager=self.chain_manager
+        )
+        
+        # Calculate new global step
+        new_global_step = last_processed_window - start_neuron_window
+        
+        tplr.logger.info(
+            f"Model catchup complete. Last processed window: {last_processed_window}, "
+            f"New global step: {new_global_step}"
+        )
+        
+        return new_global_step

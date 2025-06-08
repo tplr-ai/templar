@@ -158,22 +158,31 @@ class StorageClient:
                 if time_min is not None or time_max is not None:
                     last_modified = head_response.get("LastModified")
                     if last_modified is not None:
-                        # Ensure timezone awareness
+                        # Ensure timezone awareness for last_modified
                         if last_modified.tzinfo is None:
                             from datetime import timezone
-
                             last_modified = last_modified.replace(tzinfo=timezone.utc)
 
-                        if time_min is not None and last_modified < time_min:
-                            tplr.logger.debug(
-                                f"Object {key} too old: {last_modified} < {time_min}"
-                            )
-                            return None
-                        if time_max is not None and last_modified > time_max:
-                            tplr.logger.debug(
-                                f"Object {key} too new: {last_modified} > {time_max}"
-                            )
-                            return None
+                        # Ensure timezone awareness for time_min and time_max
+                        if time_min is not None:
+                            if time_min.tzinfo is None:
+                                from datetime import timezone
+                                time_min = time_min.replace(tzinfo=timezone.utc)
+                            if last_modified < time_min:
+                                tplr.logger.debug(
+                                    f"Object {key} too old: {last_modified} < {time_min}"
+                                )
+                                return None
+                                
+                        if time_max is not None:
+                            if time_max.tzinfo is None:
+                                from datetime import timezone
+                                time_max = time_max.replace(tzinfo=timezone.utc)
+                            if last_modified > time_max:
+                                tplr.logger.debug(
+                                    f"Object {key} too new: {last_modified} > {time_max}"
+                                )
+                                return None
 
             except asyncio.TimeoutError:
                 tplr.logger.debug(f"Timeout checking for {key}")

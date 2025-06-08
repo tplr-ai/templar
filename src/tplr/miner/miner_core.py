@@ -17,12 +17,9 @@
 
 import asyncio
 import json
-import time
-from datetime import datetime, timedelta, timezone
-from typing import cast
+from datetime import datetime
 
 import torch
-from bittensor.core.subtensor import ScaleObj
 from torch import autocast
 
 import tplr
@@ -41,6 +38,16 @@ class MinerCore(BaseNeuron):
         super().__init__(neuron_type="miner")
         self._miner_specific_init()
 
+    @property
+    def current_window(self) -> int:
+        """Get current window from chain manager."""
+        return self.chain_manager.current_window
+
+    @current_window.setter
+    def current_window(self, value: int) -> None:
+        """Set current window on chain manager."""
+        self.chain_manager.current_window = value
+
     def _miner_specific_init(self) -> None:
         """Initialize miner-only attributes."""
         # Tracking metrics
@@ -50,60 +57,76 @@ class MinerCore(BaseNeuron):
         # Step tracking
         self.step_counter = 0
         self.window_step = 0
+
     async def main_loop(self) -> None:
         """Implements the main operational loop for miners."""
         while True:
-            # 1. Determine step_window and update global_step
-            window_start = tplr.T()
-            step_window = self.current_window
-            self.global_step = self.current_window - self.start_window
-            
-            tplr.logger.info(
-                f"\n{'-' * 40} Window: {step_window} (Global Step: {self.global_step}) {'-' * 40}"
-            )
+            try:
+                # 1. Determine step_window and update global_step
+                window_start = tplr.T()
+                step_window = self.current_window
+                self.global_step = self.current_window - self.start_window
+                
+                tplr.logger.info(
+                    f"\n{'-' * 40} Window: {step_window} (Global Step: {self.global_step}) {'-' * 40}"
+                )
 
-            # 2. Update peers
-            peer_start = tplr.T()
-            await neuron_utils.update_peers(
-                instance=self, window=step_window, peer_start=peer_start
-            )
+                # 2. Update peers using new Comms orchestration
+                peer_start = tplr.T()
+                await self.comms.refresh_gather_targets()
+                tplr.logger.info(
+                    f"{tplr.P(step_window, tplr.T() - peer_start)} Updated gather targets"
+                )
 
-            # 3. Load training data
-            pages, loader = await self._load_training_data(step_window)
+                # 3. Load training data
+                pages, loader = await self._load_training_data(step_window)
 
-            # 4. Train window batches and accumulate local gradients
-            train_metrics = await self._train_window_batches(step_window, loader)
+                # 4. Train window batches and accumulate local gradients
+                train_metrics = await self._train_window_batches(step_window, loader)
 
-            # 5. Prepare and put gradients
-            await self._prepare_and_put_gradients(pages, step_window)
+                # 5. Prepare and put gradients
+                await self._prepare_and_put_gradients(pages, step_window)
 
-            # 6. Get gather time window
-            time_min, time_max = await self._get_gather_time_window()
+                # 6. Get gather time window
+                time_min, time_max = await self._get_gather_time_window()
 
-            # 7. Gather peer gradients
-            gather_result, gather_time = await self._gather_peer_gradients(
-                step_window, time_min, time_max
-            )
+                # 7. Gather peer gradients
+                gather_result, gather_time = await self._gather_peer_gradients(
+                    step_window, time_min, time_max
+                )
 
-            # 8. Apply gathered gradients
-            await self._apply_gathered_gradients(gather_result)
+                # 8. Apply gathered gradients
+                await self._apply_gathered_gradients(gather_result)
 
-            # 9. Log window metrics
-            await self._log_window_metrics(
-                step_window, train_metrics, gather_time, gather_result, window_start
-            )
+                # 9. Log window metrics
+                await self._log_window_metrics(
+                    step_window, train_metrics, gather_time, gather_result, window_start
+                )
 
-            # 10. Store debug data
-            await self._store_debug_data(step_window, gather_result)
+                # 10. Store debug data
+                await self._store_debug_data(step_window, gather_result)
 
-            # 11. Save miner checkpoint
-            await self._save_miner_checkpoint()
+                # 11. Save miner checkpoint
+                await self._save_miner_checkpoint()
 
-            # 12. Cleanup window GPU memory
-            await self._cleanup_window_gpu_memory()
+                # 12. Cleanup window GPU memory
+                await self._cleanup_window_gpu_memory()
 
-            # 13. Wait for next window
-            await self._wait_for_next_window(step_window)
+                # 13. Wait for next window
+                await self._wait_for_next_window(step_window)
+                
+            except Exception as e:
+                tplr.logger.error(
+                    f"Error in miner main loop: {e}",
+                    extra={
+                        "step_window": getattr(self, 'step_window', 'unknown'),
+                        "current_window": self.current_window,
+                        "error_type": type(e).__name__,
+                    }
+                )
+                # Wait a bit before retrying to avoid rapid error loops
+                await asyncio.sleep(5)
+                # Continue to next iteration
 
     async def _load_training_data(self, step_window: int) -> tuple:
         """Load training data for the current window."""
@@ -215,38 +238,22 @@ class MinerCore(BaseNeuron):
             for tensor in processed_state_dict.values()
             if isinstance(tensor, torch.Tensor)
         )
-        tplr.logger.info(f"Uploading {upload_size} bytes of own state for UID: {self.uid}")
+        
+        # Convert bytes to MB for more readable logging
+        upload_mb = upload_size / (1024 * 1024)
+        
+        tplr.logger.info(f"Uploading {upload_mb:.2f} MB of own state for UID: {self.uid}")
         tplr.logger.info("Put task completed!")
 
     async def _get_gather_time_window(self) -> tuple[datetime, datetime]:
         """Query blockchain for timestamp to define time_min, time_max."""
-        sync_block = self.current_window * self.hparams.blocks_per_window
-        retries = 0
-        delay = 1
-        max_retries = 5
-        max_delay = 60
+        # Use new Comms orchestration method for time window calculation
+        time_window = await self.comms.get_activity_time_window(self.current_window)
         
-        while True:
-            try:
-                response = self.subtensor.query_module("Timestamp", "Now", block=sync_block)
-                if response is None or not isinstance(response, ScaleObj):
-                    raise ValueError(f"Could not query timestamp for {sync_block}")
-                ts_value = cast(int, response.value) / 1000  # convert ms to seconds
-                break
-            except Exception as e:
-                tplr.logger.error(
-                    f"Failed to query timestamp for block {sync_block}: {str(e)}. "
-                    f"Retry {retries + 1}/{max_retries}"
-                )
-                retries += 1
-                if retries > max_retries:
-                    tplr.logger.error("Exceeded maximum retries for timestamp query.")
-                    raise e
-                time.sleep(delay)
-                delay = min(delay * 2, max_delay)
-
-        time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
-        time_max = time_min + timedelta(seconds=self.hparams.time_window_delta_seconds)
+        if time_window is None:
+            raise RuntimeError(f"Failed to calculate time window for current window {self.current_window}")
+            
+        time_min, time_max = time_window
         
         tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
         return time_min, time_max
@@ -254,28 +261,33 @@ class MinerCore(BaseNeuron):
     async def _gather_peer_gradients(
         self, step_window: int, time_min: datetime, time_max: datetime
     ) -> tuple:
-        """Call self.comms.gather. Handle test mode peer selection."""
-        tplr.logger.info("Refreshing peers before gather task...")
+        """Call self.comms.gather with enhanced peer management."""
+        tplr.logger.info("Refreshing gather targets before gather task...")
+
+        # Use new Comms method to refresh gather targets
+        await self.comms.refresh_gather_targets()
 
         if self.config.test:
             tplr.logger.info("Test mode active: Using all peers from metagraph.")
             all_uids = list(range(len(self.metagraph.S)))
             self.comms.peers = [uid for uid in all_uids if uid != self.uid]
+        else:
+            # Use gather target peers from PeerManager
+            self.comms.peers = self.comms.peer_manager.gather_target_peers
 
         tplr.logger.info(f"Final peers for gather: {self.comms.peers}")
 
         gather_start = tplr.T()
         tplr.logger.info("Waiting on gather task...")
         
+        # Use simplified gather method that can use internal peer lists
         gather_result = await self.comms.gather(
             my_uid=self.uid,
             uids=self.comms.peers,
             window=step_window,
-            key="gradient",
             timeout=45,
             device="cpu",
             local=False,
-            stale_retention=100,
             totalks=self.totalks,
             time_min=time_min,
             time_max=time_max,
@@ -453,10 +465,10 @@ class MinerCore(BaseNeuron):
                     model=self.model,
                     optimizer=self.optimizer,
                     scheduler=self.scheduler,
-                    momentum=self.momentum,
                     global_step=self.global_step,
                     current_window=self.current_window,
                     start_window=self.start_window,
+                    sync_window=self.current_window,  # For miners, sync_window is same as current_window
                 )
             )
         else:

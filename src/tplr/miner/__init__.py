@@ -15,23 +15,6 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-# ruff: noqa
-# pylint: disable=all
-# mypy: ignore-errors
-# type: ignore
+from .miner_core import MinerCore
 
-__version__ = "dev-x40f6xyf"
-
-# Import package.
-from .chain import *
-from .comms import *
-from .compress import *
-from .dataset import *
-from .r2_dataset import *
-from .hparams import *
-from .logging import *
-from .schemas import *
-from .wandb import initialize_wandb
-from .metrics import *
-from .shard_index import ShardIndex
-
+__all__ = ["MinerCore"] 

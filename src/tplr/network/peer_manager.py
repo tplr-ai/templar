@@ -17,7 +17,7 @@
 
 import asyncio
 import random
-from typing import Set
+from typing import Set, List, Optional
 
 import tplr
 from ..chain import ChainManager
@@ -39,9 +39,89 @@ class PeerManager:
         self.active_check_interval = hparams.active_check_interval
         self.recent_windows = hparams.recent_windows
 
+        # Gather target management as per SPEC.md
+        self.gather_target_peers: List[int] = []
+        self.next_gather_target_peers: Optional[List[int]] = None
+        self.gather_targets_update_window: int = -1
+
         # Background task management
         self._peer_tracking_task = None
         self._stop_tracking = False
+
+    async def refresh_gather_targets(self, current_window: int, metadata_manager) -> None:
+        """
+        Refresh gather target peers using the logic from neuron_utils.update_peers.
+        
+        Args:
+            current_window: Current blockchain window
+            metadata_manager: MetadataManager instance for fetching peer lists
+        """
+        # Check if peers list is empty and fetch previous list if needed
+        if len(self.gather_target_peers) == 0:
+            tplr.logger.info(
+                "Current gather target peers list is empty, attempting to fetch previous peer list"
+            )
+            result = await metadata_manager.get_peer_list(fetch_previous=True)
+            if result is not None:
+                prev_peers, prev_update_window = result
+                tplr.logger.info(
+                    f"Got previous peer list with {len(prev_peers)} peers "
+                    f"and update window {prev_update_window}"
+                )
+                self.gather_target_peers = prev_peers
+                # Don't set next_gather_target_peers here, as we want the normal update process to continue
+            else:
+                tplr.logger.warning(
+                    "Failed to fetch previous peer list, continuing with empty peers"
+                )
+
+        # Get next peers
+        if (
+            self.next_gather_target_peers is None  # next peers are not fetched yet
+            and self.gather_targets_update_window  # they should be on bucket by now
+            + self.hparams.peer_replacement_frequency
+            - current_window
+            < self.hparams.peer_list_window_margin
+        ):
+            result = await metadata_manager.get_peer_list()
+            if result is None:
+                tplr.logger.info("Unable to get peer list from bucket")
+            else:
+                next_peers, peers_update_window = result
+                tplr.logger.info(
+                    f"Got peer list {next_peers} and update window "
+                    f"{peers_update_window} from bucket"
+                )
+                if (
+                    self.gather_targets_update_window is None
+                    or peers_update_window > self.gather_targets_update_window
+                ):
+                    self.next_gather_target_peers = next_peers
+                    self.gather_targets_update_window = peers_update_window
+                    tplr.logger.info("This list is new, updating next_gather_target_peers")
+
+        # Update peers, if it's time
+        if self.next_gather_target_peers is not None and current_window >= self.gather_targets_update_window:
+            self.gather_target_peers = self.next_gather_target_peers
+            late_text = (
+                f"{current_window - self.gather_targets_update_window} windows late"
+                if current_window - self.gather_targets_update_window > 0
+                else "on time"
+            )
+            tplr.logger.info(
+                f"Updated gather target peers {late_text} - gather:{len(self.gather_target_peers)}. "
+                f"Next update expected on window "
+                f"{self.gather_targets_update_window + self.hparams.peer_list_window_margin}"
+            )
+            self.next_gather_target_peers = None
+        else:
+            reason = (
+                "next gather target peers are not defined yet"
+                if self.next_gather_target_peers is None
+                else f"current window is {current_window} and peers update window "
+                f"is {self.gather_targets_update_window}"
+            )
+            tplr.logger.info(f"Not time to replace gather target peers: {reason}")
 
     async def track_active_peers(self) -> None:
         """Background task to track active peers"""

@@ -341,10 +341,22 @@ class MetadataManager:
                 tplr.logger.info("No active validators found")
                 return None, None
 
+            # Check if commitments are loaded
+            if not hasattr(self.chain_manager, 'commitments') or not self.chain_manager.commitments:
+                tplr.logger.warning(
+                    f"Chain manager commitments not loaded yet. "
+                    f"Has commitments attr: {hasattr(self.chain_manager, 'commitments')}, "
+                    f"Commitments value: {getattr(self.chain_manager, 'commitments', 'None')}"
+                )
+                return None, None
+
             # Get validator's bucket from commitments
             validator_bucket = self.chain_manager.commitments.get(int(validator_uid))
             if not validator_bucket:
-                tplr.logger.warning(f"No bucket found for validator {validator_uid}")
+                tplr.logger.warning(
+                    f"No bucket found for validator {validator_uid}. "
+                    f"Available UIDs in commitments: {list(self.chain_manager.commitments.keys())}"
+                )
                 return None, None
 
             tplr.logger.debug(f"Validator Bucket: {validator_bucket}")

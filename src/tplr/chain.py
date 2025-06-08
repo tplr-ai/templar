@@ -18,13 +18,14 @@
 
 # Global imports
 import asyncio
-import time
 from collections import defaultdict
+from datetime import datetime
 from typing import Dict, Optional
 
 import bittensor as bt
 import numpy as np
 import torch
+import websockets.exceptions
 from bittensor import Wallet
 from bittensor.core.chain_data import decode_account_id
 from pydantic import ValidationError
@@ -64,16 +65,20 @@ class ChainManager:
         self.metagraph = metagraph
         self.hparams = hparams or {}
 
-        # Block and window tracking
+        # Block and window tracking - now centralized
         self.current_block = 0
         self.current_window = 0
         self.window_duration = self.hparams.blocks_per_window
         self.window_time = 0
         self.window_seeds = {}
 
-        # Events
+        # Events for block/window updates
         self.block_event = asyncio.Event()
         self.new_window_event = asyncio.Event()
+        self.stop_event = asyncio.Event()
+
+        # Block listener task management
+        self._block_listener_task: Optional[asyncio.Task] = None
 
         # Initialize bucket storage
         self.commitments = {}
@@ -85,6 +90,125 @@ class ChainManager:
         # Store wallet and bucket
         self.wallet = wallet
         self.bucket = bucket
+
+    def start_block_listener(self) -> None:
+        """Start the centralized block listener if not already running."""
+        if self._block_listener_task is None or self._block_listener_task.done():
+            self._block_listener_task = asyncio.create_task(self._block_listener_loop())
+            logger.info("Started block listener")
+
+    async def stop_block_listener(self) -> None:
+        """Stop the centralized block listener."""
+        self.stop_event.set()
+        if self._block_listener_task and not self._block_listener_task.done():
+            self._block_listener_task.cancel()
+            try:
+                await self._block_listener_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Stopped  block listener")
+
+    async def _block_listener_loop(self) -> None:
+        """
+        Centralized block listener that maintains current_block and current_window.
+        Handles reconnection and errors with exponential backoff.
+        """
+        backoff = 1
+        max_backoff = 60
+
+        def handler(event):
+            try:
+                old_block = self.current_block
+                old_window = self.current_window
+                
+                self.current_block = int(event["header"]["number"])
+                new_window = int(self.current_block / self.hparams.blocks_per_window)
+                
+                # Set block event for any block update
+                self.block_event.set()
+                
+                # Check for window transition
+                if new_window != self.current_window:
+                    self.current_window = new_window
+                    self.new_window_event.set()
+                    logger.info(
+                        f"Window transition: {old_window} -> {self.current_window} "
+                        f"(block: {old_block} -> {self.current_block})"
+                    )
+                
+                # Clear events after setting them so they can be waited on again
+                self.block_event.clear()
+                if new_window != old_window:
+                    self.new_window_event.clear()
+                    
+            except Exception as e:
+                logger.error(f"Error processing block event: {e}")
+
+        while not self.stop_event.is_set():
+            try:
+                subtensor = bt.subtensor(config=self.config)
+                await asyncio.to_thread(
+                    subtensor.substrate.subscribe_block_headers, handler
+                )
+                backoff = 1  # Reset backoff on successful connection
+                break
+            except websockets.exceptions.ConnectionClosedError as e:
+                logger.warning(
+                    f"Websocket ConnectionClosedError: {e}. Retrying in {backoff}s"
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+            except Exception as e:
+                logger.error(f"Block subscription error: {e}. Retrying in {backoff}s")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
+    async def get_block_timestamp(self, block_number: int) -> Optional[datetime]:
+        """
+        Query blockchain timestamp for a specific block number.
+        
+        Args:
+            block_number: The block number to query timestamp for
+            
+        Returns:
+            Timezone-aware datetime object or None on failure
+        """
+        max_retries = 3
+        retry_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                subtensor = bt.subtensor(config=self.config)
+                
+                # Query the timestamp module
+                timestamp_result = await asyncio.to_thread(
+                    subtensor.query_module,
+                    "Timestamp", 
+                    "Now",
+                    block=block_number
+                )
+                
+                if timestamp_result is not None:
+                    # Handle ScaleObj parsing
+                    if hasattr(timestamp_result, 'value'):
+                        timestamp_ms = timestamp_result.value
+                    else:
+                        timestamp_ms = timestamp_result
+                    
+                    # Convert from milliseconds to seconds and create datetime
+                    timestamp_seconds = timestamp_ms / 1000.0
+                    return datetime.fromtimestamp(timestamp_seconds)
+                    
+            except Exception as e:
+                logger.warning(
+                    f"Attempt {attempt + 1}/{max_retries} failed to get block timestamp "
+                    f"for block {block_number}: {e}"
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (2 ** attempt))
+        
+        logger.error(f"Failed to get block timestamp for block {block_number} after {max_retries} attempts")
+        return None
 
     def start_commitment_fetcher(self):
         """Attach to the already-running event loop."""
@@ -107,7 +231,7 @@ class ChainManager:
                 commitments = await self.get_commitments()
                 if commitments:
                     self.commitments = commitments
-                    self.update_peers_with_buckets()
+                    # update_peers_with_buckets is now handled by PeerManager
                     logger.debug(f"Updated commitments: {self.commitments}")
             except Exception as e:
                 logger.error(f"Error fetching commitments: {e}")
@@ -134,42 +258,11 @@ class ChainManager:
 
     def block_to_window(self, block: int) -> int:
         """Returns the slice window based on a block."""
-        return int(block / self.hparams.window_length)
+        return int(block / self.hparams.blocks_per_window)
 
     def window_to_seed(self, window: int) -> str:
         """Returns the slice window based on a block."""
-        return str(self.subtensor.get_block_hash(window * self.hparams.window_length))
-
-    def block_listener(self, loop):
-        """Listens for new blocks and updates current block/window state.
-
-        Args:
-            loop: The event loop to run the listener in
-
-        This method subscribes to block headers from the subtensor network and:
-        - Updates self.current_block with the latest block number
-        - Updates self.current_window when crossing window boundaries
-        - Retries on connection errors until stop_event is set
-        """
-
-        def handler(event, _u, _s):
-            self.current_block = int(event["header"]["number"])
-            if (
-                int(self.current_block / self.hparams.blocks_per_window)
-                != self.current_window
-            ):
-                self.current_window = int(
-                    self.current_block / self.hparams.blocks_per_window
-                )
-
-        while not self.stop_event.is_set():
-            try:
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(
-                    handler
-                )
-                break
-            except Exception:
-                time.sleep(1)
+        return str(self.subtensor.get_block_hash(window * self.hparams.blocks_per_window))
 
     def commit(self, wallet: "bt.wallet", bucket: Bucket) -> None:
         """Commits bucket configuration to the chain.
@@ -420,7 +513,7 @@ class ChainManager:
         commitments = await self.get_commitments()
         if commitments:
             self.commitments = commitments
-            self.update_peers_with_buckets()
+            # update_peers_with_buckets is now handled by PeerManager
             logger.debug(f"Fetched commitments: {self.commitments}")
         else:
             logger.warning("No commitments fetched.")
@@ -445,42 +538,5 @@ class ChainManager:
         else:
             return None
 
-    def update_peers_with_buckets(self):
-        """Updates peers for gradient gathering, evaluation peers, and tracks inactive peers."""
-        # Create mappings
-        uid_to_stake = dict(
-            zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist())
-        )
-
-        # Get currently active peers
-        active_peers = set(int(uid) for uid in self.active_peers)
-
-        # Track inactive peers (previously active peers that are no longer active)
-        previously_active = set(
-            self.eval_peers.keys()
-        )  # since self.eval_peers is now a dict
-        newly_inactive = previously_active - active_peers
-        self.inactive_peers = newly_inactive
-
-        logger.debug(f"Active peers: {active_peers}")
-        logger.info(f"Newly inactive peers: {newly_inactive}")
-        logger.trace(f"Stakes: {uid_to_stake}")
-
-        if not active_peers:
-            logger.warning("No active peers found. Skipping update.")
-            return
-
-        # ---------------------------------------------------------------
-        # Convert self.eval_peers into a dict while retaining old counts
-        # for peers still active with stake <= 1000.
-        # ---------------------------------------------------------------
-        self.eval_peers = {
-            int(uid): self.eval_peers.get(int(uid), 1)
-            for uid in active_peers
-            if uid in uid_to_stake and uid_to_stake[uid] <= 20000
-        }
-
-        logger.debug(f"Filtered eval peers: {list(self.eval_peers.keys())}")
-
-        logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
-        logger.info(f"Total inactive peers: {len(self.inactive_peers)}")
+    # NOTE: update_peers_with_buckets has been moved to PeerManager
+    # This method was removed to fix the 'active_peers' attribute error

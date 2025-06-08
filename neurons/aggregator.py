@@ -32,6 +32,7 @@ from transformers import LlamaForCausalLM
 
 # Import tplr functions
 import tplr
+from tplr.neurons.neuron_utils import pack_binary_tensor
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -114,14 +115,21 @@ class AggregationServer:
             self.param_totalks[name] = totalk
         tplr.logger.info("Pre-calculation complete.")
 
-        # Initialize comms
-        self.comms = tplr.comms.Comms(
-            wallet=self.wallet,
-            key_prefix="aggregator",
+        # Initialize ChainManager (required by Comms)
+        self.chain_manager = tplr.chain.ChainManager(
             config=self.config,
             netuid=self.config.netuid,
             metagraph=self.metagraph,
             hparams=self.hparams,
+            wallet=self.wallet,
+        )
+
+        # Initialize comms with new API
+        self.comms = tplr.comms.Comms(
+            chain_manager=self.chain_manager,
+            wallet=self.wallet,
+            hparams=self.hparams,
+            key_prefix="aggregator",
             uid=self.uid,
         )
         self.comms.bucket = self.comms.get_own_bucket("aggregator", "write")
@@ -234,12 +242,11 @@ class AggregationServer:
             time_max = datetime.now(timezone.utc) + timedelta(minutes=30)
             tplr.logger.info(f"Using fallback time window: {time_min} to {time_max}")
 
-        # Use comms to select gather peers
+        # Use new peer management approach from comms
         peer_start = tplr.T()
-        await tplr.neurons.update_peers(
-            instance=self, window=self.sync_window - 1, peer_start=peer_start
-        )
-        selected_uids = self.comms.peers
+        self.comms.peer_manager.update_peers_with_buckets()
+        await self.comms.refresh_gather_targets()
+        selected_uids = self.comms.peer_manager.gather_target_peers
 
         tplr.logger.info(
             f"\nSelected {len(selected_uids)} peers for gradient collection"
@@ -314,7 +321,7 @@ class AggregationServer:
                     )
 
                     # Pack the decompressed gradient
-                    processed_state_dict[name] = tplr.neurons.pack_binary_tensor(
+                    processed_state_dict[name] = pack_binary_tensor(
                         self.transformer.decode(decompressed)
                         .sign()
                         .to(self.config.device),

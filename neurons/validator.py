@@ -3217,4 +3217,6 @@ def sign_preserving_multiplication(a, b):
 
 if __name__ == "__main__":
     uvloop.install()
-    asyncio.run(Validator().run())
+    # Use the new ValidatorCore instead of the old Validator
+    from tplr.validator import ValidatorCore
+    asyncio.run(ValidatorCore().run())

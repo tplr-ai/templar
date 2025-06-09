@@ -267,7 +267,7 @@ class AggregationServer:
             window=self.sync_window - 1,
             key="gradient",
             timeout=45,
-            device="cpu",
+            device=self.config.device,
             local=False,
             stale_retention=100,
             totalks=self.param_totalks,

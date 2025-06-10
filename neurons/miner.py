@@ -515,7 +515,7 @@ class Miner:
                 window=step_window,
                 key="gradient",
                 timeout=45,
-                device="cpu",
+                device=self.config.device,
                 local=False,
                 stale_retention=100,
                 totalks=self.totalks,

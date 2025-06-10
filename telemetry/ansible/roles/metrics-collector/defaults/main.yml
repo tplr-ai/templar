@@ -1,0 +1,27 @@
+---
+# Default variables for metrics-collector role
+
+# User and group settings
+metrics_collector_user: "loki"
+metrics_collector_group: "loki"
+metrics_collector_create_user: false  # Default to false to use existing loki user
+
+# InfluxDB connection settings
+metrics_collector_influxdb_url: "http://localhost:8086"
+metrics_collector_influxdb_token: "CHANGE_ME"  # Should be set in vault
+metrics_collector_influxdb_org: "tplr"
+metrics_collector_influxdb_bucket: "tplr"
+metrics_collector_minutes: 30
+metrics_collector_timeout: 600
+metrics_collector_interval: 1800  # 30 minutes
+metrics_collector_max_workers: 5
+
+# R2 storage settings
+metrics_collector_r2_bucket: "tplr-metrics"
+metrics_collector_r2_endpoint: "https://account-id.r2.cloudflarestorage.com"
+metrics_collector_r2_region: "auto"
+metrics_collector_r2_access_key_id: "CHANGE_ME"  # Should be set in vault
+metrics_collector_r2_secret_access_key: "CHANGE_ME"  # Should be set in vault
+
+# Debug mode
+metrics_collector_debug: true

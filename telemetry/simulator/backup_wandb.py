@@ -817,7 +817,7 @@ async def process_and_upload_runs(
         for i in range(0, len(pipeline_tasks), batch_size):
             batch = pipeline_tasks[i : i + batch_size]
             logger.info(
-                f"Processing batch {i//batch_size + 1}/{(len(pipeline_tasks) + batch_size - 1)//batch_size} ({len(batch)} runs)"
+                f"Processing batch {i // batch_size + 1}/{(len(pipeline_tasks) + batch_size - 1) // batch_size} ({len(batch)} runs)"
             )
 
             batch_results = await asyncio.gather(*batch, return_exceptions=True)

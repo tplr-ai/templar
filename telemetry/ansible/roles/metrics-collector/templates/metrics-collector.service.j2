@@ -1,0 +1,40 @@
+[Unit]
+Description=InfluxDB to R2 Metrics Collector
+After=network.target
+Requires=network.target
+
+[Service]
+Type=simple
+User={{ metrics_collector_user }}
+Group={{ metrics_collector_group }}
+WorkingDirectory=/opt/metrics-collector
+Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+ExecStart=/bin/bash -c '/usr/bin/uv run /opt/metrics-collector/metrics_collector.py \
+  --influxdb-url={{ metrics_collector_influxdb_url }} \
+  --influxdb-token={{ metrics_collector_influxdb_token }} \
+  --influxdb-org={{ metrics_collector_influxdb_org | default('tplr') }} \
+  --influxdb-bucket={{ metrics_collector_influxdb_bucket | default('tplr') }} \
+  --minutes={{ metrics_collector_minutes | default(30) }} \
+  --timeout={{ metrics_collector_timeout | default(600) }} \
+  --r2-bucket={{ metrics_collector_r2_bucket }} \
+  --r2-endpoint={{ metrics_collector_r2_endpoint }} \
+  --r2-region={{ metrics_collector_r2_region | default('auto') }} \
+  --interval={{ metrics_collector_interval | default(1800) }} \
+  --max-workers={{ metrics_collector_max_workers | default(5) }} \
+  {% if metrics_collector_debug %}--debug{% endif %}'
+
+Environment="R2_ACCESS_KEY_ID={{ metrics_collector_r2_access_key_id }}"
+Environment="R2_SECRET_ACCESS_KEY={{ metrics_collector_r2_secret_access_key }}"
+Environment="SOURCE_INFLUXDB_URL={{ metrics_collector_influxdb_url }}"
+Environment="SOURCE_INFLUXDB_TOKEN={{ metrics_collector_influxdb_token }}"
+Environment="SOURCE_INFLUXDB_ORG={{ metrics_collector_influxdb_org | default('tplr') }}"
+Environment="SOURCE_INFLUXDB_BUCKET={{ metrics_collector_influxdb_bucket | default('tplr') }}"
+
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=metrics-collector
+
+[Install]
+WantedBy=multi-user.target

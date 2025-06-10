@@ -1,0 +1,79 @@
+---
+# Metrics collector deployment tasks
+
+- name: Install required packages
+  apt:
+    name:
+      - python3
+      - python3-venv
+      - curl
+      - ca-certificates
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Create metrics collector user
+  user:
+    name: "{{ metrics_collector_user }}"
+    system: yes
+    create_home: no
+    shell: /usr/sbin/nologin
+  when: metrics_collector_create_user | default(true)
+
+- name: Create metrics collector directory
+  file:
+    path: /opt/metrics-collector
+    state: directory
+    owner: "{{ metrics_collector_user }}"
+    group: "{{ metrics_collector_group }}"
+    mode: 0755
+
+- name: Install pipx for Python application management
+  apt:
+    name:
+      - pipx
+      - python3-venv
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Ensure pipx is configured
+  shell: pipx ensurepath
+  changed_when: false
+
+- name: Install uv with pipx
+  shell: pipx install uv
+  args:
+    creates: /root/.local/pipx/venvs/uv
+  register: uv_install
+
+- name: Copy uv to /usr/bin
+  copy:
+    src: "/root/.local/bin/uv"
+    dest: "/usr/bin/uv"
+    mode: '0755'
+    remote_src: yes
+
+- name: Copy metrics collector script
+  copy:
+    src: metrics_collector.py
+    dest: /opt/metrics-collector/metrics_collector.py
+    owner: "{{ metrics_collector_user }}"
+    group: "{{ metrics_collector_group }}"
+    mode: 0755
+  notify: restart metrics-collector
+
+- name: Create systemd service file
+  template:
+    src: metrics-collector.service.j2
+    dest: /etc/systemd/system/metrics-collector.service
+    owner: root
+    group: root
+    mode: 0644
+  notify: reload systemd
+
+- name: Ensure metrics collector service is enabled and running
+  systemd:
+    name: metrics-collector
+    state: started
+    enabled: yes
+    daemon_reload: yes

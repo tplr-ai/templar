@@ -337,7 +337,7 @@ class Comms(ChainManager):
                 if file_path:
                     async with aiofiles.open(file_path, "r") as f:
                         data = await f.read()
-                        data_bytes = json.dumps(json.loads(data)).encode("utf-8")
+                        data_bytes = data.encode("utf-8")
                 else:
                     raise ValueError(f"file_path required for JSON file: {key}")
 
@@ -766,6 +766,25 @@ class Comms(ChainManager):
         put_end = tplr.T()
         tplr.logger.info(f"{tplr.P(window, put_end - put_start)} PUT {filename} <--")
         return put_end - put_start
+
+    async def gradient_timestamp(
+        self, uid: int, window: int, version: str = tplr.__version__
+    ) -> float:
+        """
+        Return POSIX seconds of the gradient file’s Last-Modified header,
+        or 0.0 if it does not exist / fails.
+        """
+        bucket = self.commitments.get(int(uid))
+        if not bucket:
+            return 0.0
+        try:
+            s3 = await self._get_s3_client(bucket)
+            key = f"gradient-{window}-{uid}-v{version}.pt"
+            hdr = await s3.head_object(Bucket=bucket.name, Key=key)
+            return hdr["LastModified"].timestamp()
+        except Exception:
+            await self._purge_s3_client(bucket)
+            return 0.0
 
     async def get(
         self,

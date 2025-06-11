@@ -51,6 +51,10 @@
       tags: [monitoring, alerting]
       when: monitoring_enabled | default(true)
 
+    - role: tools
+      tags: [tools, admin]
+      when: tools_enabled | default(true)
+
   post_tasks:
     - name: Verify Subtensor deployment
       block:

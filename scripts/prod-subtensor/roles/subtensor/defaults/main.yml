@@ -42,12 +42,9 @@ subtensor_metrics_port: 9615
 subtensor_metrics_port_start: 9615
 
 # Chainspec configuration
-subtensor_chainspec_url: "https://raw.githubusercontent.com/opentensor/subtensor/refs/heads/main/chainspecs/raw_spec_finney.json"
+subtensor_chainspec_url: "https://raw.githubusercontent.com/opentensor/subtensor/v2.0.10/chainspecs/raw_spec_finney.json"
 
-# Enhanced peer connectivity settings
+# v2.0.10 compatible settings
 subtensor_sync_mode: "warp"
-subtensor_max_parallel_downloads: 8
-subtensor_in_peers: 50
-subtensor_out_peers: 50
 subtensor_log_level: "info"
 subtensor_bootnodes: "/dns/bootnode.finney.chain.opentensor.ai/tcp/30333/ws/p2p/12D3KooWRwbMb85RWnT8DSXSYMWQtuDwh4LJzndoRrTDotTR5gDC"

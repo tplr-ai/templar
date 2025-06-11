@@ -2,23 +2,32 @@
 
 Ansible deployment for highly available Subtensor infrastructure.
 
-## Quick Start
+## 🚀 Quick Start
 
+### Simple Deployment
 ```bash
-cd scripts/prod-subtensor
-ansible-vault encrypt group_vars/vault.yml
-ansible-playbook -i inventory playbook.yml --ask-vault-pass
+# 1. Prepare Ubuntu 24.04 server with Docker
+# 2. Configure inventory and settings
+cp inventory.example inventory
+cp group_vars/all.yml.example group_vars/all.yml
+
+# 3. Deploy everything
+ansible-playbook -i inventory playbook.yml
+
+# 4. Verify deployment
+ansible your-server -i inventory -m shell -a "subtensor-admin health" --become
 ```
+
+**📖 For detailed step-by-step instructions, see [REPLICATION.md](REPLICATION.md)**
 
 ## Architecture
 
-This deployment creates a **3-node high availability** Subtensor setup:
+This deployment creates a **2-node high availability** Subtensor setup:
 
 - **subtensor-0**: Primary node (ports: 9933, 9944, 30333)
-- **subtensor-1**: Secondary node (ports: 9934, 9945, 30334)  
-- **subtensor-2**: Tertiary node (ports: 9935, 9946, 30335)
+- **subtensor-1**: Secondary node (ports: 9934, 9945, 30334)
 
-All nodes sync with the official Finney mainnet using warp sync and official bootnodes.
+All nodes sync with the official Finney mainnet using warp sync and official bootnodes. Running Subtensor v2.0.10 in production mode.
 
 ## Configuration
 
@@ -29,7 +38,7 @@ Edit `group_vars/all.yml` for network, replicas, and resource limits.
 The deployment automatically downloads the official chainspec from:
 
 ```
-https://raw.githubusercontent.com/opentensor/subtensor/refs/heads/main/chainspecs/raw_spec_finney.json
+https://raw.githubusercontent.com/opentensor/subtensor/v2.0.10/chainspecs/raw_spec_finney.json
 ```
 
 This ensures consistency with the official Subtensor network configuration.
@@ -44,103 +53,171 @@ ansible-playbook -i inventory playbook.yml --ask-vault-pass
 ansible-playbook -i inventory playbook.yml --tags nginx
 ansible-playbook -i inventory playbook.yml --tags subtensor
 ansible-playbook -i inventory playbook.yml --tags monitoring
+ansible-playbook -i inventory playbook.yml --tags tools
 ```
 
-## Management
+## Admin Tools
 
+The deployment includes comprehensive admin tools for day-to-day management:
+
+### Health & Monitoring
 ```bash
-# Service status
-systemctl status subtensor nginx prometheus alertmanager
+subtensor-admin health          # Check node health and peer count
+subtensor-admin status          # Quick Docker container status
+subtensor-monitor sync          # Check sync status across nodes
+subtensor-monitor dashboard     # Real-time monitoring overview
+subtensor-monitor metrics       # System CPU, memory, disk usage
+```
 
-# Health checks
-/opt/subtensor/scripts/health_check.sh        # Subtensor nodes health
-/opt/monitoring/subtensor_health_check.sh     # Monitoring health check
+### Backup & Snapshots
+```bash
+subtensor-admin backup          # Simple container backup
+subtensor-admin snapshot        # Compressed LZ4 snapshot (recommended)
+subtensor-admin restore         # Interactive restore from snapshots
+```
 
-# Logs
-journalctl -u subtensor -f                    # Subtensor service logs
-journalctl -u subtensor-monitor -f            # Monitoring logs
-docker logs subtensor-0 -f                    # Individual node logs
+**Snapshot Process:**
+- Creates `snapshot_YYYY-MM-DD.tar.lz4` files
+- Temporarily stops services for clean snapshots
+- Stores in `/opt/subtensor/backups/`
+- Typical size: ~10GB compressed
 
-# Watchtower management
-/opt/subtensor/scripts/watchtower-manage.sh status       # Check Watchtower status
-/opt/subtensor/scripts/watchtower-manage.sh monitor      # Enable monitor-only mode
-/opt/subtensor/scripts/watchtower-manage.sh update       # Enable automatic updates
-/opt/subtensor/scripts/watchtower-manage.sh force-update # Force immediate update
+### Service Management
+```bash
+subtensor-admin restart         # Restart Subtensor services
+subtensor-admin logs            # View recent container logs
+```
+
+### Daily Operations Example
+```bash
+# Morning health check
+subtensor-admin health
+
+# Create snapshot before maintenance
+subtensor-admin snapshot
+
+# Monitor sync progress
+subtensor-monitor sync
+
+# Check system resources
+subtensor-monitor metrics
+```
+
+## Troubleshooting
+
+### Common Issues
+
+**Nodes not syncing:**
+```bash
+# Check peer connections
+subtensor-admin health
+
+# View sync status
+subtensor-monitor sync
+
+# Check container logs
+subtensor-admin logs
+```
+
+**High resource usage:**
+```bash
+# Check system metrics
+subtensor-monitor metrics
+
+# Monitor in real-time
+subtensor-monitor dashboard
+```
+
+**Service failures:**
+```bash
+# Check service status
+systemctl status subtensor
+
+# Restart services
+subtensor-admin restart
+
+# View detailed logs
+journalctl -u subtensor -f
+```
+
+### Recovery Procedures
+
+**Restore from snapshot:**
+```bash
+# List available snapshots
+subtensor-admin restore
+
+# Follow interactive prompts to select and restore
+```
+
+**Manual service recovery:**
+```bash
+# Stop services
+systemctl stop subtensor
+
+# Check docker containers
+docker ps -a
+
+# Remove corrupted containers
+docker rm subtensor-0 subtensor-1
+
+# Restart deployment
+ansible-playbook -i inventory playbook.yml --tags subtensor
 ```
 
 ## Monitoring
 
-The deployment includes comprehensive monitoring with Discord alerts.
+Basic monitoring is included with Prometheus and AlertManager:
+- **Prometheus**: `http://SERVER:9090`
+- **AlertManager**: `http://SERVER:9093`
 
 ```bash
-# Access monitoring interfaces
-# Prometheus: http://SERVER:9090
-# AlertManager: http://SERVER:9093
-
-# Monitor all services
-systemctl status prometheus alertmanager node-exporter subtensor-monitor
+# Check monitoring services
+systemctl status prometheus alertmanager node-exporter
 ```
 
-For detailed monitoring setup and Discord integration, see [MONITORING.md](MONITORING.md).
+## Configuration Files
 
-## Automated Updates with Blue/Green Deployment
+Key configuration files to customize for your deployment:
 
-This deployment includes Docker Watchtower for automated container updates using a blue/green rollout strategy.
-
-### Features
-
-- **Zero-downtime updates**: Rolling updates ensure continuous service availability
-- **Health checks**: Automated verification of container health before and after updates
-- **Automatic rollback**: Failed updates are automatically rolled back
-- **Discord notifications**: Real-time alerts for update status
-- **Backup creation**: Pre-update backups for easy recovery
-
-### Configuration
-
-Edit `group_vars/all.yml` to configure Watchtower behavior:
-
+### `group_vars/all.yml`
 ```yaml
-watchtower_enabled: true
-watchtower_poll_interval: 3600  # Check for updates every hour
-watchtower_monitor_only: false  # Set to true to only monitor, not update
-bluegreen_enabled: true
-bluegreen_rollback_on_failure: true
+# Basic settings
+subtensor_version: "v2.0.10"
+subtensor_replicas: 2
+subtensor_sync_mode: "fast"
+
+# Network settings
+subtensor_network: "finney"
+subtensor_bootnodes: "..."
+
+# Resource limits
+subtensor_memory_limit: "8g"
+subtensor_cpu_limit: "4"
+
+# Tools settings  
+tools_enabled: true
 ```
 
-### Update Process
+### `inventory`
+```ini
+[subtensor]
+your-server.example.com ansible_user=ubuntu
 
-1. **Pre-update**: Creates backup, drains traffic, verifies cluster health
-2. **Update**: Downloads new image, stops old container, starts new one
-3. **Health check**: Verifies new container is healthy and syncing
-4. **Post-update**: Restores traffic, sends notifications
-5. **Rollback**: If health checks fail, automatically rolls back to previous version
-
-### Management Commands
-
-```bash
-# Check update status
-/opt/subtensor/scripts/watchtower-manage.sh status
-
-# Force immediate update check
-/opt/subtensor/scripts/watchtower-manage.sh force-update
-
-# Switch to monitor-only mode (no automatic updates)
-/opt/subtensor/scripts/watchtower-manage.sh monitor
-
-# Enable automatic updates
-/opt/subtensor/scripts/watchtower-manage.sh update
-
-# Switch deployment group
-/opt/subtensor/scripts/watchtower-manage.sh switch-group green
-
-# View Watchtower logs
-/opt/subtensor/scripts/watchtower-manage.sh logs
+[subtensor:vars]
+ansible_ssh_private_key_file=~/.ssh/your-key.pem
 ```
 
-### Safety Features
+## Documentation
 
-- **Primary node protection**: Secondary nodes must be healthy before updating primary
-- **Gradual rollout**: Updates one node at a time with health verification
-- **Traffic management**: Temporarily removes updating nodes from load balancer
-- **Backup restoration**: Automatic restoration from backup on critical failures
-- **Timeout protection**: Updates that take too long are automatically failed
+- **[REPLICATION.md](REPLICATION.md)** - Complete step-by-step replication guide
+- **[Admin Tools](roles/tools/README.md)** - Simple command reference
+- **Configuration examples** in `group_vars/all.yml.example`
+- **Inventory template** in `inventory.example`
+
+## Support
+
+For issues or questions:
+1. Check the troubleshooting section above
+2. Review the detailed replication guide
+3. Verify configuration against examples

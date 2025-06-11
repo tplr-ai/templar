@@ -18,7 +18,6 @@
     - /opt/subtensor/data
     - /opt/subtensor/data/node-0
     - /opt/subtensor/data/node-1
-    - /opt/subtensor/data/node-2
     - /opt/subtensor/chainspecs
     - /opt/subtensor/scripts
     - /opt/subtensor/logs
@@ -96,5 +95,4 @@
   loop:
     - 9933
     - 9934
-    - 9935
   when: not ansible_check_mode

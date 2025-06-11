@@ -1,0 +1,3 @@
+---
+tools_dir: "/opt/subtensor/tools"
+tools_venv_dir: "/opt/subtensor/venv"

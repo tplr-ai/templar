@@ -60,12 +60,6 @@ services:
           --no-mdns \
           --bootnodes {{ subtensor_bootnodes }} \
           --sync {{ subtensor_sync_mode }} \
-          --name "node-0" \
-          --max-parallel-downloads {{ subtensor_max_parallel_downloads }} \
-          --in-peers {{ subtensor_in_peers }} \
-          --out-peers {{ subtensor_out_peers }} \
-          --state-cache-size {{ subtensor_state_cache_size }} \
-          --blocks-pruning {{ subtensor_blocks_pruning }} \
           --prometheus-external --prometheus-port 9615 \
           --log {{ subtensor_log_level }}
 
@@ -94,12 +88,6 @@ services:
           --no-mdns \
           --bootnodes {{ subtensor_bootnodes }} \
           --sync {{ subtensor_sync_mode }} \
-          --name "node-1" \
-          --max-parallel-downloads {{ subtensor_max_parallel_downloads }} \
-          --in-peers {{ subtensor_in_peers }} \
-          --out-peers {{ subtensor_out_peers }} \
-          --state-cache-size {{ subtensor_state_cache_size }} \
-          --blocks-pruning {{ subtensor_blocks_pruning }} \
           --prometheus-external --prometheus-port 9615 \
           --log {{ subtensor_log_level }}
 

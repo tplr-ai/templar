@@ -810,14 +810,34 @@ class Validator:
                 else:
                     selected_peers = self.select_next_peers()
                 if selected_peers is not None:
+                    # Select reserve peers
+                    reserve_peers = self._select_reserves(
+                        selected_peers, len(selected_peers)
+                    )
+
                     self.last_peer_update_window = self.sync_window
-                    await self.comms.post_peer_list(
-                        peers=selected_peers,
-                        first_effective_window=self.current_window
+
+                    # Create enhanced peer data
+                    peer_data = {
+                        "peers": selected_peers,
+                        "reserve_peers": reserve_peers,
+                        "target_success_rate": 1.0,  # 100% success rate target
+                        "first_effective_window": self.current_window
                         + self.hparams.peer_list_window_margin,
-                        sync_window=self.sync_window,
-                        weights=self.weights,
-                        initial_selection=initial_selection,
+                        "sync_window": self.sync_window,
+                        "weights": self.weights.cpu().numpy().tolist(),
+                        "initial_selection": initial_selection,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "version": tplr.__version__,
+                    }
+
+                    # Store as JSON and upload
+                    await self.comms.put(
+                        state_dict=peer_data,
+                        uid=str(self.uid),
+                        window=self.sync_window,
+                        key="peers",
+                        local=False,
                     )
 
             self.comms.update_peers_with_buckets()
@@ -2580,6 +2600,40 @@ class Validator:
         )
 
         return selected_peers
+
+    def _select_reserves(
+        self, primary_peers: list[int], reserve_count: int
+    ) -> list[int]:
+        """Select reserve peers from remaining active peers."""
+        available_reserves = [
+            int(peer) for peer in self.comms.active_peers if peer not in primary_peers
+        ]
+
+        if len(available_reserves) < reserve_count:
+            tplr.log_with_context(
+                level="warning",
+                message=f"Only {len(available_reserves)} reserves available, need {reserve_count}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            reserve_count = len(available_reserves)
+
+        # Sort by weight and take top N
+        reserve_weights = [
+            (peer, float(self.weights.cpu()[peer])) for peer in available_reserves
+        ]
+        reserve_weights.sort(key=lambda x: x[1], reverse=True)
+
+        selected_reserves = [peer for peer, _ in reserve_weights[:reserve_count]]
+
+        tplr.log_with_context(
+            level="info",
+            message=f"Selected {len(selected_reserves)} reserve peers",
+            sync_window=self.sync_window,
+            current_window=self.current_window,
+        )
+
+        return selected_reserves
 
     async def evaluate_miner_sync(
         self, eval_uid: int

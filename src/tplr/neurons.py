@@ -167,34 +167,75 @@ async def update_peers(
         if result is None:
             logger.info("Unable to get peer list from bucket")
         else:
-            next_peers, peers_update_window = result
+            # Handle both old and new formats
+            if len(result) == 2:
+                # Old format: (peers, update_window)
+                next_peers, peers_update_window = result
+                reserve_peers = []
+                target_success_rate = 1.0
+            else:
+                # New format: (peer_data, update_window)
+                peer_data, peers_update_window = result
+                if isinstance(peer_data, dict) and "peers" in peer_data:
+                    next_peers = peer_data["peers"]
+                    reserve_peers = peer_data.get("reserve_peers", [])
+                    target_success_rate = peer_data.get("target_success_rate", 1.0)
+                else:
+                    # Fallback for invalid data
+                    next_peers = peer_data if isinstance(peer_data, list) else []
+                    reserve_peers = []
+                    target_success_rate = 1.0
+
             logger.info(
                 f"Got peer list {next_peers} and update window "
                 f"{peers_update_window} from bucket"
             )
+            if reserve_peers:
+                logger.info(f"Got {len(reserve_peers)} reserve peers: {reserve_peers}")
+
             if (
                 instance.peers_update_window is None
                 or peers_update_window > instance.peers_update_window
             ):
                 instance.next_peers = next_peers
+                instance.next_reserve_peers = reserve_peers
+                instance.next_target_success_rate = target_success_rate
                 instance.peers_update_window = peers_update_window
                 logger.info("This list is new, updating next_peers")
 
     # Update peers, if it's time
     if instance.next_peers is not None and window >= instance.peers_update_window:
         instance.comms.peers = instance.next_peers
+
+        # Apply reserves if available
+        instance.comms.reserve_peers = getattr(instance, "next_reserve_peers", [])
+        instance.comms.target_success_rate = getattr(
+            instance, "next_target_success_rate", 1.0
+        )
+
         late_text = (
             f"{window - instance.peers_update_window} windows late"
             if window - instance.peers_update_window > 0
             else "on time"
         )
+
+        reserve_info = (
+            f", Reserves: {len(instance.comms.reserve_peers)}"
+            if instance.comms.reserve_peers
+            else ""
+        )
         logger.info(
             f"{tplr.P(window, tplr.T() - peer_start)} Updated peers "
-            f"{late_text} - gather:{len(instance.comms.peers)}. Next update "
+            f"{late_text} - gather:{len(instance.comms.peers)}{reserve_info}. "
+            f"Target rate: {instance.comms.target_success_rate:.0%}. Next update "
             f"expected on step window "
             f"{instance.peers_update_window + instance.hparams.peer_list_window_margin}"
         )
+
+        # Clear next peer data
         instance.next_peers = None
+        instance.next_reserve_peers = []
+        instance.next_target_success_rate = 1.0
     else:
         reason = (
             "next peers are not defined yet"

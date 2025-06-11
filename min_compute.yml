@@ -22,8 +22,8 @@ compute_spec:
       min_vram: 141                        # Minimum GPU VRAM (GB)
       recommended_vram: 141                # Recommended GPU VRAM (GB)
       cuda_cores: 16896                    # Minimum number of CUDA cores (if applicable)
-      min_compute_capability: 9.0          # Minimum CUDA compute capability
-      recommended_compute_capability: 9.0  # Recommended CUDA compute capability
+      min_compute_capability: 9.0          # Minimum CUDA compute capability - see https://developer.nvidia.com/cuda-gpus
+      recommended_compute_capability: 9.0  # Recommended CUDA compute capability - see https://developer.nvidia.com/cuda-gpus
       recommended_gpu: "NVIDIA H200"       # provide a recommended GPU to purchase/rent
       min_amount: 1                        # Minimum amount of GPUs required for the miner to run
       recommended_amount: 8                # Recomended amount of GPUs, if distributed training is enabled

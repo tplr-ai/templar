@@ -1,0 +1,78 @@
+#!/bin/bash
+set -euo pipefail
+
+CONTAINER_NAME="${1:-all}"
+BACKUP_DIR="{{ backup_storage_path }}"
+LOG_FILE="{{ subtensor_logs_dir }}/backup.log"
+RETENTION_DAYS={{ backup_retention_days | default(7) }}
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+if [ "$CONTAINER_NAME" != "all" ]; then
+    BACKUP_NAME="${CONTAINER_NAME}_backup_$TIMESTAMP"
+else
+    BACKUP_NAME="subtensor_backup_$TIMESTAMP"
+fi
+
+log_message() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+create_backup() {
+    local backup_path="$BACKUP_DIR/$BACKUP_NAME"
+    mkdir -p "$backup_path"
+    
+    # Always backup configuration files
+    cp {{ subtensor_base_path }}/docker-compose.yml "$backup_path/"
+    [[ -f {{ subtensor_base_path }}/.env ]] && cp {{ subtensor_base_path }}/.env "$backup_path/"
+    [[ -d {{ subtensor_base_path }}/chainspecs ]] && cp -r {{ subtensor_base_path }}/chainspecs "$backup_path/"
+    
+{% if 'data' in subtensor_backup_volumes %}
+    mkdir -p "$backup_path/data"
+    
+    if [ "$CONTAINER_NAME" != "all" ]; then
+        # Backup specific container data
+        NODE_ID=$(echo "$CONTAINER_NAME" | grep -o '[0-9]$' || echo "0")
+        if [[ -d "{{ subtensor_data_dir }}/node-$NODE_ID" ]]; then
+            log_message "Backing up data for $CONTAINER_NAME (node-$NODE_ID)"
+            rsync -av --exclude='lock' "{{ subtensor_data_dir }}/node-$NODE_ID/" "$backup_path/data/node-$NODE_ID/"
+        fi
+    else
+        # Backup all nodes
+        for i in {0..{{ subtensor_replicas | int - 1 }}}; do
+            if [[ -d "{{ subtensor_data_dir }}/node-$i" ]]; then
+                log_message "Backing up data for node-$i"
+                rsync -av --exclude='lock' "{{ subtensor_data_dir }}/node-$i/" "$backup_path/data/node-$i/"
+            fi
+        done
+    fi
+{% endif %}
+    
+    mkdir -p "$backup_path/logs"
+    find {{ subtensor_logs_dir }} -name "*.log" -mtime -1 -exec cp {} "$backup_path/logs/" \;
+    
+    cat > "$backup_path/metadata.json" << EOF
+{
+    "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+    "hostname": "{{ ansible_host }}",
+    "subtensor_version": "{{ subtensor_version }}",
+    "network": "{{ subtensor_network }}",
+    "replicas": {{ subtensor_replicas }}
+}
+EOF
+    
+    cd "$BACKUP_DIR"
+    tar -czf "$BACKUP_NAME.tar.gz" "$BACKUP_NAME"
+    rm -rf "$BACKUP_NAME"
+    
+    log_message "Backup completed: $BACKUP_NAME.tar.gz"
+}
+
+cleanup_old_backups() {
+    find "$BACKUP_DIR" -name "subtensor_backup_*.tar.gz" -mtime +$RETENTION_DAYS -delete
+}
+
+{% if enable_backup | default(true) %}
+mkdir -p "$BACKUP_DIR"
+create_backup
+cleanup_old_backups
+{% endif %}

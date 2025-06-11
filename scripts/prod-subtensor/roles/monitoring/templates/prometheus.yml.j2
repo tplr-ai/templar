@@ -1,0 +1,44 @@
+global:
+  scrape_interval: {{ prometheus_scrape_interval }}
+  evaluation_interval: {{ prometheus_evaluation_interval }}
+  scrape_timeout: 10s
+
+rule_files:
+  - "{{ monitoring_config_path }}/subtensor_rules.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - localhost:{{ alertmanager_port }}
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:{{ prometheus_port }}']
+
+  - job_name: 'node'
+    static_configs:
+      - targets: ['localhost:{{ node_exporter_port }}']
+
+  - job_name: 'subtensor-nodes'
+    static_configs:
+      - targets:
+{% for i in range(subtensor_replicas | int) %}
+        - 'localhost:{{ subtensor_metrics_port_start | int + i }}'
+{% endfor %}
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['localhost:80']
+    metrics_path: /nginx_status
+    scrape_interval: 30s
+
+  - job_name: 'subtensor-custom-metrics'
+    static_configs:
+      - targets: ['localhost:8088']
+    metrics_path: /metrics
+    scrape_interval: 15s

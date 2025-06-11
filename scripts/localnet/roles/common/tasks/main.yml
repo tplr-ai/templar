@@ -1,9 +1,11 @@
-- name: Update apt cache manually
+- name: Update apt cache with retry
   become: true
-  command: apt-get update
-  changed_when: false
+  apt:
+    update_cache: yes
+  retries: 3
+  delay: 10
 
-- name: Install base apt packages
+- name: Install critical packages first
   become: true
   apt:
     update_cache: no
@@ -11,19 +13,42 @@
       - build-essential
       - make
       - git
-      - clang
       - curl
       - libssl-dev
-      - llvm
       - libudev-dev
       - pkg-config
-      - protobuf-compiler
       - python3-pip
-      - nodejs
-      - npm
       - rsync
       - jq
     state: present
+  retries: 3
+  delay: 10
+  tags: common
+
+- name: Install system packages that may have dependency issues
+  become: true
+  apt:
+    update_cache: no
+    name:
+      - clang
+      - llvm
+      - protobuf-compiler
+    state: present
+  retries: 3
+  delay: 10
+  ignore_errors: true
+  tags: common
+
+- name: Install Node.js and npm
+  become: true
+  apt:
+    update_cache: no
+    name:
+      - nodejs
+      - npm
+    state: present
+  retries: 3
+  delay: 10
   tags: common
 
 - name: Install extra apt packages (if any)

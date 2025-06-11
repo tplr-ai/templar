@@ -35,6 +35,7 @@
     "peer_replacement_frequency": 5,
     "peer_list_window_margin": 2,
     "active_check_interval": 60,
+    "registration_check_interval": 600,
     "recent_windows": 5,
     "power_normalisation": 2.2,
     "validator_sample_rate": 0.6,

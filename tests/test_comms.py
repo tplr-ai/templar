@@ -114,6 +114,7 @@ async def comms_instance():
     mock_metagraph = MagicMock()
     mock_hparams = MagicMock()
     mock_hparams.active_check_interval = 60
+    mock_hparams.registration_check_interval = 600
     mock_hparams.recent_windows = 3
 
     # Create comms instance with mocked get_own_bucket
@@ -1276,6 +1277,7 @@ class MockHParams:
         self.catch_up_batch_size = 10
         self.catch_up_timeout = 300
         self.active_check_interval = 60
+        self.registration_check_interval = 600
         self.recent_windows = 5
         self.max_topk_peers = 50
 

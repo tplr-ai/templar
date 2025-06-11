@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, TypeVar, cast
 import torch
 import torch.nn as nn
 from torch._prims_common import DeviceLikeType
+import bittensor as bt
 
 import tplr
 from tplr.logging import logger
@@ -533,3 +534,24 @@ def pack_binary_tensor(tensor: torch.Tensor, device: DeviceLikeType):
         packed_tensor |= tensor[i::8] << i  # Pack 8 values per byte
 
     return packed_tensor
+
+
+async def periodic_registration_check(
+    instance: NeuronT, interval: int
+) -> None:
+    """Periodically verify that a neuron's wallet is still registered."""
+    while not instance.stop_event.is_set():
+        try:
+            subtensor_sync = bt.subtensor(config=instance.config)
+            await asyncio.to_thread(
+                lambda: instance.metagraph.sync(subtensor=subtensor_sync)
+            )
+            if instance.wallet.hotkey.ss58_address not in instance.metagraph.hotkeys:
+                logger.error(
+                    f"The wallet {instance.wallet} is not registered on subnet: {instance.metagraph.netuid}"
+                )
+                instance.stop_event.set()
+                break
+        except Exception as e:
+            logger.error(f"Registration check failed: {e}")
+        await asyncio.sleep(interval)

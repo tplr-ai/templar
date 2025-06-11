@@ -331,6 +331,11 @@ class Miner:
             await tplr.neurons.catchup_with_aggregation_server(self, self.start_window)
 
         self.comms.start_commitment_fetcher()
+        asyncio.create_task(
+            tplr.neurons.periodic_registration_check(
+                self, self.hparams.registration_check_interval
+            )
+        )
 
         while True:
             # 1. Initialize window and update peers

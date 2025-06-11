@@ -77,7 +77,7 @@ async def cleanup_bucket():
                         {"Key": obj["Key"]}
                         for obj in page["Contents"]
                         if obj["Key"].startswith(
-                            ("checkpoint", "gradient", "start_window")
+                            ("checkpoint", "gradient", "start_window", "debug", "peers")
                         )
                     ]
                     objects_to_delete.extend(filtered_objects)

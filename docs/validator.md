@@ -38,13 +38,14 @@ This guide will help you set up and run a validator for **τemplar**. Validators
 ## Prerequisites
 
 - **NVIDIA GPU** with CUDA support
-  - Minimum H100 recommended
+  - **Minimum H200 required** (141GB VRAM)
+  - Recommended: 1x H200 GPU for validators
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Docker** and **Docker Compose**
 - **Git**
 - **Python 3.12+** (for manual installation)
 - **Cloudflare R2 Bucket Configuration**:
-  - **Dataset Setup**: You must set up your own dataset following the instructions in the [R2 Dataset Guide](./r2_dataset.md)
+  - **Dataset Setup**: You must set up your own **DCLM dataset** (current dataset) following the instructions in the [R2 Dataset Guide](./r2_dataset.md)
   - **Gradient Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:
@@ -131,7 +132,7 @@ This guide will help you set up and run a validator for **τemplar**. Validators
    R2_GRADIENTS_WRITE_ACCESS_KEY_ID=<your_r2_write_access_key_id>
    R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=<your_r2_write_secret_access_key>
 
-   # Dataset R2 credentials - You must set up your own dataset
+   # Dataset R2 credentials - You must set up your own DCLM dataset (current dataset)
    # See: ./r2_dataset.md for instructions
    R2_DATASET_ACCOUNT_ID=<your_dataset_account_id>
    R2_DATASET_BUCKET_NAME=<your_dataset_bucket_name>
@@ -222,7 +223,7 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
    export R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
    export R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
 
-   # Dataset R2 credentials - You must set up your own dataset
+   # Dataset R2 credentials - You must set up your own DCLM dataset (current dataset)
    # See docs/r2_dataset.md for instructions
    export R2_DATASET_ACCOUNT_ID=your_dataset_account_id
    export R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
@@ -298,7 +299,7 @@ R2_GRADIENTS_READ_SECRET_ACCESS_KEY=your_r2_gradients_read_secret_access_key
 R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_gradients_write_access_key_id
 R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_gradients_write_secret_access_key
 
-# Dataset R2 credentials - You must set up your own dataset
+# Dataset R2 credentials - You must set up your own DCLM dataset (current dataset)
 # See docs/r2_dataset.md for instructions
 R2_DATASET_ACCOUNT_ID=your_dataset_account_id
 R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
@@ -328,7 +329,11 @@ DEBUG=false
 ### Hardware Requirements
 
 - **GPU Requirements**:
-  - Minimum: NVIDIA H100 with 80GB VRAM
+  - **Minimum: NVIDIA H200 with 141GB VRAM** (as defined in min_compute.yml)
+  - Recommended: 1x H200 GPU for validators
+  - **Minimum CPU**: 32 cores, 3.5 GHz
+  - **Minimum RAM**: 800 GB
+  - **Minimum Network**: 1024 Mbps download/upload bandwidth
 - **Storage**: 200GB+ recommended for model and evaluation data
 - **RAM**: 32GB+ recommended
 - **Network**: High-bandwidth, stable connection for state synchronization

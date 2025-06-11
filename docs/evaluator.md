@@ -25,11 +25,14 @@ The evaluator script (`scripts/evaluator.py`) performs:
 ### System Requirements
 
 - Registered Bittensor wallet
-- NVIDIA GPU with CUDA support
+- **NVIDIA GPU with CUDA support (H200 required - 141GB VRAM minimum)**
 - Python 3.8+
 - uv package manager
 - lm-eval benchmark tool installed
 - Access to model checkpoints on the network
+- **CPU**: 32 cores, 3.5 GHz minimum
+- **RAM**: 800 GB minimum
+- **Network**: 1024 Mbps download/upload bandwidth minimum
 
 ### Environment Variables
 

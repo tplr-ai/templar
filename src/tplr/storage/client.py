@@ -18,6 +18,7 @@
 import asyncio
 import math
 import os
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -46,6 +47,7 @@ from ..schemas import Bucket
 CF_REGION_NAME: str = "enam"
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
+MAX_DOWNLOAD_WORKERS = min(16, CPU_COUNT * 2)  # Max concurrent download workers
 
 
 class StorageClient:
@@ -167,8 +169,13 @@ class StorageClient:
                 )
                 async with aiofiles.open(temp_file_path, "wb") as f:
                     async with get_response["Body"] as stream:
-                        data = await asyncio.wait_for(stream.read(), timeout=timeout)
-                        await f.write(data)
+                        while True:
+                            chunk = await asyncio.wait_for(
+                                stream.read(8192), timeout=timeout
+                            )
+                            if not chunk:
+                                break
+                            await f.write(chunk)
             else:
                 success = await self.multipart_download(
                     key, temp_file_path, bucket, show_progress=show_progress
@@ -195,8 +202,6 @@ class StorageClient:
 
     async def put_object(self, key: str, data: bytes, bucket: Bucket) -> bool:
         """Upload object to S3 storage."""
-        import uuid
-
         temp_file_path = os.path.join(self.temp_dir, f"temp_put_{uuid.uuid4().hex}")
 
         try:
@@ -207,10 +212,9 @@ class StorageClient:
             file_size = len(data)
             multipart_threshold = 100 * 1024 * 1024  # 100MB
 
-            s3_client = await self._get_s3_client(bucket)
-
             if file_size <= multipart_threshold:
                 # Simple upload for small files
+                s3_client = await self._get_s3_client(bucket)
                 await s3_client.put_object(Bucket=bucket.name, Key=key, Body=data)
             else:
                 # Multipart upload for large files
@@ -282,15 +286,8 @@ class StorageClient:
 
     async def get_object_size(self, key: str, bucket: Bucket) -> Optional[int]:
         """Get the size of an S3 object without downloading it using HEAD request."""
-        try:
-            s3_client = await self._get_s3_client(bucket)
-            response: HeadObjectOutputTypeDef = await s3_client.head_object(
-                Bucket=bucket.name, Key=key
-            )
-            return response["ContentLength"]
-        except Exception as e:
-            tplr.logger.debug(f"Error getting object size for {key}: {e}")
-            return None
+        metadata = await self.get_object_metadata(key, bucket)
+        return metadata["ContentLength"] if metadata else None
 
     async def get_object_metadata(
         self, key: str, bucket: Bucket
@@ -375,6 +372,9 @@ class StorageClient:
                 async def upload_part(
                     part_number: int,
                 ) -> Optional[CompletedPartTypeDef]:
+                    if upload_id is None:
+                        raise ValueError("Upload ID is None")
+
                     byte_range_start = (part_number - 1) * PART_SIZE
                     byte_range_end = min(byte_range_start + PART_SIZE, file_size)
 
@@ -383,9 +383,6 @@ class StorageClient:
                             async with aiofiles.open(file_path, "rb") as f:
                                 await f.seek(byte_range_start)
                                 data = await f.read(byte_range_end - byte_range_start)
-
-                            if upload_id is None:
-                                raise ValueError("Upload ID is None")
 
                             response: UploadPartOutputTypeDef = (
                                 await s3_client.upload_part(
@@ -468,7 +465,7 @@ class StorageClient:
         bucket: Bucket,
         show_progress: bool = True,
         chunk_size: Optional[int] = None,
-        max_workers: Optional[int] = None,
+        max_workers: int = MAX_DOWNLOAD_WORKERS,
     ) -> bool:
         """Download large file using multipart download with concurrent chunks.
 
@@ -500,13 +497,6 @@ class StorageClient:
                         max(5 * 1024 * 1024, file_size // 32),
                         50 * 1024 * 1024,  # 50MB max default
                     )
-
-            # Use provided max_workers or auto-calculate
-            if max_workers is None:
-                if torch.cuda.is_available():
-                    max_workers = min(torch.cuda.device_count() * 4, 16)
-                else:
-                    max_workers = min((os.cpu_count() or 1) * 4, 16)
 
             total_chunks = math.ceil(file_size / chunk_size)
             max_workers = min(max_workers, total_chunks)

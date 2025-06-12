@@ -282,9 +282,9 @@ def test_all_manager_dependencies_are_properly_stored_as_instance_variables(
     }
     actual_attrs = set(manager.__dict__.keys())
 
-    assert expected_attrs.issubset(actual_attrs), (
-        f"Missing expected attributes: {expected_attrs - actual_attrs}"
-    )
+    assert expected_attrs.issubset(
+        actual_attrs
+    ), f"Missing expected attributes: {expected_attrs - actual_attrs}"
 
     # Verify no unexpected critical attributes are missing
     missing_attrs = expected_attrs - actual_attrs
@@ -2249,9 +2249,9 @@ def test_all_manager_dependencies_are_properly_stored_as_instance_variables(
     }
     actual_attrs = set(manager.__dict__.keys())
 
-    assert expected_attrs.issubset(actual_attrs), (
-        f"Missing expected attributes: {expected_attrs - actual_attrs}"
-    )
+    assert expected_attrs.issubset(
+        actual_attrs
+    ), f"Missing expected attributes: {expected_attrs - actual_attrs}"
 
     # Verify no unexpected critical attributes are missing
     missing_attrs = expected_attrs - actual_attrs
@@ -4218,9 +4218,9 @@ def test_all_manager_dependencies_are_properly_stored_as_instance_variables(
     }
     actual_attrs = set(manager.__dict__.keys())
 
-    assert expected_attrs.issubset(actual_attrs), (
-        f"Missing expected attributes: {expected_attrs - actual_attrs}"
-    )
+    assert expected_attrs.issubset(
+        actual_attrs
+    ), f"Missing expected attributes: {expected_attrs - actual_attrs}"
 
     # Verify no unexpected critical attributes are missing
     missing_attrs = expected_attrs - actual_attrs
@@ -7783,9 +7783,9 @@ async def test_aggregate_gradients_aggregated_state_dict_contains_lists(
 
         # Check all values are lists
         for key, value in aggregated.items():
-            assert isinstance(value, list), (
-                f"Key {key} should contain a list, got {type(value)}"
-            )
+            assert isinstance(
+                value, list
+            ), f"Key {key} should contain a list, got {type(value)}"
 
         # Check specific list contents
         assert len(aggregated["param1"]) == 2  # From both UIDs

@@ -22,6 +22,7 @@ import re
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Any, List, Literal, Optional
+
 import bittensor as bt
 import torch
 from torch.optim import SGD
@@ -29,20 +30,21 @@ from torch.optim.lr_scheduler import SequentialLR
 from transformers.models.llama import LlamaForCausalLM
 
 import tplr as tplr
+
 from . import __version__
 from .chain import ChainManager
 from .compress import CompressDCT, TransformDCT
 from .config import BUCKET_SECRETS
+from .network.peer_manager import PeerManager
+from .protocol.metadata_manager import MetadataManager
 from .schemas import Bucket
 
 # Import all the new managers
 from .storage.client import StorageClient
 from .storage.file_manager import FileManager
-from .training.gradient_manager import GradientManager
-from .training.checkpoint_manager import CheckpointManager
 from .training.aggregation_manager import AggregationManager
-from .network.peer_manager import PeerManager
-from .protocol.metadata_manager import MetadataManager
+from .training.checkpoint_manager import CheckpointManager
+from .training.gradient_manager import GradientManager
 
 # Constants
 CPU_COUNT = os.cpu_count() or 4

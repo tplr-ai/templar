@@ -36,7 +36,7 @@ from .chain import ChainManager
 from .compress import CompressDCT, TransformDCT
 from .config import BUCKET_SECRETS
 from .network.peer_manager import PeerManager
-from .protocol.metadata_manager import MetadataManager
+from .protocol.coordinator_manager import CoordinatorManager
 from .schemas import Bucket
 
 # Import all the new managers
@@ -137,7 +137,7 @@ class Comms(ChainManager):
             self.config.device if hasattr(self.config, "device") else "cpu",
         )
 
-        self.metadata_manager = MetadataManager(
+        self.coordinator_manager = CoordinatorManager(
             self.storage_client,
             self.file_manager,
             self,  # ChainManager
@@ -464,14 +464,14 @@ class Comms(ChainManager):
             candidates, weights, k
         )
 
-    # Metadata methods
+    # Coordination methods
     async def post_start_window(self, start_window: int) -> None:
-        """Post start window - delegate to metadata manager"""
-        await self.metadata_manager.post_start_window(start_window)
+        """Post start window - delegate to coordinator manager"""
+        await self.coordinator_manager.post_start_window(start_window)
 
     async def get_start_window(self, retries: int = -1) -> int | None:
-        """Get start window - delegate to metadata manager"""
-        return await self.metadata_manager.get_start_window(retries)
+        """Get start window - delegate to coordinator manager"""
+        return await self.coordinator_manager.get_start_window(retries)
 
     async def post_peer_list(
         self,
@@ -481,20 +481,20 @@ class Comms(ChainManager):
         weights: torch.Tensor,
         initial_selection: bool,
     ) -> None:
-        """Post peer list - delegate to metadata manager"""
-        await self.metadata_manager.post_peer_list(
+        """Post peer list - delegate to coordinator manager"""
+        await self.coordinator_manager.post_peer_list(
             peers, first_effective_window, sync_window, weights, initial_selection
         )
 
     async def get_peer_list(
         self, fetch_previous: bool = False
     ) -> tuple[list[int], int] | None:
-        """Get peer list - delegate to metadata manager"""
-        return await self.metadata_manager.get_peer_list(fetch_previous)
+        """Get peer list - delegate to coordinator manager"""
+        return await self.coordinator_manager.get_peer_list(fetch_previous)
 
     async def get_debug_dict(self, window: int) -> dict | None:
-        """Get debug dict - delegate to metadata manager"""
-        return await self.metadata_manager.get_debug_dict(window)
+        """Get debug dict - delegate to coordinator manager"""
+        return await self.coordinator_manager.get_debug_dict(window)
 
     # Aggregation methods
     async def load_aggregation(self, window: int) -> dict | None:

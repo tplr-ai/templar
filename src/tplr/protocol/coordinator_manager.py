@@ -20,7 +20,6 @@ import json
 import re
 from typing import Optional
 
-import aiofiles
 import torch
 
 import tplr
@@ -34,8 +33,8 @@ from ..storage.file_manager import FileManager
 PEERS_FILE_PREFIX = "peers_"
 
 
-class MetadataManager:
-    """Manages protocol metadata"""
+class CoordinatorManager:
+    """Manages protocol coordination"""
 
     def __init__(
         self,
@@ -56,22 +55,9 @@ class MetadataManager:
         """Upload the start window as a JSON object to the node's R2 bucket."""
         try:
             key = f"start_window_v{self.version}.json"
-            start_window_data = {"start_window": start_window}
-
-            # Create temporary JSON file
-            temp_file = self.file_manager.create_temp_file("start_window", ".json")
-
-            async with aiofiles.open(temp_file, "w") as f:
-                await f.write(json.dumps(start_window_data))
-
-            # Read the file and upload
-            with open(temp_file, "rb") as f:
-                data = f.read()
+            data = f'{{"start_window": {start_window}}}'.encode("utf-8")
 
             success = await self.storage_client.put_object(key, data, self.bucket)
-
-            # Cleanup temp file
-            self.file_manager.delete_file(temp_file)
 
             if success:
                 tplr.logger.info(f"Successfully posted start_window: {start_window}")
@@ -141,28 +127,21 @@ class MetadataManager:
         """Upload peer list and debug data as JSON to the node's R2 bucket."""
         try:
             key = f"{PEERS_FILE_PREFIX}{first_effective_window}_v{self.version}.json"
-            peers_and_weights = {
-                "peers": peers,
-                "initial_selection": initial_selection,
-                "sync_window": sync_window,
-                "first_effective_window": first_effective_window,
-                "weights": weights.tolist() if torch.is_tensor(weights) else weights,
-            }
 
-            # Create temporary JSON file
-            temp_file = self.file_manager.create_temp_file("peer_list", ".json")
-
-            async with aiofiles.open(temp_file, "w") as f:
-                await f.write(json.dumps(peers_and_weights))
-
-            # Read and upload
-            with open(temp_file, "rb") as f:
-                data = f.read()
+            # Serialize JSON directly to bytes
+            data = json.dumps(
+                {
+                    "peers": peers,
+                    "initial_selection": initial_selection,
+                    "sync_window": sync_window,
+                    "first_effective_window": first_effective_window,
+                    "weights": weights.tolist()
+                    if torch.is_tensor(weights)
+                    else weights,
+                }
+            ).encode("utf-8")
 
             success = await self.storage_client.put_object(key, data, self.bucket)
-
-            # Cleanup temp file
-            self.file_manager.delete_file(temp_file)
 
             if success:
                 tplr.logger.info(

@@ -597,29 +597,29 @@ class TestComms:
     @pytest.mark.asyncio
     async def test_post_start_window(self, comms):
         """Test post start window"""
-        comms.metadata_manager = Mock()
-        comms.metadata_manager.post_start_window = AsyncMock()
+        comms.coordinator_manager = Mock()
+        comms.coordinator_manager.post_start_window = AsyncMock()
 
         await comms.post_start_window(start_window=5)
 
-        comms.metadata_manager.post_start_window.assert_called_once_with(5)
+        comms.coordinator_manager.post_start_window.assert_called_once_with(5)
 
     @pytest.mark.asyncio
     async def test_get_start_window(self, comms):
         """Test get start window"""
-        comms.metadata_manager = Mock()
-        comms.metadata_manager.get_start_window = AsyncMock(return_value=5)
+        comms.coordinator_manager = Mock()
+        comms.coordinator_manager.get_start_window = AsyncMock(return_value=5)
 
         result = await comms.get_start_window(retries=3)
 
         assert result == 5
-        comms.metadata_manager.get_start_window.assert_called_once_with(3)
+        comms.coordinator_manager.get_start_window.assert_called_once_with(3)
 
     @pytest.mark.asyncio
     async def test_post_peer_list(self, comms):
         """Test post peer list"""
-        comms.metadata_manager = Mock()
-        comms.metadata_manager.post_peer_list = AsyncMock()
+        comms.coordinator_manager = Mock()
+        comms.coordinator_manager.post_peer_list = AsyncMock()
 
         peers = [1, 2, 3]
         weights = torch.tensor([0.1, 0.2, 0.3])
@@ -632,31 +632,35 @@ class TestComms:
             initial_selection=True,
         )
 
-        comms.metadata_manager.post_peer_list.assert_called_once()
+        comms.coordinator_manager.post_peer_list.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_get_peer_list(self, comms):
         """Test get peer list"""
-        comms.metadata_manager = Mock()
+        comms.coordinator_manager = Mock()
         expected_result = ([1, 2, 3], 5)
-        comms.metadata_manager.get_peer_list = AsyncMock(return_value=expected_result)
+        comms.coordinator_manager.get_peer_list = AsyncMock(
+            return_value=expected_result
+        )
 
         result = await comms.get_peer_list(fetch_previous=True)
 
         assert result == expected_result
-        comms.metadata_manager.get_peer_list.assert_called_once_with(True)
+        comms.coordinator_manager.get_peer_list.assert_called_once_with(True)
 
     @pytest.mark.asyncio
     async def test_get_debug_dict(self, comms):
         """Test get debug dict"""
-        comms.metadata_manager = Mock()
+        comms.coordinator_manager = Mock()
         expected_result = {"debug": "data"}
-        comms.metadata_manager.get_debug_dict = AsyncMock(return_value=expected_result)
+        comms.coordinator_manager.get_debug_dict = AsyncMock(
+            return_value=expected_result
+        )
 
         result = await comms.get_debug_dict(window=1)
 
         assert result == expected_result
-        comms.metadata_manager.get_debug_dict.assert_called_once_with(1)
+        comms.coordinator_manager.get_debug_dict.assert_called_once_with(1)
 
     @pytest.mark.asyncio
     async def test_load_aggregation(self, comms):

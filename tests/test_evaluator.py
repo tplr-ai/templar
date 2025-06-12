@@ -126,9 +126,9 @@ async def test_evaluator_loads_new_checkpoints(evaluator):
     evaluator.model.to.assert_called_once_with(evaluator.config.device)
 
     assert loaded_model_state is not None, "Model state dict should be loaded"
-    assert len(loaded_model_state) == len(model_state_dict), (
-        "Model state dict should have same number of keys"
-    )
+    assert len(loaded_model_state) == len(
+        model_state_dict
+    ), "Model state dict should have same number of keys"
     for key in model_state_dict:
         assert key in loaded_model_state, f"Key {key} should be in loaded state dict"
 

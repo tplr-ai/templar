@@ -18,7 +18,9 @@
 # Global imports
 import json
 from types import SimpleNamespace
-from transformers import AutoTokenizer, LlamaConfig
+
+from transformers.models.auto.tokenization_auto import AutoTokenizer
+from transformers.models.llama import LlamaConfig
 
 # Local imports
 from .logging import logger

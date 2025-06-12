@@ -45,7 +45,7 @@ import json
 import os
 import shutil
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 import bittensor as bt
 import torch
@@ -186,7 +186,6 @@ class Evaluator:
         self.tokenizer = self.hparams.tokenizer
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
             key_prefix="model",
             config=self.config,
             netuid=self.netuid,
@@ -218,78 +217,62 @@ class Evaluator:
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
         self.buckets = self.comms.get_all_buckets()
 
-    async def load_latest_model(self) -> Tuple[bool, dict, int, int]:
-        """Load and prepare the latest model checkpoint for evaluation.
+    async def load_latest_model(
+        self,
+    ) -> Tuple[bool, Optional[Dict], Optional[int], Optional[int]]:
+        """Load the latest model from checkpoint if available."""
+        try:
+            result = await self.comms.get_latest_checkpoint(version=self.version)
+            bt.logging.info(f"[DEBUG] get_latest_checkpoint() result: {result}")
 
-        This method:
-        1. Fetches the latest checkpoint from storage
-        2. Verifies checkpoint validity
-        3. Updates internal state trackers
+            if result is None:
+                bt.logging.debug("No checkpoint available")
+                return False, None, None, None
 
-        Returns:
-            Tuple containing:
-            - success (bool): Whether loading succeeded
-            - checkpoint_data (dict): Checkpoint metadata
-            - checkpoint_window (int): Window number of checkpoint
-            - global_step (int): Global training step
-        """
-        result = await self.comms.get_latest_checkpoint(version=self.version)
-        if not result:
-            tplr.logger.error(
-                f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket_name', 'unknown')}, "
-                f"key_prefix: {self.comms.key_prefix}"
-            )
-            return (False, {}, 0, 0)
+            checkpoint_data, _ = result
+            bt.logging.info(f"[DEBUG] Checkpoint data: {checkpoint_data}")
 
-        tplr.logger.info(f"[DEBUG] get_latest_checkpoint() result: {result}")
+            current_window = checkpoint_data.get("current_window")
+            if current_window is None:
+                bt.logging.error("Checkpoint missing current_window")
+                return False, None, None, None
 
-        checkpoint_data, _ = result
-        tplr.logger.info(f"[DEBUG] Checkpoint data: {checkpoint_data}")
+            # Calculate global step
+            start_window = checkpoint_data.get("start_window", 0)
+            global_step = current_window - start_window
 
-        checkpoint_start_window = checkpoint_data.get("start_window")
-        checkpoint_current_window = checkpoint_data.get("current_window", None)
-
-        if checkpoint_start_window is None or checkpoint_current_window is None:
-            tplr.logger.error("Checkpoint missing start_window or current_window info")
-            return (False, checkpoint_data, 0, 0)
-
-        if int(checkpoint_current_window) <= self.last_eval_window:
-            tplr.logger.info(
-                f"Checkpoint already evaluated (checkpoint window: {checkpoint_current_window}, "
-                f"last evaluated: {self.last_eval_window})."
-            )
-            return (False, checkpoint_data, int(checkpoint_current_window), 0)
-
-        tplr.logger.info(
-            f"Loading model from checkpoint (window: {checkpoint_current_window})"
-        )
-
-        # Debug: Check checkpoint model dimensions
-        if "model_state_dict" in checkpoint_data:
-            k_proj_key = "model.layers.0.self_attn.k_proj.weight"
-            if k_proj_key in checkpoint_data["model_state_dict"]:
-                k_proj_shape = checkpoint_data["model_state_dict"][k_proj_key].shape
-                tplr.logger.info(f"[DEBUG] Checkpoint k_proj shape: {k_proj_shape}")
-                tplr.logger.info(
-                    f"[DEBUG] Expected k_proj shape: {self.model.model.layers[0].self_attn.k_proj.weight.shape}"
+            # Only load if this checkpoint is newer than our last evaluation
+            if current_window <= self.last_eval_window:
+                bt.logging.debug(
+                    f"Checkpoint window {current_window} <= last_eval_window {self.last_eval_window}, skipping"
                 )
+                return False, None, current_window, global_step
 
-        self.model.load_state_dict(
-            {
-                k: v.to("cpu")
-                for k, v in checkpoint_data["model_state_dict"].items()  # type: ignore
-            }
-        )
-        self.model.to("cpu")  # type: ignore
+            bt.logging.info(f"Loading model from checkpoint (window: {current_window})")
 
-        global_step = int(checkpoint_current_window) - int(checkpoint_start_window)
+            # Load model state
+            model_state_dict = checkpoint_data.get("model_state_dict", {})
+            if model_state_dict:
+                # Move tensors to appropriate device
+                device_state_dict = {
+                    k: v.to("cpu") if hasattr(v, "to") else v
+                    for k, v in model_state_dict.items()
+                }
+                self.model.load_state_dict(device_state_dict)
+                self.model.to("cpu")  # type: ignore
 
-        tplr.logger.info(
-            f"Loaded checkpoint (start_window={checkpoint_start_window}, "
-            f"current_window={checkpoint_current_window}, global_step={global_step})"
-        )
+            # Store momentum data as instance attribute
+            self.momentum = checkpoint_data.get("momentum", {})
 
-        return (True, checkpoint_data, int(checkpoint_current_window), global_step)
+            bt.logging.info(
+                f"Loaded checkpoint (start_window={start_window}, current_window={current_window}, global_step={global_step})"
+            )
+
+            return True, checkpoint_data, current_window, global_step
+
+        except Exception as e:
+            bt.logging.error(f"Error loading latest model: {e}")
+            return False, None, None, None
 
     def _run_lm_eval(
         self,

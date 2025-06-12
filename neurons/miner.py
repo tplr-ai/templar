@@ -190,7 +190,6 @@ class Miner:
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
             key_prefix="model",
             config=self.config,
             netuid=self.config.netuid,
@@ -209,7 +208,10 @@ class Miner:
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         self.start_window = self.current_window  # Record the start window
         self.global_step = 0  # Initialize global_step to zero
+
+        # Set current window on comms to ensure proper propagation
         self.comms.current_window = self.current_window
+
         self.step_counter = 0
 
         # Add step tracking
@@ -262,6 +264,9 @@ class Miner:
 
         self.comms.commitments = await self.comms.get_commitments()
         tplr.logger.info("Loaded commitments")
+
+        # Start background tasks for the refactored comms
+        self.comms.start_background_tasks()
 
         # Fetch start_window from highest stake validator
         self.start_window = await self.comms.get_start_window()
@@ -444,7 +449,6 @@ class Miner:
                 key="gradient",
                 global_step=self.global_step,
                 local=False,
-                stale_retention=100,
             )
             tplr.logger.info("Put task completed!")
 
@@ -513,11 +517,9 @@ class Miner:
                 my_uid=self.uid,
                 uids=self.comms.peers,
                 window=step_window,
-                key="gradient",
                 timeout=45,
                 device=self.config.device,
                 local=False,
-                stale_retention=100,
                 totalks=self.totalks,
                 time_min=time_min,
                 time_max=time_max,
@@ -757,27 +759,6 @@ class Miner:
                 tplr.logger.info("Logging performance profiling summary...")
                 tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
 
-            # Save checkpoint logic
-            if self.global_step % self.hparams.checkpoint_frequency == 0:
-                tplr.logger.info(
-                    f"Creating checkpoint at global_step {self.global_step}"
-                )
-
-                # asyncio checkpoint saving task
-                asyncio.create_task(
-                    self.comms.save_checkpoint(
-                        model=self.model,
-                        optimizer=self.optimizer,
-                        scheduler=self.scheduler,
-                        momentum=self.momentum,
-                        global_step=self.global_step,
-                        current_window=self.current_window,
-                        start_window=self.start_window,
-                    )
-                )
-            else:
-                tplr.logger.info("Skipping checkpoint save this round")
-
             await self.cleanup_window()
 
             # Delete local variables to clear up memory
@@ -787,6 +768,14 @@ class Miner:
             tplr.logger.info("Wait for next window...")
             while self.current_window == step_window:
                 await asyncio.sleep(0.1)
+
+    async def cleanup_comms(self):
+        """Clean up communications resources before shutdown"""
+        try:
+            await self.comms.close_all_resources()
+            tplr.logger.info("Successfully cleaned up communications resources")
+        except Exception as e:
+            tplr.logger.error(f"Error cleaning up communications: {e}")
 
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""
@@ -815,10 +804,12 @@ class Miner:
                 self.current_block = int(event["header"]["number"])
                 new_window = int(self.current_block / self.hparams.blocks_per_window)
                 if new_window != self.current_window:
+                    old_window = self.current_window
                     self.current_window = new_window
+                    # Ensure comms gets updated current window
                     self.comms.current_window = self.current_window
                     tplr.logger.info(
-                        f"New block received. Current window updated to: {self.current_window}"
+                        f"New block received. Current window updated: {old_window} -> {self.current_window}"
                     )
             except Exception as e:
                 tplr.logger.error(f"Error processing block event: {e}")

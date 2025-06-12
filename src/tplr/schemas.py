@@ -47,6 +47,6 @@ class Bucket(BaseModel):
     secret_access_key: str = Field(..., min_length=1)
 
     # v2 style; silently ignored by v1
-    model_config = ConfigDict(
+    model_config = ConfigDict(  # type: ignore
         str_strip_whitespace=True,
     )

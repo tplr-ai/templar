@@ -107,7 +107,6 @@ async def comms_instance():
     # Initialize Comms as per production (see miner.py)
     comms = comms_module.Comms(
         wallet=wallet,
-        save_location="/tmp",
         key_prefix="model",
         config=config,
         netuid=config.netuid,

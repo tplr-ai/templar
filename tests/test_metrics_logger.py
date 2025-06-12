@@ -108,15 +108,15 @@ class TestMetricsLogger:
         )
         log.debug(f"MetricsLogger instance created [ID: {id(logger)}]")
         # Verify internal mock references immediately
-        assert logger.client is mock_influxdb_client.return_value, (
-            "Logger client mismatch"
-        )
+        assert (
+            logger.client is mock_influxdb_client.return_value
+        ), "Logger client mismatch"
         assert (
             logger.write_api is mock_influxdb_client.return_value.write_api.return_value
         ), "Logger write_api mismatch"
-        assert isinstance(logger.write_api.write, MagicMock), (
-            "Logger write_api.write is not a mock"
-        )
+        assert isinstance(
+            logger.write_api.write, MagicMock
+        ), "Logger write_api.write is not a mock"
         return logger
 
     # --- Other fixtures (CUDA, System, BT_Config) - Keep as they were ---
@@ -188,13 +188,13 @@ class TestMetricsLogger:
     def get_write_method_mock(self, logger_instance):
         """Helper to reliably get the write method mock from the logger instance."""
         assert hasattr(logger_instance, "write_api"), "Logger missing 'write_api'"
-        assert hasattr(logger_instance.write_api, "write"), (
-            "Logger's write_api missing 'write'"
-        )
+        assert hasattr(
+            logger_instance.write_api, "write"
+        ), "Logger's write_api missing 'write'"
         write_mock = logger_instance.write_api.write
-        assert isinstance(write_mock, MagicMock), (
-            f"write_api.write is not a MagicMock, it's {type(write_mock)}"
-        )
+        assert isinstance(
+            write_mock, MagicMock
+        ), f"write_api.write is not a MagicMock, it's {type(write_mock)}"
         log.debug(
             f"Retrieved write mock [ID: {id(write_mock)}] Name: {getattr(write_mock, '_mock_name', 'N/A')}"
         )
@@ -244,9 +244,9 @@ class TestMetricsLogger:
         log.debug("Running test_log_basic...")
         metrics_logger.log(measurement="test_m", tags={"t": "v"}, fields={"f": 1})
         write_mock = self.get_write_method_mock(metrics_logger)
-        assert wait_for_mock_call(write_mock), (
-            f"'{write_mock._mock_name}' not called within timeout"
-        )
+        assert wait_for_mock_call(
+            write_mock
+        ), f"'{write_mock._mock_name}' not called within timeout"
         write_mock.assert_called_once()
         # Add further checks on call_args if needed
         log.debug("test_log_basic completed.")
@@ -255,9 +255,9 @@ class TestMetricsLogger:
         log.debug("Running test_log_with_system_metrics...")
         metrics_logger.log("sys_test", {}, {}, with_system_metrics=True)
         write_mock = self.get_write_method_mock(metrics_logger)
-        assert wait_for_mock_call(write_mock), (
-            f"'{write_mock._mock_name}' not called within timeout"
-        )
+        assert wait_for_mock_call(
+            write_mock
+        ), f"'{write_mock._mock_name}' not called within timeout"
         write_mock.assert_called_once()
         # Check system mocks were called
         if hasattr(mock_system_metrics["cpu_percent"], "assert_called_once"):
@@ -269,9 +269,9 @@ class TestMetricsLogger:
         log.debug("Running test_log_with_gpu_metrics...")
         metrics_logger.log("gpu_test", {}, {}, with_gpu_metrics=True)
         write_mock = self.get_write_method_mock(metrics_logger)
-        assert wait_for_mock_call(write_mock), (
-            f"'{write_mock._mock_name}' not called within timeout"
-        )
+        assert wait_for_mock_call(
+            write_mock
+        ), f"'{write_mock._mock_name}' not called within timeout"
         write_mock.assert_called_once()
         # Check CUDA mocks were called (ensure mock fixture provides actual mocks)
         if hasattr(mock_cuda_functions["current_device"], "assert_called"):
@@ -286,9 +286,9 @@ class TestMetricsLogger:
         log.debug("Running test_log_with_list_fields...")
         metrics_logger.log("list_test", {}, {"numeric": [1.0, 2.0], "peers": [1, 2]})
         write_mock = self.get_write_method_mock(metrics_logger)
-        assert wait_for_mock_call(write_mock), (
-            f"'{write_mock._mock_name}' not called within timeout"
-        )
+        assert wait_for_mock_call(
+            write_mock
+        ), f"'{write_mock._mock_name}' not called within timeout"
         write_mock.assert_called_once()
         log.debug("test_log_with_list_fields completed.")
 
@@ -297,9 +297,9 @@ class TestMetricsLogger:
         metrics_logger.config = bt_config
         metrics_logger.log("config_test", {}, {})
         write_mock = self.get_write_method_mock(metrics_logger)
-        assert wait_for_mock_call(write_mock), (
-            f"'{write_mock._mock_name}' not called within timeout"
-        )
+        assert wait_for_mock_call(
+            write_mock
+        ), f"'{write_mock._mock_name}' not called within timeout"
         write_mock.assert_called_once()
         log.debug("test_log_with_config_tags completed.")
 
@@ -326,9 +326,9 @@ class TestMetricsLogger:
         # but the call to run_in_executor should still succeed.
         metrics_logger.log("exception_test", {}, {})
         # We wait for the _write_point function to be called, which then calls the mock
-        assert wait_for_mock_call(write_mock), (
-            f"'{write_mock._mock_name}' not called within timeout (even with exception)"
-        )
+        assert wait_for_mock_call(
+            write_mock
+        ), f"'{write_mock._mock_name}' not called within timeout (even with exception)"
         write_mock.assert_called_once()  # Check it was attempted
 
         log.debug("test_log_with_exception completed.")
@@ -345,9 +345,9 @@ class TestMetricsLogger:
             with_gpu_metrics=True,
         )
         write_mock = self.get_write_method_mock(metrics_logger)
-        assert wait_for_mock_call(write_mock), (
-            f"'{write_mock._mock_name}' not called within timeout"
-        )
+        assert wait_for_mock_call(
+            write_mock
+        ), f"'{write_mock._mock_name}' not called within timeout"
         write_mock.assert_called_once()
         log.debug("test_miner_metrics_pattern completed.")
 
@@ -368,9 +368,9 @@ class TestMetricsLogger:
         write_mock = self.get_write_method_mock(metrics_logger)
 
         metrics_logger.log("single_call_test", {}, {})
-        assert wait_for_mock_call(write_mock), (
-            f"'{write_mock._mock_name}' not called within timeout"
-        )
+        assert wait_for_mock_call(
+            write_mock
+        ), f"'{write_mock._mock_name}' not called within timeout"
         write_mock.assert_called_once()
         log.debug("test_log_call_invokes_write_once completed.")
 
@@ -394,9 +394,9 @@ class TestMetricsLogger:
                 sample_rate=0.8,
             )
 
-            assert wait_for_mock_call(write_mock), (
-                f"'{write_mock._mock_name}' not called within timeout"
-            )
+            assert wait_for_mock_call(
+                write_mock
+            ), f"'{write_mock._mock_name}' not called within timeout"
             write_mock.assert_called_once()
 
         with patch("random.random", return_value=0.9):

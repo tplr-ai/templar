@@ -102,8 +102,8 @@ class Comms(ChainManager):
     def _initialize_managers(self):
         """Initialize all manager components"""
         # Foundation components
-        self.storage_client = StorageClient(self.temp_dir)
         self.file_manager = FileManager(self.temp_dir, self.uid)
+        self.storage_client = StorageClient(self.file_manager)
 
         # Domain-specific managers
         self.gradient_manager = GradientManager(

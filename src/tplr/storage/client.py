@@ -18,7 +18,6 @@
 import asyncio
 import math
 import os
-import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -42,6 +41,7 @@ import tplr
 
 from ..config import client_config
 from ..schemas import Bucket
+from .file_manager import FileManager
 
 # Constants
 CF_REGION_NAME: str = "enam"
@@ -53,15 +53,12 @@ MAX_DOWNLOAD_WORKERS = min(16, CPU_COUNT * 2)  # Max concurrent download workers
 class StorageClient:
     """Handles all S3/R2 storage operations with improved type hints"""
 
-    def __init__(self, temp_dir: str) -> None:
-        """Initialize with aiobotocore session and temp directory"""
+    def __init__(self, file_manager: FileManager) -> None:
+        """Initialize with aiobotocore session and file manager"""
         self.session = get_session()
         self._s3_clients: Dict[Tuple[str, str, str], S3Client] = {}
-        self.temp_dir = temp_dir
+        self.file_manager = file_manager
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
-
-        # Ensure temp directory exists
-        os.makedirs(self.temp_dir, exist_ok=True)
 
     def get_base_url(self, account_id: str) -> str:
         """Constructs the base URL for the R2 storage endpoint."""
@@ -113,11 +110,7 @@ class StorageClient:
         show_progress: bool = True,
     ) -> Optional[bytes]:
         """Download object from S3 using asynchronous streaming."""
-        import uuid
-
-        temp_file_path = os.path.join(
-            self.temp_dir, f"temp_{key}_{uuid.uuid4().hex}.pt"
-        )
+        temp_file_path = self.file_manager.create_temp_file(f"get_{key}")
 
         try:
             s3_client = await self._get_s3_client(bucket)
@@ -197,12 +190,11 @@ class StorageClient:
             tplr.logger.error(f"Error in get_object for {key}: {e}")
             return None
         finally:
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
+            self.file_manager.delete_file(temp_file_path)
 
     async def put_object(self, key: str, data: bytes, bucket: Bucket) -> bool:
         """Upload object to S3 storage."""
-        temp_file_path = os.path.join(self.temp_dir, f"temp_put_{uuid.uuid4().hex}")
+        temp_file_path = self.file_manager.create_temp_file("put", "")
 
         try:
             # Write data to temp file
@@ -229,8 +221,7 @@ class StorageClient:
             tplr.logger.error(f"Error uploading {key} to S3: {e}")
             return False
         finally:
-            if os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
+            self.file_manager.delete_file(temp_file_path)
 
     async def delete_object(self, key: str, bucket: Bucket) -> bool:
         """Delete object from S3 storage."""

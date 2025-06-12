@@ -15,24 +15,14 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-# ruff: noqa
-# pylint: disable=all
-# mypy: ignore-errors
-# type: ignore
 
-__version__ = "0.3.6"
+class NoOpWandB:
+    """No-op implementation of wandb that does nothing when wandb is disabled."""
 
-# Import package.
-from .chain import *
-from .comms import *
-from .compress import *
-from .dataset import *
-from .neurons import *
-from .r2_dataset import *
-from .hparams import *
-from .logging import *
-from .schemas import *
-from .wandb import initialize_wandb
-from .noop_wandb import NoOpWandB
-from .metrics import *
-from .shard_index import ShardIndex
+    def log(self, *args, **kwargs):
+        """Log method that does nothing."""
+        pass
+
+    def __getattr__(self, name):
+        """Return a no-op lambda for any unknown attributes."""
+        return lambda *args, **kwargs: None

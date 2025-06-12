@@ -32,6 +32,9 @@ from typing import cast
 import bittensor as bt
 import numpy as np
 import torch
+
+# Local
+import tplr
 import uvloop
 
 # Third party
@@ -43,10 +46,8 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
+from tplr import NoOpWandB
 from transformers import LlamaForCausalLM
-
-# Local
-import tplr
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -98,6 +99,11 @@ class Miner:
             "--local",
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
+        )
+        parser.add_argument(
+            "--wandb",
+            action="store_true",
+            help="Enable Weights & Biases logging",
         )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
@@ -219,14 +225,18 @@ class Miner:
         self.total_tokens_processed = 0
         self.batch_times = []  # For tracking processing speed
 
-        # Initialize WandB
-        self.wandb = tplr.initialize_wandb(
-            run_prefix="M",
-            uid=self.uid,
-            config=self.config,
-            group="miner",
-            job_type="mining",
-        )
+        # Initialize WandB only if enabled
+        tplr.logger.info(f"Using WandB: {self.config.wandb}")
+        if self.config.wandb:
+            self.wandb = tplr.initialize_wandb(
+                run_prefix="M",
+                uid=self.uid,
+                config=self.config,
+                group="miner",
+                job_type="mining",
+            )
+        else:
+            self.wandb = NoOpWandB()
 
         # Initialize metrics logger for InfluxDB
         self.metrics_logger = tplr.metrics.MetricsLogger(
@@ -626,7 +636,7 @@ class Miner:
                 self.scheduler.step()
                 torch.cuda.empty_cache()
 
-                # Log total window time and add timing metrics to existing wandb logging
+                # Log total window time and add timing metrics
                 tplr.logger.info(
                     f"{tplr.P(step_window, tplr.T() - window_start)} Completed window iteration"
                 )

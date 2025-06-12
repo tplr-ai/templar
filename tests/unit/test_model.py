@@ -16,6 +16,6 @@ def test_toy_model_creation():
 
     # Count total parameters and assert it's under 3M
     total_params = sum(p.numel() for p in model.parameters())
-    assert (
-        total_params <= MAX_PARAMS
-    ), f"Model has {total_params:,} parameters, which exceeds the {MAX_PARAMS:,} limit"
+    assert total_params <= MAX_PARAMS, (
+        f"Model has {total_params:,} parameters, which exceeds the {MAX_PARAMS:,} limit"
+    )

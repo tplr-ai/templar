@@ -454,9 +454,9 @@ async def test_seed_consistency(monkeypatch):
     batch2 = torch.tensor(next(iter(loader2)))
 
     # Test content consistency
-    assert torch.equal(
-        batch1, batch2
-    ), "Same seed should produce identical batch content"
+    assert torch.equal(batch1, batch2), (
+        "Same seed should produce identical batch content"
+    )
 
     # Test seed range
     seeds = [random.randint(0, 10000) for _ in range(10)]
@@ -564,9 +564,9 @@ async def test_retry_mechanism_success(monkeypatch):
     assert isinstance(tokens, list), "Tokens should be a list"
     assert len(tokens) > 0, "Tokens list should not be empty"
     # The DummyFS should have failed exactly 2 times before succeeding.
-    assert (
-        dummy_fs.call_count == 2
-    ), "DummyFS did not simulate the expected number of transient errors"
+    assert dummy_fs.call_count == 2, (
+        "DummyFS did not simulate the expected number of transient errors"
+    )
 
 
 # --- Test: Persistent failure raises exception ---
@@ -748,25 +748,25 @@ def test_round_robin_sequential(monkeypatch):
     # Expectations:
     # First call should return instance configured for accountA.
     endpoint1 = fs1.kwargs["client_kwargs"]["endpoint_url"]
-    assert (
-        endpoint1 == "https://accountA.r2.cloudflarestorage.com"
-    ), f"Expected endpoint for accountA, got {endpoint1}"
+    assert endpoint1 == "https://accountA.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountA, got {endpoint1}"
+    )
 
     # Second call should return instance configured for accountB.
     endpoint2 = fs2.kwargs["client_kwargs"]["endpoint_url"]
-    assert (
-        endpoint2 == "https://accountB.r2.cloudflarestorage.com"
-    ), f"Expected endpoint for accountB, got {endpoint2}"
+    assert endpoint2 == "https://accountB.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountB, got {endpoint2}"
+    )
 
     # Third call should cycle back to accountA.
     endpoint3 = fs3.kwargs["client_kwargs"]["endpoint_url"]
-    assert (
-        endpoint3 == "https://accountA.r2.cloudflarestorage.com"
-    ), f"Expected endpoint for accountA on cycle, got {endpoint3}"
+    assert endpoint3 == "https://accountA.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountA on cycle, got {endpoint3}"
+    )
     # Verify that the fs instance is cached: fs1 and fs3 should be the same object.
-    assert (
-        fs1 is fs3
-    ), "Expected the same cached S3FileSystem instance for repeated accountA selection"
+    assert fs1 is fs3, (
+        "Expected the same cached S3FileSystem instance for repeated accountA selection"
+    )
 
 
 def test_round_robin_single_entry(monkeypatch):
@@ -809,25 +809,25 @@ def test_round_robin_single_entry(monkeypatch):
     endpoint2 = fs2.kwargs["client_kwargs"]["endpoint_url"]
     endpoint3 = fs3.kwargs["client_kwargs"]["endpoint_url"]
 
-    assert (
-        endpoint1 == "https://accountA.r2.cloudflarestorage.com"
-    ), f"Expected endpoint for accountA, got {endpoint1}"
-    assert (
-        endpoint2 == "https://accountA.r2.cloudflarestorage.com"
-    ), f"Expected endpoint for accountA, got {endpoint2}"
-    assert (
-        endpoint3 == "https://accountA.r2.cloudflarestorage.com"
-    ), f"Expected endpoint for accountA, got {endpoint3}"
+    assert endpoint1 == "https://accountA.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountA, got {endpoint1}"
+    )
+    assert endpoint2 == "https://accountA.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountA, got {endpoint2}"
+    )
+    assert endpoint3 == "https://accountA.r2.cloudflarestorage.com", (
+        f"Expected endpoint for accountA, got {endpoint3}"
+    )
 
     # The fs instances should be cached hence identical.
-    assert (
-        fs1 is fs2 and fs1 is fs3
-    ), "Expected the same cached S3FileSystem instance for accountA"
+    assert fs1 is fs2 and fs1 is fs3, (
+        "Expected the same cached S3FileSystem instance for accountA"
+    )
 
     # The round robin counter should increment even if only one entry exists.
-    assert (
-        R2DatasetLoader._round_robin_index == 3
-    ), f"Expected round robin index to be 3, got {R2DatasetLoader._round_robin_index}"
+    assert R2DatasetLoader._round_robin_index == 3, (
+        f"Expected round robin index to be 3, got {R2DatasetLoader._round_robin_index}"
+    )
 
 
 def test_configuration_without_multiple(monkeypatch):
@@ -871,9 +871,9 @@ def test_configuration_without_multiple(monkeypatch):
     # The returned S3FileSystem should be configured based on the provided single endpoint configuration.
     endpoint = fs.kwargs["client_kwargs"]["endpoint_url"]
     expected_endpoint = "https://accountDefault.r2.cloudflarestorage.com"
-    assert (
-        endpoint == expected_endpoint
-    ), f"Expected endpoint {expected_endpoint}, got {endpoint}"
+    assert endpoint == expected_endpoint, (
+        f"Expected endpoint {expected_endpoint}, got {endpoint}"
+    )
 
 
 def test_round_robin_caching(monkeypatch):
@@ -939,38 +939,38 @@ def test_round_robin_caching(monkeypatch):
     endpoint_B = "https://accountB.r2.cloudflarestorage.com"
 
     # Check that instances returning the same endpoint are identical (cached)
-    assert (
-        fs_instances[0].kwargs["client_kwargs"]["endpoint_url"] == endpoint_A
-    ), "Expected accountA endpoint at index 0"
-    assert (
-        fs_instances[1].kwargs["client_kwargs"]["endpoint_url"] == endpoint_B
-    ), "Expected accountB endpoint at index 1"
-    assert (
-        fs_instances[2].kwargs["client_kwargs"]["endpoint_url"] == endpoint_A
-    ), "Expected accountA endpoint at index 2"
-    assert (
-        fs_instances[3].kwargs["client_kwargs"]["endpoint_url"] == endpoint_B
-    ), "Expected accountB endpoint at index 3"
-    assert (
-        fs_instances[4].kwargs["client_kwargs"]["endpoint_url"] == endpoint_A
-    ), "Expected accountA endpoint at index 4"
-    assert (
-        fs_instances[5].kwargs["client_kwargs"]["endpoint_url"] == endpoint_B
-    ), "Expected accountB endpoint at index 5"
+    assert fs_instances[0].kwargs["client_kwargs"]["endpoint_url"] == endpoint_A, (
+        "Expected accountA endpoint at index 0"
+    )
+    assert fs_instances[1].kwargs["client_kwargs"]["endpoint_url"] == endpoint_B, (
+        "Expected accountB endpoint at index 1"
+    )
+    assert fs_instances[2].kwargs["client_kwargs"]["endpoint_url"] == endpoint_A, (
+        "Expected accountA endpoint at index 2"
+    )
+    assert fs_instances[3].kwargs["client_kwargs"]["endpoint_url"] == endpoint_B, (
+        "Expected accountB endpoint at index 3"
+    )
+    assert fs_instances[4].kwargs["client_kwargs"]["endpoint_url"] == endpoint_A, (
+        "Expected accountA endpoint at index 4"
+    )
+    assert fs_instances[5].kwargs["client_kwargs"]["endpoint_url"] == endpoint_B, (
+        "Expected accountB endpoint at index 5"
+    )
 
     # Verify caching: same instance for accountA calls at indices 0, 2, 4.
-    assert (
-        fs_instances[0] is fs_instances[2] is fs_instances[4]
-    ), "Expected the same cached instance for accountA"
+    assert fs_instances[0] is fs_instances[2] is fs_instances[4], (
+        "Expected the same cached instance for accountA"
+    )
     # Similarly, same instance for accountB calls at indices 1, 3, 5.
-    assert (
-        fs_instances[1] is fs_instances[3] is fs_instances[5]
-    ), "Expected the same cached instance for accountB"
+    assert fs_instances[1] is fs_instances[3] is fs_instances[5], (
+        "Expected the same cached instance for accountB"
+    )
 
     # Additionally, cache should have exactly 2 entries.
-    assert (
-        len(R2DatasetLoader._fs_cache) == 2
-    ), f"Expected fs cache to have 2 entries, got {len(R2DatasetLoader._fs_cache)}"
+    assert len(R2DatasetLoader._fs_cache) == 2, (
+        f"Expected fs cache to have 2 entries, got {len(R2DatasetLoader._fs_cache)}"
+    )
 
 
 def test_round_robin_thread_safety(monkeypatch):
@@ -1042,9 +1042,9 @@ def test_round_robin_thread_safety(monkeypatch):
         t.join()
 
     # Expectation: The round_robin_index should equal total_calls.
-    assert (
-        R2DatasetLoader._round_robin_index == total_calls
-    ), f"Expected _round_robin_index to be {total_calls}, got {R2DatasetLoader._round_robin_index}"
+    assert R2DatasetLoader._round_robin_index == total_calls, (
+        f"Expected _round_robin_index to be {total_calls}, got {R2DatasetLoader._round_robin_index}"
+    )
 
     # Valid endpoint URLs we expect.
     valid_endpoints = {
@@ -1055,9 +1055,9 @@ def test_round_robin_thread_safety(monkeypatch):
     # All returned instances must have a valid endpoint.
     for instance in results:
         endpoint_url = instance.kwargs["client_kwargs"]["endpoint_url"]
-        assert (
-            endpoint_url in valid_endpoints
-        ), f"Invalid endpoint {endpoint_url} found in instance"
+        assert endpoint_url in valid_endpoints, (
+            f"Invalid endpoint {endpoint_url} found in instance"
+        )
 
     # Check caching: For each endpoint, repeated calls should return the same instance.
     # Build a mapping: endpoint_url -> instance (first encountered).
@@ -1068,9 +1068,9 @@ def test_round_robin_thread_safety(monkeypatch):
             endpoint_to_instance[endpoint_url] = instance
         else:
             # Ensure the cached instance is always returned.
-            assert (
-                instance is endpoint_to_instance[endpoint_url]
-            ), f"Different instances returned for endpoint {endpoint_url}"
+            assert instance is endpoint_to_instance[endpoint_url], (
+                f"Different instances returned for endpoint {endpoint_url}"
+            )
 
 
 # Test Case 6: Concurrency under high load
@@ -1135,9 +1135,9 @@ def test_round_robin_high_concurrency(monkeypatch):
             results.append(future.result())
 
     # Check that the round robin index equals the total number of calls.
-    assert (
-        R2DatasetLoader._round_robin_index == total_calls
-    ), f"Expected round robin index {total_calls}, got {R2DatasetLoader._round_robin_index}"
+    assert R2DatasetLoader._round_robin_index == total_calls, (
+        f"Expected round robin index {total_calls}, got {R2DatasetLoader._round_robin_index}"
+    )
 
     valid_endpoints = {
         "https://accountA.r2.cloudflarestorage.com",
@@ -1156,9 +1156,9 @@ def test_round_robin_high_concurrency(monkeypatch):
         else:
             assert instance is cache[ep], f"Different instances found for endpoint {ep}"
     # The cache size must match the number of endpoints.
-    assert (
-        len(R2DatasetLoader._fs_cache) == 2
-    ), f"Expected fs_cache size 2, got {len(R2DatasetLoader._fs_cache)}"
+    assert len(R2DatasetLoader._fs_cache) == 2, (
+        f"Expected fs_cache size 2, got {len(R2DatasetLoader._fs_cache)}"
+    )
 
 
 # Test Case 7: Lock robustness with simulated delay
@@ -1230,9 +1230,9 @@ def test_lock_robustness_simulated_delay(monkeypatch):
         t.join()
 
     # Verify total round robin index.
-    assert (
-        R2DatasetLoader._round_robin_index == total_calls
-    ), f"Expected round robin index {total_calls}, got {R2DatasetLoader._round_robin_index}"
+    assert R2DatasetLoader._round_robin_index == total_calls, (
+        f"Expected round robin index {total_calls}, got {R2DatasetLoader._round_robin_index}"
+    )
 
     # Validate that each instance has the correct endpoint and caching works.
     valid_endpoints = {
@@ -1244,9 +1244,9 @@ def test_lock_robustness_simulated_delay(monkeypatch):
         ep = inst.kwargs["client_kwargs"]["endpoint_url"]
         assert ep in valid_endpoints, f"Unexpected endpoint {ep}"
         if ep in cache:
-            assert (
-                inst is cache[ep]
-            ), f"Caching failure: Different instances for endpoint {ep}"
+            assert inst is cache[ep], (
+                f"Caching failure: Different instances for endpoint {ep}"
+            )
         else:
             cache[ep] = inst
 
@@ -1319,14 +1319,14 @@ def test_validate_configuration_correctness(monkeypatch):
             account = "confB"
         else:
             account = None
-        assert (
-            account is not None
-        ), f"Endpoint {ep} does not match any expected configuration."
+        assert account is not None, (
+            f"Endpoint {ep} does not match any expected configuration."
+        )
         expected_region = R2DatasetLoader.CF_REGION_NAME
         region = inst.kwargs["client_kwargs"].get("region_name")
-        assert (
-            region == expected_region
-        ), f"Expected region {expected_region}, got {region}"
+        assert region == expected_region, (
+            f"Expected region {expected_region}, got {region}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1459,9 +1459,9 @@ async def test_closed_parquet_file_retry(monkeypatch):
     result = await loader.read_row_group(pf_data, chosen_shard, 0)
 
     # Verify the retry happened
-    assert (
-        reopen_count == 2
-    ), f"Expected file to be opened twice (initial + retry), but was opened {reopen_count} times"
+    assert reopen_count == 2, (
+        f"Expected file to be opened twice (initial + retry), but was opened {reopen_count} times"
+    )
     assert result is not None, "read_row_group should have succeeded after retry"
 
     # Verify the cache was cleared and new file is in cache
@@ -1589,9 +1589,9 @@ async def test_closed_parquet_file_max_retries_exceeded(monkeypatch):
 
     # Verify it tried multiple times (initial attempt + retries)
     # The loader will try 3 times total (initial + 2 retries for max_retries=3)
-    assert (
-        get_parquet_calls >= 3
-    ), f"Expected at least 3 _get_parquet_file calls, but got {get_parquet_calls}"
+    assert get_parquet_calls >= 3, (
+        f"Expected at least 3 _get_parquet_file calls, but got {get_parquet_calls}"
+    )
 
 
 # ---------------------------------------------------------------------------

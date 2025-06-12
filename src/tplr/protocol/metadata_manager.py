@@ -24,10 +24,11 @@ import aiofiles
 import torch
 
 import tplr
-from ..storage.client import StorageClient
-from ..storage.file_manager import FileManager
+
 from ..chain import ChainManager
 from ..schemas import Bucket
+from ..storage.client import StorageClient
+from ..storage.file_manager import FileManager
 
 # Constants
 PEERS_FILE_PREFIX = "peers_"
@@ -88,7 +89,7 @@ class MetadataManager:
                 (
                     validator_bucket,
                     validator_uid,
-                ) = await self._get_highest_stake_validator_bucket()
+                ) = self._get_highest_stake_validator_bucket()
                 if validator_bucket is None:
                     tplr.logger.warning(
                         "No highest staked validator bucket found. Retrying in 10 seconds"
@@ -188,7 +189,7 @@ class MetadataManager:
                 (
                     validator_bucket,
                     validator_uid,
-                ) = await self._get_highest_stake_validator_bucket()
+                ) = self._get_highest_stake_validator_bucket()
 
                 if validator_bucket is None:
                     tplr.logger.warning(
@@ -284,7 +285,7 @@ class MetadataManager:
             (
                 validator_bucket,
                 validator_uid,
-            ) = await self._get_highest_stake_validator_bucket()
+            ) = self._get_highest_stake_validator_bucket()
             if not validator_bucket or validator_uid is None:
                 tplr.logger.warning(
                     "No validator bucket - cannot proceed with debug fetch"
@@ -323,36 +324,14 @@ class MetadataManager:
             )
             return None
 
-    async def _get_highest_stake_validator_bucket(
+    def _get_highest_stake_validator_bucket(
         self,
     ) -> tuple[Bucket, int] | tuple[None, None]:
-        """Get the bucket for the validator with highest stake."""
-        try:
-            # Check if metagraph is available
-            if self.chain_manager.metagraph is None:
-                tplr.logger.warning("Metagraph is not available")
-                return None, None
-
-            # Get validator with highest stake
-            validator_uid = self.chain_manager.metagraph.S.argmax().item()
-            tplr.logger.debug(f"Found validator with highest stake: {validator_uid}")
-
-            if validator_uid is None:
-                tplr.logger.info("No active validators found")
-                return None, None
-
-            # Get validator's bucket from commitments
-            validator_bucket = self.chain_manager.commitments.get(int(validator_uid))
-            if not validator_bucket:
-                tplr.logger.warning(f"No bucket found for validator {validator_uid}")
-                return None, None
-
-            tplr.logger.debug(f"Validator Bucket: {validator_bucket}")
-            return validator_bucket, validator_uid
-
-        except Exception as e:
-            tplr.logger.error(f"Error getting highest stake validator bucket: {e}")
+        """Get the bucket for the validator with highest stake using chain manager."""
+        bucket, uid = self.chain_manager.get_highest_stake_validator_bucket()
+        if bucket is None or uid is None:
             return None, None
+        return bucket, uid
 
     async def post_debug_dict(self, debug_data: dict, window: int, uid: str) -> bool:
         """Post debug dictionary to storage"""

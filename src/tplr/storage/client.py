@@ -18,53 +18,27 @@
 import asyncio
 import math
 import os
-from typing import Optional, List, Dict, Tuple, Any, TYPE_CHECKING
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiofiles
 import torch
-from aiobotocore.session import get_session
 from aiobotocore.config import AioConfig
+from aiobotocore.session import get_session
 from botocore.exceptions import ClientError, ConnectionClosedError
 from tqdm import tqdm as std_tqdm
-
-# Enhanced type imports for better LSP support
-if TYPE_CHECKING:
-    from types_aiobotocore_s3.client import S3Client
-    from types_aiobotocore_s3.type_defs import (
-        GetObjectOutputTypeDef,
-        HeadObjectOutputTypeDef,
-        PutObjectOutputTypeDef,
-        DeleteObjectOutputTypeDef,
-        ListObjectsV2OutputTypeDef,
-        CreateMultipartUploadOutputTypeDef,
-        UploadPartOutputTypeDef,
-        CompleteMultipartUploadOutputTypeDef,
-        AbortMultipartUploadOutputTypeDef,
-        CompletedPartTypeDef,
-        MultipartUploadTypeDef,
-    )
-else:
-    # Runtime imports
-    try:
-        from types_aiobotocore_s3.client import S3Client
-    except ImportError:
-        from aiobotocore.client import AioBaseClient as S3Client
-
-    # Type aliases for runtime fallback
-    GetObjectOutputTypeDef = Dict[str, Any]
-    HeadObjectOutputTypeDef = Dict[str, Any]
-    PutObjectOutputTypeDef = Dict[str, Any]
-    DeleteObjectOutputTypeDef = Dict[str, Any]
-    ListObjectsV2OutputTypeDef = Dict[str, Any]
-    CreateMultipartUploadOutputTypeDef = Dict[str, Any]
-    UploadPartOutputTypeDef = Dict[str, Any]
-    CompleteMultipartUploadOutputTypeDef = Dict[str, Any]
-    AbortMultipartUploadOutputTypeDef = Dict[str, Any]
-    CompletedPartTypeDef = Dict[str, Any]
-    MultipartUploadTypeDef = Dict[str, Any]
+from types_aiobotocore_s3.client import S3Client
+from types_aiobotocore_s3.type_defs import (
+    CompletedPartTypeDef,
+    CreateMultipartUploadOutputTypeDef,
+    GetObjectOutputTypeDef,
+    HeadObjectOutputTypeDef,
+    ListObjectsV2OutputTypeDef,
+    UploadPartOutputTypeDef,
+)
 
 import tplr
+
 from ..config import client_config
 from ..schemas import Bucket
 
@@ -316,6 +290,20 @@ class StorageClient:
             return response["ContentLength"]
         except Exception as e:
             tplr.logger.debug(f"Error getting object size for {key}: {e}")
+            return None
+
+    async def get_object_metadata(
+        self, key: str, bucket: Bucket
+    ) -> Optional[HeadObjectOutputTypeDef]:
+        """Get S3 object metadata without downloading it using HEAD request."""
+        try:
+            s3_client = await self._get_s3_client(bucket)
+            response: HeadObjectOutputTypeDef = await s3_client.head_object(
+                Bucket=bucket.name, Key=key
+            )
+            return response
+        except Exception as e:
+            tplr.logger.debug(f"Error getting object metadata for {key}: {e}")
             return None
 
     async def get_object_range(

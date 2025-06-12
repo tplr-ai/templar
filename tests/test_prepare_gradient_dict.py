@@ -106,9 +106,9 @@ def test_return_structure_and_types(caplog):
 
     # Instead of checking miner.logger.messages, use captured logs.
     expected_log_fragment = "Attached metadata to gradient:"
-    assert (
-        expected_log_fragment in caplog.text
-    ), f"Expected string '{expected_log_fragment}' not found in log:\n{caplog.text}"
+    assert expected_log_fragment in caplog.text, (
+        f"Expected string '{expected_log_fragment}' not found in log:\n{caplog.text}"
+    )
 
 
 def test_metadata_attachment():
@@ -130,9 +130,9 @@ def test_metadata_attachment():
 
     # Verify that gradient["metadata"] exactly equals the expected dictionary.
     expected_metadata = {"pages_info": pages, "window": step_window}
-    assert (
-        gradient.get("metadata") == expected_metadata
-    ), f"Metadata does not match. Expected: {expected_metadata}, Got: {gradient.get('metadata')}"
+    assert gradient.get("metadata") == expected_metadata, (
+        f"Metadata does not match. Expected: {expected_metadata}, Got: {gradient.get('metadata')}"
+    )
 
 
 def test_weight_decay_application():
@@ -278,26 +278,26 @@ def test_compressor_and_transformer_calls():
 
     # Check that compressor.compress was called with the expected encoded tensor and topk.
     recorder_compressor = miner.compressor
-    assert (
-        recorder_compressor.called_args is not None
-    ), "compressor.compress was not called."
+    assert recorder_compressor.called_args is not None, (
+        "compressor.compress was not called."
+    )
     recorded_tensor, recorded_topk = recorder_compressor.called_args
     torch.testing.assert_close(
         recorded_tensor,
         expected_tensor_for_compression,  # Use the corrected expected value
         msg="compressor.compress argument (encoded tensor) does not match expected value for the first iteration.",
     )
-    assert (
-        recorded_topk == miner.hparams.topk_compression
-    ), "compressor.compress argument (topk) does not match hparams."
+    assert recorded_topk == miner.hparams.topk_compression, (
+        "compressor.compress argument (topk) does not match hparams."
+    )
 
     # Check that transformer.decode was called with the result of compressor.decompress.
     recorder_transformer = miner.transformer
     # The dummy decompress returns [0.2, 0.2]
     expected_tensor_for_decode = torch.tensor([0.2, 0.2])
-    assert (
-        recorder_transformer.decode_called_with is not None
-    ), "transformer.decode was not called."
+    assert recorder_transformer.decode_called_with is not None, (
+        "transformer.decode was not called."
+    )
     torch.testing.assert_close(
         recorder_transformer.decode_called_with,
         expected_tensor_for_decode,
@@ -409,9 +409,9 @@ def test_logging_behavior(caplog):
         prepare_gradient_dict(miner, pages, step_window)
 
     expected_str = f"Attached metadata to gradient: {{'pages_info': {pages}, 'window': {step_window}}}"
-    assert (
-        expected_str in caplog.text
-    ), f"Expected log message not found in logs: {caplog.text}"
+    assert expected_str in caplog.text, (
+        f"Expected log message not found in logs: {caplog.text}"
+    )
 
 
 def test_correct_use_of_scheduler_learning_rate():

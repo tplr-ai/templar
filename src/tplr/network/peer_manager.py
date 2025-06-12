@@ -20,6 +20,7 @@ import random
 from typing import Set
 
 import tplr
+
 from ..chain import ChainManager
 from ..storage.client import StorageClient
 

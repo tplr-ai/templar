@@ -140,7 +140,7 @@ class ChainManager:
         """Returns the slice window based on a block."""
         return str(self.subtensor.get_block_hash(window * self.hparams.window_length))
 
-    def block_listener(self, loop):
+    def block_listener(self, loop):  # pragma: no cover
         """Listens for new blocks and updates current block/window state.
 
         Args:
@@ -152,15 +152,22 @@ class ChainManager:
         - Retries on connection errors until stop_event is set
         """
 
-        def handler(event, _u, _s):
+        def handler(event, update_nr, subscription_id):  # pragma: no cover
+            logger.debug(f"New block received: {self.current_block}")
+            self.block_event.set()
             self.current_block = int(event["header"]["number"])
-            if (
-                int(self.current_block / self.hparams.blocks_per_window)
-                != self.current_window
-            ):
+
+            # Update current window based on block number
+            if self.current_block % self.hparams.blocks_per_window == 0:
                 self.current_window = int(
                     self.current_block / self.hparams.blocks_per_window
                 )
+                self.new_window_event.set()
+                logger.debug(
+                    f"New window started: {self.current_window} at block {self.current_block}"
+                )
+            else:
+                self.new_window_event.clear()
 
         while not self.stop_event.is_set():
             try:
@@ -484,3 +491,36 @@ class ChainManager:
 
         logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
         logger.info(f"Total inactive peers: {len(self.inactive_peers)}")
+
+    def get_highest_stake_validator_bucket(
+        self,
+    ) -> tuple[Optional[Bucket], Optional[int]]:
+        """Get the bucket for the validator with highest stake.
+
+        Returns:
+            tuple[Optional[Bucket], Optional[int]]: (validator_bucket, validator_uid)
+                                                   or (None, None) if not found
+        """
+        try:
+            if self.metagraph is None:
+                logger.warning("Metagraph is not available")
+                return None, None
+
+            validator_uid = self.metagraph.S.argmax().item()
+            logger.debug(f"Found validator with highest stake: {validator_uid}")
+
+            if validator_uid is None:
+                logger.info("No active validators found")
+                return None, None
+
+            validator_bucket = self.commitments.get(int(validator_uid))
+            if not validator_bucket:
+                logger.warning(f"No bucket found for validator {validator_uid}")
+                return None, None
+
+            logger.debug(f"Validator Bucket: {validator_bucket}")
+            return validator_bucket, validator_uid
+
+        except Exception as e:
+            logger.error(f"Error getting highest stake validator bucket: {e}")
+            return None, None

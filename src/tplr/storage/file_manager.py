@@ -115,7 +115,7 @@ class FileManager:
             current_time = time.time()
             max_age_seconds = max_age_hours * 3600
 
-            for root, dirs, files in os.walk(self.uid_temp_dir):
+            for root, _, files in os.walk(self.uid_temp_dir):
                 for file in files:
                     file_path = os.path.join(root, file)
                     try:

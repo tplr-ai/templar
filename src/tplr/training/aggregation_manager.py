@@ -21,7 +21,7 @@ import asyncio
 import torch
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Optional, List, Dict
+from typing import Optional
 import os
 import time
 
@@ -69,7 +69,6 @@ class AggregationManager:
         local: bool = True,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
-        stale_retention: int = 10,
         show_progress: bool = False,
     ) -> SimpleNamespace | None:
         """
@@ -94,7 +93,6 @@ class AggregationManager:
                 self._get_with_retry(
                     uid,
                     window,
-                    "gradient",
                     timeout,
                     local=local,
                     time_min=time_min,
@@ -360,13 +358,11 @@ class AggregationManager:
         self,
         uid: int,
         window: int,
-        key: str,
         timeout: int,
         local: bool = True,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
         show_progress: bool = False,
-        **kwargs,
     ) -> tuple | None:
         """Get gradient with retry logic - returns tuple (state_dict, global_step)"""
         max_retries = 3
@@ -383,7 +379,6 @@ class AggregationManager:
                     time_min=time_min,
                     time_max=time_max,
                     show_progress=show_progress,
-                    **kwargs,
                 )
                 if result is not None:
                     return result
@@ -487,7 +482,6 @@ class AggregationManager:
         window: int,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
-        **kwargs,
     ) -> dict | None:
         """Check for gradient in local storage"""
         try:
@@ -533,15 +527,12 @@ class AggregationManager:
             tplr.logger.debug(f"Error checking local gradient for UID {uid}: {e}")
             return None
 
-    async def load_aggregation(
-        self, window: int, chunk_size: int = 50_000_000
-    ) -> dict | None:
+    async def load_aggregation(self, window: int) -> dict | None:
         """
         Load aggregated gradients for a specified window from the aggregation server.
 
         Args:
             window: Window number to load
-            chunk_size: Size of each chunk for multipart download (default 50MB)
 
         Returns:
             Processed aggregation data or None if failed

@@ -90,8 +90,7 @@ class Comms(ChainManager):
             os.makedirs(self.save_location, exist_ok=True)
         self.key_prefix = key_prefix
 
-        # Initialize current window tracking
-        self._current_window = 0
+        # Current window is managed by ChainManager parent class
 
         # Initialize all managers
         self._initialize_managers()
@@ -119,8 +118,7 @@ class Comms(ChainManager):
             self.file_manager,
             self.bucket,
             self.uid if self.uid is not None else 0,
-            self.metagraph,
-            self.commitments,
+            self,  # Pass ChainManager (self) for validator lookup
         )
 
         self.peer_manager = PeerManager(
@@ -296,16 +294,16 @@ class Comms(ChainManager):
         Return POSIX seconds of the gradient file’s Last-Modified header,
         or 0.0 if it does not exist / fails.
         """
-        bucket = self.commitments.get(int(uid))
+        bucket = self.get_bucket(int(uid))
         if not bucket:
             return 0.0
         try:
-            s3 = await self._get_s3_client(bucket)
             key = f"gradient-{window}-{uid}-v{version}.pt"
-            hdr = await s3.head_object(Bucket=bucket.name, Key=key)
-            return hdr["LastModified"].timestamp()
+            metadata = await self.storage_client.get_object_metadata(key, bucket)
+            if metadata and "LastModified" in metadata:
+                return metadata["LastModified"].timestamp()
+            return 0.0
         except Exception:
-            await self._purge_s3_client(bucket)
             return 0.0
 
     async def get(
@@ -346,7 +344,7 @@ class Comms(ChainManager):
                 return state_dict, global_step
             else:
                 # Remote storage
-                peer_bucket = self.commitments.get(int(uid))
+                peer_bucket = self.get_bucket(int(uid))
                 if not peer_bucket:
                     return None
 
@@ -418,7 +416,6 @@ class Comms(ChainManager):
             show_progress=show_progress,
         )
 
-    # Backward compatibility methods (delegate to managers)
     async def save_checkpoint(
         self,
         model: torch.nn.Module,
@@ -500,11 +497,9 @@ class Comms(ChainManager):
         return await self.metadata_manager.get_debug_dict(window)
 
     # Aggregation methods
-    async def load_aggregation(
-        self, window: int, chunk_size: int = 50_000_000
-    ) -> dict | None:
+    async def load_aggregation(self, window: int) -> dict | None:
         """Load aggregation - delegate to aggregation manager"""
-        return await self.aggregation_manager.load_aggregation(window, chunk_size)
+        return await self.aggregation_manager.load_aggregation(window)
 
     async def _apply_gathered_gradients(
         self,
@@ -599,37 +594,9 @@ class Comms(ChainManager):
         """Get last checkpoint data from checkpoint manager"""
         return self.checkpoint_manager.last_checkpoint_data
 
-    @property
-    def current_window(self):
-        """Get current window"""
-        return getattr(self, "_current_window", 0)
-
-    @current_window.setter
-    def current_window(self, value):
-        """Set current window and propagate to managers"""
-        self._current_window = value
-
     def get_current_window(self) -> int | None:
         """Get current window for peer manager"""
         return self.current_window
-
-    def start_commitment_fetcher(self):
-        """Start commitment fetcher - delegate to parent"""
-        if hasattr(super(), "start_commitment_fetcher"):
-            super().start_commitment_fetcher()
-
-    async def get_commitments(self, block: int | None = None):
-        """Get commitments - delegate to parent"""
-        if hasattr(super(), "get_commitments"):
-            commitments = await super().get_commitments(block)
-            self.checkpoint_manager.commitments = commitments
-            return commitments
-        return {}
-
-    def try_commit(self, wallet, bucket):
-        """Try commit - delegate to parent"""
-        if hasattr(super(), "try_commit"):
-            super().try_commit(wallet, bucket)
 
     @property
     def peers(self):

@@ -15,18 +15,21 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-import re
-import torch
-import pickle
-from typing import Any
 import asyncio
+import pickle
+import re
+from typing import Any, Optional
+
 import bittensor as bt
+import torch
 
 import tplr
+from tplr.chain import ChainManager
+
 from .. import __version__
+from ..schemas import Bucket
 from ..storage.client import StorageClient
 from ..storage.file_manager import FileManager
-from ..schemas import Bucket
 
 
 class CheckpointManager:
@@ -38,16 +41,16 @@ class CheckpointManager:
         file_manager: FileManager,
         bucket: Bucket,
         uid: int,
-        metagraph=None,  # Add metagraph for validator lookup
-        commitments=None,  # Add commitments for peer buckets
+        chain_manager: Optional[
+            ChainManager
+        ] = None,  # ChainManager for validator lookup
     ):
         """Initialize with storage dependencies"""
         self.storage_client = storage_client
         self.file_manager = file_manager
         self.bucket = bucket
         self.uid = uid
-        self.metagraph = metagraph
-        self.commitments = commitments or {}
+        self.chain_manager = chain_manager
         self.last_checkpoint_data: dict[str, Any] | None = None
 
     def _move_to_cpu(self, obj):
@@ -231,7 +234,7 @@ class CheckpointManager:
             (
                 validator_bucket,
                 validator_uid,
-            ) = await self._get_highest_stake_validator_bucket()
+            ) = self._get_highest_stake_validator_bucket()
             if validator_bucket and validator_uid is not None:
                 result = await self._get_bucket_checkpoint(
                     validator_bucket, validator_uid, version
@@ -381,34 +384,18 @@ class CheckpointManager:
         except Exception as e:
             tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
 
-    async def _get_highest_stake_validator_bucket(
+    def _get_highest_stake_validator_bucket(
         self,
     ) -> tuple[Bucket, int] | tuple[None, None]:
-        """Get the bucket for the validator with highest stake."""
-        if not self.metagraph:
-            tplr.logger.warning("No metagraph available for validator lookup")
+        """Get the bucket for the validator with highest stake using chain manager."""
+        if not self.chain_manager:
+            tplr.logger.warning("No chain manager available for validator lookup")
             return None, None
 
-        try:
-            # Get validator with highest stake
-            validator_uid = self.metagraph.S.argmax().item()
-            tplr.logger.info(f"Found validator with highest stake: {validator_uid}")
-
-            if validator_uid is None:
-                tplr.logger.info("No active validators found")
-                return None, None
-
-            validator_bucket = self.commitments.get(int(validator_uid))
-            if not validator_bucket:
-                tplr.logger.info(f"No bucket committed for validator {validator_uid}")
-                return None, None
-
-            tplr.logger.info(f"Validator Bucket: {validator_bucket}")
-            return validator_bucket, validator_uid
-
-        except Exception as e:
-            tplr.logger.error(f"Error getting highest stake validator: {e}")
-            return None, None
+        bucket, uid = self.chain_manager.get_highest_stake_validator_bucket()
+        if bucket is not None and uid is not None:
+            return bucket, uid
+        return None, None
 
     # TODO: Add peer activity checking methods
     # TODO: Add batch checkpoint operations for efficiency

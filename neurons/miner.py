@@ -518,7 +518,7 @@ class Miner:
                 uids=self.comms.peers,
                 window=step_window,
                 timeout=45,
-                device="cpu",
+                device=self.config.device,
                 local=False,
                 totalks=self.totalks,
                 time_min=time_min,

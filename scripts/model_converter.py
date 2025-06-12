@@ -101,7 +101,7 @@ def config() -> bt.Config:
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda:1",
+        default="cuda:0",
         help="Device to use for model loading",
     )
     parser.add_argument(
@@ -228,7 +228,7 @@ class ModelConverter:
         self.uid = 1
 
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
-        self.model.to(self.config.device)
+        self.model.to("cpu")
 
         self.tokenizer = self.hparams.tokenizer
         self.comms = tplr.comms.Comms(
@@ -308,14 +308,13 @@ class ModelConverter:
         tplr.logger.info(
             f"Loading model from checkpoint (window: {checkpoint_current_window})"
         )
-
         self.model.load_state_dict(
             {
-                k: v.to(self.config.device)
+                k: v.to("cpu")
                 for k, v in checkpoint_data["model_state_dict"].items()  # type: ignore
             }
         )
-        self.model.to(self.config.device)  # type: ignore
+        self.model.to("cpu")  # type: ignore
 
         self.momentum = checkpoint_data["momentum"]
 
@@ -379,7 +378,8 @@ class ModelConverter:
 
             for dir_path in dirs_to_delete:
                 tplr.logger.info(f"Deleting previous model version: {dir_path}")
-                shutil.rmtree(dir_path, ignore_errors=True)
+                if os.path.exists(dir_path):
+                    shutil.rmtree(dir_path, ignore_errors=True)
 
             tplr.logger.info(f"Deleted {len(dirs_to_delete)} previous model versions")
         except Exception as e:

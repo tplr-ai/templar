@@ -287,6 +287,25 @@ class Comms(ChainManager):
         tplr.logger.info(f"{tplr.P(window, duration)} PUT {filename} <--")
         return duration
 
+    async def gradient_timestamp(
+        self, uid: int, window: int, version: str = tplr.__version__
+    ) -> float:
+        """
+        Return POSIX seconds of the gradient file’s Last-Modified header,
+        or 0.0 if it does not exist / fails.
+        """
+        bucket = self.commitments.get(int(uid))
+        if not bucket:
+            return 0.0
+        try:
+            s3 = await self._get_s3_client(bucket)
+            key = f"gradient-{window}-{uid}-v{version}.pt"
+            hdr = await s3.head_object(Bucket=bucket.name, Key=key)
+            return hdr["LastModified"].timestamp()
+        except Exception:
+            await self._purge_s3_client(bucket)
+            return 0.0
+
     async def get(
         self,
         uid: str,

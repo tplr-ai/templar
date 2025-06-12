@@ -1,0 +1,11 @@
+---
+# Metrics collector handlers
+
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: restart metrics-collector
+  systemd:
+    name: metrics-collector
+    state: restarted

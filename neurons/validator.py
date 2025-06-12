@@ -296,6 +296,7 @@ class Validator:
         self.inactivity_slash_rate = 0.25  # 25% slash per window
         self.missing_gradient_slash_rate = 0.75
         self.sync_score_slash_rate = 0.75
+        self.idx_similarity_slashing_rate = 0.5
 
         # Initialize peer related attributes
         self.next_peers: list[int] | None = None
@@ -1050,6 +1051,34 @@ class Validator:
                 state_dict = cast(dict, aggregation_result.get("state_dict"))
                 skipped_uids = cast(list[int], state_dict.get("skipped_uids", []))
                 success_rate = cast(float, state_dict.get("success_rate", 0.0))
+                idx_overlap_peers = cast(
+                    set[int], state_dict.get("uids_idx_overlap", {})
+                )
+                for uid in idx_overlap_peers:
+                    old_score = self.final_scores[uid].item()
+
+                    # Only reduce positive scores
+                    if self.final_scores[uid] > 0:
+                        self.final_scores[uid] *= self.idx_similarity_slashing_rate
+                        self.binary_moving_averages[uid] *= (
+                            self.idx_similarity_slashing_rate
+                        )
+
+                        new_score = self.final_scores[uid].item()
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to similarity in idxs.",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+                    else:
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Skipped score of UID {uid} (current score: {old_score:.4f}) due to negative or zero value.",
+                            sync_window=self.sync_window,
+                            current_window=self.current_window,
+                        )
+
             gather_time = tplr.T() - gather_start
 
             from_aggregator = 1 if aggregation_result is not None else 0

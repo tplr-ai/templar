@@ -83,7 +83,7 @@ def config() -> bt.Config:
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda:7",
+        default="cuda:0",
         help="Device to use for evaluation",
     )
     parser.add_argument(
@@ -170,6 +170,9 @@ class Evaluator:
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
         self.hparams = tplr.load_hparams()
+        tplr.logger.info(
+            f"Loaded hparams: hidden_size={self.hparams.hidden_size}, num_hidden_layers={self.hparams.num_hidden_layers}, num_key_value_heads={self.hparams.num_key_value_heads}"
+        )
         self.wallet = bt.wallet(config=self.config)
 
         self.version = tplr.__version__
@@ -178,7 +181,7 @@ class Evaluator:
         self.uid = 1
 
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
-        self.model.to(self.config.device)
+        self.model.to("cpu")
 
         self.tokenizer = self.hparams.tokenizer
         self.comms = tplr.comms.Comms(
@@ -252,12 +255,11 @@ class Evaluator:
             if model_state_dict:
                 # Move tensors to appropriate device
                 device_state_dict = {
-                    k: v.to(self.config.device) if hasattr(v, "to") else v
+                    k: v.to("cpu") if hasattr(v, "to") else v
                     for k, v in model_state_dict.items()
                 }
                 self.model.load_state_dict(device_state_dict)
-                # Ensure model is on the correct device
-                self.model.to(self.config.device)
+                self.model.to("cpu")  # type: ignore
 
             # Store momentum data as instance attribute
             self.momentum = checkpoint_data.get("momentum", {})
@@ -286,9 +288,6 @@ class Evaluator:
         Args:
             tasks: Comma-separated task list
             output_dir: Directory to save results
-            global_step: Current global step for logging
-            checkpoint_window: Current window for logging
-            block_number: Current block for logging
             model_args: Optional model arguments
             batch_size: Optional batch size
             limit: Optional dataset limit
@@ -389,7 +388,7 @@ class Evaluator:
 
         for task_name, task_results in results["results"].items():
             # We need to try each metric in order until we find one that exists
-            # Alo we need to prioritise metrics in order of preference
+            # Also we need to prioritise metrics in order of preference
             # see: https://github.com/EleutherAI/lm-evaluation-harness/blob/758c5ed891b1ca48acd8d3a0d309a827215796b7/scripts/regression.py#L115
             metric_names = ["acc_norm,none", "acc,none"]
             metric_value = None
@@ -502,8 +501,8 @@ class Evaluator:
                 benchmark_runtime=benchmark_runtime,
                 exit_code=exit_code,
             )
-            shutil.rmtree(results_dir)
-            torch.cuda.empty_cache()
+            if os.path.exists(results_dir):
+                shutil.rmtree(results_dir)
         else:
             tplr.logger.info("No regular tasks to run")
 
@@ -513,7 +512,7 @@ class Evaluator:
             exit_code, benchmark_runtime = self._run_lm_eval(
                 tasks="mmlu",
                 output_dir=results_dir,
-                model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH},dtype=bfloat16",
+                model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}",
                 batch_size="auto",
                 limit="0.15",
                 num_fewshot=5,
@@ -528,14 +527,15 @@ class Evaluator:
                 benchmark_runtime=benchmark_runtime,
                 exit_code=exit_code,
             )
-            shutil.rmtree(results_dir)
-            torch.cuda.empty_cache()
+            if os.path.exists(results_dir):
+                shutil.rmtree(results_dir)
         elif has_mmlu_task:
             tplr.logger.info(
                 f"Skipping mmlu (run #{self.eval_counter}, next at run #{(self.eval_counter // 4 + 1) * 4})"
             )
 
-        shutil.rmtree(MODEL_PATH)
+        if os.path.exists(MODEL_PATH):
+            shutil.rmtree(MODEL_PATH)
         torch.cuda.empty_cache()
 
         self.last_eval_window = checkpoint_window

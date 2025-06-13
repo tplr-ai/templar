@@ -80,8 +80,13 @@ def prepare_gradient_dict(miner, pages, step_window):
     else:
         model_iterator = miner.model.named_parameters()
     for n, p in model_iterator:
-        # Apply weight decay
+        # Weight-decay is done by *every* rank
         p.data.mul_(1.0 - lr * miner.hparams.weight_decay)
+
+        # Skip parameters not owned by this rank
+        if n not in miner.owned_params:
+            p.grad = None
+            continue
 
         # Apply momentum decay.
         miner.momentum[n].mul_(miner.hparams.momentum_decay)
@@ -416,9 +421,7 @@ def process_loaded_data(model: torch.nn.Module, compressed_data: dict) -> dict |
         "tensors": {},
     }
 
-    if isinstance(
-        model, torch.nn.parallel.DistributedDataParallel
-    ):
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
         model_iterator = model.module.named_parameters()
     else:
         model_iterator = model.named_parameters()
@@ -458,9 +461,7 @@ async def compare_model_with_debug_dict(
     max_diff = 0.0
 
     # Compare each parameter with its debug entry
-    if isinstance(
-        model, torch.nn.parallel.DistributedDataParallel
-    ):
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
         model_iterator = model.module.named_parameters()
     else:
         model_iterator = model.named_parameters()

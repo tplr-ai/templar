@@ -188,17 +188,22 @@ class Miner:
 
         # Init optimizer and momentum
         self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
-        if self.is_master:
-            self.momentum = {}
+        self.momentum = {}
+        self.owned_params = set()
+
         self.xshapes = {}
         self.totalks = {}
-        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-            model_iterator = self.model.module.named_parameters()
-        else:
-            model_iterator = self.model.named_parameters()
-        for n, p in model_iterator:
-            if self.is_master:
-                self.momentum[n] = torch.zeros_like(p)
+        model_iterator = (
+            self.model.module.named_parameters()
+            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
+            else self.model.named_parameters()
+        )
+
+        for idx, (n, p) in enumerate(model_iterator):
+            if idx % self.world_size == self.rank:
+                # this rank “owns” the parameter
+                self.owned_params.add(n)
+                self.momentum[n] = torch.zeros_like(p, device=self.device)
             _, _, xshape, totalk, _ = self.compressor.compress(
                 self.transformer.encode(torch.zeros_like(p)),
                 self.hparams.topk_compression,
@@ -337,13 +342,20 @@ class Miner:
         )
 
         if self.world_size == 1 or self.is_master:
-            ckpt_ok, ckpt_sync_win, self.optimizer, self.scheduler = await self.comms.load_checkpoint(
+            (
+                ckpt_ok,
+                ckpt_sync_win,
+                self.optimizer,
+                self.scheduler,
+            ) = await self.comms.load_checkpoint(
                 model=bare_model,
                 optimizer=self.optimizer,
                 scheduler=self.scheduler,
                 current_window=self.current_window,
                 device=str(self.device),
-                init_version=tplr.__version__ if has_new_checkpoint else self.bootstrap_version,
+                init_version=tplr.__version__
+                if has_new_checkpoint
+                else self.bootstrap_version,
             )
 
             if ckpt_ok:
@@ -361,17 +373,10 @@ class Miner:
             else:
                 tplr.logger.info("No checkpoint found – starting from scratch")
 
-                # initialise per-parameter momentum on rank-0
-                if self.is_master:
-                    tgt_iter = (
-                        self.model.module.named_parameters()
-                        if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-                        else self.model.named_parameters()
-                    )
-                    self.momentum = {n: torch.zeros_like(p) for n, p in tgt_iter}
-
                 # still perform the full catch-up from the very first window
-                await tplr.neurons.catchup_with_aggregation_server(self, self.start_window)
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, self.start_window
+                )
 
         # ---- broadcast to other ranks (if any) --------------------------------
         if self.world_size > 1:
@@ -397,7 +402,7 @@ class Miner:
             bcast_time = tplr.T() - bcast_start
             tplr.logger.info(
                 f"{tplr.P(self.current_window, bcast_time)} "
-                f"Broadcast checkpoint to {self.world_size-1} ranks"
+                f"Broadcast checkpoint to {self.world_size - 1} ranks"
             )
 
         self.comms.start_commitment_fetcher()
@@ -494,6 +499,14 @@ class Miner:
                 n_batches += 1
                 tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {n_batches}]")
 
+                # Clear intermediate activations immediately
+                del outputs, batch
+                if "input_ids" in locals():
+                    del input_ids
+                if "labels" in locals():
+                    del labels
+                torch.cuda.empty_cache()
+
                 if self.current_window != step_window:
                     tplr.logger.info("<Exhausted window>")
                     break
@@ -522,26 +535,59 @@ class Miner:
                     if p.grad is not None:
                         p.grad.div_(self.world_size)
 
-            # 2️⃣ Synchronise all ranks so we know everyone is done with backward()
+            # Synchronise all ranks
             if self.world_size > 1:
                 dist.barrier()
-            if self.is_master:
-                compress_start = tplr.T()
-                gradient, _, _ = tplr.prepare_gradient_dict(self, pages, step_window)
-                tplr.logger.info(
-                    f"{tplr.P(step_window, tplr.T() - compress_start)} Compressed local gradients"
+
+            # 1️⃣ every rank builds its momentum shard
+            compress_start = tplr.T()
+            shard_gradient, _, _ = tplr.prepare_gradient_dict(self, pages, step_window)
+            tplr.logger.info(
+                f"{tplr.P(step_window, tplr.T() - compress_start)} "
+                f"Compressed local shard with {len(shard_gradient) - 1} tensors"
+            )
+
+            # gather the shards → rank-0
+            if self.world_size > 1:
+                gathered = [None] * self.world_size
+                dist.gather_object(  # NCCL / Gloo friendly
+                    shard_gradient,
+                    gathered if self.is_master else None,
+                    dst=0,
                 )
-                tplr.logger.debug(f"Putting own state dict for UID {self.uid}")
+            else:  # single-GPU run
+                gathered = [shard_gradient]
 
-                # Move everything to CPU before upload
-                processed_state_dict = {}
-                for k, v in gradient.items():
-                    if isinstance(v, torch.Tensor):
-                        processed_state_dict[k] = v.to("cpu")
-                    else:
-                        processed_state_dict[k] = v
+            # rank-0 merges & uploads the full gradient
+            if self.is_master:
+                gradient: dict[str, object] = {}
+                merged_pages: list[tuple[int, int]] = []
 
-                # Launch the put operation as a background task
+                for shard in gathered:
+                    if shard is not None:
+                        m = shard.pop("metadata", None)
+                        if m and "pages_info" in m:
+                            merged_pages.extend(m["pages_info"])
+
+                        gradient.update(shard)
+
+                gradient["metadata"] = {
+                    "pages_info": merged_pages,
+                    "window": step_window,
+                }
+
+                tplr.logger.info(
+                    f"Merged {len(gathered)} shards → "
+                    f"{len(gradient) - 1} tensors  |  "
+                    f"pages_info len = {len(merged_pages)}"
+                )
+
+                # move to CPU before R2 upload
+                processed_state_dict = {
+                    k: (v.to("cpu") if isinstance(v, torch.Tensor) else v)
+                    for k, v in gradient.items()
+                }
+
                 put_completion_time = await self.comms.put(
                     state_dict=processed_state_dict,
                     uid=str(self.uid),
@@ -551,16 +597,18 @@ class Miner:
                     local=False,
                     stale_retention=100,
                 )
-                tplr.logger.info("Put task completed!")
+
                 upload_size = sum(
-                    tensor.element_size() * tensor.nelement()
-                    for tensor in processed_state_dict.values()
-                    if isinstance(tensor, torch.Tensor)
+                    t.element_size() * t.nelement()
+                    for t in processed_state_dict.values()
+                    if isinstance(t, torch.Tensor)
                 )
                 tplr.logger.info(
-                    f"Uploading {upload_size} bytes of own state for UID: {self.uid}"
+                    f"Uploaded {upload_size / 1e6:.1f} MB shard-merged gradient"
                 )
+
             else:
+                # non-master ranks simply wait; they don't upload
                 put_completion_time = 0.0
 
             tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
@@ -736,6 +784,7 @@ class Miner:
             self.model.train()
             self.optimizer.zero_grad()
 
+            new_grad = None
             if gather_result is not None and gather_result.state_dict is not None:
                 if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
                     model_iterator = self.model.module.named_parameters()
@@ -927,15 +976,15 @@ class Miner:
                 tplr.logger.info("Logging performance profiling summary...")
                 tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
 
-            await self.cleanup_window()
             if self.world_size > 1:
                 dist.barrier()
 
             # Delete local variables to clear up memory
-            del loader, pages, gather_result
+            del loader, pages, gather_result, shard_gradient, new_grad
             if self.is_master:
                 del processed_state_dict, gradient
 
+            await self.cleanup_window()
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
             while self.current_window == step_window:

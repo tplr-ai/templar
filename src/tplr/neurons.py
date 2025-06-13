@@ -139,7 +139,6 @@ def prepare_gradient_dict(miner, pages, step_window):
     torch.cuda.empty_cache()
 
     gradient["metadata"] = {"pages_info": pages, "window": step_window}
-    logger.info(f"Attached metadata to gradient: {gradient['metadata']}")
 
     return gradient, xshapes, totalks
 

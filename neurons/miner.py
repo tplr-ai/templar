@@ -575,6 +575,7 @@ class Miner:
                     "pages_info": merged_pages,
                     "window": step_window,
                 }
+                tplr.logger.info(f"Attached metadata to gradient: {gradient['metadata']}")
 
                 tplr.logger.info(
                     f"Merged {len(gathered)} shards → "

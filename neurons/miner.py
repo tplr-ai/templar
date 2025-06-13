@@ -43,7 +43,10 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
-from transformers import LlamaForCausalLM
+from torchtitan.config_manager import ConfigManager, JobConfig
+from torchtitan.protocols.train_spec import get_train_spec
+from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.components.loss import build_cross_entropy_loss
 
 # Local
 import tplr
@@ -113,17 +116,11 @@ class Miner:
     def __init__(self):
         tplr.logger.debug("Starting initialization...")
 
-        # Init config and load hparams
+        # templar config
         self.config = Miner.config()
         self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
 
-        if self.config.actual_batch_size is not None:
-            tplr.logger.info(
-                f"Overriding hparams batch size: {self.hparams.batch_size} -> {self.config.actual_batch_size}"
-            )
-            self.hparams.batch_size = self.config.actual_batch_size
-
-        # Init bittensor objects
+        # bittensor config
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
@@ -133,36 +130,54 @@ class Miner:
             )
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+        
+        # setup model
+        tt_config_manager = ConfigManager()
+        self.tt_config = tt_config_manager.parse_args([
+            '--model.name', 'llama3',
+            '--model.flavor', '8B', # Specify the 8B model
+            '--training.seq_len', str(self.hparams.sequence_length),
+            '--model.tokenizer_path', 'assets/tokenizer.model', # Path to your tiktoken model
+        ])
 
-        # Init model with hparams config
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)  # type: ignore
-        self.tokenizer = self.hparams.tokenizer
-        self.model.gradient_checkpointing_enable()
+        # init model from spec
+        self.train_spec = get_train_spec(self.tt_config.model.name)
+        
+        # build tokenizer from torchtitan TrainSpec 
+        self.tokenizer = self.train_spec.build_tokenizer_fn(self.tt_config)
+        
+        # init model on meta device to save memory
+        model_args = self.train_spec.config[self.tt_config.model.flavor]
+        model_args.update_from_config(self.tt_config, self.tokenizer)
+        with torch.device("meta"):
+            self.model = self.train_spec.cls.from_model_args(model_args) # 
 
-        # Init compression
-        self.transformer = tplr.compress.TransformDCT(
-            self.model, target_chunk=self.hparams.target_chunk
+        # set up parallelism TODO DO LATER
+        world_size = 1 # Assuming single GPU for the miner (TODO CHANGE ME WHEN HANDLING PARALLELISM)
+        self.device = torch.device(self.config.device)
+        self.parallel_dims = ParallelDims(
+            dp_shard=-1,
+            dp_replicate=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            world_size=world_size,
+            enable_loss_parallel=False,
         )
-        self.compressor = tplr.compress.CompressDCT(
-            use_quantization=True,
-            quantization_bins=self.hparams.quantization_bins,
-            quantization_range=self.hparams.quantization_range,
-        )
+        self.world_mesh = self.parallel_dims.build_mesh(device_type=self.config.device.split(":")[0])
+        
+        self.model = self.train_spec.parallelize_fn(self.model, self.world_mesh, self.parallel_dims, self.tt_config)
+        self.model.to_empty(device=self.device)
+        with torch.no_grad():
+            self.model.init_weights()
+        
+        self.model.train()
 
-        # Init optimizer and momentum
+        # Build the loss fn from the torchtitan TrainSpec 
+        self.loss_fn = self.train_spec.build_loss_fn(self.tt_config)
+        
+        # init optimizer and scheduler
         self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
-        self.momentum = {}
-        self.xshapes = {}
-        self.totalks = {}
-        for n, p in self.model.named_parameters():
-            self.momentum[n] = torch.zeros_like(p)
-            _, _, xshape, totalk, quant_params = self.compressor.compress(
-                self.transformer.encode(self.momentum[n]), self.hparams.topk_compression
-            )
-            self.xshapes[n] = xshape
-            self.totalks[n] = totalk
-        # Set up scheduler
         warmup_scheduler = LinearLR(
             self.optimizer,
             start_factor=0.1,
@@ -180,14 +195,7 @@ class Miner:
             schedulers=[warmup_scheduler, cosine_scheduler],
             milestones=[250],
         )
-
-        self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
-        tplr.logger.info(
-            f"[Miner] code_version={tplr.__version__} "
-            f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
-        )
-
-        # Init comms
+        
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",
@@ -198,28 +206,16 @@ class Miner:
             hparams=self.hparams,
             uid=self.uid,
         )
-
-        self.bucket = self.comms.get_own_bucket("gradients", "read")
+        self.bucket = self.comms.get_own_bucket("gradients", "write")
         self.comms.try_commit(self.wallet, self.bucket)
-        # self.comms.fetch_commitments()
-
-        # Init state params
+        
         self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
-        self.start_window = self.current_window  # Record the start window
-        self.global_step = 0  # Initialize global_step to zero
+        self.start_window = self.current_window
+        self.global_step = 0
         self.comms.current_window = self.current_window
-        self.step_counter = 0
-
-        # Add step tracking
-        self.window_step = 0
-
-        # Track additional metrics
-        self.total_tokens_processed = 0
-        self.batch_times = []  # For tracking processing speed
-
-        # Initialize WandB
+        
         self.wandb = tplr.initialize_wandb(
             run_prefix="M",
             uid=self.uid,
@@ -376,24 +372,28 @@ class Miner:
             self.model.zero_grad()
             total_loss = 0.0
             n_batches = 0
-            window_tokens = 0  # Initialize token count for this window
+            window_tokens = 0
 
             for i, batch in enumerate(loader):
                 input_ids = torch.tensor(batch, dtype=torch.long).to(self.model.device)
-                tokens_this_batch = input_ids.numel()  # Tokens in current batch
-                window_tokens += tokens_this_batch  # Accumulate tokens
+                tokens_this_batch = input_ids.numel()
+                window_tokens += tokens_this_batch
+                
+                # For TorchTitan, labels are typically the input shifted by one
                 labels = input_ids.clone()
-                labels = torch.where(
-                    labels == self.tokenizer.pad_token_id, -100, labels
-                )
-
+                
+                # Titan model forward pass returns logits 
                 with autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
-                    outputs = self.model(input_ids=input_ids, labels=labels)
-
-                total_loss += outputs.loss.item()
-                outputs.loss.backward()
+                    # The model expects tokens, not labels
+                    logits = self.model(tokens=input_ids)
+                
+                # Calculate loss externally
+                loss = self.loss_fn(logits, labels)
+                
+                total_loss += loss.item()
+                loss.backward()
                 n_batches += 1
-                tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {i + 1}]")
+                tplr.logger.info(f"loss: {loss.item()} [Batch {i + 1}]")
                 if self.current_window != step_window:
                     tplr.logger.info("<Exhausted window>")
                     break

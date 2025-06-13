@@ -30,7 +30,8 @@ import bittensor as bt
 import torch
 import uvloop
 from bittensor.core.subtensor import ScaleObj
-from transformers import LlamaForCausalLM
+from torchtitan.config_manager import ConfigManager
+from torchtitan.protocols.train_spec import get_train_spec
 
 # Import tplr functions
 import tplr
@@ -91,8 +92,32 @@ class AggregationServer:
             tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
         # Initialize model for gradient processing
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)
+        # Set up model config
+        tt_config_manager = ConfigManager()
+        self.tt_config = tt_config_manager.parse_args([
+            '--model.name', 'llama3',
+            '--model.flavor', '8B', # Specify the 8B model
+            '--training.seq_len', str(self.hparams.sequence_length),
+            '--model.tokenizer_path', 'assets/tokenizer.model', # Path to your tiktoken model
+        ])
+
+        # Get the training specification for llama3
+        self.train_spec = get_train_spec(self.tt_config.model.name)
+
+        # Build tokenizer from the TrainSpec
+        self.tokenizer = self.train_spec.build_tokenizer_fn(self.tt_config)
+
+        # use meta tensors to save memory
+        model_args = self.train_spec.config[self.tt_config.model.flavor]
+        model_args.update_from_config(self.tt_config, self.tokenizer)
+
+        with torch.device("meta"):
+            self.model = self.train_spec.cls.from_model_args(model_args)
+
+        # Move model to the correct device and init weights
+        self.model.to_empty(device=self.config.device)
+        with torch.no_grad():
+            self.model.init_weights()
 
         # Initialize compression
         self.transformer = tplr.compress.TransformDCT(

@@ -49,7 +49,8 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
-from transformers import LlamaForCausalLM
+from torchtitan.config_manager import ConfigManager
+from torchtitan.protocols.train_spec import get_train_spec
 
 # Local
 import tplr
@@ -151,9 +152,32 @@ class Validator:
             tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
         # Init model with hparams config
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)
-        self.tokenizer = self.hparams.tokenizer
+        # Set up model config
+        tt_config_manager = ConfigManager()
+        self.tt_config = tt_config_manager.parse_args([
+            '--model.name', 'llama3',
+            '--model.flavor', '8B',
+            '--training.seq_len', str(self.hparams.sequence_length),
+            '--model.tokenizer_path', 'assets/tokenizer.model',
+        ])
+
+        # Get the training specification for llama3
+        self.train_spec = get_train_spec(self.tt_config.model.name)
+
+        # Build tokenizer from the TrainSpec
+        self.tokenizer = self.train_spec.build_tokenizer_fn(self.tt_config)
+
+        # use meta tensors to save memory
+        model_args = self.train_spec.config[self.tt_config.model.flavor]
+        model_args.update_from_config(self.tt_config, self.tokenizer)
+
+        with torch.device("meta"):
+            self.model = self.train_spec.cls.from_model_args(model_args)
+
+        # Move model to the correct device and init weights
+        self.model.to_empty(device=self.config.device)
+        with torch.no_grad():
+            self.model.init_weights() #
 
         # Init compression
         self.transformer = tplr.compress.TransformDCT(
@@ -629,14 +653,20 @@ class Validator:
                         )
                         continue
 
+                    # Define the loss function, consistent with TorchTitan's Llama3 spec
+                    loss_fn = torch.nn.functional.cross_entropy
                     input_ids = torch.tensor(batch, dtype=torch.long).to(model.device)
                     labels = input_ids.clone()
-                    labels = torch.where(
-                        labels == self.tokenizer.pad_token_id, -100, labels
-                    )
-                    outputs = model(input_ids=input_ids, labels=labels)
-                    total_loss += outputs.loss.item()
+                    logits = model(tokens=input_ids)
+
+                    # We need to reshape logits and labels for cross_entropy
+                    # Logits shape: (batch_size, seq_len, vocab_size) -> (batch_size * seq_len, vocab_size)
+                    # Labels shape: (batch_size, seq_len) -> (batch_size * seq_len)
+                    loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
+
+                    total_loss += loss.item()
                     n_batches += 1
+
                     del input_ids, labels, outputs
                     torch.cuda.empty_cache()
 

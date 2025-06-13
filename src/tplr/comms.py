@@ -113,6 +113,10 @@ class Comms(ChainManager):
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
         self.gather_semaphore = asyncio.Semaphore(15)
 
+        # Reserve peers support
+        self.reserve_peers = []
+        self.target_success_rate = 1.0
+
     async def _get_s3_client(self, bucket: Bucket):
         """
         Returns a persistent s3_client for the given bucket credentials.
@@ -771,7 +775,7 @@ class Comms(ChainManager):
         self, uid: int, window: int, version: str = tplr.__version__
     ) -> float:
         """
-        Return POSIX seconds of the gradient file’s Last-Modified header,
+        Return POSIX seconds of the gradient file's Last-Modified header,
         or 0.0 if it does not exist / fails.
         """
         bucket = self.commitments.get(int(uid))
@@ -952,7 +956,7 @@ class Comms(ChainManager):
         time_min: datetime = None,
         time_max: datetime = None,
     ) -> Optional[SimpleNamespace]:
-        """Gather operation with individual gradient normalization and connection management."""
+        """Gather operation with reserve peers support."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
@@ -964,152 +968,224 @@ class Comms(ChainManager):
         )
         tplr.logger.debug(f"Target UIDs for gathering: {uids}")
 
+        # Get reserves and target rate
+        reserves = getattr(self, "reserve_peers", [])
+        target_rate = getattr(self, "target_success_rate", 1.0)
+        target_count = int(len(uids) * target_rate)
+
+        if reserves:
+            tplr.logger.info(
+                f"Using {len(reserves)} reserve peers with {target_rate:.0%} target rate"
+            )
+
         aggregated_state_dict = {}
         valid_uids = []
-        skipped_uids = []  # Retain UIDs that are skipped.
+        skipped_uids = []
         global_steps = []
+        current_peers = uids.copy()
 
         async with self.gather_semaphore:
-            batch_tasks = [
-                self.get_with_retry(
-                    uid=uid,
-                    window=window,
-                    key=key,
-                    timeout=timeout,
-                    local=local,
-                    stale_retention=stale_retention,
-                    time_min=time_min,
-                    time_max=time_max,
-                )
-                for uid in uids
-            ]
+            # Try primary peers first
+            await self._try_peers(
+                current_peers,
+                window,
+                key,
+                timeout,
+                local,
+                stale_retention,
+                time_min,
+                time_max,
+                device,
+                totalks,
+                aggregated_state_dict,
+                valid_uids,
+                skipped_uids,
+                global_steps,
+                metrics,
+            )
 
-            try:
-                download_start = tplr.T()
-                batch_responses = await asyncio.gather(
-                    *batch_tasks, return_exceptions=True
-                )
-                tplr.logger.info(
-                    f"{tplr.P(window, tplr.T() - download_start)} Downloaded peer gradients <--"
-                )
-                process_start = tplr.T()
-                for uid, response in zip(uids, batch_responses):
-                    if isinstance(response, Exception):
-                        tplr.logger.debug(f"Error from UID {uid}: {str(response)}")
-                        skipped_uids.append(uid)
-                        continue
-                    if response is None:
-                        tplr.logger.info(f"Skipped UID {uid} - gradient not found.")
-                        skipped_uids.append(uid)
-                        continue
-
-                    try:
-                        state_dict_resp, global_step_resp = response
-                        tplr.logger.debug(
-                            f"Received state dict and global step {global_step_resp} from UID {uid}"
-                        )
-                    except (TypeError, ValueError) as e:
-                        tplr.logger.debug(f"Invalid response from UID {uid}: {e}")
-                        skipped_uids.append(uid)
-                        continue
-
-                    if state_dict_resp is None:
-                        tplr.logger.debug(f"Empty state dict from UID {uid}")
-                        skipped_uids.append(uid)
-                        continue
-
-                    # ---------- Begin Compressed Indices and Values Check ----------
-                    valid_response = True
-                    for param_name, tensor in state_dict_resp.items():
-                        if param_name.endswith("idxs"):
-                            base_name = param_name[:-4]
-                            totalk = totalks.get(base_name)
-                            if totalk is None:
-                                tplr.logger.warning(
-                                    f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
-                                )
-                                valid_response = False
-                                break
-                            try:
-                                self.check_compressed_indices(
-                                    param_name,
-                                    tensor.to(device),
-                                    totalk,
-                                    allowed_topk=self.hparams.topk_compression,
-                                )
-                            except Exception as e:
-                                tplr.logger.warning(
-                                    f"Compressed indices check failed for parameter {param_name} from UID {uid}: {e}"
-                                )
-                                valid_response = False
-                                break
-                        # Check if values are valid (not NaN, not Inf)
-                        elif param_name.endswith("vals"):
-                            tensor_to_check = tensor.to(device)
-                            if (
-                                torch.isnan(tensor_to_check).any()
-                                or torch.isinf(tensor_to_check).any()
-                            ):
-                                tplr.logger.warning(
-                                    f"NaN/Inf in {param_name} from UID {uid}, skipping"
-                                )
-                                valid_response = False
-                                break
-
-                    # If any check failed, skip this UID entirely
-                    if not valid_response:
-                        tplr.logger.info(
-                            f"Skipping UID {uid} due to validation failures"
-                        )
-                        skipped_uids.append(uid)
-                        continue
-                    # ---------- End Compressed Indices and Values Check ----------
-
-                    # Process tensors (with normalization on 'vals' keys).
-                    for param_name, tensor in state_dict_resp.items():
-                        if isinstance(tensor, torch.Tensor):
-                            aggregated_state_dict.setdefault(param_name, []).append(
-                                tensor.to(device)
-                            )
-                            metrics["download_bytes"] += (
-                                tensor.element_size() * tensor.nelement()
-                            )
-                        elif param_name.endswith("quant_params"):
-                            aggregated_state_dict.setdefault(param_name, []).append(
-                                tensor
-                            )
-
-                    valid_uids.append(uid)
-                    global_steps.append(global_step_resp)
+            # If we have reserves and need more successes
+            if reserves and len(valid_uids) < target_count:
+                needed = min(target_count - len(valid_uids), len(reserves))
+                reserve_peers = reserves[:needed]
 
                 tplr.logger.info(
-                    f"{tplr.P(window, tplr.T() - process_start)} Processed peer gradients <--"
+                    f"Primary peers: {len(valid_uids)}/{len(uids)} success. "
+                    f"Trying {needed} reserves to reach target {target_count}"
                 )
 
-            except Exception as e:
-                tplr.logger.error(f"Error processing uid batch: {str(e)}")
+                await self._try_peers(
+                    reserve_peers,
+                    window,
+                    key,
+                    timeout,
+                    local,
+                    stale_retention,
+                    time_min,
+                    time_max,
+                    device,
+                    totalks,
+                    aggregated_state_dict,
+                    valid_uids,
+                    skipped_uids,
+                    global_steps,
+                    metrics,
+                )
 
         if not valid_uids:
             tplr.logger.info("No valid gradients received from any UID")
             return None
 
         total_time = time.time() - start_time
+        actual_rate = len(valid_uids) / len(uids)
         tplr.logger.info(
-            f"Gather done in {total_time:.2f}s. Success rate: {len(valid_uids)}/{len(uids)}, "
-            f"Upload: {metrics['upload_bytes']} bytes, Download: {metrics['download_bytes']} bytes"
+            f"Gather done in {total_time:.2f}s. Success: {len(valid_uids)} peers "
+            f"(rate: {actual_rate:.1%}, target: {target_rate:.1%})"
         )
 
-        result = SimpleNamespace(
+        return SimpleNamespace(
             time=total_time,
             upload_bytes=metrics["upload_bytes"],
             download_bytes=metrics["download_bytes"],
-            success_rate=len(valid_uids) / len(uids),
+            success_rate=actual_rate,
             state_dict=SimpleNamespace(**aggregated_state_dict),
             uids=valid_uids,
             global_steps=global_steps,
             skipped_uids=skipped_uids,
         )
-        return result
+
+    async def _try_peers(
+        self,
+        peer_uids,
+        window,
+        key,
+        timeout,
+        local,
+        stale_retention,
+        time_min,
+        time_max,
+        device,
+        totalks,
+        aggregated_state_dict,
+        valid_uids,
+        skipped_uids,
+        global_steps,
+        metrics,
+    ):
+        """Try to gather from a list of peers."""
+        if not peer_uids:
+            return
+
+        batch_tasks = [
+            self.get_with_retry(
+                uid=uid,
+                window=window,
+                key=key,
+                timeout=timeout,
+                local=local,
+                stale_retention=stale_retention,
+                time_min=time_min,
+                time_max=time_max,
+            )
+            for uid in peer_uids
+        ]
+
+        try:
+            download_start = tplr.T()
+            batch_responses = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            tplr.logger.info(
+                f"{tplr.P(window, tplr.T() - download_start)} Downloaded peer gradients <--"
+            )
+
+            process_start = tplr.T()
+            for uid, response in zip(peer_uids, batch_responses):
+                if isinstance(response, Exception):
+                    tplr.logger.debug(f"Error from UID {uid}: {str(response)}")
+                    skipped_uids.append(uid)
+                    continue
+                if response is None:
+                    tplr.logger.info(f"Skipped UID {uid} - gradient not found.")
+                    skipped_uids.append(uid)
+                    continue
+
+                try:
+                    state_dict_resp, global_step_resp = response
+                    tplr.logger.debug(
+                        f"Received state dict and global step {global_step_resp} from UID {uid}"
+                    )
+                except (TypeError, ValueError) as e:
+                    tplr.logger.debug(f"Invalid response from UID {uid}: {e}")
+                    skipped_uids.append(uid)
+                    continue
+
+                if state_dict_resp is None:
+                    tplr.logger.debug(f"Empty state dict from UID {uid}")
+                    skipped_uids.append(uid)
+                    continue
+
+                # Validation checks
+                valid_response = True
+                for param_name, tensor in state_dict_resp.items():
+                    if param_name.endswith("idxs"):
+                        base_name = param_name[:-4]
+                        totalk = totalks.get(base_name)
+                        if totalk is None:
+                            tplr.logger.warning(
+                                f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
+                            )
+                            valid_response = False
+                            break
+                        try:
+                            self.check_compressed_indices(
+                                param_name,
+                                tensor.to(device),
+                                totalk,
+                                allowed_topk=self.hparams.topk_compression,
+                            )
+                        except Exception as e:
+                            tplr.logger.warning(
+                                f"Compressed indices check failed for parameter {param_name} from UID {uid}: {e}"
+                            )
+                            valid_response = False
+                            break
+                    elif param_name.endswith("vals"):
+                        tensor_to_check = tensor.to(device)
+                        if (
+                            torch.isnan(tensor_to_check).any()
+                            or torch.isinf(tensor_to_check).any()
+                        ):
+                            tplr.logger.warning(
+                                f"NaN/Inf in {param_name} from UID {uid}, skipping"
+                            )
+                            valid_response = False
+                            break
+
+                if not valid_response:
+                    tplr.logger.info(f"Skipping UID {uid} due to validation failures")
+                    skipped_uids.append(uid)
+                    continue
+
+                # Process valid tensors
+                for param_name, tensor in state_dict_resp.items():
+                    if isinstance(tensor, torch.Tensor):
+                        aggregated_state_dict.setdefault(param_name, []).append(
+                            tensor.to(device)
+                        )
+                        metrics["download_bytes"] += (
+                            tensor.element_size() * tensor.nelement()
+                        )
+                    elif param_name.endswith("quant_params"):
+                        aggregated_state_dict.setdefault(param_name, []).append(tensor)
+
+                valid_uids.append(uid)
+                global_steps.append(global_step_resp)
+
+            tplr.logger.info(
+                f"{tplr.P(window, tplr.T() - process_start)} Processed peer gradients <--"
+            )
+
+        except Exception as e:
+            tplr.logger.error(f"Error processing uid batch: {str(e)}")
 
     async def cleanup_old_checkpoints(self, keep_last: int = 3):
         """

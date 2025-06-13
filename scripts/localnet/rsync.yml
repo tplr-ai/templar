@@ -6,7 +6,7 @@
   vars:
     ansible_python_interpreter: /usr/bin/python3
     remote_mode: "{{ hostvars[inventory_hostname]['remote_mode'] | default(false) }}"
-    
+
   tasks:
     - name: Create templar directory on remote if it doesn't exist
       file:
@@ -17,7 +17,7 @@
 
     - name: Synchronize scripts directory
       synchronize:
-        src: "../../scripts/"
+        src: "{{ playbook_dir }}/../../scripts/"
         dest: "{{ ansible_env.HOME }}/templar/scripts"
         rsync_opts:
           - "--exclude=__pycache__"
@@ -27,7 +27,7 @@
 
     - name: Synchronize neurons directory
       synchronize:
-        src: "../../neurons/"
+        src: "{{ playbook_dir }}/../../neurons/"
         dest: "{{ ansible_env.HOME }}/templar/neurons"
         rsync_opts:
           - "--exclude=__pycache__"
@@ -37,7 +37,7 @@
 
     - name: Synchronize src directory
       synchronize:
-        src: "../../src/"
+        src: "{{ playbook_dir }}/../../src/"
         dest: "{{ ansible_env.HOME }}/templar/src"
         rsync_opts:
           - "--exclude=__pycache__"
@@ -48,29 +48,64 @@
 
     - name: Synchronize hparams.json
       synchronize:
-        src: "../../hparams.json"
+        src: "{{ playbook_dir }}/../../hparams.json"
         dest: "{{ ansible_env.HOME }}/templar/hparams.json"
         delete: no
       tags: rsync
 
     - name: Synchronize _metadata.yaml
       synchronize:
-        src: "../../_metadata.yaml"
+        src: "{{ playbook_dir }}/../../_metadata.yaml"
         dest: "{{ ansible_env.HOME }}/templar/_metadata.yaml"
         delete: no
       tags: rsync
 
     - name: Synchronize _shard_sizes.json
       synchronize:
-        src: "../../_shard_sizes.json"
+        src: "{{ playbook_dir }}/../../_shard_sizes.json"
         dest: "{{ ansible_env.HOME }}/templar/_shard_sizes.json"
         delete: no
       tags: rsync
+
+    - name: Synchronize pyproject.toml
+      synchronize:
+        src: "{{ playbook_dir }}/../../pyproject.toml"
+        dest: "{{ ansible_env.HOME }}/templar/pyproject.toml"
+        delete: no
+      tags: rsync
+
+    - name: Synchronize tests directory
+      synchronize:
+        src: "{{ playbook_dir }}/../../tests/"
+        dest: "{{ ansible_env.HOME }}/templar/tests"
+        rsync_opts:
+          - "--exclude=__pycache__"
+          - "--exclude=*.pyc"
+        delete: yes
+      tags: rsync
+
+    - name: Synchronize pytest.ini or tox.ini if present
+      synchronize:
+        src: "{{ playbook_dir }}/../../{{ item }}"
+        dest: "{{ ansible_env.HOME }}/templar/{{ item }}"
+        delete: no
+      with_items:
+      - pytest.ini
+      - conftest.py
+      ignore_errors: yes
+      tags: rsync
+
 
     - name: Display sync completion
       debug:
         msg: "Files synchronized successfully to {{ ansible_env.HOME }}/templar"
       tags: rsync
 
-- name: Trigger reload playbook
-  import_playbook: reload.yml
+    - name: Run uv sync to update dependencies
+      shell: uv sync
+      args:
+        chdir: "{{ ansible_env.HOME }}/templar"
+      tags: rsync
+
+# - name: Trigger reload playbook
+#   import_playbook: reload.yml

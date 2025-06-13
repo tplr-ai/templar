@@ -3,6 +3,9 @@
   vars_files:
     - group_vars/all/vault.yml
   become: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    remote_mode: "{{ hostvars[inventory_hostname]['remote_mode'] | default(false) }}"
 
   tasks:
     - name: Set templar_path for remote deployment

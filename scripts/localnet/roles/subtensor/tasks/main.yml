@@ -2,7 +2,7 @@
   git:
     repo: https://github.com/opentensor/subtensor.git
     dest: "{{ ansible_env.HOME }}/subtensor"
-    version: main
+    version: v3.0.0
     update: yes
   tags: subtensor
 
@@ -40,10 +40,12 @@
   tags: subtensor
 
 - name: Check if Subtensor RPC is already running and responsive
-  shell: "curl -s -H 'Content-Type: application/json' -d '{\"id\":1, \"jsonrpc\":\"2.0\", \"method\": \"system_health\", \"params\":[]}' http://127.0.0.1:9944 | grep -q result"
+  shell: "curl -s --connect-timeout 5 --max-time 10 -H 'Content-Type: application/json' -d '{\"id\":1, \"jsonrpc\":\"2.0\", \"method\": \"system_health\", \"params\":[]}' http://127.0.0.1:9944 | grep -q result"
   register: subtensor_already_running
   failed_when: false
   changed_when: false
+  retries: 3
+  delay: 2
   tags: subtensor
 
 - name: Debug Subtensor runtime status
@@ -79,7 +81,7 @@
   tags: subtensor
 
 - name: Verify Subtensor node is responding to RPC requests
-  shell: "curl -s -H 'Content-Type: application/json' -d '{\"id\":1, \"jsonrpc\":\"2.0\", \"method\": \"system_health\", \"params\":[]}' http://127.0.0.1:9944 | grep -q result"
+  shell: "curl -s --connect-timeout 5 --max-time 10 -H 'Content-Type: application/json' -d '{\"id\":1, \"jsonrpc\":\"2.0\", \"method\": \"system_health\", \"params\":[]}' http://127.0.0.1:9944 | grep -q result"
   register: rpc_check
   retries: 20
   delay: 10
@@ -89,10 +91,12 @@
   tags: subtensor
 
 - name: Final verification of Subtensor operational status
-  shell: "curl -s -H 'Content-Type: application/json' -d '{\"id\":1, \"jsonrpc\":\"2.0\", \"method\": \"system_name\", \"params\":[]}' http://127.0.0.1:9944"
+  shell: "curl -s --connect-timeout 5 --max-time 10 -H 'Content-Type: application/json' -d '{\"id\":1, \"jsonrpc\":\"2.0\", \"method\": \"system_name\", \"params\":[]}' http://127.0.0.1:9944"
   register: subtensor_system_name
   failed_when: false
   changed_when: false
+  retries: 3
+  delay: 2
   tags: subtensor
 
 - name: Report Subtensor operational status

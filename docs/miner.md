@@ -33,11 +33,12 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 ## Prerequisites
 
 - **NVIDIA GPU** with CUDA support
-  - Minimum H100 recommended
+  - **Minimum H200 required** (141GB VRAM)
+  - Recommended: 8x H200 GPUs for optimal performance
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Git**
 - **Cloudflare R2 Bucket Configuration**:
-  - **Dataset Setup**: You must set up your own DCLM dataset following the instructions in the [R2 Dataset Guide](./r2_dataset.md)
+  - **Dataset Setup**: You must set up your own **DCLM dataset** (current dataset) following the instructions in the [R2 Dataset Guide](./r2_dataset.md)
   - **Gradient Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:
@@ -130,7 +131,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 
    # Create and register hotkey
    btcli wallet new_hotkey --wallet.name default --wallet.hotkey miner --n-words 12
-   btcli subnet pow_register --wallet.name default --wallet.hotkey miner --netuid <netuid> --subtensor.network <network>
+   btcli subnet register --wallet.name default --wallet.hotkey miner --netuid <netuid> --subtensor.network <network>
    ```
 
 6. **Log into Weights & Biases (WandB)**:
@@ -162,7 +163,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    export R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
    export R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
 
-   # Dataset R2 credentials - You must set up your own DCLM dataset
+   # Dataset R2 credentials - You must set up your own DCLM dataset (current dataset)
    # See docs/r2_dataset.md for instructions
    export R2_DATASET_ACCOUNT_ID=your_dataset_account_id
    export R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
@@ -247,7 +248,11 @@ DEBUG=false
 ### Hardware Requirements
 
 - **GPU Requirements**:
-  - Minimum: NVIDIA H100 with 80GB VRAM
+  - **Minimum: NVIDIA H200 with 141GB VRAM** (as defined in min_compute.yml)
+  - Recommended: 8x H200 GPUs for miners
+  - **Minimum CPU**: 32 cores, 3.5 GHz
+  - **Minimum RAM**: 800 GB
+  - **Minimum Network**: 1024 Mbps download/upload bandwidth
 - **Storage**: 100GB+ recommended for model and data
 - **Network**: Stable internet connection with good bandwidth
 

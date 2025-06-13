@@ -8,8 +8,8 @@ Welcome to the Templar documentation. This index provides an overview of all ava
 - **[Miner Setup](./miner.md)** - Complete guide for setting up and running a miner
 - **[Validator Setup](./validator.md)** - Instructions for deploying and operating a validator
 - **[Dataset Setup](./r2_dataset.md)** - Overview of dataset requirements and setup options
-  - [FineWeb-edu Dataset](./r2_dataset-fineweb-edu.md) - Current dataset setup guide
-  - [DCLM Dataset](./r2_dataset-dclm.md) - Future dataset preparation guide
+  - [FineWeb-edu Dataset](./r2_dataset-fineweb-edu.md) - Legacy dataset setup guide
+  - [DCLM Dataset](./r2_dataset-dclm.md) - Current dataset preparation guide
 
 ### Deployment Options
 - **[Ansible Setup](./miner-setup-ansible.md)** - Automated deployment using Ansible playbooks
@@ -52,8 +52,8 @@ Welcome to the Templar documentation. This index provides an overview of all ava
 
 #### Dataset Documentation
 - **[r2_dataset.md](./r2_dataset.md)**: Main dataset overview and selection guide
-- **[r2_dataset-fineweb-edu.md](./r2_dataset-fineweb-edu.md)**: Current FineWeb-edu dataset setup
-- **[r2_dataset-dclm.md](./r2_dataset-dclm.md)**: DCLM dataset for future use
+- **[r2_dataset-dclm.md](./r2_dataset-dclm.md)**: DCLM dataset (current dataset)
+- **[r2_dataset-fineweb-edu.md](./r2_dataset-fineweb-edu.md)**: Legacy FineWeb-edu dataset setup
 
 ### Development Tools
 
@@ -77,10 +77,13 @@ Welcome to the Templar documentation. This index provides an overview of all ava
 Before diving into specific documentation:
 
 1. **System Requirements**:
-   - NVIDIA GPU with CUDA support (H100 recommended)
+   - **NVIDIA GPU with CUDA support (H200 required - 141GB VRAM minimum)**
    - Ubuntu 22.04+ or compatible Linux
-   - Python 3.12+
+   - Python 3.11+
    - Docker & Docker Compose (for containerized deployment)
+   - **CPU**: 32 cores, 3.5 GHz minimum
+   - **RAM**: 800 GB minimum
+   - **Network**: 1024 Mbps download/upload bandwidth minimum
 
 2. **Network Requirements**:
    - Registered Bittensor wallet

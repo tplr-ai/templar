@@ -57,6 +57,7 @@ class DummyMiner:
         self.scheduler = DummyScheduler()
         self.hparams = DummyHparams()
         self.momentum = {"weight": torch.zeros_like(self.model.weight)}
+        self.owned_params = {"weight", "weight1", "weight2"}
         self.compressor = DummyCompressor()
         self.transformer = DummyTransformer()
         self.logger = DummyLogger()

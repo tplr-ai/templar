@@ -430,13 +430,13 @@ class Miner:
             start_idx, n_my_pages = self.pages_for_rank(
                 total_pages, self.rank, self.world_size
             )
-            global_offset = step_window * total_pages + start_idx
 
             pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset=global_offset,
-                n_pages=n_my_pages,
+                offset=step_window * total_pages,
+                n_pages=total_pages,
                 seed=self.uid,
             )
+            own_pages = pages[start_idx : start_idx + n_my_pages]
             tplr.logger.info(
                 f"[Rank {self.rank}/{self.world_size}] pages "
                 f"{list(range(start_idx, start_idx + n_my_pages))}"
@@ -444,7 +444,7 @@ class Miner:
             loader = await tplr.r2_dataset.R2DatasetLoader.create(
                 batch_size=self.hparams.batch_size,
                 sequence_length=self.hparams.sequence_length,
-                pages_info=pages,
+                pages_info=own_pages,
                 tokenizer=self.tokenizer,
             )
             tplr.logger.info(
@@ -541,7 +541,9 @@ class Miner:
 
             # 1️⃣ every rank builds its momentum shard
             compress_start = tplr.T()
-            shard_gradient, _, _ = tplr.prepare_gradient_dict(self, pages, step_window)
+            shard_gradient, _, _ = tplr.prepare_gradient_dict(
+                self, own_pages, step_window
+            )
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - compress_start)} "
                 f"Compressed local shard with {len(shard_gradient) - 1} tensors"
@@ -575,7 +577,9 @@ class Miner:
                     "pages_info": merged_pages,
                     "window": step_window,
                 }
-                tplr.logger.info(f"Attached metadata to gradient: {gradient['metadata']}")
+                tplr.logger.info(
+                    f"Attached metadata to gradient: {gradient['metadata']}"
+                )
 
                 tplr.logger.info(
                     f"Merged {len(gathered)} shards → "

@@ -1,0 +1,3 @@
+[submodule "neurons/torchtitan"]
+	path = neurons/torchtitan
+	url = https://github.com/pytorch/torchtitan.git

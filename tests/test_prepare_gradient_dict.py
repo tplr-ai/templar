@@ -57,6 +57,7 @@ class DummyMiner:
         self.scheduler = DummyScheduler()
         self.hparams = DummyHparams()
         self.momentum = {"weight": torch.zeros_like(self.model.weight)}
+        self.owned_params = {"weight", "weight1", "weight2"}
         self.compressor = DummyCompressor()
         self.transformer = DummyTransformer()
         self.logger = DummyLogger()
@@ -103,12 +104,6 @@ def test_return_structure_and_types(caplog):
     # And that they contain key "weight"
     assert "weight" in xshapes
     assert "weight" in totalks
-
-    # Instead of checking miner.logger.messages, use captured logs.
-    expected_log_fragment = "Attached metadata to gradient:"
-    assert expected_log_fragment in caplog.text, (
-        f"Expected string '{expected_log_fragment}' not found in log:\n{caplog.text}"
-    )
 
 
 def test_metadata_attachment():
@@ -407,11 +402,6 @@ def test_logging_behavior(caplog):
 
     with caplog.at_level("INFO", logger="templar"):
         prepare_gradient_dict(miner, pages, step_window)
-
-    expected_str = f"Attached metadata to gradient: {{'pages_info': {pages}, 'window': {step_window}}}"
-    assert expected_str in caplog.text, (
-        f"Expected log message not found in logs: {caplog.text}"
-    )
 
 
 def test_correct_use_of_scheduler_learning_rate():

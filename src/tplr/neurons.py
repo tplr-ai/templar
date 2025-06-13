@@ -75,9 +75,18 @@ def prepare_gradient_dict(miner, pages, step_window):
     # Check if we're in the first 5 iterations
     is_early_iteration = miner.gradient_iteration_counter <= 5
 
-    for n, p in miner.model.named_parameters():
-        # Apply weight decay
+    if isinstance(miner.model, torch.nn.parallel.DistributedDataParallel):
+        model_iterator = miner.model.module.named_parameters()
+    else:
+        model_iterator = miner.model.named_parameters()
+    for n, p in model_iterator:
+        # Weight-decay is done by *every* rank
         p.data.mul_(1.0 - lr * miner.hparams.weight_decay)
+
+        # Skip parameters not owned by this rank
+        if n not in miner.owned_params:
+            p.grad = None
+            continue
 
         # Apply momentum decay.
         miner.momentum[n].mul_(miner.hparams.momentum_decay)
@@ -100,6 +109,8 @@ def prepare_gradient_dict(miner, pages, step_window):
         idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
             encoded, miner.hparams.topk_compression
         )
+        if totalk is None:
+            print("totalk is None")
         del encoded  # Free the encoded tensor immediately
 
         # Estimate transmitted gradient
@@ -128,7 +139,6 @@ def prepare_gradient_dict(miner, pages, step_window):
     torch.cuda.empty_cache()
 
     gradient["metadata"] = {"pages_info": pages, "window": step_window}
-    logger.info(f"Attached metadata to gradient: {gradient['metadata']}")
 
     return gradient, xshapes, totalks
 
@@ -276,7 +286,13 @@ async def catchup_with_aggregation_server(
                 weight_decay = instance.hparams.weight_decay
 
                 # Apply the gradients to the model parameters
-                for name, param in instance.model.named_parameters():
+                if isinstance(
+                    instance.model, torch.nn.parallel.DistributedDataParallel
+                ):
+                    model_iterator = instance.model.module.named_parameters()
+                else:
+                    model_iterator = instance.model.named_parameters()
+                for name, param in model_iterator:
                     if name in processed_agg_data["tensors"]:
                         # Apply weight decay to the parameter manually if needed
                         if weight_decay > 0:
@@ -404,7 +420,11 @@ def process_loaded_data(model: torch.nn.Module, compressed_data: dict) -> dict |
         "tensors": {},
     }
 
-    for name, param in model.named_parameters():
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        model_iterator = model.module.named_parameters()
+    else:
+        model_iterator = model.named_parameters()
+    for name, param in model_iterator:
         if name in state_dict:
             original_shape = param.shape
             # Use unpack_binary_tensor from the sample, but in our context
@@ -440,7 +460,11 @@ async def compare_model_with_debug_dict(
     max_diff = 0.0
 
     # Compare each parameter with its debug entry
-    for name, param in model.named_parameters():
+    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        model_iterator = model.module.named_parameters()
+    else:
+        model_iterator = model.named_parameters()
+    for name, param in model_iterator:
         debug_key = name + "_debug"
 
         if debug_key in debug_dict and isinstance(debug_dict[debug_key], list):

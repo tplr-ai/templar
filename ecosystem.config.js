@@ -14,36 +14,51 @@ module.exports = {
   apps: [
     /*───────────────────────── Miner ─────────────────────────*/
     {
-      /*
-       * One PM2 process launches `torchrun`, which then forks the
-       * required number of Python ranks (two in this example).
-       */
-      name: 'TM-DDP-2',            // miner, 2 distributed ranks
-      script: 'bash',              // run a one-liner shell command
-      interpreter: 'bash',
+      name            : "TM1",
+      exec_mode       : "fork",
+      exec_interpreter: "none",
+      script          : "torchrun",
       args: [
-        '-c',
-        [
-          // torchrun launch — change 2 → N to scale ranks
-          'torchrun',
-          '--standalone',
-          '--nnodes', '1',
-          '--nproc_per_node', '2',          // two ranks → two GPUs
-          'neurons/miner.py',
-
-          // miner-specific CLI flags
-          '--wallet.name', 'templar_test',
-          '--wallet.hotkey', 'M1',          // single hotkey is enough
-          '--device', 'cuda',               // DDP selects proper GPU
-          '--subtensor.network', 'local',
-          '--netuid', '2',
-          '--use_wandb',
-          `--project "${PROJECT_NAME}"`,
-        ].join(' ')
+        "--standalone",
+        "--nnodes", "1",
+        "--nproc_per_node", "2",
+        "neurons/miner.py",
+        "--wallet.name", "templar_test",
+        "--wallet.hotkey", "M1",
+        "--device", "cuda",
+        "--subtensor.network", "local",
+        "--netuid", "2",
+        "--use_wandb",
+        "--project", PROJECT_NAME
       ],
       env: {
         ...process.env,
-        PROJECT_NAME
+        PROJECT_NAME,
+        CUDA_VISIBLE_DEVICES: "1,2"
+      }
+    },
+    {
+      name            : "TM2",
+      exec_mode       : "fork",
+      exec_interpreter: "none",
+      script          : "torchrun",
+      args: [
+        "--standalone",
+        "--nnodes", "1",
+        "--nproc_per_node", "2",
+        "neurons/miner.py",
+        "--wallet.name", "templar_test",
+        "--wallet.hotkey", "M2",
+        "--device", "cuda",
+        "--subtensor.network", "local",
+        "--netuid", "2",
+        "--use_wandb",
+        "--project", PROJECT_NAME
+      ],
+      env: {
+        ...process.env,
+        PROJECT_NAME,
+        CUDA_VISIBLE_DEVICES: "3,4"
       }
     },
 
@@ -78,7 +93,7 @@ module.exports = {
       },
       args: [
         '--netuid', '3',
-        '--device', 'cuda:4',
+        '--device', 'cuda:7',
         '--project', 'templar'
       ].join(' ')
     }

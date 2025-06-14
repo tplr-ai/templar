@@ -744,6 +744,11 @@ class Validator:
             self.model.to(self.config.device)
 
         self.comms.start_commitment_fetcher()
+        asyncio.create_task(
+            tplr.neurons.periodic_registration_check(
+                self, self.hparams.registration_check_interval
+            )
+        )
         self.comms.start_background_tasks()
         time_min = None
         self.last_peer_update_window = None

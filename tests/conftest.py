@@ -70,6 +70,7 @@ class DummyConfig:
 
 class DummyHParams:
     active_check_interval = 60
+    registration_check_interval = 600
     recent_windows = 5
     catch_up_threshold = 5
     catch_up_min_peers = 1

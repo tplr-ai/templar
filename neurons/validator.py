@@ -2763,8 +2763,8 @@ class Validator:
                 new_grad = self.transformer.decode(
                     self.compressor.batch_decompress(
                         p.to(self.config.device),
-                        idxs,
-                        vals,
+                        cast(list[torch.Tensor], idxs),
+                        cast(list[torch.Tensor], vals),
                         self.xshapes[n],
                         self.totalks[n],
                         quant_params,

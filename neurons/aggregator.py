@@ -315,8 +315,8 @@ class AggregationServer:
                     # Use the compressor to decompress the gradients
                     decompressed = self.compressor.batch_decompress(
                         param,
-                        idxs,
-                        vals,
+                        cast(list[torch.Tensor], idxs),
+                        cast(list[torch.Tensor], vals),
                         self.param_shapes[name],
                         self.param_totalks[name],
                         quant_params,

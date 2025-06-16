@@ -37,7 +37,6 @@ import uvloop
 
 # Third party
 from bittensor.core.subtensor import ScaleObj
-from torch import autocast
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
@@ -310,7 +309,7 @@ class Miner:
             args=(self.loop,),
             daemon=True,
         )
-        self.listener.start()  #
+        self.listener.start()
 
         # Use config peers if provided
         if self.config.peers:
@@ -466,57 +465,21 @@ class Miner:
             tplr.logger.info("Start accumulating...")
             self.optimizer.zero_grad()
             self.model.zero_grad()
-            total_loss = 0.0
-            n_batches = 0
-            window_tokens = 0  # Initialize token count for this window
-
-            loader_iter = iter(loader)
-            while True:
-                try:
-                    batch = next(loader_iter)
-                    local_has_batch = True
-                except StopIteration:
-                    local_has_batch = False
-                    batch = None
-
-                if self.world_size > 1:
-                    cont = self.should_continue(local_has_batch, self.device)
-                    if not cont:
-                        if self.is_master:
-                            tplr.logger.info(
-                                "Stopping batch loop: at least one rank exhausted."
-                            )
-                        break
-                    if not local_has_batch:
-                        continue
-
-                input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
-                tokens_this_batch = input_ids.numel()
-                window_tokens += tokens_this_batch
-                labels = input_ids.clone()
-                labels = torch.where(
-                    labels == self.tokenizer.pad_token_id, -100, labels
-                )
-
-                with autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                    outputs = self.model(input_ids=input_ids, labels=labels)
-
-                total_loss += outputs.loss.item()
-                outputs.loss.backward()
-                n_batches += 1
-                tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {n_batches}]")
-
-                # Clear intermediate activations immediately
-                del outputs, batch
-                if "input_ids" in locals():
-                    del input_ids
-                if "labels" in locals():
-                    del labels
-                torch.cuda.empty_cache()
-
-                if self.current_window != step_window:
-                    tplr.logger.info("<Exhausted window>")
-                    break
+            strategy = tplr.SimpleAccum(
+                device=self.device,
+                world_size=self.world_size,
+                is_master=self.is_master,
+                tokenizer=self.tokenizer,
+                xshapes=self.xshapes,
+                totalks=self.totalks,
+                should_continue=self.should_continue,
+                current_window=self.current_window,
+                step_window=step_window,
+            )
+            res = strategy.inner_step(self.model, loader)
+            total_loss = res["total_loss"]
+            n_batches = res["batch_count"]
+            window_tokens = res["batch_tokens"]
 
             if n_batches > 0:
                 tplr.logger.info(
@@ -764,65 +727,14 @@ class Miner:
 
             # 8. Apply gathered gradients
             update_start = tplr.T()
-            new_grad = None
-            if self.is_master:
-                self.model.train()
-                self.optimizer.zero_grad()
-
-                new_grad = None
-                if gather_result is not None and gather_result.state_dict is not None:
-                    if isinstance(
-                        self.model, torch.nn.parallel.DistributedDataParallel
-                    ):
-                        model_iterator = self.model.module.named_parameters()
-                    else:
-                        model_iterator = self.model.named_parameters()
-                    for n, p in model_iterator:
-                        idxs_key = n + "idxs"
-                        vals_key = n + "vals"
-                        quant_key = n + "quant_params"
-
-                        idxs = getattr(gather_result.state_dict, idxs_key, None)
-                        vals = getattr(gather_result.state_dict, vals_key, None)
-                        quant_params = getattr(
-                            gather_result.state_dict, quant_key, None
-                        )
-                        if idxs is not None and vals is not None:
-                            if not isinstance(idxs, (list, tuple)):
-                                idxs = [idxs]
-                            if not isinstance(vals, (list, tuple)):
-                                vals = [vals]
-                            new_grad = self.transformer.decode(
-                                self.compressor.batch_decompress(
-                                    p.to(self.device),
-                                    cast(list[torch.Tensor], idxs),
-                                    cast(list[torch.Tensor], vals),
-                                    self.xshapes[n],
-                                    self.totalks[n],
-                                    quant_params,
-                                )
-                            )
-
-                            if p.grad is None:
-                                p.grad = new_grad
-                            else:
-                                p.grad.copy_(new_grad)
-                            p.grad.sign_()
-                        else:
-                            tplr.logger.info(
-                                f"Gradient data missing for parameter {n}, skipping."
-                            )
-
-                self.optimizer.step()
-                self.scheduler.step()
-                torch.cuda.empty_cache()
-                for t in bare_model.state_dict().values():
-                    if torch.is_tensor(t):
-                        dist.broadcast(t.data, src=0)
-            else:
-                for t in bare_model.state_dict().values():
-                    if torch.is_tensor(t):
-                        dist.broadcast(t.data, src=0)
+            strategy.outer_step(
+                self.model,
+                self.optimizer,
+                self.scheduler,
+                gather_result=gather_result,
+                transformer=self.transformer,
+                compressor=self.compressor,
+            )
 
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - update_start)} Updated model"
@@ -973,7 +885,7 @@ class Miner:
             # Delete local variables to clear up memory
             del loader, pages, gather_result, shard_gradient
             if self.is_master:
-                del processed_state_dict, gradient, new_grad
+                del processed_state_dict, gradient
 
             await self.cleanup_window()
             # 4. Wait for next window

@@ -1,0 +1,216 @@
+from abc import ABC, abstractmethod
+import typing
+from typing import NotRequired
+import torch
+import torch.distributed as dist
+from torch import autocast, nn
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler
+from transformers.models.auto.tokenization_auto import AutoTokenizer
+import tplr
+from tplr.r2_dataset import R2DatasetLoader
+
+
+class stepReturnValues(typing.TypedDict):
+    total_loss: float
+    batch_count: int
+    batch_tokens: int
+    accum_batch_size: NotRequired[int]
+
+
+class InnerOuterStrategy(ABC):
+    @abstractmethod
+    def inner_step(
+        self,
+        model: nn.Module,
+        loader,
+        inner_optimizer: Optimizer | None,
+        inner_scheduler: LRScheduler | None,
+    ) -> stepReturnValues:
+        """Execute inner optimization step"""
+        pass
+
+    @abstractmethod
+    def outer_step(
+        self,
+        model: nn.Module,
+        optimizer: Optimizer,
+        scheduler: LRScheduler,
+        **kwargs,
+    ) -> None:
+        """Execute outer optimization step"""
+        pass
+
+
+class SimpleAccum(InnerOuterStrategy):
+    def __init__(
+        self,
+        device: torch.device,
+        world_size: int,
+        is_master: bool,
+        tokenizer: AutoTokenizer,
+        xshapes: dict,
+        totalks: dict,
+        should_continue: typing.Callable[[bool, torch.device], bool],
+        current_window: int,
+        step_window: int,
+    ):
+        self.device = device
+        self.world_size = world_size
+        self.is_master = is_master
+        self.tokenizer = tokenizer
+        self.xshapes = xshapes
+        self.totalks = totalks
+        self.should_continue = should_continue
+        self.current_window = current_window
+        self.step_window = step_window
+
+    def inner_step(
+        self,
+        model: nn.Module,
+        loader: R2DatasetLoader,
+        inner_optimizer: Optimizer | None = None,
+        inner_scheduler: LRScheduler | None = None,
+    ) -> stepReturnValues:
+        """
+        Process batches from the loader until the accumulation batch size target is reached.
+        Returns metrics dictionary with loss and token counts.
+        """
+        total_loss = 0.0
+        batch_count = 0
+        batch_tokens = 0
+        accum_batch_size = 0
+
+        loader_iter = iter(loader)
+        while True:
+            try:
+                batch = next(loader_iter)
+                local_has_batch = True
+            except StopIteration:
+                local_has_batch = False
+                batch = None
+
+            if self.world_size > 1:
+                cont = self.should_continue(local_has_batch, self.device)
+                if not cont:
+                    if self.is_master:
+                        tplr.logger.info(
+                            "Stopping batch loop: at least one rank exhausted."
+                        )
+                    break
+                if not local_has_batch:
+                    continue
+
+            input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
+            tokens_this_batch = input_ids.numel()
+            batch_tokens += tokens_this_batch
+            labels = input_ids.clone()
+            labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+
+            # Update accumulated batch size
+            assert batch is not None
+            current_batch_size = len(batch)
+            accum_batch_size += current_batch_size
+
+            with autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                outputs = model(input_ids=input_ids, labels=labels)
+
+            total_loss += outputs.loss.item()
+            outputs.loss.backward()
+            batch_count += 1
+            tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {batch_count}]")
+
+            # Clear intermediate activations immediately
+            del outputs, batch
+            if "input_ids" in locals():
+                del input_ids
+            if "labels" in locals():
+                del labels
+            torch.cuda.empty_cache()
+
+            if self.current_window != self.step_window:
+                tplr.logger.info("<Exhausted window>")
+                break
+
+        # Return metrics
+        return {
+            "total_loss": total_loss,
+            "batch_count": batch_count,
+            "batch_tokens": typing.cast(int, batch_tokens),
+            "accum_batch_size": accum_batch_size,
+        }
+
+    def outer_step(
+        self,
+        model: nn.Module,
+        optimizer: Optimizer,
+        scheduler: LRScheduler,
+        *,
+        gather_result,
+        transformer,
+        compressor,
+        **kwargs,
+    ) -> None:
+        """
+        Synchronize gradients (if DDP) and apply optimizer step
+        """
+        bare_model = (
+            model.module
+            if isinstance(model, torch.nn.parallel.DistributedDataParallel)
+            else model
+        )
+        new_grad = None
+        if self.is_master:
+            model.train()
+            optimizer.zero_grad()
+
+            new_grad = None
+            if gather_result is not None and gather_result.state_dict is not None:
+                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                    model_iterator = model.module.named_parameters()
+                else:
+                    model_iterator = model.named_parameters()
+                for n, p in model_iterator:
+                    idxs_key = n + "idxs"
+                    vals_key = n + "vals"
+                    quant_key = n + "quant_params"
+
+                    idxs = getattr(gather_result.state_dict, idxs_key, None)
+                    vals = getattr(gather_result.state_dict, vals_key, None)
+                    quant_params = getattr(gather_result.state_dict, quant_key, None)
+                    if idxs is not None and vals is not None:
+                        if not isinstance(idxs, (list, tuple)):
+                            idxs = [idxs]
+                        if not isinstance(vals, (list, tuple)):
+                            vals = [vals]
+                        new_grad = transformer.decode(
+                            compressor.batch_decompress(
+                                p.to(self.device),
+                                typing.cast(list[torch.Tensor], idxs),
+                                typing.cast(list[torch.Tensor], vals),
+                                self.xshapes[n],
+                                self.totalks[n],
+                                quant_params,
+                            )
+                        )
+
+                        if p.grad is None:
+                            p.grad = new_grad
+                        else:
+                            p.grad.copy_(new_grad)
+                        p.grad.sign_()
+                    else:
+                        tplr.logger.info(
+                            f"Gradient data missing for parameter {n}, skipping."
+                        )
+
+            optimizer.step()
+            scheduler.step()
+            torch.cuda.empty_cache()
+            for t in bare_model.state_dict().values():
+                if torch.is_tensor(t):
+                    dist.broadcast(t.data, src=0)
+        else:
+            for t in bare_model.state_dict().values():
+                if torch.is_tensor(t):
+                    dist.broadcast(t.data, src=0)

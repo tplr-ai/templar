@@ -44,7 +44,7 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
-from transformers import LlamaForCausalLM
+from transformers.models.llama import LlamaForCausalLM
 
 # Local
 import tplr
@@ -66,7 +66,7 @@ torch.backends.cudnn.allow_tf32 = True
 class Miner:
     # Command line config items.
     @staticmethod
-    def config():
+    def miner_config():
         parser = argparse.ArgumentParser(description="Miner script")
         parser.add_argument(
             "--netuid", type=int, default=268, help="Bittensor network UID."
@@ -127,7 +127,7 @@ class Miner:
         tplr.logger.debug("Starting initialization...")
 
         # Init config and load hparams
-        self.config = Miner.config()
+        self.config = Miner.miner_config()
         # ---------------------------------------------------------------------
         # Distributed initialisation
         # ---------------------------------------------------------------------
@@ -145,6 +145,7 @@ class Miner:
 
         # Convenience flags
         self.is_master = self.rank == 0
+        self.config.local = cast(bool, self.config.local)
         self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
 
         if self.config.actual_batch_size is not None:
@@ -166,7 +167,7 @@ class Miner:
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.device)
+        self.model.to(self.device)  # type: ignore[reportArgumentType]
         self.model.gradient_checkpointing_enable()
         if self.world_size > 1:
             self.model = torch.nn.parallel.DistributedDataParallel(
@@ -561,8 +562,9 @@ class Miner:
                 gathered = [shard_gradient]
 
             # rank-0 merges & uploads the full gradient
+            gradient = {}
+            processed_state_dict = {}
             if self.is_master:
-                gradient: dict[str, object] = {}
                 merged_pages: list[tuple[int, int]] = []
 
                 for shard in gathered:
@@ -656,9 +658,6 @@ class Miner:
 
             # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
-
-            # Refresh the peers list immediately before gathering
-            tplr.logger.info("Refreshing peers before gather task...")
 
             if self.config.test:
                 # In test mode, use all UIDs from metagraph except self

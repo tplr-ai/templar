@@ -702,14 +702,29 @@ class Miner:
             self.total_tokens_processed += window_tokens
             tokens_per_sec = window_tokens / duration
 
+            # ─────────────── gradient & weight norms (local) ────────────────
             grad_norms = [
                 p.grad.norm().item()
                 for p in self.model.parameters()
                 if p.grad is not None
             ]
             weight_norms = [p.norm().item() for p in self.model.parameters()]
+
+            # ─────────────── momentum norms (gathered across ranks) ─────────
+            local_mom_norms: list[float] = [
+                m.norm().item() for m in self.momentum.values()
+            ]
+            if self.world_size > 1:
+                gathered_mom: list[list[float]] = [None] * self.world_size  # type: ignore[var-annotated]
+                dist.all_gather_object(gathered_mom, local_mom_norms)
+            else:
+                gathered_mom = [local_mom_norms]
+
+            momentum_norms = []
             if self.is_master:
-                momentum_norms = [m.norm().item() for m in self.momentum.values()]
+                momentum_norms: list[float] = [
+                    v for sublist in gathered_mom for v in sublist
+                ]
                 self.wandb.log(
                     {
                         # Training metrics
@@ -741,7 +756,9 @@ class Miner:
                         else 0,
                         "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
                         "miner/mean_momentum_norm": sum(momentum_norms)
-                        / len(momentum_norms),
+                        / len(momentum_norms)
+                        if momentum_norms
+                        else 0,
                     },
                     step=self.global_step,
                 )

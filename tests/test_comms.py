@@ -1271,10 +1271,6 @@ class MockHParams:
         self.blocks_per_window = 100
         self.target_chunk = 512
         self.topk_compression = 0.1
-        self.catch_up_threshold = 5
-        self.catch_up_min_peers = 1
-        self.catch_up_batch_size = 10
-        self.catch_up_timeout = 300
         self.active_check_interval = 60
         self.recent_windows = 5
         self.max_topk_peers = 50
@@ -2035,7 +2031,6 @@ async def test_update_peers_with_buckets(comms_instance):
     #    minimum_peers => aggregator requires at least this many
     #    topk_peers => aggregator takes top X% by incentive
     comms_instance.hparams.minimum_peers = 2
-    comms_instance.hparams.topk_peers = 50  # i.e. "top 50%"
 
     # 5. Call your update function
     #    (Ensure the method is actually defined on comms_instance, or rename if needed.)

@@ -136,7 +136,11 @@ class Miner:
         self.local_rank = int(os.getenv("LOCAL_RANK", 0))
 
         if self.world_size > 1:
-            dist.init_process_group(backend="nccl", init_method="env://")
+            dist.init_process_group(
+                backend="nccl",
+                init_method="env://",
+                timeout=timedelta(minutes=45),
+            )
             torch.cuda.set_device(self.local_rank)
             self.config.device = f"cuda:{self.local_rank}"
         else:
@@ -249,8 +253,10 @@ class Miner:
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
-        self.comms.try_commit(self.wallet, self.bucket)
-        # self.comms.fetch_commitments()
+        if self.is_master:
+            self.comms.try_commit(self.wallet, self.bucket)
+        if self.world_size > 1:
+            dist.barrier()
 
         # Init state params
         self.stop_event = asyncio.Event()
@@ -382,7 +388,6 @@ class Miner:
         # ---- broadcast to other ranks (if any) --------------------------------
         if self.world_size > 1:
             bcast_start = tplr.T()
-            dist.barrier()
 
             # 1) parameters & buffers
             for tensor in bare_model.state_dict().values():
@@ -399,12 +404,12 @@ class Miner:
             dist.broadcast_object_list(sched_pkt, src=0)
             self.scheduler.load_state_dict(sched_pkt[0])
 
-            dist.barrier()
             bcast_time = tplr.T() - bcast_start
             tplr.logger.info(
                 f"{tplr.P(self.current_window, bcast_time)} "
                 f"Broadcast checkpoint to {self.world_size - 1} ranks"
             )
+            dist.barrier()
 
         self.comms.start_commitment_fetcher()
 
@@ -421,9 +426,10 @@ class Miner:
             )
 
             peer_start = tplr.T()
-            await tplr.neurons.update_peers(
-                instance=self, window=step_window, peer_start=peer_start
-            )
+            if self.is_master:
+                await tplr.neurons.update_peers(
+                    instance=self, window=step_window, peer_start=peer_start
+                )
 
             # 2. Load ONLY the pages that belong to *this* rank -------------------
             data_start = tplr.T()

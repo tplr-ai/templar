@@ -177,6 +177,9 @@ class R2DatasetBenchmark:
             },
         }
 
+        self.window_results = []
+        self.benchmark_start_time = time.perf_counter()
+
     async def retry_call(
         self,
         func,
@@ -306,6 +309,8 @@ class R2DatasetBenchmark:
             f"Window {target_window} completed: {window_batches} batches, {window_tokens} tokens, {window_time:.2f}s"
         )
 
+        self.window_results.append(window_stats)
+
         return window_stats
 
     async def _benchmark(self) -> Optional[int]:
@@ -394,6 +399,23 @@ class R2DatasetBenchmark:
     def cleanup(self) -> None:
         """Cleanup resources before exit."""
         self.stop_event.set()
+
+        # Show final statistics
+        self.show_final_statistics()
+
+    def show_final_statistics(self) -> None:
+        """Generate and display final benchmark statistics."""
+        if not self.window_results:
+            tplr.logger.info("No benchmark data to display")
+            return
+
+        total_time = time.perf_counter() - self.benchmark_start_time
+        final_stats = self._calculate_final_stats(self.window_results, total_time)
+
+        if final_stats:
+            self.print_summary(final_stats)
+
+        R2DatasetLoader.log_profiling_summary()
 
     def _calculate_final_stats(
         self, window_results: List[dict], total_time: float
@@ -503,6 +525,8 @@ def main() -> None:
         )
         asyncio.run(benchmark.run())
 
+    except KeyboardInterrupt:
+        tplr.logger.info("Benchmark service interrupted by user")
     except Exception as e:
         tplr.logger.error(f"Benchmark service terminated with error: {e}")
     finally:

@@ -537,11 +537,6 @@ class Miner:
                 f"{tplr.P(step_window, tplr.T() - train_start)} Completed training"
             )
 
-            if self.world_size > 1 and self.is_master:
-                for p in self.model.parameters():
-                    if p.grad is not None:
-                        p.grad.div_(self.world_size)
-
             # Synchronise all ranks
             if self.world_size > 1:
                 dist.barrier()

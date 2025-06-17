@@ -344,7 +344,7 @@ class Diloco(InnerOuterStrategy):
 
                 loss = outputs.loss
                 if first_loss == 0.0:
-                    first_loss = loss
+                    first_loss = float(loss.item())
                 total_loss += float(loss.item())
                 loss.backward()
                 batch_count += 1

@@ -37,7 +37,8 @@ import uvloop
 
 # Third party
 from bittensor.core.subtensor import ScaleObj
-from torch.optim import SGD, AdamW
+from torch.distributed.optim import ZeroRedundancyOptimizer
+from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
     LinearLR,
@@ -203,11 +204,14 @@ class Miner:
         )
 
         self.outer_optimizer = SGD(self.model.parameters(), lr=0.9)
-        self.inner_optimizer = AdamW(
+        self.inner_optimizer = ZeroRedundancyOptimizer(
             self.model.parameters(),
+            optimizer_class=torch.optim.AdamW,
             lr=self.hparams.learning_rate,
             weight_decay=self.hparams.weight_decay,
             betas=(0.9, 0.95),
+            parameters_as_bucket_view=True,
+            overlap_with_ddp=False,
         )
         warmup_scheduler = LinearLR(
             self.inner_optimizer,

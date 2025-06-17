@@ -357,7 +357,7 @@ class Diloco(InnerOuterStrategy):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 inner_optimizer.step()
                 inner_scheduler.step()
-                inner_optimizer.zero_grad()
+                inner_optimizer.zero_grad(set_to_none=True)
 
                 inner_step_count += 1
                 tplr.logger.info(

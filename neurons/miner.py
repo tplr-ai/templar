@@ -202,56 +202,32 @@ class Miner:
             else self.model.named_parameters()
         )
 
-        if self.hparams.strategy == "diloco":
-            self.outer_optimizer = SGD(
-                self.model.parameters(), lr=self.hparams.learning_rate
-            )
-            self.inner_optimizer = AdamW(
-                self.model.parameters(),
-                lr=self.hparams.learning_rate,
-                weight_decay=self.hparams.weight_decay,
-                betas=(0.9, 0.95),
-            )
-            self.outer_scheduler = None
-            warmup_scheduler = LinearLR(
-                self.inner_optimizer,
-                start_factor=0.1,
-                end_factor=1.0,
-                total_iters=250,
-            )
-            cosine_scheduler = CosineAnnealingWarmRestarts(
-                self.inner_optimizer,
-                T_0=self.hparams.t_max,
-                T_mult=2,
-                eta_min=self.hparams.learning_rate * 0.1,
-            )
-            self.inner_scheduler = SequentialLR(
-                self.inner_optimizer,
-                schedulers=[warmup_scheduler, cosine_scheduler],
-                milestones=[250],
-            )
-        else:
-            self.outer_optimizer = SGD(self.model.parameters(), lr=0.9)
-            warmup_scheduler = LinearLR(
-                self.outer_optimizer,
-                start_factor=0.1,
-                end_factor=1.0,
-                total_iters=250,
-            )
-            cosine_scheduler = CosineAnnealingWarmRestarts(
-                self.outer_optimizer,
-                T_0=self.hparams.t_max,
-                T_mult=2,
-                eta_min=self.hparams.learning_rate * 0.1,
-            )
-            self.outer_scheduler = SequentialLR(
-                self.outer_optimizer,
-                schedulers=[warmup_scheduler, cosine_scheduler],
-                milestones=[250],
-            )
-            self.inner_optimizer = None
-            self.inner_scheduler = None
-
+        self.outer_optimizer = SGD(
+            self.model.parameters(), lr=0.9
+        )
+        self.inner_optimizer = AdamW(
+            self.model.parameters(),
+            lr=self.hparams.learning_rate,
+            weight_decay=self.hparams.weight_decay,
+            betas=(0.9, 0.95),
+        )
+        warmup_scheduler = LinearLR(
+            self.inner_optimizer,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=250,
+        )
+        cosine_scheduler = CosineAnnealingWarmRestarts(
+            self.inner_optimizer,
+            T_0=self.hparams.t_max,
+            T_mult=2,
+            eta_min=self.hparams.learning_rate * 0.1,
+        )
+        self.inner_scheduler = SequentialLR(
+            self.inner_optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[250],
+        )
         for idx, (n, p) in enumerate(model_iterator):
             if idx % self.world_size == self.rank:
                 # this rank “owns” the parameter
@@ -382,12 +358,8 @@ class Miner:
             (
                 ckpt_ok,
                 ckpt_sync_win,
-                self.outer_optimizer,
-                self.outer_scheduler,
             ) = await self.comms.load_checkpoint(
                 model=bare_model,
-                optimizer=self.outer_optimizer,
-                scheduler=self.outer_scheduler,
                 current_window=self.current_window,
                 device=str(self.device),
                 init_version=tplr.__version__
@@ -423,17 +395,6 @@ class Miner:
             for tensor in bare_model.state_dict().values():
                 if torch.is_tensor(tensor):
                     dist.broadcast(tensor.data, src=0)
-
-            # 2) optimizer state  (broadcast as one object ➜ load on every rank)
-            opt_pkt = [self.outer_optimizer.state_dict()]
-            dist.broadcast_object_list(opt_pkt, src=0)
-            self.outer_optimizer.load_state_dict(opt_pkt[0])
-
-            # 3) scheduler state (same idea)
-            assert self.outer_scheduler is not None
-            sched_pkt = [self.outer_scheduler.state_dict()]
-            dist.broadcast_object_list(sched_pkt, src=0)
-            self.outer_scheduler.load_state_dict(sched_pkt[0])
 
             bcast_time = tplr.T() - bcast_start
             tplr.logger.info(
@@ -495,34 +456,20 @@ class Miner:
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             tplr.logger.info("Start accumulating...")
-            if self.hparams.strategy == "diloco":
-                strategy = tplr.Diloco(
-                    device=self.device,
-                    world_size=self.world_size,
-                    is_master=self.is_master,
-                    tokenizer=self.tokenizer,
-                    xshapes=self.xshapes,
-                    totalks=self.totalks,
-                    should_continue=self.should_continue,
-                    current_window=self.current_window,
-                    step_window=step_window,
-                )
-                res = strategy.inner_step(
-                    self.model, loader, self.inner_optimizer, self.inner_scheduler
-                )
-            else:
-                strategy = tplr.SimpleAccum(
-                    device=self.device,
-                    world_size=self.world_size,
-                    is_master=self.is_master,
-                    tokenizer=self.tokenizer,
-                    xshapes=self.xshapes,
-                    totalks=self.totalks,
-                    should_continue=self.should_continue,
-                    current_window=self.current_window,
-                    step_window=step_window,
-                )
-                res = strategy.inner_step(self.model, loader)
+            strategy = tplr.Diloco(
+                device=self.device,
+                world_size=self.world_size,
+                is_master=self.is_master,
+                tokenizer=self.tokenizer,
+                xshapes=self.xshapes,
+                totalks=self.totalks,
+                should_continue=self.should_continue,
+                get_current_window=lambda: self.current_window,
+                step_window=step_window,
+            )
+            res = strategy.inner_step(
+                self.model, loader, self.inner_optimizer, self.inner_scheduler
+            )
             total_loss = res["total_loss"]
             n_batches = res["batch_count"]
             window_tokens = res["batch_tokens"]
@@ -747,10 +694,6 @@ class Miner:
                         "miner/gather_peers": len(self.comms.peers),
                         "miner/effective_batch_size": len(self.comms.peers)
                         * self.hparams.batch_size,
-                        # Optimization metrics
-                        "miner/learning_rate": self.outer_scheduler.get_last_lr()[0]
-                        if self.outer_scheduler is not None
-                        else 0.9,
                         # Gradient statistics as points
                         "miner/mean_grad_norm": sum(grad_norms) / len(grad_norms)
                         if grad_norms
@@ -778,7 +721,6 @@ class Miner:
             strategy.outer_step(
                 self.model,
                 self.outer_optimizer,
-                self.outer_scheduler,
                 gather_result=gather_result,
                 transformer=self.transformer,
                 compressor=self.compressor,
@@ -881,9 +823,6 @@ class Miner:
                         "miner/gather_peers": len(self.comms.peers),
                         "miner/effective_batch_size": len(self.comms.peers)
                         * self.hparams.batch_size,
-                        "miner/learning_rate": self.outer_scheduler.get_last_lr()[0]
-                        if self.outer_scheduler is not None
-                        else 0.9,
                         "miner/mean_grad_norm": mean_grad_norm,
                         "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
                         "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
@@ -960,10 +899,8 @@ class Miner:
         """Aggressive memory cleanup between windows"""
         # Clear gradients more thoroughly
         self.model.zero_grad(set_to_none=True)
-        if self.inner_optimizer is not None:
-            self.inner_optimizer.zero_grad(set_to_none=True)
-        if self.outer_optimizer is not None:
-            self.outer_optimizer.zero_grad(set_to_none=True)
+        self.inner_optimizer.zero_grad(set_to_none=True)
+        self.outer_optimizer.zero_grad(set_to_none=True)
 
         # Empty CUDA cache
         torch.cuda.empty_cache()

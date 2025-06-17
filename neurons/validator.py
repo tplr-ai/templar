@@ -166,7 +166,8 @@ class Validator:
         )
 
         # Init optimizer
-        self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
+        self.lr = 0.9
+        self.optimizer = SGD(self.model.parameters(), lr=self.lr)
         self.xshapes = {}
         self.totalks = {}
         for n, p in self.model.named_parameters():
@@ -176,25 +177,6 @@ class Validator:
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
-
-        # Set up scheduler setup
-        warmup_scheduler = LinearLR(
-            self.optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=250,
-        )
-        cosine_scheduler = CosineAnnealingWarmRestarts(
-            self.optimizer,
-            T_0=self.hparams.t_max,
-            T_mult=2,
-            eta_min=self.hparams.learning_rate * 0.1,
-        )
-        self.scheduler = SequentialLR(
-            self.optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[250],
-        )
 
         self.openskill_model = PlackettLuce(
             beta=self.hparams.openskill_beta, tau=self.hparams.openskill_tau
@@ -705,12 +687,8 @@ class Validator:
         (
             success,
             loaded_checkpoint_window,
-            loaded_optimizer,
-            loaded_scheduler,
         ) = await self.comms.load_checkpoint(
             model=self.model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
             current_window=self.current_window,
             device=self.config.device,
             init_version=tplr.__version__
@@ -718,12 +696,9 @@ class Validator:
             else self.bootstrap_version,
         )
         if success:
-            self.optimizer = loaded_optimizer
-            self.scheduler = loaded_scheduler
             tplr.logger.info(
                 f"Loaded checkpoint with global_step={self.global_step}, "
                 f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
-                f"scheduler_step={self.scheduler.last_epoch}"
             )
             # Only catch up if we're behind
             if (
@@ -766,7 +741,7 @@ class Validator:
             self.sync_window += 1
             tplr.log_with_context(
                 level="info",
-                message=f"Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}",
+                message=f"Sync Window: {self.sync_window}, Global step: {self.global_step}",
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
@@ -1621,9 +1596,8 @@ class Validator:
                                     )
 
                                 p.data.sub_(
-                                    grad.sign(),
-                                    alpha=self.scheduler.get_last_lr()[0]
-                                    * self.hparams.eval_lr_factor,
+                                    grad,
+                                    alpha=self.lr * self.hparams.eval_lr_factor,
                                 )
                     except Exception as e:
                         old_score = self.final_scores[eval_uid].item()
@@ -1857,9 +1831,8 @@ class Validator:
                                 ).to(self.config.device)
 
                                 p.data.sub_(
-                                    grad.sign(),
-                                    alpha=self.scheduler.get_last_lr()[0]
-                                    * self.hparams.eval_lr_factor,
+                                    grad,
+                                    alpha=self.lr * self.hparams.eval_lr_factor,
                                 )
                     except Exception as e:
                         tplr.log_with_context(
@@ -2250,10 +2223,6 @@ class Validator:
             update_start = tplr.T()
             self.optimizer.zero_grad()
             self.model.zero_grad()
-            lr = self.scheduler.get_last_lr()[0]
-            # Apply weight decay just like in the miner
-            for n, p in self.model.named_parameters():
-                p.data.mul_(1.0 - lr * self.hparams.weight_decay)
 
             if aggregation_result is not None:
                 self.apply_aggregated_gradients(aggregation_result=aggregation_result)
@@ -2266,7 +2235,6 @@ class Validator:
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                self.scheduler.step()
                 torch.cuda.empty_cache()
 
             tplr.log_with_context(
@@ -2350,7 +2318,6 @@ class Validator:
                 "validator/network/window": self.sync_window,
                 "validator/network/step": self.global_step,
                 "validator/network/evaluated_uids": len(self.evaluated_uids),
-                "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
                 "validator/network/active_miners": len(self.valid_score_indices),
                 "validator/gather/success_rate": success_rate * 100,
                 "validator/timing/window_total": tplr.T() - window_start,
@@ -2380,7 +2347,6 @@ class Validator:
                     "loss_random_improvement": float(self.relative_improvement_random),
                     "current_block": int(self.current_block),
                     "evaluated_uids_count": int(len(self.evaluated_uids)),
-                    "learning_rate": float(self.scheduler.get_last_lr()[0]),
                     "active_miners_count": int(len(self.valid_score_indices)),
                     "gather_success_rate": gather_success_rate,
                     "window_total_time": float(tplr.T() - window_start),
@@ -2416,11 +2382,6 @@ class Validator:
                     "model_state_dict": {
                         k: v.cpu().clone() for k, v in self.model.state_dict().items()
                     },
-                    "optimizer_state_dict": {
-                        k: v.cpu().clone() if torch.is_tensor(v) else v
-                        for k, v in self.optimizer.state_dict().items()
-                    },
-                    "scheduler_state_dict": self.scheduler.state_dict(),
                     "start_window": self.start_window,
                     "current_window": self.current_window,
                     "sync_window": self.sync_window,
@@ -2621,14 +2582,11 @@ class Validator:
                 "sync_score": 0.0,
             }
 
-        # Get current learning rate
-        current_lr = self.scheduler.get_last_lr()[0]
-
         # Compare miner's debug dict with validator's model
         comparison_metrics = await tplr.neurons.compare_model_with_debug_dict(
             model=self.model,
             debug_dict=miner_debug_dict,
-            learning_rate=current_lr,
+            learning_rate=self.lr,
             index_range=(10, 12),
         )
 
@@ -2705,7 +2663,6 @@ class Validator:
 
                 # Update parameters with optimizer
                 self.optimizer.step()
-                self.scheduler.step()
                 torch.cuda.empty_cache()
 
                 tplr.log_with_context(
@@ -2768,13 +2725,13 @@ class Validator:
                         self.xshapes[n],
                         self.totalks[n],
                         quant_params,
+                        normalise=False,
                     )
                 )
                 if p.grad is None:
                     p.grad = new_grad
                 else:
                     p.grad.copy_(new_grad)
-                p.grad.sign_()
             else:
                 tplr.log_with_context(
                     level="info",
@@ -2783,7 +2740,6 @@ class Validator:
                     current_window=self.current_window,
                 )
         self.optimizer.step()
-        self.scheduler.step()
         torch.cuda.empty_cache()
 
     # ------------- state helpers ----------------

@@ -202,9 +202,7 @@ class Miner:
             else self.model.named_parameters()
         )
 
-        self.outer_optimizer = SGD(
-            self.model.parameters(), lr=0.9
-        )
+        self.outer_optimizer = SGD(self.model.parameters(), lr=0.9)
         self.inner_optimizer = AdamW(
             self.model.parameters(),
             lr=self.hparams.learning_rate,
@@ -470,17 +468,9 @@ class Miner:
             res = strategy.inner_step(
                 self.model, loader, self.inner_optimizer, self.inner_scheduler
             )
-            total_loss = res["total_loss"]
+            loss = res["first_loss"]
             n_batches = res["batch_count"]
             window_tokens = res["batch_tokens"]
-
-            if n_batches > 0:
-                tplr.logger.info(
-                    f"Normalizing gradients by {n_batches} accumulation steps"
-                )
-                for param in self.model.parameters():
-                    if param.grad is not None:
-                        param.grad.div_(n_batches)
 
             # If training completes before the window is exhausted, wait until the window ends.
             if self.current_window == step_window:
@@ -661,57 +651,6 @@ class Miner:
             ]
             weight_norms = [p.norm().item() for p in self.model.parameters()]
 
-            # ─────────────── momentum norms (gathered across ranks) ─────────
-            local_mom_norms: list[float] = [
-                m.norm().item() for m in self.momentum.values()
-            ]
-            if self.world_size > 1:
-                gathered_mom: list[list[float]] = [None] * self.world_size  # type: ignore[var-annotated]
-                dist.all_gather_object(gathered_mom, local_mom_norms)
-            else:
-                gathered_mom = [local_mom_norms]
-
-            momentum_norms = []
-            if self.is_master:
-                momentum_norms: list[float] = [
-                    v for sublist in gathered_mom for v in sublist
-                ]
-                self.wandb.log(
-                    {
-                        # Training metrics
-                        "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
-                        "miner/tokens_per_sec": tokens_per_sec,
-                        "miner/batch_duration": duration,
-                        "miner/total_tokens": self.total_tokens_processed,
-                        "miner/batch_tokens": window_tokens,
-                        "miner/global_step": self.global_step,
-                        # Resource metrics
-                        "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                        / 1024**2,  # MB
-                        "miner/gpu_memory_cached": torch.cuda.memory_reserved()
-                        / 1024**2,  # MB
-                        # Network metrics
-                        "miner/gather_peers": len(self.comms.peers),
-                        "miner/effective_batch_size": len(self.comms.peers)
-                        * self.hparams.batch_size,
-                        # Gradient statistics as points
-                        "miner/mean_grad_norm": sum(grad_norms) / len(grad_norms)
-                        if grad_norms
-                        else 0,
-                        "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
-                        "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                        "miner/grad_norm_std": torch.tensor(grad_norms).std().item()
-                        if grad_norms
-                        else 0,
-                        "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
-                        "miner/mean_momentum_norm": sum(momentum_norms)
-                        / len(momentum_norms)
-                        if momentum_norms
-                        else 0,
-                    },
-                    step=self.global_step,
-                )
-
             # ---------------------------------------------------------------------
             # 6. Await both gather
             # ---------------------------------------------------------------------
@@ -775,10 +714,23 @@ class Miner:
                 f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"
             )
 
+            # ─────────────── momentum norms (gathered across ranks) ─────────
+            local_mom_norms: list[float] = [
+                m.norm().item() for m in self.momentum.values()
+            ]
+            if self.world_size > 1:
+                gathered_mom: list[list[float]] = [None] * self.world_size  # type: ignore[var-annotated]
+                dist.all_gather_object(gathered_mom, local_mom_norms)
+            else:
+                gathered_mom = [local_mom_norms]
+
+            momentum_norms = []
             # Log metrics to WandB
             if self.is_master:
                 # Calculate common metrics values
-                loss_value = total_loss / n_batches if n_batches > 0 else 0
+                momentum_norms: list[float] = [
+                    v for sublist in gathered_mom for v in sublist
+                ]
                 mean_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0
                 grad_norm_std = (
                     torch.tensor(grad_norms).std().item() if grad_norms else 0
@@ -811,7 +763,7 @@ class Miner:
                         "miner/timing/put": put_completion_time,
                         "miner/timing/model_update": model_update_time,
                         # Existing metrics
-                        "miner/loss": loss_value,
+                        "miner/loss": loss,
                         "miner/tokens_per_sec": tokens_per_sec,
                         "miner/total_tokens": self.total_tokens_processed,
                         "miner/batch_tokens": window_tokens,
@@ -842,7 +794,7 @@ class Miner:
                         "global_step": self.global_step,
                     },
                     fields={
-                        "loss": loss_value,
+                        "loss": loss,
                         "n_gather_peers": int(len(self.comms.peers)),
                         "gather_success_rate": gather_success_rate,
                         "gather_peers": json.dumps(self.comms.peers),

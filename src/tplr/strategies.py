@@ -13,6 +13,7 @@ from tplr.r2_dataset import R2DatasetLoader
 
 class stepReturnValues(typing.TypedDict):
     total_loss: float
+    first_loss: float
     batch_count: int
     batch_tokens: int
     accum_batch_size: NotRequired[int]
@@ -271,6 +272,7 @@ class Diloco(InnerOuterStrategy):
         batch_count: int = 0
         batch_tokens: int = 0
         accum_batch_size: int = 0  # ← global counter
+        first_loss = 0.0
 
         self.params_offloaded = self._get_offloaded_param(model)
 
@@ -341,6 +343,8 @@ class Diloco(InnerOuterStrategy):
                     outputs = model(input_ids=input_ids, labels=labels)
 
                 loss = outputs.loss
+                if first_loss == 0.0:
+                    first_loss = loss
                 total_loss += float(loss.item())
                 loss.backward()
                 batch_count += 1
@@ -396,6 +400,7 @@ class Diloco(InnerOuterStrategy):
         # ---------------------------------------------------------------------- #
         return {
             "total_loss": total_loss,
+            "first_loss": first_loss,
             "batch_count": batch_count,
             "batch_tokens": batch_tokens,
         }

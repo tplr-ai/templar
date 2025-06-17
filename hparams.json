@@ -52,5 +52,6 @@
     "checkpoint_init_version": null,
     "num_evaluation_bins": 5,
     "quantization_bins": 256,
-    "quantization_range": 6
+    "quantization_range": 6,
+    "strategy": "demo"
 }

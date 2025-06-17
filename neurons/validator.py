@@ -49,7 +49,7 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
-from transformers import LlamaForCausalLM
+from transformers.models.llama import LlamaForCausalLM
 
 # Local
 import tplr

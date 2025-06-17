@@ -56,7 +56,7 @@ def prepare_gradient_dict(miner, pages, step_window):
     gradient = {}
     xshapes = {}
     totalks = {}
-    lr = miner.scheduler.get_last_lr()[0]
+    lr = miner.outer_scheduler.get_last_lr()[0]
 
     # Use an internal iteration counter stored in miner if it doesn't exist already
     if not hasattr(miner, "gradient_iteration_counter"):
@@ -282,7 +282,7 @@ async def catchup_with_aggregation_server(
 
             if processed_agg_data is not None:
                 # Get learning rate for this step
-                lr = instance.scheduler.get_last_lr()[0]
+                lr = instance.outer_scheduler.get_last_lr()[0]
                 weight_decay = instance.hparams.weight_decay
 
                 # Apply the gradients to the model parameters
@@ -318,8 +318,8 @@ async def catchup_with_aggregation_server(
                 )
 
                 # Let the optimizer handle the parameter updates
-                instance.optimizer.step()
-                instance.scheduler.step()
+                instance.outer_optimizer.step()
+                instance.outer_scheduler.step()
                 torch.cuda.empty_cache()
 
                 logger.info(
@@ -374,8 +374,8 @@ async def catchup_with_aggregation_server(
                     f"Failed to process aggregation data for window {current_step}"
                 )
                 # Still advance the optimizer and scheduler
-                instance.optimizer.step()
-                instance.scheduler.step()
+                instance.outer_optimizer.step()
+                instance.outer_scheduler.step()
 
             del processed_agg_data
             torch.cuda.empty_cache()

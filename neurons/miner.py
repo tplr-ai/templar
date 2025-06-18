@@ -40,7 +40,7 @@ from bittensor.core.subtensor import ScaleObj
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
-    CosineAnnealingWarmRestarts,
+    CosineAnnealingLR,
     LinearLR,
     SequentialLR,
 )
@@ -217,18 +217,17 @@ class Miner:
             self.inner_optimizer,
             start_factor=0.1,
             end_factor=1.0,
-            total_iters=250,
+            total_iters=500,
         )
-        cosine_scheduler = CosineAnnealingWarmRestarts(
+        cosine_scheduler = CosineAnnealingLR(
             self.inner_optimizer,
-            T_0=self.hparams.t_max,
-            T_mult=2,
+            T_max=self.hparams.t_max,
             eta_min=self.hparams.learning_rate * 0.1,
         )
         self.inner_scheduler = SequentialLR(
             self.inner_optimizer,
             schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[250],
+            milestones=[500],
         )
         for idx, (n, p) in enumerate(model_iterator):
             if idx % self.world_size == self.rank:

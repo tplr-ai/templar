@@ -261,7 +261,8 @@ class Diloco(InnerOuterStrategy):
             Keys: total_loss (float), batch_count (int), batch_tokens (int)
         """
 
-        SOME_TODO_CONFIG = 32  # ← global samples per inner-step
+        BATCHES_BEFORE_LOCAL_OPTIMIZATION = 256  # ← global samples per inner-step
+        MAX_INNER_STEPS = 15
         assert inner_optimizer is not None
         assert inner_scheduler is not None
 
@@ -331,7 +332,7 @@ class Diloco(InnerOuterStrategy):
             # 4. Forward + backward
             # ------------------------------------------------------------------ #
             ddp_should_sync = (
-                accum_batch_size >= SOME_TODO_CONFIG
+                accum_batch_size >= BATCHES_BEFORE_LOCAL_OPTIMIZATION
             ) or self.world_size == 1
             ddp_context_mgr = (
                 model.no_sync
@@ -353,7 +354,7 @@ class Diloco(InnerOuterStrategy):
             # ------------------------------------------------------------------ #
             # 5. Step only when *global* accumulation threshold is hit
             # ------------------------------------------------------------------ #
-            if accum_batch_size >= SOME_TODO_CONFIG:
+            if accum_batch_size >= BATCHES_BEFORE_LOCAL_OPTIMIZATION:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 inner_optimizer.step()
                 inner_scheduler.step()
@@ -363,25 +364,30 @@ class Diloco(InnerOuterStrategy):
                 tplr.logger.info(
                     f"Inner Step {inner_step_count}, "
                     f"Batch {batch_count}, loss: {loss.item():.4f}, "
-                    f"accum: {accum_batch_size}/{SOME_TODO_CONFIG}"
+                    f"accum: {accum_batch_size}/{BATCHES_BEFORE_LOCAL_OPTIMIZATION}"
                 )
                 accum_batch_size = 0  # reset on *all* ranks
 
             # ------------------------------------------------------------------ #
-            # 6. Memory hygiene
+            # 6. Outer-loop window control
             # ------------------------------------------------------------------ #
-            del outputs, batch, input_ids, labels
-            torch.cuda.empty_cache()
+            window_changed = self.get_current_window() != self.step_window
+            local_done = torch.tensor(
+                [window_changed or inner_step_count == MAX_INNER_STEPS],
+                dtype=torch.uint8,
+                device=self.device,
+            )
 
-            # ------------------------------------------------------------------ #
-            # 7. Outer-loop window control (unchanged from your code)
-            # ------------------------------------------------------------------ #
-            if self.get_current_window() != self.step_window or inner_step_count == 15:
-                tplr.logger.info("<Exhausted window>")
+            if self.world_size > 1:
+                dist.all_reduce(local_done, op=dist.ReduceOp.MAX)
+            global_done = bool(local_done.item())
+
+            if global_done:
+                tplr.logger.info("<Exhausted window: exiting synchronously>")
                 break
 
         # ------------------------------------------------------------------ #
-        # 8. Your “parameter offloading” logic (unchanged)
+        # 7. Your “parameter offloading” logic (unchanged)
         # ------------------------------------------------------------------ #
         bare_model = (
             model.module
@@ -396,7 +402,7 @@ class Diloco(InnerOuterStrategy):
             param.data = param_offloaded_on_device  # reset for next inner step
 
         # ---------------------------------------------------------------------- #
-        # 9. Return aggregated metrics
+        # 8. Return aggregated metrics
         # ---------------------------------------------------------------------- #
         return {
             "total_loss": total_loss,

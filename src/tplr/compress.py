@@ -262,6 +262,7 @@ class CompressDCT(Generic[Q]):
         quantize_params: QuantParamsT | list[QuantParamsT] | None = None,
         *,
         normalise: bool = True,
+        clip_norm_val: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not isinstance(idx, list):
             idx = [idx]
@@ -289,7 +290,11 @@ class CompressDCT(Generic[Q]):
                     l2_norm = torch.norm(v, p=2)
                     if l2_norm > eps:
                         v = v / l2_norm
-
+            elif clip_norm_val is not None:
+                current_norm = torch.norm(v.float())
+                if current_norm > clip_norm_val:
+                    clip_factor = clip_norm_val / current_norm
+                    v = v * clip_factor
             processed_vals.append(v)
 
         # Concatenate everything

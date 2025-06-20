@@ -417,7 +417,10 @@ class Comms(ChainManager):
             except (ConnectionClosedError, ClientError) as e:
                 await self._purge_s3_client(bucket)
                 if "404" in str(e):
-                    tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
+                    tplr.log_with_context(
+                        level="debug",
+                        message=f"Object {key} not found in bucket {bucket.name}",
+                    )
                     return None
 
             file_size = response["ContentLength"]  # type: ignore
@@ -962,7 +965,11 @@ class Comms(ChainManager):
         tplr.logger.debug(
             f"Gather operation - my_uid: {my_uid}, window: {window}, key: {key}, timeout: {timeout}"
         )
-        tplr.logger.debug(f"Target UIDs for gathering: {uids}")
+        tplr.log_with_context(
+            level="debug",
+            message=f"Target UIDs for gathering: {uids}",
+            current_window=window,
+        )
 
         aggregated_state_dict = {}
         valid_uids = []
@@ -995,7 +1002,11 @@ class Comms(ChainManager):
                 process_start = tplr.T()
                 for uid, response in zip(uids, batch_responses):
                     if isinstance(response, Exception):
-                        tplr.logger.debug(f"Error from UID {uid}: {str(response)}")
+                        tplr.log_with_context(
+                            level="debug",
+                            message=f"Error from UID {uid}: {str(response)}",
+                            current_window=window,
+                        )
                         skipped_uids.append(uid)
                         continue
                     if response is None:
@@ -1009,7 +1020,11 @@ class Comms(ChainManager):
                             f"Received state dict and global step {global_step_resp} from UID {uid}"
                         )
                     except (TypeError, ValueError) as e:
-                        tplr.logger.debug(f"Invalid response from UID {uid}: {e}")
+                        tplr.log_with_context(
+                            level="debug",
+                            message=f"Invalid response from UID {uid}: {e}",
+                            current_window=window,
+                        )
                         skipped_uids.append(uid)
                         continue
 
@@ -1152,7 +1167,11 @@ class Comms(ChainManager):
 
         peer_bucket = self.commitments.get(uid)
         if not peer_bucket:
-            tplr.logger.debug(f"No bucket committed for UID {uid}")
+            tplr.log_with_context(
+                level="debug",
+                message=f"No bucket committed for UID {uid}",
+                current_window=self.current_window,
+            )
             return False
 
         try:
@@ -1176,7 +1195,11 @@ class Comms(ChainManager):
                     if e.response["Error"]["Code"] not in ["404", "403", "401"]:
                         tplr.logger.error(f"Error checking activity for {uid}: {e}")
                         return False
-                    tplr.logger.debug(f"{filename} not found for UID {uid}")
+                    tplr.log_with_context(
+                        level="debug",
+                        message=f"{filename} not found for UID {uid}",
+                        current_window=self.current_window,
+                    )
 
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(peer_bucket)
@@ -1916,7 +1939,10 @@ class Comms(ChainManager):
         except (ConnectionClosedError, ClientError) as e:
             await self._purge_s3_client(bucket)
             if "404" in str(e):
-                tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
+                tplr.log_with_context(
+                    level="debug",
+                    message=f"Object {key} not found in bucket {bucket.name}",
+                )
                 return None
             tplr.logger.error(f"Error getting object size for {key}: {e}")
             return None
@@ -2036,14 +2062,34 @@ class Comms(ChainManager):
                 f"Downloading {filename} in {len(chunks_info)} parallel chunks"
             )
 
-            # Download chunks concurrently
             semaphore = asyncio.Semaphore(max_concurrent)
 
-            async def download_chunk(start, end):
-                async with semaphore:
-                    return await self.s3_get_object_range(
-                        bucket=bucket, key=filename, start=start, end=end, timeout=45
-                    )
+            async def download_chunk(
+                start, end, max_retries: int = 3, backoff: float = 2.0
+            ):
+                """
+                Download a single byte-range with automatic retries.
+                `backoff` is an exponential factor (1 s, 2 s, 4 s, …).
+                """
+                delay = 1.0
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        async with semaphore:
+                            return await self.s3_get_object_range(
+                                bucket=bucket,
+                                key=filename,
+                                start=start,
+                                end=end,
+                                timeout=45,
+                            )
+                    except Exception as exc:
+                        tplr.logger.warning(
+                            f"[Chunk {start}-{end}] attempt {attempt}/{max_retries} failed: {exc}"
+                        )
+                        if attempt == max_retries:
+                            raise  # bubble up → outer `except`
+                        await asyncio.sleep(delay)
+                        delay *= backoff
 
             # Execute downloads
             tasks = [download_chunk(start, end) for start, end in chunks_info]

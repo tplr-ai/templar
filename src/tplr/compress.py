@@ -21,10 +21,24 @@
 # Global imports
 
 import math
+from typing import Generic, Literal, TypeAlias, TypeVar, cast, overload
 import torch
 import torch.fft
 
 from einops import rearrange
+
+# ---------- type aliases ---------- #
+IdxT: TypeAlias = torch.Tensor  # int16 indices
+ValT: TypeAlias = torch.Tensor  # (possibly quantised) values
+ShapeT: TypeAlias = tuple[int, ...]  # original tensor shape
+TotK: TypeAlias = int  # size of the last dim
+Shape4D = tuple[int, int, int, int]  # y, x, h, w
+
+# (shift, scale, offset, lookup table, original dtype)
+QuantParamsT: TypeAlias = tuple[torch.Tensor, float, int, torch.Tensor, torch.dtype]
+
+# Boolean flag that propagates the chosen quantisation mode
+Q = TypeVar("Q", Literal[True], Literal[False])
 
 
 class TransformDCT:
@@ -115,15 +129,43 @@ class TransformDCT:
         return x
 
 
-class CompressDCT:
+class CompressDCT(Generic[Q]):
+    """DCT-style sparsifier/compressor with optional 8-bit quantisation."""
+
+    use_quantization: Q
+    n_bins: int
+    range_in_sigmas: int
+
+    # ------------------------------------------------------------------ #
+    # Constructor – two overloads so each instance "remembers" its mode
+    # ------------------------------------------------------------------ #
+    @overload
+    def __init__(
+        self: "CompressDCT[Literal[True]]",
+        *,
+        use_quantization: Literal[True] = True,
+        quantization_bins: int = 256,
+        quantization_range: int = 6,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self: "CompressDCT[Literal[False]]",
+        *,
+        use_quantization: Literal[False] = False,
+        quantization_bins: int = 256,
+        quantization_range: int = 6,
+    ) -> None: ...
+
     @torch.no_grad()
     def __init__(
         self,
+        *,
         use_quantization: bool = False,
         quantization_bins: int = 256,
         quantization_range: int = 6,
-    ):
-        self.use_quantization = use_quantization
+    ) -> None:
+        self.use_quantization = cast(Q, use_quantization)
         if self.use_quantization:
             self.n_bins = quantization_bins
             self.range_in_sigmas = (
@@ -135,10 +177,26 @@ class CompressDCT:
             topk = x.shape[-1]
         if topk < 1:
             topk = 1
-        return topk
+        return int(topk)
+
+    # ------------------------------------------------------------------ #
+    # compress – returns a 5-tuple *or* a 4-tuple, depending on the mode
+    # ------------------------------------------------------------------ #
+    @overload
+    def compress(
+        self: "CompressDCT[Literal[True]]",
+        x: torch.Tensor,
+        topk: int,
+    ) -> tuple[IdxT, ValT, ShapeT, TotK, QuantParamsT]: ...
+    @overload
+    def compress(
+        self: "CompressDCT[Literal[False]]",
+        x: torch.Tensor,
+        topk: int,
+    ) -> tuple[IdxT, ValT, ShapeT, TotK]: ...
 
     @torch.no_grad()
-    def compress(self, x, topk):
+    def compress(self, x: torch.Tensor, topk: int):  # type: ignore[override]
         xshape = x.shape
         if len(x.shape) > 2:  # 2D weights
             x = rearrange(x, "y x h w -> y x (h w)")
@@ -163,8 +221,15 @@ class CompressDCT:
         return idx, val, xshape, totalk
 
     @torch.no_grad()
-    def decompress(self, p, idx, val, xshape, totalk, quantize_params=None):
-        # Dequantize if values were quantized
+    def decompress(
+        self,
+        p: torch.Tensor,
+        idx: torch.Tensor,
+        val: torch.Tensor,
+        xshape: ShapeT,
+        totalk: int,
+        quantize_params: QuantParamsT | None = None,
+    ) -> torch.Tensor:
         if self.use_quantization and quantize_params is not None:
             val = self._dequantize_values(val, quantize_params)
 
@@ -180,39 +245,38 @@ class CompressDCT:
         ).reshape(xshape)
 
         if len(x.shape) > 2:  # 2D weights
-            x = rearrange(x, "y x (h w) -> y x h w", h=xshape[2])
+            xshape4 = cast(Shape4D, xshape)
+            h_dim = xshape4[2]
+            x = rearrange(x, "y x (h w) -> y x h w", h=h_dim)
 
         return x
 
     @torch.no_grad()
     def batch_decompress(
-        self, p, idx, val, xshape, totalk, quantize_params=None, normalise=True
-    ):
-        """
-        Decompress multiple tensors in batch mode.
-        """
-        # Ensure idx and val are lists
+        self,
+        p: torch.Tensor,
+        idx: torch.Tensor | list[torch.Tensor],
+        val: torch.Tensor | list[torch.Tensor],
+        xshape: ShapeT,
+        totalk: int,
+        quantize_params: QuantParamsT | list[QuantParamsT] | None = None,
+        *,
+        normalise: bool = True,
+    ) -> torch.Tensor:
         if not isinstance(idx, list):
             idx = [idx]
         if not isinstance(val, list):
             val = [val]
 
-        # Handle quantization parameters
-        if quantize_params is not None:
-            if not isinstance(quantize_params, list):
-                quantize_params = [quantize_params] * len(val)
+        if quantize_params is not None and not isinstance(quantize_params, list):
+            quantize_params = [quantize_params] * len(val)  # type: ignore[list-item]
 
-        # Process values - dequantize if needed
-        processed_vals = []
-        for i in range(len(val)):
-            v = val[i].to(p.device)
+        processed_vals: list[torch.Tensor] = []
+        for i, v in enumerate(val):
+            v = v.to(p.device)
+            if self.use_quantization and quantize_params:
+                v = self._dequantize_values(v, quantize_params[i])  # type: ignore[arg-type]
 
-            # Dequantize if we have quantization parameters
-            if self.use_quantization and quantize_params and i < len(quantize_params):
-                v = self._dequantize_values(v, quantize_params[i])
-
-            # Apply L2 normalization to this individual tensor's values
-            # Normalize along the last dimension (where top-k was selected)
             if normalise:
                 eps = 1e-8
                 if len(v.shape) == 3:  # 2D weights
@@ -238,89 +302,45 @@ class CompressDCT:
         )
 
     @torch.no_grad()
-    def _quantize_values(self, val):
-        """
-        Quantize values to 8-bit representation with statistical approach
-
-        Args:
-            val: Tensor of values to quantize
-
-        Returns:
-            tuple: (quantized_values, quantization_parameters)
-        """
-        # Statistical quantization approach
+    def _quantize_values(self, val: torch.Tensor) -> tuple[torch.Tensor, QuantParamsT]:
         offset = self.n_bins // 2  # 128 for 8-bit
         shift = val.mean()
+        centered = val - shift
 
-        # Center tensor around mean
-        centered_val = val - shift
-
-        # Calculate standard deviation (unbiased)
-        std_unbiased = centered_val.norm() / math.sqrt(centered_val.numel() - 1)
-
-        # Compute scale factor based on standard deviation range
-        scale = self.range_in_sigmas * std_unbiased / self.n_bins
-
-        # Ensure scale is not zero to avoid NaN
+        std = centered.norm() / math.sqrt(centered.numel() - 1)
+        scale = self.range_in_sigmas * std / self.n_bins
         if scale == 0 or torch.isnan(scale) or torch.isinf(scale):
-            scale = 1.0
+            scale = torch.tensor(1.0, dtype=centered.dtype, device=val.device)
 
-        # Quantize to 8-bit representation
-        centered_val = centered_val.to(torch.float32)
-        quantized_val = (
-            (centered_val / scale + offset)
+        centered_fp32 = centered.to(torch.float32)
+        qval = (
+            (centered_fp32 / scale + offset)
             .round()
             .clamp(0, self.n_bins - 1)
             .to(torch.uint8)
         )
 
-        # Create lookup table by computing mean values for each bucket
-        device = quantized_val.device
+        device = qval.device
         sums = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
         counts = torch.zeros(self.n_bins, dtype=torch.float32, device=device)
 
-        sums.scatter_add_(0, quantized_val.flatten().long(), centered_val.flatten())
+        sums.scatter_add_(0, qval.flatten().long(), centered_fp32.flatten())
         counts.scatter_add_(
-            0, quantized_val.flatten().long(), torch.ones_like(centered_val.flatten())
+            0, qval.flatten().long(), torch.ones_like(centered_fp32.flatten())
         )
 
         lookup = torch.where(counts > 0, sums / counts, torch.zeros_like(sums))
-
-        # Store quantization parameters for dequantization
-        orig_dtype = val.dtype
-        quant_params = (shift, scale, offset, lookup, orig_dtype)
-
-        return quantized_val, quant_params
+        qparams: QuantParamsT = (shift, float(scale), offset, lookup, val.dtype)
+        return qval, qparams
 
     @torch.no_grad()
-    def _dequantize_values(self, val, quant_params):
-        """
-        Dequantize 8-bit values back to original representation
-
-        Args:
-            val: Quantized uint8 tensor
-            quant_params: Tuple of (shift, scale, offset, lookup, orig_dtype)
-
-        Returns:
-            Dequantized tensor in original dtype
-        """
-        if quant_params is None:
-            return val
-
-        shift, scale, offset, lookup, orig_dtype = quant_params
-
-        # Ensure lookup is on the same device as val
-        if isinstance(lookup, torch.Tensor):
-            lookup = lookup.to(val.device)
-
-        # Convert quantized values back using lookup table
-        dequantized = lookup[val.long()]
-
-        # Apply scale and shift to get back original distribution
-        val = dequantized + shift
-        val = val.to(orig_dtype)
-
-        return val
+    def _dequantize_values(
+        self, val: torch.Tensor, qparams: QuantParamsT
+    ) -> torch.Tensor:
+        shift, _, _, lookup, orig_dtype = qparams
+        lookup = lookup.to(val.device) if isinstance(lookup, torch.Tensor) else lookup
+        deq = lookup[val.long()] + shift
+        return deq.to(orig_dtype)
 
 
 # Code modified and sourced from https://github.com/zh217/torch-dct

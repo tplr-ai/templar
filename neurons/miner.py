@@ -44,7 +44,7 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
-from transformers import LlamaForCausalLM
+from transformers.models.llama import LlamaForCausalLM
 
 # Local
 import tplr
@@ -66,7 +66,7 @@ torch.backends.cudnn.allow_tf32 = True
 class Miner:
     # Command line config items.
     @staticmethod
-    def config():
+    def miner_config():
         parser = argparse.ArgumentParser(description="Miner script")
         parser.add_argument(
             "--netuid", type=int, default=268, help="Bittensor network UID."
@@ -127,7 +127,7 @@ class Miner:
         tplr.logger.debug("Starting initialization...")
 
         # Init config and load hparams
-        self.config = Miner.config()
+        self.config = Miner.miner_config()
         # ---------------------------------------------------------------------
         # Distributed initialisation
         # ---------------------------------------------------------------------
@@ -136,7 +136,11 @@ class Miner:
         self.local_rank = int(os.getenv("LOCAL_RANK", 0))
 
         if self.world_size > 1:
-            dist.init_process_group(backend="nccl", init_method="env://")
+            dist.init_process_group(
+                backend="nccl",
+                init_method="env://",
+                timeout=timedelta(minutes=45),
+            )
             torch.cuda.set_device(self.local_rank)
             self.config.device = f"cuda:{self.local_rank}"
         else:
@@ -145,6 +149,7 @@ class Miner:
 
         # Convenience flags
         self.is_master = self.rank == 0
+        self.config.local = cast(bool, self.config.local)
         self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
 
         if self.config.actual_batch_size is not None:
@@ -166,7 +171,7 @@ class Miner:
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.device)
+        self.model.to(self.device)  # type: ignore[reportArgumentType]
         self.model.gradient_checkpointing_enable()
         if self.world_size > 1:
             self.model = torch.nn.parallel.DistributedDataParallel(
@@ -248,8 +253,10 @@ class Miner:
         )
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
-        self.comms.try_commit(self.wallet, self.bucket)
-        # self.comms.fetch_commitments()
+        if self.is_master:
+            self.comms.try_commit(self.wallet, self.bucket)
+        if self.world_size > 1:
+            dist.barrier()
 
         # Init state params
         self.stop_event = asyncio.Event()
@@ -381,7 +388,6 @@ class Miner:
         # ---- broadcast to other ranks (if any) --------------------------------
         if self.world_size > 1:
             bcast_start = tplr.T()
-            dist.barrier()
 
             # 1) parameters & buffers
             for tensor in bare_model.state_dict().values():
@@ -398,12 +404,12 @@ class Miner:
             dist.broadcast_object_list(sched_pkt, src=0)
             self.scheduler.load_state_dict(sched_pkt[0])
 
-            dist.barrier()
             bcast_time = tplr.T() - bcast_start
             tplr.logger.info(
                 f"{tplr.P(self.current_window, bcast_time)} "
                 f"Broadcast checkpoint to {self.world_size - 1} ranks"
             )
+            dist.barrier()
 
         self.comms.start_commitment_fetcher()
 
@@ -420,9 +426,10 @@ class Miner:
             )
 
             peer_start = tplr.T()
-            await tplr.neurons.update_peers(
-                instance=self, window=step_window, peer_start=peer_start
-            )
+            if self.is_master:
+                await tplr.neurons.update_peers(
+                    instance=self, window=step_window, peer_start=peer_start
+                )
 
             # 2. Load ONLY the pages that belong to *this* rank -------------------
             data_start = tplr.T()
@@ -530,11 +537,6 @@ class Miner:
                 f"{tplr.P(step_window, tplr.T() - train_start)} Completed training"
             )
 
-            if self.world_size > 1 and self.is_master:
-                for p in self.model.parameters():
-                    if p.grad is not None:
-                        p.grad.div_(self.world_size)
-
             # Synchronise all ranks
             if self.world_size > 1:
                 dist.barrier()
@@ -561,8 +563,9 @@ class Miner:
                 gathered = [shard_gradient]
 
             # rank-0 merges & uploads the full gradient
+            gradient = {}
+            processed_state_dict = {}
             if self.is_master:
-                gradient: dict[str, object] = {}
                 merged_pages: list[tuple[int, int]] = []
 
                 for shard in gathered:
@@ -657,9 +660,6 @@ class Miner:
             # Log the time window we're using
             tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
 
-            # Refresh the peers list immediately before gathering
-            tplr.logger.info("Refreshing peers before gather task...")
-
             if self.config.test:
                 # In test mode, use all UIDs from metagraph except self
                 tplr.logger.info("Test mode active: Using all peers from metagraph.")
@@ -668,52 +668,11 @@ class Miner:
 
             tplr.logger.info(f"Final peers for gather: {self.comms.peers}")
 
-            gather_start = tplr.T()
-            tplr.logger.info("Waiting on gather task...")
-            if self.world_size > 1:
-                if self.is_master:
-                    gather_result = await self.comms.gather(
-                        my_uid=self.uid,
-                        uids=self.comms.peers,
-                        window=step_window,
-                        key="gradient",
-                        timeout=45,
-                        device=str(self.device),
-                        local=False,
-                        stale_retention=100,
-                        totalks=self.totalks,
-                        time_min=time_min,
-                        time_max=time_max,
-                    )
-                    tplr.logger.info("Gather task completed!")
-                else:
-                    gather_result = None
-
-                # Broadcast gather_result from rank 0 to all other ranks
-                obj_list = [gather_result]  # must be a list
-                dist.broadcast_object_list(obj_list, src=0)
-
-                def _move_to_device(obj, device):
-                    """Recursively move every tensor inside obj to device."""
-                    if isinstance(obj, torch.Tensor):
-                        return obj.to(device)
-
-                    if isinstance(obj, (list, tuple)):
-                        return type(obj)(_move_to_device(x, device) for x in obj)
-
-                    if isinstance(obj, dict):
-                        return {k: _move_to_device(v, device) for k, v in obj.items()}
-
-                    return obj  # int / str / None …
-
-                # ─ after dist.broadcast_object_list() … ───────────────────────────────
-                gather_result = obj_list[0]
-
-                if gather_result is not None:
-                    sd = vars(gather_result.state_dict)
-                    for k, v in sd.items():
-                        sd[k] = _move_to_device(v, self.device)
-            else:
+            gather_result = None
+            gather_time = 0.0
+            if self.is_master:
+                gather_start = tplr.T()
+                tplr.logger.info("Waiting on gather task...")
                 gather_result = await self.comms.gather(
                     my_uid=self.uid,
                     uids=self.comms.peers,
@@ -727,8 +686,10 @@ class Miner:
                     time_min=time_min,
                     time_max=time_max,
                 )
-            tplr.logger.info("Gather task completed!")
-            gather_time = tplr.T() - gather_start
+                tplr.logger.info("Gather task completed!")
+                gather_time = tplr.T() - gather_start
+            if self.world_size > 1:
+                dist.barrier()
 
             # 5. Calculate and log metrics
             duration = time.time() - train_start
@@ -736,14 +697,29 @@ class Miner:
             self.total_tokens_processed += window_tokens
             tokens_per_sec = window_tokens / duration
 
+            # ─────────────── gradient & weight norms (local) ────────────────
             grad_norms = [
                 p.grad.norm().item()
                 for p in self.model.parameters()
                 if p.grad is not None
             ]
             weight_norms = [p.norm().item() for p in self.model.parameters()]
+
+            # ─────────────── momentum norms (gathered across ranks) ─────────
+            local_mom_norms: list[float] = [
+                m.norm().item() for m in self.momentum.values()
+            ]
+            if self.world_size > 1:
+                gathered_mom: list[list[float]] = [None] * self.world_size  # type: ignore[var-annotated]
+                dist.all_gather_object(gathered_mom, local_mom_norms)
+            else:
+                gathered_mom = [local_mom_norms]
+
+            momentum_norms = []
             if self.is_master:
-                momentum_norms = [m.norm().item() for m in self.momentum.values()]
+                momentum_norms: list[float] = [
+                    v for sublist in gathered_mom for v in sublist
+                ]
                 self.wandb.log(
                     {
                         # Training metrics
@@ -775,7 +751,9 @@ class Miner:
                         else 0,
                         "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
                         "miner/mean_momentum_norm": sum(momentum_norms)
-                        / len(momentum_norms),
+                        / len(momentum_norms)
+                        if momentum_norms
+                        else 0,
                     },
                     step=self.global_step,
                 )
@@ -786,61 +764,69 @@ class Miner:
 
             # 8. Apply gathered gradients
             update_start = tplr.T()
-            self.model.train()
-            self.optimizer.zero_grad()
-
             new_grad = None
-            if gather_result is not None and gather_result.state_dict is not None:
-                if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-                    model_iterator = self.model.module.named_parameters()
-                else:
-                    model_iterator = self.model.named_parameters()
-                for n, p in model_iterator:
-                    idxs_key = n + "idxs"
-                    vals_key = n + "vals"
-                    quant_key = n + "quant_params"
+            if self.is_master:
+                self.model.train()
+                self.optimizer.zero_grad()
 
-                    idxs = getattr(gather_result.state_dict, idxs_key, None)
-                    vals = getattr(gather_result.state_dict, vals_key, None)
-                    quant_params = getattr(gather_result.state_dict, quant_key, None)
-                    if idxs is not None and vals is not None:
-                        if not isinstance(idxs, (list, tuple)):
-                            idxs = [idxs]
-                        if not isinstance(vals, (list, tuple)):
-                            vals = [vals]
-                        new_grad = self.transformer.decode(
-                            self.compressor.batch_decompress(
-                                p.to(self.device),
-                                idxs,
-                                vals,
-                                self.xshapes[n],
-                                self.totalks[n],
-                                quant_params,
-                            )
-                        )
-
-                        if p.grad is None:
-                            p.grad = new_grad
-                        else:
-                            p.grad.copy_(new_grad)
-                        p.grad.sign_()
+                new_grad = None
+                if gather_result is not None and gather_result.state_dict is not None:
+                    if isinstance(
+                        self.model, torch.nn.parallel.DistributedDataParallel
+                    ):
+                        model_iterator = self.model.module.named_parameters()
                     else:
-                        tplr.logger.info(
-                            f"Gradient data missing for parameter {n}, skipping."
-                        )
+                        model_iterator = self.model.named_parameters()
+                    for n, p in model_iterator:
+                        idxs_key = n + "idxs"
+                        vals_key = n + "vals"
+                        quant_key = n + "quant_params"
 
-                tplr.logger.info(
-                    f"{tplr.P(self.start_window, tplr.T() - update_start)} Updated model"
-                )
+                        idxs = getattr(gather_result.state_dict, idxs_key, None)
+                        vals = getattr(gather_result.state_dict, vals_key, None)
+                        quant_params = getattr(
+                            gather_result.state_dict, quant_key, None
+                        )
+                        if idxs is not None and vals is not None:
+                            if not isinstance(idxs, (list, tuple)):
+                                idxs = [idxs]
+                            if not isinstance(vals, (list, tuple)):
+                                vals = [vals]
+                            new_grad = self.transformer.decode(
+                                self.compressor.batch_decompress(
+                                    p.to(self.device),
+                                    cast(list[torch.Tensor], idxs),
+                                    cast(list[torch.Tensor], vals),
+                                    self.xshapes[n],
+                                    self.totalks[n],
+                                    quant_params,
+                                )
+                            )
+
+                            if p.grad is None:
+                                p.grad = new_grad
+                            else:
+                                p.grad.copy_(new_grad)
+                            p.grad.sign_()
+                        else:
+                            tplr.logger.info(
+                                f"Gradient data missing for parameter {n}, skipping."
+                            )
 
                 self.optimizer.step()
                 self.scheduler.step()
                 torch.cuda.empty_cache()
+                for t in bare_model.state_dict().values():
+                    if torch.is_tensor(t):
+                        dist.broadcast(t.data, src=0)
+            else:
+                for t in bare_model.state_dict().values():
+                    if torch.is_tensor(t):
+                        dist.broadcast(t.data, src=0)
 
-                # Log total window time and add timing metrics to existing wandb logging
-                tplr.logger.info(
-                    f"{tplr.P(step_window, tplr.T() - window_start)} Completed window iteration"
-                )
+            tplr.logger.info(
+                f"{tplr.P(step_window, tplr.T() - update_start)} Updated model"
+            )
 
             if self.is_master:
                 # Add debug data including successfully gathered peers
@@ -985,9 +971,9 @@ class Miner:
                 dist.barrier()
 
             # Delete local variables to clear up memory
-            del loader, pages, gather_result, shard_gradient, new_grad
+            del loader, pages, gather_result, shard_gradient
             if self.is_master:
-                del processed_state_dict, gradient
+                del processed_state_dict, gradient, new_grad
 
             await self.cleanup_window()
             # 4. Wait for next window

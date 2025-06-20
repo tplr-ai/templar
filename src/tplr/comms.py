@@ -2036,14 +2036,34 @@ class Comms(ChainManager):
                 f"Downloading {filename} in {len(chunks_info)} parallel chunks"
             )
 
-            # Download chunks concurrently
             semaphore = asyncio.Semaphore(max_concurrent)
 
-            async def download_chunk(start, end):
-                async with semaphore:
-                    return await self.s3_get_object_range(
-                        bucket=bucket, key=filename, start=start, end=end, timeout=45
-                    )
+            async def download_chunk(
+                start, end, max_retries: int = 3, backoff: float = 2.0
+            ):
+                """
+                Download a single byte-range with automatic retries.
+                `backoff` is an exponential factor (1 s, 2 s, 4 s, …).
+                """
+                delay = 1.0
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        async with semaphore:
+                            return await self.s3_get_object_range(
+                                bucket=bucket,
+                                key=filename,
+                                start=start,
+                                end=end,
+                                timeout=45,
+                            )
+                    except Exception as exc:
+                        tplr.logger.warning(
+                            f"[Chunk {start}-{end}] attempt {attempt}/{max_retries} failed: {exc}"
+                        )
+                        if attempt == max_retries:
+                            raise  # bubble up → outer `except`
+                        await asyncio.sleep(delay)
+                        delay *= backoff
 
             # Execute downloads
             tasks = [download_chunk(start, end) for start, end in chunks_info]

@@ -71,11 +71,6 @@ class DummyConfig:
 class DummyHParams:
     active_check_interval = 60
     recent_windows = 5
-    catch_up_threshold = 5
-    catch_up_min_peers = 1
-    catch_up_batch_size = 10
-    catch_up_timeout = 300
-    target_chunk = 512
     topk_compression = 3  # Expected number of indices will be 3 (min(3, totalk))
 
 

@@ -34,7 +34,6 @@ DEFAULT_HPARAMS = {
     "learning_rate": 0.001,
     # Window and sync parameters
     "blocks_per_window": 2,
-    "windows_per_sync": 100,
     "windows_per_weights": 10,
     # Optimization parameters
     "momentum_decay": 0.999,

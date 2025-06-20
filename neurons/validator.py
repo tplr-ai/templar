@@ -998,10 +998,6 @@ class Validator:
 
                 # For evaluation, also use all peers but track separately with equal initial weight
                 self.eval_peers = {uid: 1 for uid in self.comms.peers}
-            else:
-                # Normal operation - update and filter peers
-                self.comms.update_peers_with_buckets()
-                self.eval_peers = self.comms.eval_peers
 
             tplr.log_with_context(
                 level="info",

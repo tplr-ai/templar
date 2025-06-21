@@ -37,7 +37,7 @@ from tplr.shard_index import ShardIndex
 
 _timer_profiler = get_timer_profiler("R2DatasetLoader")
 
-pyarrow.set_io_thread_count(os.cpu_count())
+pyarrow.set_io_thread_count(os.cpu_count() // 8)
 
 
 class R2DatasetLoader(DatasetLoader):

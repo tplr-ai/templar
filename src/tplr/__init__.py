@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "0.3.7"
+__version__ = "dev-zibmrr4x"
 
 # Import package.
 from .chain import *
@@ -35,4 +35,5 @@ from .schemas import *
 from .wandb import initialize_wandb
 from .metrics import *
 from .shard_index import ShardIndex
-from .strategies import SimpleAccum, Diloco
+from .strategies import Diloco
+from .sharded_dataset import ShardedGPUDataset, get_sharded_gpu_dataloader

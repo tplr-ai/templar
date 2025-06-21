@@ -56,7 +56,7 @@ def prepare_gradient_dict(miner, pages, step_window):
     gradient = {}
     xshapes = {}
     totalks = {}
-    lr = miner.outer_scheduler.get_last_lr()[0]
+    lr = 0.9
 
     # Use an internal iteration counter stored in miner if it doesn't exist already
     if not hasattr(miner, "gradient_iteration_counter"):
@@ -71,9 +71,9 @@ def prepare_gradient_dict(miner, pages, step_window):
     )
 
     # Track if this is the first iteration
-    is_first_iteration = miner.gradient_iteration_counter == 1
+    is_first_iteration = miner.gradient_iteration_counter == 0
     # Check if we're in the first 5 iterations
-    is_early_iteration = miner.gradient_iteration_counter <= 5
+    is_early_iteration = miner.gradient_iteration_counter <= 0
 
     if isinstance(miner.model, torch.nn.parallel.DistributedDataParallel):
         model_iterator = miner.model.module.named_parameters()

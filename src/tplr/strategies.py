@@ -261,7 +261,7 @@ class Diloco(InnerOuterStrategy):
             Keys: total_loss (float), batch_count (int), batch_tokens (int)
         """
 
-        BATCHES_BEFORE_LOCAL_OPTIMIZATION = 256  # ← global samples per inner-step
+        BATCHES_BEFORE_LOCAL_OPTIMIZATION = 32  # ← global samples per inner-step
         MAX_INNER_STEPS = 15
         assert inner_optimizer is not None
         assert inner_scheduler is not None
@@ -343,13 +343,11 @@ class Diloco(InnerOuterStrategy):
                 with autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     outputs = model(input_ids=input_ids, labels=labels)
 
-                loss = outputs.loss
-                if first_loss == 0.0:
-                    first_loss = float(loss.item())
-                total_loss += float(loss.item())
+                loss = outputs.loss / 32
                 loss.backward()
+                total_loss += outputs.loss.item()
                 batch_count += 1
-                tplr.logger.info(f"loss: {loss.item():.4f} [Batch {batch_count}]")
+                tplr.logger.info(f"loss: {outputs.loss.item():.4f} [Batch {batch_count}]")
 
             # ------------------------------------------------------------------ #
             # 5. Step only when *global* accumulation threshold is hit
@@ -363,9 +361,11 @@ class Diloco(InnerOuterStrategy):
                 inner_step_count += 1
                 tplr.logger.info(
                     f"Inner Step {inner_step_count}, "
-                    f"Batch {batch_count}, loss: {loss.item():.4f}, "
+                    f"Batch {batch_count}, loss: {outputs.loss.item():.4f}, "
                     f"accum: {accum_batch_size}/{BATCHES_BEFORE_LOCAL_OPTIMIZATION}"
                 )
+                if first_loss == 0.0:
+                    first_loss = float(outputs.loss.item())
                 accum_batch_size = 0  # reset on *all* ranks
 
             # ------------------------------------------------------------------ #
@@ -384,6 +384,8 @@ class Diloco(InnerOuterStrategy):
 
             if global_done:
                 tplr.logger.info("<Exhausted window: exiting synchronously>")
+                for _ in range(inner_step_count, MAX_INNER_STEPS):
+                    inner_scheduler.step()
                 break
 
         # ------------------------------------------------------------------ #
@@ -431,74 +433,66 @@ class Diloco(InnerOuterStrategy):
             else model
         )
         new_grad = None
-        if self.is_master:
-            model.train()
-            optimizer.zero_grad()
+        model.train()
+        optimizer.zero_grad()
 
-            new_grad = None
-            if gather_result is not None and gather_result.state_dict is not None:
-                if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-                    model_iterator = model.module.named_parameters()
-                else:
-                    model_iterator = model.named_parameters()
-                for n, p in model_iterator:
-                    idxs_key = n + "idxs"
-                    vals_key = n + "vals"
-                    quant_key = n + "quant_params"
+        new_grad = None
+        if gather_result is not None and gather_result.state_dict is not None:
+            if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+                model_iterator = model.module.named_parameters()
+            else:
+                model_iterator = model.named_parameters()
+            for n, p in model_iterator:
+                idxs_key = n + "idxs"
+                vals_key = n + "vals"
+                quant_key = n + "quant_params"
 
-                    idxs = getattr(gather_result.state_dict, idxs_key, None)
-                    vals = getattr(gather_result.state_dict, vals_key, None)
-                    quant_params = getattr(gather_result.state_dict, quant_key, None)
-                    if idxs is not None and vals is not None:
-                        if not isinstance(idxs, (list, tuple)):
-                            idxs = [idxs]
-                        if not isinstance(vals, (list, tuple)):
-                            vals = [vals]
+                idxs = getattr(gather_result.state_dict, idxs_key, None)
+                vals = getattr(gather_result.state_dict, vals_key, None)
+                quant_params = getattr(gather_result.state_dict, quant_key, None)
+                if idxs is not None and vals is not None:
+                    if not isinstance(idxs, (list, tuple)):
+                        idxs = [idxs]
+                    if not isinstance(vals, (list, tuple)):
+                        vals = [vals]
 
-                        # Calculate worker norms and derive clipping threshold
-                        gather_norms = torch.stack(
-                            [torch.norm(sparse_vals, p=2) for sparse_vals in vals]
+                    # Calculate worker norms and derive clipping threshold
+                    gather_norms = torch.stack(
+                        [torch.norm(sparse_vals.float(), p=2) for sparse_vals in vals]
+                    )
+                    median_norm = torch.median(gather_norms)
+
+                    # Clamp median_norm between safety bounds to prevent anomalous workers
+                    clip_thresh = torch.clamp(
+                        median_norm,
+                        min=-10000,
+                        max=100000,
+                    )
+
+                    new_grad = transformer.decode(
+                        compressor.batch_decompress(
+                            p.to(self.device),
+                            typing.cast(list[torch.Tensor], idxs),
+                            typing.cast(list[torch.Tensor], vals),
+                            self.xshapes[n],
+                            self.totalks[n],
+                            quant_params,
+                            normalise=False,
+                            clip_norm_val=clip_thresh,
                         )
-                        median_norm = torch.median(gather_norms)
+                    )
 
-                        # Clamp median_norm between safety bounds to prevent anomalous workers
-                        clip_thresh = torch.clamp(
-                            median_norm,
-                            min=100000,
-                            max=-10000,
-                        )
-
-                        new_grad = transformer.decode(
-                            compressor.batch_decompress(
-                                p.to(self.device),
-                                typing.cast(list[torch.Tensor], idxs),
-                                typing.cast(list[torch.Tensor], vals),
-                                self.xshapes[n],
-                                self.totalks[n],
-                                quant_params,
-                                normalise=False,
-                                clip_thresh=clip_thresh,
-                            )
-                        )
-
-                        if p.grad is None:
-                            p.grad = new_grad
-                        else:
-                            p.grad.copy_(new_grad)
+                    if p.grad is None:
+                        p.grad = new_grad
                     else:
-                        tplr.logger.info(
-                            f"Gradient data missing for parameter {n}, skipping."
-                        )
+                        p.grad.copy_(new_grad)
+                else:
+                    tplr.logger.info(
+                        f"Gradient data missing for parameter {n}, skipping."
+                    )
 
-            optimizer.step()
-            torch.cuda.empty_cache()
-            for t in bare_model.state_dict().values():
-                if torch.is_tensor(t):
-                    dist.broadcast(t.data, src=0)
-        else:
-            for t in bare_model.state_dict().values():
-                if torch.is_tensor(t):
-                    dist.broadcast(t.data, src=0)
+        optimizer.step()
+        torch.cuda.empty_cache()
 
     def _get_offloaded_param(self, model):
         """Get a copy of current parameters and offload them to CPU"""

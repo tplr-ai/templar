@@ -21,10 +21,10 @@ module.exports = {
       args: [
         "--standalone",
         "--nnodes", "1",
-        "--nproc_per_node", "2",
+        "--nproc_per_node", "1",
         "neurons/miner.py",
-        "--wallet.name", "templar_test",
-        "--wallet.hotkey", "M1",
+        "--wallet.name", "miner1",
+        "--wallet.hotkey", "default",
         "--device", "cuda",
         "--subtensor.network", "local",
         "--netuid", "2",
@@ -34,7 +34,7 @@ module.exports = {
       env: {
         ...process.env,
         PROJECT_NAME,
-        CUDA_VISIBLE_DEVICES: "1,2"
+        CUDA_VISIBLE_DEVICES: "1"
       }
     },
     {
@@ -45,10 +45,10 @@ module.exports = {
       args: [
         "--standalone",
         "--nnodes", "1",
-        "--nproc_per_node", "2",
+        "--nproc_per_node", "1",
         "neurons/miner.py",
-        "--wallet.name", "templar_test",
-        "--wallet.hotkey", "M2",
+        "--wallet.name", "miner2",
+        "--wallet.hotkey", "default",
         "--device", "cuda",
         "--subtensor.network", "local",
         "--netuid", "2",
@@ -58,7 +58,127 @@ module.exports = {
       env: {
         ...process.env,
         PROJECT_NAME,
-        CUDA_VISIBLE_DEVICES: "3,4"
+        CUDA_VISIBLE_DEVICES: "2"
+      }
+    },
+    {
+      name            : "TM3",
+      exec_mode       : "fork",
+      exec_interpreter: "none",
+      script          : "torchrun",
+      args: [
+        "--standalone",
+        "--nnodes", "1",
+        "--nproc_per_node", "1",
+        "neurons/miner.py",
+        "--wallet.name", "miner3",
+        "--wallet.hotkey", "default",
+        "--device", "cuda",
+        "--subtensor.network", "local",
+        "--netuid", "2",
+        "--use_wandb",
+        "--project", PROJECT_NAME
+      ],
+      env: {
+        ...process.env,
+        PROJECT_NAME,
+        CUDA_VISIBLE_DEVICES: "3"
+      }
+    },
+    {
+      name            : "TM4",
+      exec_mode       : "fork",
+      exec_interpreter: "none",
+      script          : "torchrun",
+      args: [
+        "--standalone",
+        "--nnodes", "1",
+        "--nproc_per_node", "1",
+        "neurons/miner.py",
+        "--wallet.name", "miner4",
+        "--wallet.hotkey", "default",
+        "--device", "cuda",
+        "--subtensor.network", "local",
+        "--netuid", "2",
+        "--use_wandb",
+        "--project", PROJECT_NAME
+      ],
+      env: {
+        ...process.env,
+        PROJECT_NAME,
+        CUDA_VISIBLE_DEVICES: "4"
+      }
+    },
+    {
+      name            : "TM5",
+      exec_mode       : "fork",
+      exec_interpreter: "none",
+      script          : "torchrun",
+      args: [
+        "--standalone",
+        "--nnodes", "1",
+        "--nproc_per_node", "1",
+        "neurons/miner.py",
+        "--wallet.name", "miner5",
+        "--wallet.hotkey", "default",
+        "--device", "cuda",
+        "--subtensor.network", "local",
+        "--netuid", "2",
+        "--use_wandb",
+        "--project", PROJECT_NAME
+      ],
+      env: {
+        ...process.env,
+        PROJECT_NAME,
+        CUDA_VISIBLE_DEVICES: "5"
+      }
+    },
+    {
+      name            : "TM6",
+      exec_mode       : "fork",
+      exec_interpreter: "none",
+      script          : "torchrun",
+      args: [
+        "--standalone",
+        "--nnodes", "1",
+        "--nproc_per_node", "1",
+        "neurons/miner.py",
+        "--wallet.name", "miner6",
+        "--wallet.hotkey", "default",
+        "--device", "cuda",
+        "--subtensor.network", "local",
+        "--netuid", "2",
+        "--use_wandb",
+        "--project", PROJECT_NAME
+      ],
+      env: {
+        ...process.env,
+        PROJECT_NAME,
+        CUDA_VISIBLE_DEVICES: "6"
+      }
+    },
+    {
+      name            : "TM7",
+      exec_mode       : "fork",
+      exec_interpreter: "none",
+      script          : "torchrun",
+      args: [
+        "--standalone",
+        "--nnodes", "1",
+        "--nproc_per_node", "1",
+        "neurons/miner.py",
+        "--wallet.name", "miner7",
+        "--wallet.hotkey", "default",
+        "--device", "cuda",
+        "--subtensor.network", "local",
+        "--netuid", "2",
+        "--use_wandb",
+        "--project", PROJECT_NAME
+      ],
+      env: {
+        ...process.env,
+        PROJECT_NAME,
+        CUDA_VISIBLE_DEVICES: "7"
       }
     },
 
@@ -72,30 +192,30 @@ module.exports = {
         PROJECT_NAME
       },
       args: [
-        '--wallet.name', 'templar_test',
-        '--wallet.hotkey', 'V1',
+        '--wallet.name', 'validator',
+        '--wallet.hotkey', 'default',
         '--device', 'cuda:0',
         '--subtensor.network', 'local',
         '--netuid', '2',
         '--use_wandb',
         `--project "${PROJECT_NAME}"`
       ].join(' ')
-    },
-
-    /*──────────────────────── Aggregator ─────────────────────*/
-    {
-      name: 'Aggregator',
-      script: 'neurons/aggregator.py',
-      interpreter: 'python3',
-      env: {
-        ...process.env,
-        PROJECT_NAME
-      },
-      args: [
-        '--netuid', '3',
-        '--device', 'cuda:7',
-        '--project', 'templar'
-      ].join(' ')
     }
+
+    ///*──────────────────────── Aggregator ─────────────────────*/
+    //{
+    //  name: 'Aggregator',
+    //  script: 'neurons/aggregator.py',
+    //  interpreter: 'python3',
+    //  env: {
+    //    ...process.env,
+    //    PROJECT_NAME
+    //  },
+    //  args: [
+    //    '--netuid', '3',
+    //    '--device', 'cuda:7',
+    //    '--project', 'templar'
+    //  ].join(' ')
+    //}
   ]
 };

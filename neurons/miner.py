@@ -38,7 +38,7 @@ import uvloop
 # Third party
 from bittensor.core.subtensor import ScaleObj
 from torch.distributed.optim import ZeroRedundancyOptimizer
-from torch.optim import SGD, AdamW
+from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
     LinearLR,
@@ -82,6 +82,40 @@ class Miner:
         )
         parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
+        )
+        # ──────────────────────────────────────────────────────────────
+        # Desynchronisation options
+        # ──────────────────────────────────────────────────────────────
+        parser.add_argument(
+            "--desync-offset",
+            type=int,
+            default=0,
+            help=(
+                "Pause for this many *windows* once, to run out of phase "
+                "with other miners (0 ⇒ feature disabled)."
+            ),
+        )
+        parser.add_argument(
+            "--desync-after",
+            type=int,
+            default=0,
+            help=(
+                "Trigger the pause after this many optimisation *steps* "
+                "(windows) have been completed."
+            ),
+        )
+        # ──────────────────────────────────────────────────────────────
+        # Inner step options
+        # ──────────────────────────────────────────────────────────────
+        parser.add_argument(
+            "--max-inner-steps",
+            type=int,
+            default=15,
+        )
+        parser.add_argument(
+            "--batches-before-local-optimization",
+            type=int,
+            default=256,
         )
         parser.add_argument(
             "--local_rank", type=int, default=int(os.getenv("LOCAL_RANK", 0))
@@ -151,6 +185,13 @@ class Miner:
         self.is_master = self.rank == 0
         self.config.local = cast(bool, self.config.local)
         self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
+
+        # ──────────────────────────────────────────────────────────────
+        # Desync state
+        # ──────────────────────────────────────────────────────────────
+        self.desync_offset = cast(int, self.config.desync_offset)
+        self.desync_after = cast(int, self.config.desync_after)
+        self._desync_done = False  # one–shot guard
 
         if self.config.actual_batch_size is not None:
             tplr.logger.info(
@@ -414,6 +455,37 @@ class Miner:
             self.global_step = (
                 self.current_window - self.start_window
             )  # Update global_step
+
+            # ─────────────────────────────────────────────────────────
+            # One-shot window pause → desynchronise this miner
+            # ─────────────────────────────────────────────────────────
+            if (
+                not self._desync_done
+                and self.desync_offset > 0
+                and self.global_step >= self.desync_after
+            ):
+                if self.is_master:
+                    tplr.logger.info(
+                        f"[Desync] Triggered at global step "
+                        f"{self.global_step}. Pausing for "
+                        f"{self.desync_offset} windows."
+                    )
+
+                target_window = self.current_window + self.desync_offset
+
+                # keep all DDP ranks together while we wait
+                if self.world_size > 1:
+                    dist.barrier()
+
+                while self.current_window < target_window:
+                    await asyncio.sleep(0.5)
+
+                if self.world_size > 1:
+                    dist.barrier()
+
+                # optional: account for the skipped optimisation steps
+                self.global_step += self.desync_offset
+                self._desync_done = True
             tplr.logger.info(
                 f"\n{'-' * 40} Window: {step_window} (Global Step: {self.global_step}) {'-' * 40}"
             )
@@ -467,6 +539,10 @@ class Miner:
                 should_continue=self.should_continue,
                 get_current_window=lambda: self.current_window,
                 step_window=step_window,
+                max_inner_steps=cast(int, self.config.max_inner_steps),
+                batches_before_local_optimization=cast(
+                    int, self.config.batches_before_local_optimization
+                ),
             )
             res = strategy.inner_step(
                 self.model,

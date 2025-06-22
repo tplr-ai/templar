@@ -230,6 +230,8 @@ class Diloco(InnerOuterStrategy):
         should_continue: typing.Callable[[bool, torch.device], bool],
         get_current_window: typing.Callable[[], int],
         step_window: int,
+        max_inner_steps: int = 15,
+        batches_before_local_optimization: int = 256,
     ):
         self.device = device
         self.world_size = world_size
@@ -240,6 +242,8 @@ class Diloco(InnerOuterStrategy):
         self.should_continue = should_continue
         self.get_current_window = get_current_window
         self.step_window = step_window
+        self.max_inner_steps = max_inner_steps
+        self.batches_before_local_optimization = batches_before_local_optimization
 
         # Store offloaded parameters
         self.params_offloaded = None
@@ -261,8 +265,6 @@ class Diloco(InnerOuterStrategy):
             Keys: total_loss (float), batch_count (int), batch_tokens (int)
         """
 
-        BATCHES_BEFORE_LOCAL_OPTIMIZATION = 32  # ← global samples per inner-step
-        MAX_INNER_STEPS = 15
         assert inner_optimizer is not None
         assert inner_scheduler is not None
 
@@ -332,7 +334,7 @@ class Diloco(InnerOuterStrategy):
             # 4. Forward + backward
             # ------------------------------------------------------------------ #
             ddp_should_sync = (
-                accum_batch_size >= BATCHES_BEFORE_LOCAL_OPTIMIZATION
+                accum_batch_size >= self.batches_before_local_optimization
             ) or self.world_size == 1
             ddp_context_mgr = (
                 model.no_sync
@@ -347,12 +349,14 @@ class Diloco(InnerOuterStrategy):
                 loss.backward()
                 total_loss += outputs.loss.item()
                 batch_count += 1
-                tplr.logger.info(f"loss: {outputs.loss.item():.4f} [Batch {batch_count}]")
+                tplr.logger.info(
+                    f"loss: {outputs.loss.item():.4f} [Batch {batch_count}]"
+                )
 
             # ------------------------------------------------------------------ #
             # 5. Step only when *global* accumulation threshold is hit
             # ------------------------------------------------------------------ #
-            if accum_batch_size >= BATCHES_BEFORE_LOCAL_OPTIMIZATION:
+            if accum_batch_size >= self.batches_before_local_optimization:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 inner_optimizer.step()
                 inner_scheduler.step()
@@ -362,10 +366,10 @@ class Diloco(InnerOuterStrategy):
                 tplr.logger.info(
                     f"Inner Step {inner_step_count}, "
                     f"Batch {batch_count}, loss: {outputs.loss.item():.4f}, "
-                    f"accum: {accum_batch_size}/{BATCHES_BEFORE_LOCAL_OPTIMIZATION}"
+                    f"accum: {accum_batch_size}/{self.batches_before_local_optimization}"
                 )
                 if first_loss == 0.0:
-                    first_loss = float(outputs.loss.item())
+                    first_loss = total_loss / batch_count
                 accum_batch_size = 0  # reset on *all* ranks
 
             # ------------------------------------------------------------------ #
@@ -373,7 +377,7 @@ class Diloco(InnerOuterStrategy):
             # ------------------------------------------------------------------ #
             window_changed = self.get_current_window() != self.step_window
             local_done = torch.tensor(
-                [window_changed or inner_step_count == MAX_INNER_STEPS],
+                [window_changed or inner_step_count == self.max_inner_steps],
                 dtype=torch.uint8,
                 device=self.device,
             )
@@ -384,7 +388,7 @@ class Diloco(InnerOuterStrategy):
 
             if global_done:
                 tplr.logger.info("<Exhausted window: exiting synchronously>")
-                for _ in range(inner_step_count, MAX_INNER_STEPS):
+                for _ in range(inner_step_count, self.max_inner_steps):
                     inner_scheduler.step()
                 break
 

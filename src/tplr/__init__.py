@@ -20,7 +20,7 @@
 # mypy: ignore-errors
 # type: ignore
 
-__version__ = "dev-zibmrr4x"
+__version__ = "dev-test-local-demo"
 
 # Import package.
 from .chain import *

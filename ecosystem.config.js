@@ -8,7 +8,7 @@ const RANDOM_SUFFIX = execSync(
   .toString()
   .trim();
 
-const PROJECT_NAME = `test_${RANDOM_SUFFIX}`;
+const PROJECT_NAME = `localDeMo-1B-tests`;
 
 module.exports = {
   apps: [
@@ -98,6 +98,8 @@ module.exports = {
         "--wallet.name", "miner4",
         "--wallet.hotkey", "default",
         "--device", "cuda",
+        "--desync-offset", "1",
+        "--desync-after", "3",
         "--subtensor.network", "local",
         "--netuid", "2",
         "--use_wandb",
@@ -122,6 +124,8 @@ module.exports = {
         "--wallet.name", "miner5",
         "--wallet.hotkey", "default",
         "--device", "cuda",
+        "--desync-offset", "2",
+        "--desync-after", "3",
         "--subtensor.network", "local",
         "--netuid", "2",
         "--use_wandb",
@@ -146,6 +150,8 @@ module.exports = {
         "--wallet.name", "miner6",
         "--wallet.hotkey", "default",
         "--device", "cuda",
+        "--max-inner-steps", "10",
+        "--batches-before-local-optimization", "384".
         "--subtensor.network", "local",
         "--netuid", "2",
         "--use_wandb",
@@ -170,6 +176,7 @@ module.exports = {
         "--wallet.name", "miner7",
         "--wallet.hotkey", "default",
         "--device", "cuda",
+        "--batches-before-local-optimization", "320".
         "--subtensor.network", "local",
         "--netuid", "2",
         "--use_wandb",

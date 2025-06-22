@@ -151,7 +151,7 @@ module.exports = {
         "--wallet.hotkey", "default",
         "--device", "cuda",
         "--max-inner-steps", "10",
-        "--batches-before-local-optimization", "384".
+        "--batches-before-local-optimization", "384",
         "--subtensor.network", "local",
         "--netuid", "2",
         "--use_wandb",
@@ -176,7 +176,7 @@ module.exports = {
         "--wallet.name", "miner7",
         "--wallet.hotkey", "default",
         "--device", "cuda",
-        "--batches-before-local-optimization", "320".
+        "--batches-before-local-optimization", "320",
         "--subtensor.network", "local",
         "--netuid", "2",
         "--use_wandb",

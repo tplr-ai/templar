@@ -213,12 +213,6 @@ class Miner:
             parameters_as_bucket_view=True,
             overlap_with_ddp=False,
         )
-        # self.inner_optimizer = AdamW(
-        #     self.model.parameters(),
-        #     lr=self.hparams.learning_rate,
-        #     weight_decay=self.hparams.weight_decay,
-        #     betas=(0.9, 0.95)
-        # )
         warmup_scheduler = LinearLR(
             self.inner_optimizer,
             start_factor=0.1,
@@ -310,24 +304,6 @@ class Miner:
         # Initialize peer related attributes
         self.next_peers: list[int] | None = None
         self.peers_update_window = -1
-        train_dataset = tplr.sharded_dataset.ShardedGPUDataset(
-            shards_path=os.path.expandvars(os.path.expanduser("~/datasets/edu_fineweb_score2_10B_tokenized_llama2")),
-            token_budget=3774873600,
-            sequence_length=self.hparams.sequence_length,
-            rank=self.uid - 2,
-            world_size=7,
-            device=self.device,
-            shard_token_size=100e6,
-            split="train",
-            reside_in_gpu=True
-        )
-        self.train_loader = tplr.get_sharded_gpu_dataloader(
-            train_dataset, 
-            batch_size=self.hparams.batch_size, 
-            shuffle=True,
-            num_workers=0,
-            num_prefetch_batches=0
-        )
 
     # Main training loop.
     async def run(self):
@@ -450,33 +426,33 @@ class Miner:
 
             # 2. Load ONLY the pages that belong to *this* rank -------------------
             data_start = tplr.T()
-            # total_pages = self.hparams.pages_per_window
-            # start_idx, n_my_pages = self.pages_for_rank(
-            #     total_pages, self.rank, self.world_size
-            # )
+            total_pages = self.hparams.pages_per_window
+            start_idx, n_my_pages = self.pages_for_rank(
+                total_pages, self.rank, self.world_size
+            )
 
-            # pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-            #     offset=step_window * total_pages,
-            #     n_pages=total_pages,
-            #     seed=self.uid,
-            # )
-            # own_pages = pages[start_idx : start_idx + n_my_pages]
-            # tplr.logger.info(
-            #     f"[Rank {self.rank}/{self.world_size}] pages "
-            #     f"{list(range(start_idx, start_idx + n_my_pages))}"
-            # )
-            # loader = await tplr.r2_dataset.R2DatasetLoader.create(
-            #     batch_size=self.hparams.batch_size,
-            #     sequence_length=self.hparams.sequence_length,
-            #     pages_info=own_pages,
-            #     tokenizer=self.tokenizer,
-            # )
-            # tplr.logger.info(
-            #     f"{tplr.P(step_window, tplr.T() - data_start)} Loaded training data"
-            # )
-            # tplr.logger.info(
-            #     f"Pages: {[p[1] for p in pages]} for  Window: {step_window}"
-            # )  # type: ignore
+            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
+                offset=step_window * total_pages,
+                n_pages=total_pages,
+                seed=self.uid,
+            )
+            own_pages = pages[start_idx : start_idx + n_my_pages]
+            tplr.logger.info(
+                f"[Rank {self.rank}/{self.world_size}] pages "
+                f"{list(range(start_idx, start_idx + n_my_pages))}"
+            )
+            loader = await tplr.r2_dataset.R2DatasetLoader.create(
+                batch_size=self.hparams.batch_size,
+                sequence_length=self.hparams.sequence_length,
+                pages_info=own_pages,
+                tokenizer=self.tokenizer,
+            )
+            tplr.logger.info(
+                f"{tplr.P(step_window, tplr.T() - data_start)} Loaded training data"
+            )
+            tplr.logger.info(
+                f"Pages: {[p[1] for p in pages]} for  Window: {step_window}"
+            )  # type: ignore
 
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
@@ -493,7 +469,10 @@ class Miner:
                 step_window=step_window,
             )
             res = strategy.inner_step(
-                self.model, self.train_loader, self.inner_optimizer, self.inner_scheduler
+                self.model,
+                loader,
+                self.inner_optimizer,
+                self.inner_scheduler,
             )
             loss = res["first_loss"]
             n_batches = res["batch_count"]
@@ -516,11 +495,8 @@ class Miner:
 
             # 1️⃣ every rank builds its momentum shard
             compress_start = tplr.T()
-            # shard_gradient, _, _ = tplr.prepare_gradient_dict(
-            #     self, own_pages, step_window
-            # )
             shard_gradient, _, _ = tplr.prepare_gradient_dict(
-                self, [], step_window
+                self, own_pages, step_window
             )
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - compress_start)} "

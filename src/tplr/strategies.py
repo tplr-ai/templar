@@ -460,19 +460,6 @@ class Diloco(InnerOuterStrategy):
                     if not isinstance(vals, (list, tuple)):
                         vals = [vals]
 
-                    # Calculate worker norms and derive clipping threshold
-                    gather_norms = torch.stack(
-                        [torch.norm(sparse_vals.float(), p=2) for sparse_vals in vals]
-                    )
-                    median_norm = torch.median(gather_norms)
-
-                    # Clamp median_norm between safety bounds to prevent anomalous workers
-                    clip_thresh = torch.clamp(
-                        median_norm,
-                        min=-10000,
-                        max=100000,
-                    )
-
                     new_grad = transformer.decode(
                         compressor.batch_decompress(
                             p.to(self.device),
@@ -482,7 +469,7 @@ class Diloco(InnerOuterStrategy):
                             self.totalks[n],
                             quant_params,
                             normalise=False,
-                            clip_norm_val=clip_thresh,
+                            clip_norm=True,
                         )
                     )
 

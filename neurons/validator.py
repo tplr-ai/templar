@@ -2718,19 +2718,6 @@ class Validator:
                 if not isinstance(vals, (list, tuple)):
                     vals = [vals]
 
-                # Calculate worker norms and derive clipping threshold
-                gather_norms = torch.stack(
-                    [torch.norm(sparse_vals, p=2) for sparse_vals in vals]
-                )
-                median_norm = torch.median(gather_norms)
-
-                # Clamp median_norm between safety bounds to prevent anomalous workers
-                clip_thresh = torch.clamp(
-                    median_norm,
-                    min=100000,
-                    max=-10000,
-                )
-
                 new_grad = self.transformer.decode(
                     self.compressor.batch_decompress(
                         p.to(self.config.device),
@@ -2740,7 +2727,7 @@ class Validator:
                         self.totalks[n],
                         quant_params,
                         normalise=False,
-                        clip_norm_val=clip_thresh,
+                        clip_norm=True,
                     )
                 )
                 if p.grad is None:

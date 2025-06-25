@@ -248,7 +248,7 @@ class AggregationServer:
             f"\nSelected {len(selected_uids)} peers for gradient collection"
         )
         tplr.logger.info(
-            f"Selection parameters: topk={self.hparams.topk_peers}%, min={self.hparams.minimum_peers}, max_topk={self.hparams.max_topk_peers}"
+            f"Selection parameters: min={self.hparams.minimum_peers}, max_topk={self.hparams.max_topk_peers}"
         )
         tplr.logger.info(f"Selected UIDs: {selected_uids}")
 

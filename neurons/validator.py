@@ -1382,19 +1382,40 @@ class Validator:
 
                     # Pull miner-sent pages info from metadata
                     miner_pages = None
-                    if (
-                        "metadata" in state_dict
-                        and "pages_info" in state_dict["metadata"]
-                    ):
-                        miner_pages = state_dict["metadata"]["pages_info"]
-                    else:
-                        tplr.log_with_context(
-                            level="warning",
-                            message=f"Missing pages info metadata from miner UID {eval_uid}",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
+                    try:
+                        if (
+                            "metadata" in state_dict
+                            and "pages_info" in state_dict["metadata"]
+                        ):
+                            miner_pages = state_dict["metadata"]["pages_info"]
+                        else:
+                            tplr.log_with_context(
+                                level="warning",
+                                message=f"Missing pages info metadata from miner UID {eval_uid}",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                                eval_uid=eval_uid,
+                            )
+                    except Exception:
+                        old_score = self.final_scores[eval_uid].item()
+
+                        self.binary_moving_averages[eval_uid] *= (
+                            self.missing_gradient_slash_rate
                         )
+
+                        # Only reduce positive scores
+                        if self.final_scores[eval_uid] > 0:
+                            self.final_scores[eval_uid] *= (
+                                self.missing_gradient_slash_rate
+                            )
+                            new_score = self.final_scores[eval_uid].item()
+                            tplr.log_with_context(
+                                level="info",
+                                message=f"Reduced score of UID {eval_uid} from {old_score:.4f} to {new_score:.4f} due to malformatted metadata.",
+                                sync_window=self.sync_window,
+                                current_window=self.current_window,
+                            )
+                        continue
 
                     if local_pages is None or loader_own is None:
                         tplr.log_with_context(

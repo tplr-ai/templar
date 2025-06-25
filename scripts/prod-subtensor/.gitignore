@@ -1,0 +1,22 @@
+# Ansible configuration files with secrets
+group_vars/all.yml
+group_vars/vault.yml
+host_vars/
+
+# Ansible inventory with server details
+inventory
+
+# Ansible facts cache
+.facts_cache/
+
+# Ansible retry files
+*.retry
+
+# SSL certificates and keys
+roles/*/files/*.pem
+roles/*/files/*.key
+roles/*/files/*.crt
+
+# Backup files
+*.backup
+*~

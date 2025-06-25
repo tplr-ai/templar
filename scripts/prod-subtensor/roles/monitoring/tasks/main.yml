@@ -1,0 +1,51 @@
+---
+- name: Create monitoring user
+  user:
+    name: monitoring
+    system: yes
+    create_home: yes
+    groups: docker
+
+- name: Create monitoring directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: monitoring
+    group: monitoring
+    mode: '0755'
+  loop:
+    - "{{ monitoring_base_path }}"
+    - "{{ monitoring_data_path }}"
+    - "{{ monitoring_config_path }}"
+    - "{{ monitoring_data_path }}/prometheus"
+    - "{{ monitoring_data_path }}/alertmanager"
+
+- name: Install monitoring stack
+  include_tasks: prometheus.yml
+
+- name: Install AlertManager
+  include_tasks: alertmanager.yml
+
+- name: Configure node monitoring
+  include_tasks: node_exporter.yml
+
+- name: Setup Subtensor monitoring
+  include_tasks: subtensor_monitoring.yml
+
+- name: Configure systemd services
+  include_tasks: systemd.yml
+
+- name: Start monitoring services
+  systemd:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  loop:
+    - prometheus
+    - alertmanager
+    - node-exporter
+    - subtensor-monitor
+
+- name: Verify monitoring stack
+  include_tasks: verify.yml

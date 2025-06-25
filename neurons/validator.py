@@ -1415,6 +1415,7 @@ class Validator:
                                 sync_window=self.sync_window,
                                 current_window=self.current_window,
                             )
+                        continue
 
                     if local_pages is None or loader_own is None:
                         tplr.log_with_context(

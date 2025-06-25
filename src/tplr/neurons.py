@@ -440,67 +440,100 @@ async def compare_model_with_debug_dict(
     model: nn.Module,
     debug_dict: dict[str, list[float]],
     learning_rate: float,
+    param_avg_change: dict[str, torch.Tensor] | None = None,
+    *,
+    min_step_size: float = 1e-9,
     index_range: tuple[int, int] = (0, 2),
 ) -> dict[str, bool | float | int]:
     """
-    Compares a model's parameters with a debug dictionary to measure synchronization.
+    Compare a model’s weights with a miner-supplied debug dictionary and return
+    sync-quality metrics.
 
-    Args:
-        model: The PyTorch model with parameters to compare
-        debug_dict: Debug dictionary containing parameter debug values
-        learning_rate: Current learning rate to normalize differences
+    Args
+    ----
+    model : torch.nn.Module
+        The validator’s model (DDP or plain).
+    debug_dict : dict
+        Miner-published tensor snippets – every entry is a list holding a few
+        scalars from the corresponding parameter.
+    learning_rate : float
+        Current LR; used as a fallback step-size estimate.
+    param_avg_change : dict(str -> Tensor), optional
+        Per-tensor EMA of the *mean* absolute update size that the validator
+        maintains locally.  If an entry is missing we fall back to `learning_rate`.
+    min_step_size : float, default 1e-9
+        Small clamp to avoid huge ratios when a layer hardly moves.
+    index_range : (int, int), default (0, 2)
+        Which slice of each tensor to compare against the miner snippet.
 
-    Returns:
-        dict: Comparison metrics including L2 norm, absolute differences, and steps behind measurements
+    Returns
+    -------
+    dict
+        Keys: success, l2_norm, avg_l2_norm, avg_abs_diff, max_diff,
+              avg_steps_behind, max_steps_behind, param_count, learning_rate
     """
-    # Initialize metrics
+    # ------- prep --------------------------------------------------------
     total_squared_diff = 0.0
     total_abs_diff = 0.0
-    param_count = 0
     max_diff = 0.0
+    param_count = 0
 
-    # Compare each parameter with its debug entry
+    steps_behind_sum = 0.0
+    tensors_counted = 0
+
     if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-        model_iterator = model.module.named_parameters()
+        named_params = model.module.named_parameters()
     else:
-        model_iterator = model.named_parameters()
-    for name, param in model_iterator:
-        debug_key = name + "_debug"
+        named_params = model.named_parameters()
 
-        if debug_key in debug_dict and isinstance(debug_dict[debug_key], list):
-            # Get the parameter values (first two elements to match debug dict)
-            param_data = param.data.flatten()[
-                index_range[0] : index_range[1]
-            ].detach()  # Keep on device
+    # ------- loop over parameters ---------------------------------------
+    for name, p in named_params:
+        key = name + "_debug"
+        if key not in debug_dict or not isinstance(debug_dict[key], list):
+            continue  # miner didn’t include this tensor
 
-            # Convert debug data to tensor on the same device
-            debug_data = torch.tensor(
-                debug_dict[debug_key], device=param.device, dtype=param.dtype
-            )
+        # grab tiny slice on GPU, convert miner slice to same dtype/device
+        param_slice = p.data.flatten()[index_range[0] : index_range[1]]
+        miner_slice = torch.tensor(debug_dict[key], dtype=p.dtype, device=p.device)
 
-            # Compute differences
-            diffs = param_data - debug_data
-            squared_diff = torch.sum(diffs**2).item()
-            abs_diff = torch.abs(diffs).sum().item()
-            max_param_diff = torch.max(torch.abs(diffs)).item()
+        diff = param_slice - miner_slice
+        abs_diff = torch.abs(diff).mean().item()
+        sq_diff = torch.sum(diff**2).item()
+        max_param_df = torch.max(torch.abs(diff)).item()
 
-            # Update totals
-            total_squared_diff += squared_diff
-            total_abs_diff += abs_diff
-            param_count += param_data.numel()
-            max_diff = max(max_diff, max_param_diff)
+        # aggregate
+        total_squared_diff += sq_diff
+        total_abs_diff += abs_diff * param_slice.numel()  # mean→sum
+        max_diff = max(max_diff, max_param_df)
+        param_count += param_slice.numel()
 
-    # Calculate final metrics
-    l2_norm = torch.sqrt(torch.tensor(total_squared_diff)).item()
-    avg_l2_norm = l2_norm / param_count if param_count > 0 else math.inf
-    avg_abs_diff = total_abs_diff / param_count if param_count > 0 else math.inf
+        # --- convert abs diff to “steps” using EMA or LR -----------------
+        if param_avg_change and name in param_avg_change:
+            step_size = max(param_avg_change[name].item(), min_step_size)
+        else:
+            step_size = max(learning_rate, min_step_size)
 
-    # Normalize differences by learning rate to get "steps behind" metric
-    avg_steps_behind = avg_abs_diff / learning_rate if learning_rate > 0 else math.inf
-    max_steps_behind = max_diff / learning_rate if learning_rate > 0 else math.inf
+        steps_behind_sum += abs_diff / step_size
+        tensors_counted += 1
+    # --------------------------------------------------------------------
 
-    # Prepare return metrics
-    metrics: dict[str, bool | float | int] = {
+    # safety if miner gave nothing useful
+    if param_count == 0:
+        return {"success": False, "sync_score": 0.0}
+
+    # scalar metrics
+    l2_norm = math.sqrt(total_squared_diff)
+    avg_l2_norm = l2_norm / param_count
+    avg_abs_diff = total_abs_diff / param_count
+
+    if tensors_counted == 0:
+        avg_steps_behind = math.inf
+    else:
+        avg_steps_behind = steps_behind_sum / tensors_counted
+
+    max_steps_behind = max_diff / max(learning_rate, min_step_size)
+
+    return {
         "success": True,
         "l2_norm": l2_norm,
         "avg_l2_norm": avg_l2_norm,
@@ -511,8 +544,6 @@ async def compare_model_with_debug_dict(
         "param_count": param_count,
         "learning_rate": learning_rate,
     }
-
-    return metrics
 
 
 def unpack_binary_tensor(packed_tensor: torch.Tensor, original_shape: torch.Size):

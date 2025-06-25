@@ -287,6 +287,11 @@ class Validator:
 
         self.peers_last_eval_window = {}
 
+        # Model update variables
+        self.param_avg_change: dict[str, torch.Tensor] = {}
+        self.prev_param_state: dict[str, torch.Tensor] = {}
+        self.param_change_alpha = 0.2
+
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
             self.final_scores[uid] = 0.0
@@ -2244,6 +2249,21 @@ class Validator:
                 current_window=self.current_window,
             )
 
+            with torch.no_grad():
+                for n, p in self.model.named_parameters():
+                    # keep a clone of the last parameters
+                    if n in self.prev_param_state:
+                        delta = torch.abs(p - self.prev_param_state[n]).mean()
+                        # initialise running avg lazily
+                        if n not in self.param_avg_change:
+                            self.param_avg_change[n] = delta.clone()
+                        else:
+                            self.param_avg_change[n].mul_(
+                                1 - self.param_change_alpha
+                            ).add_(delta * self.param_change_alpha)
+                    # store current param for next iteration
+                    self.prev_param_state[n] = p.detach().cpu().clone()
+
             # Add debug data including successfully gathered peers
             debug_dict = {}
 
@@ -2588,6 +2608,7 @@ class Validator:
             debug_dict=miner_debug_dict,
             learning_rate=self.lr,
             index_range=(10, 12),
+            param_avg_change=self.param_avg_change,
         )
 
         if not comparison_metrics["success"]:

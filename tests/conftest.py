@@ -70,6 +70,7 @@ class DummyConfig:
 
 class DummyHParams:
     active_check_interval = 60
+    registration_check_interval = 600
     recent_windows = 5
     topk_compression = 3  # Expected number of indices will be 3 (min(3, totalk))
 

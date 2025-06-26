@@ -2253,7 +2253,11 @@ class Validator:
                 for n, p in self.model.named_parameters():
                     # keep a clone of the last parameters
                     if n in self.prev_param_state:
-                        delta = torch.abs(p - self.prev_param_state[n]).mean()
+                        # 1) move the live weights to CPU FIRST
+                        curr_cpu = p.detach().cpu()
+                        # 2) compute per-tensor mean abs update
+                        delta = torch.abs(curr_cpu - self.prev_param_state[n]).mean()
+
                         # initialise running avg lazily
                         if n not in self.param_avg_change:
                             self.param_avg_change[n] = delta.clone()

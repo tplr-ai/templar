@@ -1674,10 +1674,10 @@ class Validator:
                     # Clean up stored batches
                     del (
                         batches_own,
-                        local_pages,
+                        # local_pages,
                         loader_own,
                         model_own_data_eval,
-                        loader_data,
+                        # loader_data,
                     )
                     torch.cuda.empty_cache()
 

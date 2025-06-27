@@ -296,7 +296,7 @@ class Validator:
 
         self.dataset = SharedShardedDataset(
             shards_path="/home/shadeform/datasets/dclm_tokenized_llama2_cleaned",
-            sequence_length=self.hparams.sequence_lentgth,
+            sequence_length=self.hparams.sequence_length,
             rank=0,
             world_size=1,
         )

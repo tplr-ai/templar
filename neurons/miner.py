@@ -349,7 +349,7 @@ class Miner:
         self.peers_update_window = -1
         self.dataset = SharedShardedDataset(
             shards_path="/home/shadeform/datasets/dclm_tokenized_llama2_cleaned",
-            sequence_length=self.hparams.sequence_lentgth,
+            sequence_length=self.hparams.sequence_length,
             rank=self.rank,
             world_size=self.world_size,
         )

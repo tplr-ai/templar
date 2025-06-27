@@ -307,7 +307,7 @@ class Validator:
             steps_per_window=15,
             micro_bs=self.hparams.batch_size,
             batch_size=256,
-            validation_bs=24,
+            validation_bs=64,
             rank=0,
             world_size=1,
         )
@@ -1313,12 +1313,10 @@ class Validator:
                 #     # TODO: Skip to next UID without penalizing current one for validator data loading issues
                 #     next_uid = None
                 #     next_uid_dataloader_task = None
-                #     if evaluation_uids_queue:
-                #         next_uid = evaluation_uids_queue.pop(0)
-                #         next_uid_dataloader_task = asyncio.create_task(
-                #             self.preload_dataloader(seed=next_uid)
-                #         )
-                #     continue
+                if evaluation_uids_queue:
+                    next_uid = evaluation_uids_queue.pop(0)
+                else:
+                    continue
 
                 tplr.log_with_context(
                     level="info",

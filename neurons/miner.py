@@ -48,6 +48,8 @@ from transformers.models.llama import LlamaForCausalLM
 
 # Local
 import tplr
+from tplr.sharded_dataset import SharedShardedDataset
+from tplr.sharded_sampler import MinerSampler
 
 CPU_COUNT = os.cpu_count() // 8
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -345,6 +347,22 @@ class Miner:
         # Initialize peer related attributes
         self.next_peers: list[int] | None = None
         self.peers_update_window = -1
+        self.dataset = SharedShardedDataset(
+            shards_path="/home/shadeform/datasets/dclm_tokenized_llama2_cleaned",
+            sequence_length=self.hparams.sequence_lentgth,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+        self.sampler = MinerSampler(
+            dataset_len=len(self.dataset),
+            uid=self.uid,
+            window=self.current_window,
+            steps_per_window=15,
+            micro_bs=self.hparams.batch_size,
+            batch_size=self.config.batches_before_local_optimization,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
 
     # Main training loop.
     async def run(self):
@@ -498,33 +516,22 @@ class Miner:
 
             # 2. Load ONLY the pages that belong to *this* rank -------------------
             data_start = tplr.T()
-            total_pages = self.hparams.pages_per_window
-            start_idx, n_my_pages = self.pages_for_rank(
-                total_pages, self.rank, self.world_size
-            )
+            # Update sampler for current window
+            self.sampler.set_window_uid(self.uid, step_window)
 
-            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset=step_window * total_pages,
-                n_pages=total_pages,
-                seed=self.uid,
-            )
-            own_pages = pages[start_idx : start_idx + n_my_pages]
-            tplr.logger.info(
-                f"[Rank {self.rank}/{self.world_size}] pages "
-                f"{list(range(start_idx, start_idx + n_my_pages))}"
-            )
-            loader = await tplr.r2_dataset.R2DatasetLoader.create(
-                batch_size=self.hparams.batch_size,
-                sequence_length=self.hparams.sequence_length,
-                pages_info=own_pages,
-                tokenizer=self.tokenizer,
+            loader = torch.utils.data.DataLoader(
+                dataset=self.dataset,
+                sampler=self.sampler,
+                batch_size=self.hparams.micro_batch_size,  # per-GPU micro-bs
+                num_workers=2,  # tune as needed
+                pin_memory=True,
             )
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - data_start)} Loaded training data"
             )
-            tplr.logger.info(
-                f"Pages: {[p[1] for p in pages]} for  Window: {step_window}"
-            )  # type: ignore
+            # tplr.logger.info(
+            #     f"Pages: {[p[1] for p in pages]} for  Window: {step_window}"
+            # )  # type: ignore
 
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
@@ -571,8 +578,11 @@ class Miner:
 
             # 1️⃣ every rank builds its momentum shard
             compress_start = tplr.T()
+            # shard_gradient, _, _ = tplr.prepare_gradient_dict(
+            #     self, own_pages, step_window
+            # )
             shard_gradient, _, _ = tplr.prepare_gradient_dict(
-                self, own_pages, step_window
+                self, [], step_window
             )
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - compress_start)} "

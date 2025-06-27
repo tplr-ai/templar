@@ -53,6 +53,8 @@ from transformers.models.llama import LlamaForCausalLM
 
 # Local
 import tplr
+from tplr.sharded_dataset import SharedShardedDataset
+from tplr.sharded_sampler import EvalSampler
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -291,6 +293,31 @@ class Validator:
         self.param_avg_change: dict[str, torch.Tensor] = {}
         self.prev_param_state: dict[str, torch.Tensor] = {}
         self.param_change_alpha = 0.2
+
+        self.dataset = SharedShardedDataset(
+            shards_path="/home/shadeform/datasets/dclm_tokenized_llama2_cleaned",
+            sequence_length=self.hparams.sequence_lentgth,
+            rank=0,
+            world_size=1,
+        )
+        self.sampler = EvalSampler(
+            dataset_len=len(self.dataset),
+            uid=self.uid,
+            window=self.current_window,
+            steps_per_window=15,
+            micro_bs=self.hparams.batch_size,
+            batch_size=256,
+            validation_bs=24,
+            rank=0,
+            world_size=1,
+        )
+        # Convenience kwargs reused every time we build a DataLoader
+        self._loader_kwargs = dict(
+            dataset=self.dataset,
+            batch_size=self.hparams.batch_size,
+            num_workers=2,
+            pin_memory=True,
+        )
 
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
@@ -1208,6 +1235,7 @@ class Validator:
             avg_loss_after_per_batch_random = 0.0
             evaluated_peers = 0
 
+            self.sampler.set_window_uid(self.uid, self.sync_window)
             # Pre-load common random loader for all evaluated UIDs in this window.
             data_start_random = tplr.T()
 
@@ -1221,76 +1249,76 @@ class Validator:
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
-            try:
-                random_loader_data = await self.preload_dataloader(seed=random_seed)
-                if random_loader_data:
-                    common_loader_random = random_loader_data["loader"]
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation.",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                else:
-                    tplr.log_with_context(
-                        level="error",
-                        message="Random loader was None, cannot continue evaluation",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                    continue
-            except Exception as e:
-                tplr.log_with_context(
-                    level="error",
-                    message=f"Error loading random loader: {str(e)}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                continue
+            # try:
+            #     random_loader_data = await self.preload_dataloader(seed=random_seed)
+            #     if random_loader_data:
+            #         common_loader_random = random_loader_data["loader"]
+            #         tplr.log_with_context(
+            #             level="info",
+            #             message=f"{tplr.P(self.sync_window, tplr.T() - data_start_random)} Loaded common random loader for evaluation.",
+            #             sync_window=self.sync_window,
+            #             current_window=self.current_window,
+            #         )
+            #     else:
+            #         tplr.log_with_context(
+            #             level="error",
+            #             message="Random loader was None, cannot continue evaluation",
+            #             sync_window=self.sync_window,
+            #             current_window=self.current_window,
+            #         )
+            #         continue
+            # except Exception as e:
+            #     tplr.log_with_context(
+            #         level="error",
+            #         message=f"Error loading random loader: {str(e)}",
+            #         sync_window=self.sync_window,
+            #         current_window=self.current_window,
+            #     )
+            #     continue
 
             # Setup for sliding window approach
             evaluation_uids_queue = list(
                 evaluation_uids
             )  # Create a copy of the list to work with
-            next_uid_dataloader_task = None
+            # next_uid_dataloader_task = None
             next_uid = None
 
             # If we have at least one UID to evaluate, start loading the first one
             if evaluation_uids_queue:
                 next_uid = evaluation_uids_queue.pop(0)
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Starting preload for first UID: {next_uid}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                next_uid_dataloader_task = asyncio.create_task(
-                    self.preload_dataloader(seed=next_uid)
-                )
+                # tplr.log_with_context(
+                #     level="info",
+                #     message=f"Starting preload for first UID: {next_uid}",
+                #     sync_window=self.sync_window,
+                #     current_window=self.current_window,
+                # )
+                # next_uid_dataloader_task = asyncio.create_task(
+                #     self.preload_dataloader(seed=next_uid)
+                # )
 
             # Process each UID with sliding window loading
             while next_uid is not None:
                 eval_uid = next_uid
-                eval_uid_dataloader_task = next_uid_dataloader_task
+                # eval_uid_dataloader_task = next_uid_dataloader_task
                 self.peers_last_eval_window[eval_uid] = self.sync_window
 
-                if eval_uid_dataloader_task is None:
-                    tplr.log_with_context(
-                        level="error",
-                        message=f"Error loading data for UID {eval_uid}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-                    # TODO: Skip to next UID without penalizing current one for validator data loading issues
-                    next_uid = None
-                    next_uid_dataloader_task = None
-                    if evaluation_uids_queue:
-                        next_uid = evaluation_uids_queue.pop(0)
-                        next_uid_dataloader_task = asyncio.create_task(
-                            self.preload_dataloader(seed=next_uid)
-                        )
-                    continue
+                # if eval_uid_dataloader_task is None:
+                #     tplr.log_with_context(
+                #         level="error",
+                #         message=f"Error loading data for UID {eval_uid}",
+                #         sync_window=self.sync_window,
+                #         current_window=self.current_window,
+                #         eval_uid=eval_uid,
+                #     )
+                #     # TODO: Skip to next UID without penalizing current one for validator data loading issues
+                #     next_uid = None
+                #     next_uid_dataloader_task = None
+                #     if evaluation_uids_queue:
+                #         next_uid = evaluation_uids_queue.pop(0)
+                #         next_uid_dataloader_task = asyncio.create_task(
+                #             self.preload_dataloader(seed=next_uid)
+                #         )
+                #     continue
 
                 tplr.log_with_context(
                     level="info",
@@ -1315,119 +1343,90 @@ class Validator:
 
                 # Wait for the current UID's data to be loaded
                 data_start = tplr.T()
-                try:
-                    loader_data = await eval_uid_dataloader_task
-                    # Start loading the next UID if there are more in the queue
-                    next_uid = None
-                    next_uid_dataloader_task = None
-                    if evaluation_uids_queue:
-                        next_uid = evaluation_uids_queue.pop(0)
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"Starting preload for next UID: {next_uid}",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-                        next_uid_dataloader_task = asyncio.create_task(
-                            self.preload_dataloader(seed=next_uid)
-                        )
-                except Exception as e:
-                    tplr.log_with_context(
-                        level="error",
-                        message=f"Error loading data for UID {eval_uid}: {str(e)}, skipping evaluation without penalty (validator data issue)",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-                    # TODO: Skip to next UID without penalizing for validator data loading issues
-                    next_uid = None
-                    next_uid_dataloader_task = None
-                    if evaluation_uids_queue:
-                        next_uid = evaluation_uids_queue.pop(0)
-                        next_uid_dataloader_task = asyncio.create_task(
-                            self.preload_dataloader(seed=next_uid)
-                        )
-                    continue
+                loader_own = torch.utils.data.DataLoader(
+                    sampler=self.sampler,
+                    **self._loader_kwargs,
+                )
 
-                if (
-                    eval_result is not None
-                    and not (
-                        isinstance(eval_result, dict)
-                        and eval_result.get("__status") in ["TOO_LATE", "TOO_EARLY"]
-                    )
-                    and eval_result[0] is not None
-                    and loader_data is not None
-                ):
-                    state_dict, _ = eval_result
-
-                    # Extract data from loader
-                    loader_own = loader_data["loader"]
-                    local_pages = loader_data["pages"]
-
-                    # Pull miner-sent pages info from metadata
-                    miner_pages = None
-                    if (
-                        "metadata" in state_dict
-                        and "pages_info" in state_dict["metadata"]
-                    ):
-                        miner_pages = state_dict["metadata"]["pages_info"]
-                    else:
-                        tplr.log_with_context(
-                            level="warning",
-                            message=f"Missing pages info metadata from miner UID {eval_uid}",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-
-                    if local_pages is None or loader_own is None:
-                        tplr.log_with_context(
-                            level="warning",
-                            message=f"Invalid loader data for UID {eval_uid}, skipping evaluation without penalty (validator data issue)",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-                        # TODO: Skip evaluation without penalizing UID for validator data issues
-                        continue
-
-                    # Verify pages match if miner sent them
-                    if miner_pages is not None:
-                        if (
-                            isinstance(local_pages, type(miner_pages))
-                            and local_pages != miner_pages
-                        ):
-                            tplr.log_with_context(
-                                level="warning",
-                                message=f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}",
-                                sync_window=self.sync_window,
-                                current_window=self.current_window,
-                                eval_uid=eval_uid,
-                            )
-                        else:
-                            tplr.log_with_context(
-                                level="info",
-                                message=f"Pages verified for UID {eval_uid}: pages match.",
-                                sync_window=self.sync_window,
-                                current_window=self.current_window,
-                                eval_uid=eval_uid,
-                            )
-                    else:
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"Using local pages for UID {eval_uid} as miner metadata is missing.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
+                # if (
+                #     eval_result is not None
+                #     and not (
+                #         isinstance(eval_result, dict)
+                #         and eval_result.get("__status") in ["TOO_LATE", "TOO_EARLY"]
+                #     )
+                #     and eval_result[0] is not None
+                #     and loader_data is not None
+                # ):
+                #     state_dict, _ = eval_result
+                #
+                #     # Extract data from loader
+                #     loader_own = loader_data["loader"]
+                #     local_pages = loader_data["pages"]
+                #
+                #     # Pull miner-sent pages info from metadata
+                #     miner_pages = None
+                #     if (
+                #         "metadata" in state_dict
+                #         and "pages_info" in state_dict["metadata"]
+                #     ):
+                #         miner_pages = state_dict["metadata"]["pages_info"]
+                #     else:
+                #         tplr.log_with_context(
+                #             level="warning",
+                #             message=f"Missing pages info metadata from miner UID {eval_uid}",
+                #             sync_window=self.sync_window,
+                #             current_window=self.current_window,
+                #             eval_uid=eval_uid,
+                #         )
+                #
+                #     if local_pages is None or loader_own is None:
+                #         tplr.log_with_context(
+                #             level="warning",
+                #             message=f"Invalid loader data for UID {eval_uid}, skipping evaluation without penalty (validator data issue)",
+                #             sync_window=self.sync_window,
+                #             current_window=self.current_window,
+                #             eval_uid=eval_uid,
+                #         )
+                #         # TODO: Skip evaluation without penalizing UID for validator data issues
+                #         continue
+                #
+                #     # Verify pages match if miner sent them
+                #     if miner_pages is not None:
+                #         if (
+                #             isinstance(local_pages, type(miner_pages))
+                #             and local_pages != miner_pages
+                #         ):
+                #             tplr.log_with_context(
+                #                 level="warning",
+                #                 message=f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}",
+                #                 sync_window=self.sync_window,
+                #                 current_window=self.current_window,
+                #                 eval_uid=eval_uid,
+                #             )
+                #         else:
+                #             tplr.log_with_context(
+                #                 level="info",
+                #                 message=f"Pages verified for UID {eval_uid}: pages match.",
+                #                 sync_window=self.sync_window,
+                #                 current_window=self.current_window,
+                #                 eval_uid=eval_uid,
+                #             )
+                #     else:
+                #         tplr.log_with_context(
+                #             level="info",
+                #             message=f"Using local pages for UID {eval_uid} as miner metadata is missing.",
+                #             sync_window=self.sync_window,
+                #             current_window=self.current_window,
+                #             eval_uid=eval_uid,
+                #         )
+                #
+                #     tplr.log_with_context(
+                #         level="info",
+                #         message=f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}",
+                #         sync_window=self.sync_window,
+                #         current_window=self.current_window,
+                #         eval_uid=eval_uid,
+                #     )
 
                     state_dict, _ = eval_result
                     model_own_data_eval = copy.deepcopy(self.model)
@@ -1723,7 +1722,16 @@ class Validator:
 
                     # 7. Use common random loader for evaluation
                     model_random_data_eval = copy.deepcopy(self.model)
-
+                    rnd_sampler = torch.utils.data.RandomSampler(
+                        self.dataset,
+                        replacement=False,
+                        num_samples=len(self.sampler),  # keep sizes identical
+                        generator=torch.Generator().manual_seed(random_seed),
+                    )
+                    common_loader_random = torch.utils.data.DataLoader(
+                        sampler=rnd_sampler,
+                        **self._loader_kwargs,
+                    )
                     loader_random = common_loader_random
 
                     # 8. Compute initial loss
@@ -2070,16 +2078,16 @@ class Validator:
                     current_window=self.current_window,
                 )
 
-            # Cancel any remaining preload task if exiting the loop early
-            if (
-                next_uid_dataloader_task is not None
-                and not next_uid_dataloader_task.done()
-            ):
-                next_uid_dataloader_task.cancel()
-                try:
-                    await next_uid_dataloader_task
-                except asyncio.CancelledError:
-                    pass
+            # # Cancel any remaining preload task if exiting the loop early
+            # if (
+            #     next_uid_dataloader_task is not None
+            #     and not next_uid_dataloader_task.done()
+            # ):
+            #     next_uid_dataloader_task.cancel()
+            #     try:
+            #         await next_uid_dataloader_task
+            #     except asyncio.CancelledError:
+            #         pass
 
             # Clean up common random loader
             del common_loader_random

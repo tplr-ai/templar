@@ -1235,7 +1235,6 @@ class Validator:
             avg_loss_after_per_batch_random = 0.0
             evaluated_peers = 0
 
-            self.sampler.set_window_uid(self.uid, self.sync_window)
             # Pre-load common random loader for all evaluated UIDs in this window.
             data_start_random = tplr.T()
 
@@ -1300,6 +1299,7 @@ class Validator:
             while next_uid is not None:
                 eval_uid = next_uid
                 # eval_uid_dataloader_task = next_uid_dataloader_task
+                self.sampler.set_window_uid(eval_uid, self.sync_window)
                 self.peers_last_eval_window[eval_uid] = self.sync_window
 
                 # if eval_uid_dataloader_task is None:
@@ -1316,7 +1316,7 @@ class Validator:
                 if evaluation_uids_queue:
                     next_uid = evaluation_uids_queue.pop(0)
                 else:
-                    continue
+                    break
 
                 tplr.log_with_context(
                     level="info",

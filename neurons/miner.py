@@ -522,7 +522,7 @@ class Miner:
             loader = torch.utils.data.DataLoader(
                 dataset=self.dataset,
                 sampler=self.sampler,
-                batch_size=self.hparams.micro_batch_size,  # per-GPU micro-bs
+                batch_size=self.hparams.batch_size,  # per-GPU micro-bs
                 num_workers=2,  # tune as needed
                 pin_memory=True,
             )

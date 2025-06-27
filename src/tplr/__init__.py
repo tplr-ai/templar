@@ -36,4 +36,4 @@ from .wandb import initialize_wandb
 from .metrics import *
 from .shard_index import ShardIndex
 from .strategies import Diloco
-from .sharded_dataset import ShardedGPUDataset, get_sharded_gpu_dataloader
+from .sharded_dataset import *

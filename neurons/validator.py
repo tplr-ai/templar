@@ -1348,85 +1348,85 @@ class Validator:
                     **self._loader_kwargs,
                 )
 
-                # if (
-                #     eval_result is not None
-                #     and not (
-                #         isinstance(eval_result, dict)
-                #         and eval_result.get("__status") in ["TOO_LATE", "TOO_EARLY"]
-                #     )
-                #     and eval_result[0] is not None
-                #     and loader_data is not None
-                # ):
-                #     state_dict, _ = eval_result
-                #
-                #     # Extract data from loader
-                #     loader_own = loader_data["loader"]
-                #     local_pages = loader_data["pages"]
-                #
-                #     # Pull miner-sent pages info from metadata
-                #     miner_pages = None
-                #     if (
-                #         "metadata" in state_dict
-                #         and "pages_info" in state_dict["metadata"]
-                #     ):
-                #         miner_pages = state_dict["metadata"]["pages_info"]
-                #     else:
-                #         tplr.log_with_context(
-                #             level="warning",
-                #             message=f"Missing pages info metadata from miner UID {eval_uid}",
-                #             sync_window=self.sync_window,
-                #             current_window=self.current_window,
-                #             eval_uid=eval_uid,
-                #         )
-                #
-                #     if local_pages is None or loader_own is None:
-                #         tplr.log_with_context(
-                #             level="warning",
-                #             message=f"Invalid loader data for UID {eval_uid}, skipping evaluation without penalty (validator data issue)",
-                #             sync_window=self.sync_window,
-                #             current_window=self.current_window,
-                #             eval_uid=eval_uid,
-                #         )
-                #         # TODO: Skip evaluation without penalizing UID for validator data issues
-                #         continue
-                #
-                #     # Verify pages match if miner sent them
-                #     if miner_pages is not None:
-                #         if (
-                #             isinstance(local_pages, type(miner_pages))
-                #             and local_pages != miner_pages
-                #         ):
-                #             tplr.log_with_context(
-                #                 level="warning",
-                #                 message=f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}",
-                #                 sync_window=self.sync_window,
-                #                 current_window=self.current_window,
-                #                 eval_uid=eval_uid,
-                #             )
-                #         else:
-                #             tplr.log_with_context(
-                #                 level="info",
-                #                 message=f"Pages verified for UID {eval_uid}: pages match.",
-                #                 sync_window=self.sync_window,
-                #                 current_window=self.current_window,
-                #                 eval_uid=eval_uid,
-                #             )
-                #     else:
-                #         tplr.log_with_context(
-                #             level="info",
-                #             message=f"Using local pages for UID {eval_uid} as miner metadata is missing.",
-                #             sync_window=self.sync_window,
-                #             current_window=self.current_window,
-                #             eval_uid=eval_uid,
-                #         )
-                #
-                #     tplr.log_with_context(
-                #         level="info",
-                #         message=f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}",
-                #         sync_window=self.sync_window,
-                #         current_window=self.current_window,
-                #         eval_uid=eval_uid,
-                #     )
+                if (
+                    eval_result is not None
+                    and not (
+                        isinstance(eval_result, dict)
+                        and eval_result.get("__status") in ["TOO_LATE", "TOO_EARLY"]
+                    )
+                    and eval_result[0] is not None
+                    # and loader_data is not None
+                ):
+                    state_dict, _ = eval_result
+
+                    # # Extract data from loader
+                    # loader_own = loader_data["loader"]
+                    # local_pages = loader_data["pages"]
+                    #
+                    # # Pull miner-sent pages info from metadata
+                    # miner_pages = None
+                    # if (
+                    #     "metadata" in state_dict
+                    #     and "pages_info" in state_dict["metadata"]
+                    # ):
+                    #     miner_pages = state_dict["metadata"]["pages_info"]
+                    # else:
+                    #     tplr.log_with_context(
+                    #         level="warning",
+                    #         message=f"Missing pages info metadata from miner UID {eval_uid}",
+                    #         sync_window=self.sync_window,
+                    #         current_window=self.current_window,
+                    #         eval_uid=eval_uid,
+                    #     )
+                    #
+                    # if local_pages is None or loader_own is None:
+                    #     tplr.log_with_context(
+                    #         level="warning",
+                    #         message=f"Invalid loader data for UID {eval_uid}, skipping evaluation without penalty (validator data issue)",
+                    #         sync_window=self.sync_window,
+                    #         current_window=self.current_window,
+                    #         eval_uid=eval_uid,
+                    #     )
+                    #     # TODO: Skip evaluation without penalizing UID for validator data issues
+                    #     continue
+                    #
+                    # # Verify pages match if miner sent them
+                    # if miner_pages is not None:
+                    #     if (
+                    #         isinstance(local_pages, type(miner_pages))
+                    #         and local_pages != miner_pages
+                    #     ):
+                    #         tplr.log_with_context(
+                    #             level="warning",
+                    #             message=f"Pages mismatch for UID {eval_uid}: miner sent {miner_pages} vs local pages {local_pages}",
+                    #             sync_window=self.sync_window,
+                    #             current_window=self.current_window,
+                    #             eval_uid=eval_uid,
+                    #         )
+                    #     else:
+                    #         tplr.log_with_context(
+                    #             level="info",
+                    #             message=f"Pages verified for UID {eval_uid}: pages match.",
+                    #             sync_window=self.sync_window,
+                    #             current_window=self.current_window,
+                    #             eval_uid=eval_uid,
+                    #         )
+                    # else:
+                    #     tplr.log_with_context(
+                    #         level="info",
+                    #         message=f"Using local pages for UID {eval_uid} as miner metadata is missing.",
+                    #         sync_window=self.sync_window,
+                    #         current_window=self.current_window,
+                    #         eval_uid=eval_uid,
+                    #     )
+                    #
+                    # tplr.log_with_context(
+                    #     level="info",
+                    #     message=f"{tplr.P(self.sync_window, tplr.T() - data_start)} Loaded evaluation data using pages: {[p[1] for p in local_pages]}",
+                    #     sync_window=self.sync_window,
+                    #     current_window=self.current_window,
+                    #     eval_uid=eval_uid,
+                    # )
 
                     state_dict, _ = eval_result
                     model_own_data_eval = copy.deepcopy(self.model)

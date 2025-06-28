@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import copy
+import hashlib
 import os
 import random
 import sys
@@ -290,7 +291,7 @@ class Validator:
             world_size=1,
         )
         self.sampler = tplr.EvalSampler(
-            dataset_len=len(self.dataset),
+            dataset=self.dataset,
             uid=self.uid,
             window=self.current_window,
             steps_per_window=self.hparams.inner_steps,
@@ -1254,6 +1255,10 @@ class Validator:
                     continue
 
                 state_dict, _ = eval_result
+
+                meta = state_dict.get("metadata", {})
+                self.log_digest_match(eval_uid, meta)
+
                 # Loss before own data
                 model_before_update = copy.deepcopy(self.model)
                 self.sampler.set_window_uid(eval_uid, self.sync_window)
@@ -2497,6 +2502,58 @@ class Validator:
 
         return selected_uids
 
+    def _training_pool_digest(self, uid: int, window: int) -> tuple[str, int]:
+        """
+        Re-create the *exact* index pool a miner used for (uid, window) and
+        return a 128-bit hex digest **plus the expected sample count**.
+        """
+        miner_sampler = tplr.MinerSampler(
+            dataset=self.dataset,
+            uid=uid,
+            window=window,
+            steps_per_window=self.hparams.inner_steps,
+            micro_bs=self.hparams.micro_batch_size,
+            batch_size=self.hparams.target_batch_size,
+            rank=0,
+            world_size=1,
+        )
+        idxs = miner_sampler._global_indices()
+        ids = miner_sampler.ids_for_indices(idxs.tolist())
+        h = hashlib.blake2b(digest_size=16)
+        h.update(np.asarray(sorted(ids), dtype=np.uint64).tobytes())
+        return h.hexdigest(), len(ids)
+
+    # ────────────────────────────────────────────────────────────────────
+    # new helper: quick check & log
+    # ────────────────────────────────────────────────────────────────────
+    def log_digest_match(self, uid: int, meta: dict[str, object]) -> bool:
+        """
+        Compare miner-supplied metadata with our own expectation.
+        Returns True on match, False on mismatch (and logs both cases).
+        """
+        mine, n_expected = self._training_pool_digest(uid, self.sync_window)
+
+        his = meta.get("sample_digest")
+        n_his = meta.get("sample_count")
+
+        ok = (his == mine) and (n_his == n_expected)
+        msg = (
+            f"✅ sample_digest MATCH for UID {uid} (count {n_his}/{n_expected})"
+            if ok
+            else f"❌ sample_digest MISMATCH for UID {uid}\n"
+            f"     expected {mine} ({n_expected})\n"
+            f"     got      {his} ({n_his})"
+        )
+        level = "info" if ok else "warning"
+        tplr.log_with_context(
+            level=level,
+            message=msg,
+            sync_window=self.sync_window,
+            current_window=self.current_window,
+            eval_uid=uid,
+        )
+        return ok
+
     # Listens for new blocks and sets self.current_block and self.current_window
     def block_listener(self, loop):
         import websockets.exceptions  # Ensure we catch websockets errors
@@ -2603,6 +2660,7 @@ async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
             await asyncio.sleep(delay)
     tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
     return None
+
 
 if __name__ == "__main__":
     uvloop.install()

@@ -1,6 +1,9 @@
+from abc import ABC, abstractmethod
+
 import numpy as np
 from torch.utils.data import Sampler
-from abc import ABC, abstractmethod
+
+import tplr
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -24,7 +27,7 @@ class _BaseWindowSampler(Sampler, ABC):
 
     def __init__(
         self,
-        dataset_len: int,
+        dataset: tplr.SharedShardedDataset,
         uid: int,
         window: int,
         *,
@@ -34,7 +37,8 @@ class _BaseWindowSampler(Sampler, ABC):
         rank: int = 0,
         world_size: int = 1,
     ):
-        self.dataset_len = dataset_len
+        self._dataset_ref = dataset
+        self.dataset_len = len(dataset)
         self.steps_per_window = steps_per_window
         self.micro_bs = micro_bs
         self.batch_size = batch_size
@@ -68,6 +72,13 @@ class _BaseWindowSampler(Sampler, ABC):
     def __len__(self):
         return len(self._local)
 
+    # ------------------------------------------------------------------ #
+    # helper: map dataset indices ➜ sample_id (used for hashing receipts)
+    # ------------------------------------------------------------------ #
+    def ids_for_indices(self, idx_list: list[int]) -> list[int]:
+        ds = self._dataset_ref
+        return [ds.sample_id(i) for i in idx_list]
+
     # --------------------------------------------------------------------- #
     # to be implemented by subclasses
     # --------------------------------------------------------------------- #
@@ -88,10 +99,31 @@ class MinerSampler(_BaseWindowSampler):
     Deterministic, rank-aware sampler for miner training.
     """
 
-    # only the constructor’s docstring differs from the base class,
-    # so we leave it out and rely on inheritance.
+    # Explicit constructor so we can pass the dataset reference upward.
+    def __init__(
+        self,
+        dataset: tplr.SharedShardedDataset,
+        uid: int,
+        window: int,
+        *,
+        steps_per_window: int,
+        micro_bs: int,
+        batch_size: int,
+        rank: int = 0,
+        world_size: int = 1,
+    ):
+        super().__init__(
+            dataset,
+            uid,
+            window,
+            steps_per_window=steps_per_window,
+            micro_bs=micro_bs,
+            batch_size=batch_size,
+            rank=rank,
+            world_size=world_size,
+        )
 
-    def _global_indices(self) -> np.ndarray:  # noqa: D401
+    def _global_indices(self) -> np.ndarray:
         wanted = self.steps_per_window * self.batch_size
         if wanted > self.dataset_len:
             raise ValueError(
@@ -113,7 +145,7 @@ class EvalSampler(_BaseWindowSampler):
 
     def __init__(  # signature differs, so we must override
         self,
-        dataset_len: int,
+        dataset: tplr.SharedShardedDataset,
         uid: int,
         window: int,
         *,
@@ -129,7 +161,7 @@ class EvalSampler(_BaseWindowSampler):
 
         self.validation_bs = validation_bs
         super().__init__(
-            dataset_len,
+            dataset,
             uid,
             window,
             steps_per_window=steps_per_window,

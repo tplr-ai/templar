@@ -30,7 +30,6 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
-from types import SimpleNamespace
 from typing import Iterable, cast
 
 import bittensor as bt
@@ -44,11 +43,6 @@ from rich.console import Console
 from rich.table import Table
 from torch import autocast
 from torch.optim import SGD
-from torch.optim.lr_scheduler import (
-    CosineAnnealingWarmRestarts,
-    LinearLR,
-    SequentialLR,
-)
 from transformers.models.llama import LlamaForCausalLM
 
 # Local
@@ -168,7 +162,8 @@ class Validator:
         )
 
         # Init optimizer
-        self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
+        self.lr = float(self.hparams.outer_learning_rate)
+        self.optimizer = SGD(self.model.parameters(), lr=self.lr)
         self.xshapes = {}
         self.totalks = {}
         for n, p in self.model.named_parameters():
@@ -178,25 +173,6 @@ class Validator:
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
-
-        # Set up scheduler setup
-        warmup_scheduler = LinearLR(
-            self.optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=250,
-        )
-        cosine_scheduler = CosineAnnealingWarmRestarts(
-            self.optimizer,
-            T_0=self.hparams.t_max,
-            T_mult=2,
-            eta_min=self.hparams.learning_rate * 0.1,
-        )
-        self.scheduler = SequentialLR(
-            self.optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[250],
-        )
 
         self.openskill_model = PlackettLuce(
             beta=self.hparams.openskill_beta, tau=self.hparams.openskill_tau
@@ -724,12 +700,8 @@ class Validator:
         (
             success,
             loaded_checkpoint_window,
-            loaded_optimizer,
-            loaded_scheduler,
         ) = await self.comms.load_checkpoint(
             model=self.model,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,
             current_window=self.current_window,
             device=cast(str, self.config.device),
             init_version=tplr.__version__
@@ -737,13 +709,7 @@ class Validator:
             else self.bootstrap_version,
         )
         if success:
-            self.optimizer = loaded_optimizer
-            self.scheduler = loaded_scheduler
-            tplr.logger.info(
-                f"Loaded checkpoint with global_step={self.global_step}, "
-                f"optimizer_step={self.optimizer.state_dict()['state'].get(0, {}).get('step', 0)}, "
-                f"scheduler_step={self.scheduler.last_epoch}"
-            )
+            tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
             # Only catch up if we're behind
             if (
                 loaded_checkpoint_window < self.current_window
@@ -785,7 +751,7 @@ class Validator:
             self.sync_window += 1
             tplr.log_with_context(
                 level="info",
-                message=f"Sync Window: {self.sync_window}, Scheduler epoch: {self.scheduler.last_epoch}, Global step: {self.global_step}",
+                message=f"Sync Window: {self.sync_window}, Global step: {self.global_step}",
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
@@ -1029,88 +995,31 @@ class Validator:
             skipped_uids: list[int] = []
             success_rate = 0.0
             gather_result = None
-            load_aggregation_start = tplr.T()
-            aggregation_result = await self.comms.load_aggregation(self.sync_window)
-            load_aggregation_end = tplr.T()
-            if aggregation_result is None:
-                gather_result = await self.comms.gather(
-                    my_uid=self.uid,
-                    uids=self.comms.peers,
-                    window=self.sync_window,
-                    key="gradient",
-                    timeout=45,
-                    device=cast(str, self.config.device),
-                    local=False,
-                    totalks=self.totalks,
-                    time_min=time_min,
-                    time_max=time_max,
-                )
+            gather_result = await self.comms.gather(
+                my_uid=self.uid,
+                uids=self.comms.peers,
+                window=self.sync_window,
+                key="gradient",
+                timeout=45,
+                device=cast(str, self.config.device),
+                local=False,
+                totalks=self.totalks,
+                time_min=time_min,
+                time_max=time_max,
+            )
 
-                if gather_result is None:
-                    tplr.log_with_context(
-                        level="error",
-                        message="Failed to gather gradients from peers. Waiting for next window.",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                    self.global_step += 1
-                    continue
-                skipped_uids = gather_result.skipped_uids
-                success_rate = gather_result.success_rate
-            else:
+            if gather_result is None:
                 tplr.log_with_context(
-                    level="info",
-                    message=f"{tplr.P(self.sync_window, load_aggregation_end - load_aggregation_start)} Loaded aggregation data.",
+                    level="error",
+                    message="Failed to gather gradients from peers. Waiting for next window.",
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                state_dict = cast(dict, aggregation_result.get("state_dict"))
-                skipped_uids = cast(list[int], state_dict.get("skipped_uids", []))
-                success_rate = cast(float, state_dict.get("success_rate", 0.0))
-                idx_overlap_peers = cast(
-                    set[int], state_dict.get("uids_idx_overlap", {})
-                )
-                for uid in idx_overlap_peers:
-                    old_score = self.final_scores[uid].item()
-
-                    # Only reduce positive scores
-                    if self.final_scores[uid] > 0:
-                        self.final_scores[uid] *= self.idx_similarity_slashing_rate
-                        self.binary_moving_averages[uid] *= (
-                            self.idx_similarity_slashing_rate
-                        )
-
-                        new_score = self.final_scores[uid].item()
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to similarity in idxs.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-                    else:
-                        tplr.log_with_context(
-                            level="info",
-                            message=f"Skipped score of UID {uid} (current score: {old_score:.4f}) due to negative or zero value.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-
+                self.global_step += 1
+                continue
+            skipped_uids = gather_result.skipped_uids
+            success_rate = gather_result.success_rate
             gather_time = tplr.T() - gather_start
-
-            from_aggregator = 1 if aggregation_result is not None else 0
-            tplr.log_with_context(
-                level="info",
-                message=f"Using gradient source: {'aggregator' if from_aggregator else 'gather'}",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
-
-            self.wandb.log(
-                {
-                    "validator/aggregator_gradient": from_aggregator,
-                },
-                step=self.global_step,
-            )
 
             tplr.log_with_context(
                 level="info",
@@ -1278,8 +1187,8 @@ class Validator:
                 )
                 if (
                     eval_result is None
-                    or not isinstance(eval_result, dict)
-                    or eval_result.get("__status") in ["TOO_LATE", "TOO_EARLY"]
+                    or not isinstance(eval_result[0], dict)
+                    or eval_result[0].get("__status") in ["TOO_LATE", "TOO_EARLY"]
                 ):
                     tplr.log_with_context(
                         level="info",
@@ -1345,7 +1254,6 @@ class Validator:
                     continue
 
                 state_dict, _ = eval_result
-
                 # Loss before own data
                 model_before_update = copy.deepcopy(self.model)
                 self.sampler.set_window_uid(eval_uid, self.sync_window)
@@ -1832,15 +1740,23 @@ class Validator:
             update_start = tplr.T()
             self.optimizer.zero_grad()
             self.model.zero_grad()
-            lr = self.scheduler.get_last_lr()[0]
             # Apply weight decay just like in the miner
             for p in self.model.parameters():
-                p.data.mul_(1.0 - lr * self.hparams.weight_decay)
+                p.data.mul_(1.0 - self.lr * self.hparams.weight_decay)
 
-            if aggregation_result is not None:
-                self.apply_aggregated_gradients(aggregation_result=aggregation_result)
-            elif gather_result is not None and gather_result.state_dict is not None:
-                self.apply_gathered_gradients(gather_result=gather_result)
+            if gather_result is not None and gather_result.state_dict is not None:
+                tplr.neurons.outer_step(
+                    self.model,
+                    self.optimizer,
+                    gather_result=gather_result,
+                    transformer=self.transformer,
+                    compressor=self.compressor,
+                    xshapes=self.xshapes,
+                    totalks=self.totalks,
+                    device=cast(str, self.config.device),
+                    is_master=True,
+                    world_size=1,
+                )
             else:
                 tplr.log_with_context(
                     level="warning",
@@ -1848,7 +1764,6 @@ class Validator:
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                self.scheduler.step()
                 torch.cuda.empty_cache()
 
             tplr.log_with_context(
@@ -1932,7 +1847,7 @@ class Validator:
                 "validator/network/window": self.sync_window,
                 "validator/network/step": self.global_step,
                 "validator/network/evaluated_uids": len(self.evaluated_uids),
-                "validator/optimizer/learning_rate": self.scheduler.get_last_lr()[0],
+                "validator/optimizer/learning_rate": self.lr,
                 "validator/network/active_miners": len(self.valid_score_indices),
                 "validator/gather/success_rate": success_rate * 100,
                 "validator/timing/window_total": tplr.T() - window_start,
@@ -1962,7 +1877,7 @@ class Validator:
                     "loss_random_improvement": float(self.relative_improvement_random),
                     "current_block": int(self.current_block),
                     "evaluated_uids_count": int(len(self.evaluated_uids)),
-                    "learning_rate": float(self.scheduler.get_last_lr()[0]),
+                    "learning_rate": float(self.lr),
                     "active_miners_count": int(len(self.valid_score_indices)),
                     "gather_success_rate": gather_success_rate,
                     "window_total_time": float(tplr.T() - window_start),
@@ -1998,11 +1913,6 @@ class Validator:
                     "model_state_dict": {
                         k: v.cpu().clone() for k, v in self.model.state_dict().items()
                     },
-                    "optimizer_state_dict": {
-                        k: v.cpu().clone() if torch.is_tensor(v) else v
-                        for k, v in self.optimizer.state_dict().items()
-                    },
-                    "scheduler_state_dict": self.scheduler.state_dict(),
                     "start_window": self.start_window,
                     "current_window": self.current_window,
                     "sync_window": self.sync_window,
@@ -2203,14 +2113,11 @@ class Validator:
                 "sync_score": 0.0,
             }
 
-        # Get current learning rate
-        current_lr = self.scheduler.get_last_lr()[0]
-
         # Compare miner's debug dict with validator's model
         comparison_metrics = await tplr.neurons.compare_model_with_debug_dict(
             model=self.model,
             debug_dict=miner_debug_dict,
-            learning_rate=current_lr,
+            learning_rate=self.lr,
             index_range=(10, 12),
         )
 
@@ -2231,142 +2138,6 @@ class Validator:
         result = {**comparison_metrics, "sync_score": sync_score}
 
         return result
-
-    def apply_aggregated_gradients(self, aggregation_result: dict):
-        """
-        Apply aggregated gradients from the aggregation server.
-        Args:
-            aggregation_result: Pre-loaded aggregation data from the aggregation server.
-        Returns:
-            bool: True if aggregation was successfully applied, False otherwise
-        """
-        try:
-            update_start = time.time()
-
-            state_dict = aggregation_result.get("state_dict")
-            if state_dict is None:
-                tplr.log_with_context(
-                    level="warning",
-                    message="No state_dict found in aggregation result",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                return False
-
-            tensors_applied = 0
-
-            for name, param in self.model.named_parameters():
-                if name in state_dict:
-                    packed_tensor = state_dict[name]
-                    if packed_tensor is None:
-                        continue
-
-                    # Unpack binary tensor
-                    unpacked_tensor = tplr.neurons.unpack_binary_tensor(
-                        packed_tensor, param.shape
-                    )
-
-                    # Move to appropriate device
-                    unpacked_tensor = unpacked_tensor.to(self.config.device)
-
-                    # Set as gradient for optimizer
-                    if param.grad is None:
-                        param.grad = unpacked_tensor
-                    else:
-                        param.grad.copy_(unpacked_tensor)
-
-                    tensors_applied += 1
-
-            if tensors_applied > 0:
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Set gradients for {tensors_applied} tensors in {time.time() - update_start:.2f}s",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-
-                # Update parameters with optimizer
-                self.optimizer.step()
-                self.scheduler.step()
-                torch.cuda.empty_cache()
-
-                tplr.log_with_context(
-                    level="info",
-                    message="Successfully applied aggregation",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                return True
-            else:
-                tplr.log_with_context(
-                    level="warning",
-                    message="No tensors were applied during aggregation",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                return False
-
-        except Exception as e:
-            tplr.log_with_context(
-                level="error",
-                message=f"Error applying aggregated gradients: {e}",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
-            return False
-
-    def apply_gathered_gradients(self, gather_result: SimpleNamespace):
-        """
-        Apply gathered gradients from peers to the model.
-
-        This method:
-        1. Extracts the compressed gradients from the gather result
-        2. Decompresses them using the DCT transformer and compressor
-        3. Applies sign operation for SignSGD optimization
-        4. Updates the model using the optimizer and scheduler
-
-        Args:
-            gather_result: The result object from a gather operation containing
-                          compressed gradients from peers
-        """
-        for n, p in self.model.named_parameters():
-            idxs_key = n + "idxs"
-            vals_key = n + "vals"
-            quant_key = n + "quant_params"
-
-            idxs = getattr(gather_result.state_dict, idxs_key, None)
-            vals = getattr(gather_result.state_dict, vals_key, None)
-            quant_params = getattr(gather_result.state_dict, quant_key, None)
-            if idxs is not None and vals is not None:
-                if not isinstance(idxs, (list, tuple)):
-                    idxs = [idxs]
-                if not isinstance(vals, (list, tuple)):
-                    vals = [vals]
-                new_grad = self.transformer.decode(
-                    self.compressor.batch_decompress(
-                        p.to(self.config.device),
-                        cast(list[torch.Tensor], idxs),
-                        cast(list[torch.Tensor], vals),
-                        self.xshapes[n],
-                        self.totalks[n],
-                        quant_params,
-                    )
-                )
-                if p.grad is None:
-                    p.grad = new_grad
-                else:
-                    p.grad.copy_(new_grad)
-                p.grad.sign_()
-            else:
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Gradient data missing for parameter {n}, skipping.",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-        self.optimizer.step()
-        self.scheduler.step()
-        torch.cuda.empty_cache()
 
     def update_model_with_gradient(
         self, model: torch.nn.Module, eval_uid: int, eval_state_dict: dict
@@ -2459,8 +2230,8 @@ class Validator:
                     )
 
                 p.data.sub_(
-                    grad.sign(),
-                    alpha=self.scheduler.get_last_lr()[0] * self.hparams.eval_lr_factor,
+                    grad,
+                    alpha=self.lr * self.hparams.eval_lr_factor,
                 )
 
     # ------------- state helpers ----------------

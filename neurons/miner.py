@@ -38,11 +38,11 @@ import uvloop
 # Third party
 from bittensor.core.subtensor import ScaleObj
 from torch import autocast
-from torch.optim import SGD, Optimizer
+from torch.distributed.optim import ZeroRedundancyOptimizer
+from torch.optim import SGD
 from torch.optim.lr_scheduler import (
-    CosineAnnealingWarmRestarts,
+    CosineAnnealingLR,
     LinearLR,
-    LRScheduler,
     SequentialLR,
 )
 from torch.utils.data import DataLoader
@@ -138,7 +138,7 @@ class Miner:
         self.world_size = int(os.getenv("WORLD_SIZE", 1))
         self.local_rank = int(os.getenv("LOCAL_RANK", 0))
 
-        if self.world_size > 1:
+        if self.world_size >= 1:
             dist.init_process_group(
                 backend="nccl",
                 init_method="env://",
@@ -177,6 +177,7 @@ class Miner:
         self.model = LlamaForCausalLM(self.hparams.model_config)
         self.model.to(self.device)  # type: ignore[reportArgumentType]
         self.model.gradient_checkpointing_enable()
+
         if self.world_size > 1:
             self.model = torch.nn.parallel.DistributedDataParallel(
                 self.model,
@@ -197,7 +198,6 @@ class Miner:
         )
 
         # Init optimizer and momentum
-        self.optimizer = SGD(self.model.parameters(), lr=self.hparams.learning_rate)
         self.momentum = {}
         self.owned_params = set()
 
@@ -209,6 +209,43 @@ class Miner:
             else self.model.named_parameters()
         )
 
+        self.outer_optimizer = SGD(
+            self.model.parameters(), lr=self.hparams.outer_learning_rate
+        )
+        self.inner_optimizer = ZeroRedundancyOptimizer(
+            self.model.parameters(),
+            optimizer_class=torch.optim.AdamW,
+            lr=self.hparams.learning_rate,
+            weight_decay=self.hparams.weight_decay,
+            betas=(0.9, 0.95),
+            parameters_as_bucket_view=True,
+            overlap_with_ddp=False,
+        )
+        inner_steps_before_outer_step = self.hparams.inner_steps * (
+            self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
+        )
+        init_scheduler = LinearLR(
+            self.inner_optimizer,
+            start_factor=0.1,
+            end_factor=0.1,
+            total_iters=inner_steps_before_outer_step,
+        )
+        warmup_scheduler = LinearLR(
+            self.inner_optimizer,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=self.hparams.warmup_steps,
+        )
+        cosine_scheduler = CosineAnnealingLR(
+            self.inner_optimizer,
+            T_max=self.hparams.t_max,
+            eta_min=self.hparams.learning_rate * 0.1,
+        )
+        self.inner_scheduler = SequentialLR(
+            self.inner_optimizer,
+            schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
+            milestones=[inner_steps_before_outer_step, self.hparams.warmup_steps],
+        )
         for idx, (n, p) in enumerate(model_iterator):
             if idx % self.world_size == self.rank:
                 # this rank “owns” the parameter
@@ -220,24 +257,6 @@ class Miner:
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
-        # Set up scheduler
-        warmup_scheduler = LinearLR(
-            self.optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=250,
-        )
-        cosine_scheduler = CosineAnnealingWarmRestarts(
-            self.optimizer,
-            T_0=self.hparams.t_max,
-            T_mult=2,
-            eta_min=self.hparams.learning_rate * 0.1,
-        )
-        self.scheduler = SequentialLR(
-            self.optimizer,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[250],
-        )
 
         self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
         tplr.logger.info(
@@ -373,12 +392,8 @@ class Miner:
             (
                 ckpt_ok,
                 ckpt_sync_win,
-                self.optimizer,
-                self.scheduler,
             ) = await self.comms.load_checkpoint(
                 model=bare_model,
-                optimizer=self.optimizer,
-                scheduler=self.scheduler,
                 current_window=self.current_window,
                 device=str(self.device),
                 init_version=tplr.__version__
@@ -414,16 +429,6 @@ class Miner:
             for tensor in bare_model.state_dict().values():
                 if torch.is_tensor(tensor):
                     dist.broadcast(tensor.data, src=0)
-
-            # 2) optimizer state  (broadcast as one object ➜ load on every rank)
-            opt_pkt = [self.optimizer.state_dict()]
-            dist.broadcast_object_list(opt_pkt, src=0)
-            self.optimizer.load_state_dict(opt_pkt[0])
-
-            # 3) scheduler state (same idea)
-            sched_pkt = [self.scheduler.state_dict()]
-            dist.broadcast_object_list(sched_pkt, src=0)
-            self.scheduler.load_state_dict(sched_pkt[0])
 
             bcast_time = tplr.T() - bcast_start
             tplr.logger.info(
@@ -470,67 +475,10 @@ class Miner:
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             tplr.logger.info("Start accumulating...")
-            self.optimizer.zero_grad()
-            self.model.zero_grad()
-            total_loss = 0.0
-            n_batches = 0
-            window_tokens = 0  # Initialize token count for this window
-
-            loader_iter = iter(loader)
-            while True:
-                try:
-                    batch = next(loader_iter)
-                    local_has_batch = True
-                except StopIteration:
-                    local_has_batch = False
-                    batch = None
-
-                if self.world_size > 1:
-                    cont = self.should_continue(local_has_batch, self.device)
-                    if not cont:
-                        if self.is_master:
-                            tplr.logger.info(
-                                "Stopping batch loop: at least one rank exhausted."
-                            )
-                        break
-                    if not local_has_batch:
-                        continue
-
-                input_ids = torch.tensor(batch, dtype=torch.long).to(self.device)
-                tokens_this_batch = input_ids.numel()
-                window_tokens += tokens_this_batch
-                labels = input_ids.clone()
-                labels = torch.where(
-                    labels == self.tokenizer.pad_token_id, -100, labels
-                )
-
-                with autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                    outputs = self.model(input_ids=input_ids, labels=labels)
-
-                total_loss += outputs.loss.item()
-                outputs.loss.backward()
-                n_batches += 1
-                tplr.logger.info(f"loss: {outputs.loss.item()} [Batch {n_batches}]")
-
-                # Clear intermediate activations immediately
-                del outputs, batch
-                if "input_ids" in locals():
-                    del input_ids
-                if "labels" in locals():
-                    del labels
-                torch.cuda.empty_cache()
-
-                if self.current_window != step_window:
-                    tplr.logger.info("<Exhausted window>")
-                    break
-
-            if n_batches > 0:
-                tplr.logger.info(
-                    f"Normalizing gradients by {n_batches} accumulation steps"
-                )
-                for param in self.model.parameters():
-                    if param.grad is not None:
-                        param.grad.div_(n_batches)
+            res = self.inner_steps(loader=loader, step_window=step_window)
+            loss = res["first_loss"]
+            n_batches = res["batch_count"]
+            window_tokens = res["batch_tokens"]
 
             # If training completes before the window is exhausted, wait until the window ends.
             if self.current_window == step_window:
@@ -700,125 +648,24 @@ class Miner:
             ]
             weight_norms = [p.norm().item() for p in self.model.parameters()]
 
-            # ─────────────── momentum norms (gathered across ranks) ─────────
-            local_mom_norms: list[float] = [
-                m.norm().item() for m in self.momentum.values()
-            ]
-            if self.world_size > 1:
-                gathered_mom: list[list[float]] = [None] * self.world_size  # type: ignore[var-annotated]
-                dist.all_gather_object(gathered_mom, local_mom_norms)
-            else:
-                gathered_mom = [local_mom_norms]
-
-            momentum_norms = []
-            if self.is_master:
-                momentum_norms: list[float] = [
-                    v for sublist in gathered_mom for v in sublist
-                ]
-                self.wandb.log(
-                    {
-                        # Training metrics
-                        "miner/loss": total_loss / n_batches if n_batches > 0 else 0,
-                        "miner/tokens_per_sec": tokens_per_sec,
-                        "miner/batch_duration": duration,
-                        "miner/total_tokens": self.total_tokens_processed,
-                        "miner/batch_tokens": window_tokens,
-                        "miner/global_step": self.global_step,
-                        # Resource metrics
-                        "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                        / 1024**2,  # MB
-                        "miner/gpu_memory_cached": torch.cuda.memory_reserved()
-                        / 1024**2,  # MB
-                        # Network metrics
-                        "miner/gather_peers": len(self.comms.peers),
-                        "miner/effective_batch_size": len(self.comms.peers)
-                        * self.hparams.batch_size,
-                        # Optimization metrics
-                        "miner/learning_rate": self.scheduler.get_last_lr()[0],
-                        # Gradient statistics as points
-                        "miner/mean_grad_norm": sum(grad_norms) / len(grad_norms)
-                        if grad_norms
-                        else 0,
-                        "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
-                        "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                        "miner/grad_norm_std": torch.tensor(grad_norms).std().item()
-                        if grad_norms
-                        else 0,
-                        "miner/mean_weight_norm": sum(weight_norms) / len(weight_norms),
-                        "miner/mean_momentum_norm": sum(momentum_norms)
-                        / len(momentum_norms)
-                        if momentum_norms
-                        else 0,
-                    },
-                    step=self.global_step,
-                )
-
             # ---------------------------------------------------------------------
             # 6. Await both gather
             # ---------------------------------------------------------------------
 
             # 8. Apply gathered gradients
             update_start = tplr.T()
-            new_grad = None
-            if self.is_master:
-                self.model.train()
-                self.optimizer.zero_grad()
-
-                new_grad = None
-                if gather_result is not None and gather_result.state_dict is not None:
-                    if isinstance(
-                        self.model, torch.nn.parallel.DistributedDataParallel
-                    ):
-                        model_iterator = self.model.module.named_parameters()
-                    else:
-                        model_iterator = self.model.named_parameters()
-                    for n, p in model_iterator:
-                        idxs_key = n + "idxs"
-                        vals_key = n + "vals"
-                        quant_key = n + "quant_params"
-
-                        idxs = getattr(gather_result.state_dict, idxs_key, None)
-                        vals = getattr(gather_result.state_dict, vals_key, None)
-                        quant_params = getattr(
-                            gather_result.state_dict, quant_key, None
-                        )
-                        if idxs is not None and vals is not None:
-                            if not isinstance(idxs, (list, tuple)):
-                                idxs = [idxs]
-                            if not isinstance(vals, (list, tuple)):
-                                vals = [vals]
-                            new_grad = self.transformer.decode(
-                                self.compressor.batch_decompress(
-                                    p.to(self.device),
-                                    cast(list[torch.Tensor], idxs),
-                                    cast(list[torch.Tensor], vals),
-                                    self.xshapes[n],
-                                    self.totalks[n],
-                                    quant_params,
-                                )
-                            )
-
-                            if p.grad is None:
-                                p.grad = new_grad
-                            else:
-                                p.grad.copy_(new_grad)
-                            p.grad.sign_()
-                        else:
-                            tplr.logger.info(
-                                f"Gradient data missing for parameter {n}, skipping."
-                            )
-
-                self.optimizer.step()
-                self.scheduler.step()
-                torch.cuda.empty_cache()
-                for t in bare_model.state_dict().values():
-                    if torch.is_tensor(t):
-                        dist.broadcast(t.data, src=0)
-            else:
-                for t in bare_model.state_dict().values():
-                    if torch.is_tensor(t):
-                        dist.broadcast(t.data, src=0)
-
+            tplr.neurons.outer_step(
+                self.model,
+                self.outer_optimizer,
+                gather_result=gather_result,
+                transformer=self.transformer,
+                compressor=self.compressor,
+                xshapes=self.xshapes,
+                totalks=self.totalks,
+                device=str(self.device),
+                is_master=self.is_master,
+                world_size=self.world_size,
+            )
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - update_start)} Updated model"
             )
@@ -867,10 +714,23 @@ class Miner:
                 f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"
             )
 
+            # ─────────────── momentum norms (gathered across ranks) ─────────
+            local_mom_norms: list[float] = [
+                m.norm().item() for m in self.momentum.values()
+            ]
+            if self.world_size > 1:
+                gathered_mom: list[list[float]] = [None] * self.world_size  # type: ignore[var-annotated]
+                dist.all_gather_object(gathered_mom, local_mom_norms)
+            else:
+                gathered_mom = [local_mom_norms]
+
+            momentum_norms = []
             # Log metrics to WandB
             if self.is_master:
                 # Calculate common metrics values
-                loss_value = total_loss / n_batches if n_batches > 0 else 0
+                momentum_norms: list[float] = [
+                    v for sublist in gathered_mom for v in sublist
+                ]
                 mean_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0
                 grad_norm_std = (
                     torch.tensor(grad_norms).std().item() if grad_norms else 0
@@ -890,6 +750,7 @@ class Miner:
                 gather_success_rate = (
                     gather_result.success_rate * 100 if gather_result else 0.0
                 )
+                inner_lr = self.inner_scheduler.get_last_lr()[0]
 
                 self.wandb.log(
                     {
@@ -903,7 +764,7 @@ class Miner:
                         "miner/timing/put": put_completion_time,
                         "miner/timing/model_update": model_update_time,
                         # Existing metrics
-                        "miner/loss": loss_value,
+                        "miner/loss": loss,
                         "miner/tokens_per_sec": tokens_per_sec,
                         "miner/total_tokens": self.total_tokens_processed,
                         "miner/batch_tokens": window_tokens,
@@ -915,7 +776,7 @@ class Miner:
                         "miner/gather_peers": len(self.comms.peers),
                         "miner/effective_batch_size": len(self.comms.peers)
                         * self.hparams.batch_size,
-                        "miner/learning_rate": self.scheduler.get_last_lr()[0],
+                        "miner/inner_lr": inner_lr,
                         "miner/mean_grad_norm": mean_grad_norm,
                         "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
                         "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
@@ -935,7 +796,7 @@ class Miner:
                         "global_step": self.global_step,
                     },
                     fields={
-                        "loss": loss_value,
+                        "loss": loss,
                         "n_gather_peers": int(len(self.comms.peers)),
                         "gather_success_rate": gather_success_rate,
                         "gather_peers": json.dumps(self.comms.peers),
@@ -963,7 +824,7 @@ class Miner:
             # Delete local variables to clear up memory
             del loader, gather_result, shard_gradient
             if self.is_master:
-                del processed_state_dict, gradient, new_grad
+                del processed_state_dict, gradient
 
             await self.cleanup_window()
             # 4. Wait for next window
@@ -973,10 +834,7 @@ class Miner:
 
     def inner_steps(
         self,
-        model: torch.nn.Module,
         loader: DataLoader,
-        inner_optimizer: Optimizer,
-        inner_scheduler: LRScheduler,
         step_window: int,
     ) -> dict:
         """
@@ -988,7 +846,7 @@ class Miner:
         dict
             Keys: total_loss (float), batch_count (int), batch_tokens (int)
         """
-        inner_optimizer.zero_grad()
+        self.inner_optimizer.zero_grad()
 
         total_loss: float = 0.0
         batch_count: int = 0
@@ -996,7 +854,7 @@ class Miner:
         accum_batch_size: int = 0
         first_loss = 0.0
 
-        self.params_offloaded = self._get_offloaded_param()
+        params_offloaded = self._get_offloaded_param()
 
         inner_step_count: int = 0
         loader_iter = iter(loader)
@@ -1103,16 +961,16 @@ class Miner:
             if global_done:
                 tplr.logger.info("%s<Exhausted window: exiting synchronously>", rank)
                 for _ in range(inner_step_count, self.hparams.inner_steps):
-                    inner_scheduler.step()
+                    self.inner_scheduler.step()
                 break
 
         # ------------------------------------------------------------------ #
-        # 7. Your “parameter offloading” logic (unchanged)
+        # 7. parameter offloading logic
         # ------------------------------------------------------------------ #
         bare_model = (
-            model.module
-            if isinstance(model, torch.nn.parallel.DistributedDataParallel)
-            else model
+            self.model.module
+            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
+            else self.model
         )
         with torch.no_grad():
             for saved_param, p in zip(params_offloaded, bare_model.parameters()):
@@ -1149,7 +1007,7 @@ class Miner:
         """Aggressive memory cleanup between windows"""
         # Clear gradients more thoroughly
         self.model.zero_grad(set_to_none=True)
-        self.optimizer.zero_grad(set_to_none=True)
+        self.inner_optimizer.zero_grad(set_to_none=True)
 
         # Empty CUDA cache
         torch.cuda.empty_cache()

@@ -57,7 +57,7 @@ def prepare_gradient_dict(miner, step_window):
     gradient = {}
     xshapes = {}
     totalks = {}
-    lr = miner.scheduler.get_last_lr()[0]
+    lr = float(miner.hparams.outer_learning_rate)
 
     if isinstance(miner.model, torch.nn.parallel.DistributedDataParallel):
         model_iterator = miner.model.module.named_parameters()

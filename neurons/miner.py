@@ -179,6 +179,11 @@ class Miner:
         self.model.to(self.device)  # type: ignore[reportArgumentType]
         self.model.gradient_checkpointing_enable()
 
+        compile_mode = "default"
+        self.model = cast(
+            LlamaForCausalLM, torch.compile(self.model, mode=compile_mode)
+        )
+
         if self.world_size > 1:
             self.model = torch.nn.parallel.DistributedDataParallel(
                 self.model,

@@ -2088,7 +2088,7 @@ class Validator:
             #         pass
 
             # Clean up common random loader
-            del common_loader_random
+            # del common_loader_random
             torch.cuda.empty_cache()
 
             self.update_openskill_ratings()

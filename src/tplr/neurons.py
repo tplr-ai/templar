@@ -19,6 +19,7 @@
 import asyncio
 import math
 import time
+from types import SimpleNamespace
 import typing
 from typing import TYPE_CHECKING, TypeVar, cast
 
@@ -64,9 +65,6 @@ def prepare_gradient_dict(miner, step_window):
     else:
         model_iterator = miner.model.named_parameters()
     for n, p in model_iterator:
-        # Weight-decay is done by *every* rank
-        p.data.mul_(1.0 - lr * miner.hparams.weight_decay)
-
         # Skip parameters not owned by this rank
         if n not in miner.owned_params:
             p.grad = None
@@ -124,7 +122,7 @@ def outer_step(
     model: nn.Module,
     optimizer: Optimizer,
     *,
-    gather_result,
+    gather_result: SimpleNamespace | None,
     transformer: tplr.compress.TransformDCT,
     compressor: tplr.compress.CompressDCT,
     xshapes: dict,

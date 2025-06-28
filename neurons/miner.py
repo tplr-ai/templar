@@ -38,16 +38,19 @@ import uvloop
 # Third party
 from bittensor.core.subtensor import ScaleObj
 from torch import autocast
-from torch.optim import SGD
+from torch.optim import SGD, Optimizer
 from torch.optim.lr_scheduler import (
     CosineAnnealingWarmRestarts,
     LinearLR,
+    LRScheduler,
     SequentialLR,
 )
+from torch.utils.data import DataLoader
 from transformers.models.llama import LlamaForCausalLM
 
-# Local
 import tplr
+
+# Local
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -146,6 +149,7 @@ class Miner:
         else:
             self.config.device = self.config.device or "cuda"
         self.device = torch.device(self.config.device)
+        tplr.logger.info(f"[Init] device set → {self.device}")
 
         # Convenience flags
         self.is_master = self.rank == 0
@@ -178,6 +182,7 @@ class Miner:
                 self.model,
                 device_ids=[self.local_rank],
                 output_device=self.local_rank,
+                gradient_as_bucket_view=True,
             )
         self.tokenizer = self.hparams.tokenizer
 
@@ -256,7 +261,7 @@ class Miner:
         if self.is_master:
             self.comms.try_commit(self.wallet, self.bucket)
         if self.world_size > 1:
-            dist.barrier()
+            dist.barrier(device_ids=[self.local_rank])
 
         # Init state params
         self.stop_event = asyncio.Event()
@@ -425,7 +430,7 @@ class Miner:
                 f"{tplr.P(self.current_window, bcast_time)} "
                 f"Broadcast checkpoint to {self.world_size - 1} ranks"
             )
-            dist.barrier()
+            dist.barrier(device_ids=[self.local_rank])
 
         self.comms.start_commitment_fetcher()
 
@@ -540,7 +545,7 @@ class Miner:
 
             # Synchronise all ranks
             if self.world_size > 1:
-                dist.barrier()
+                dist.barrier(device_ids=[self.local_rank])
 
             # 1️⃣ every rank builds its momentum shard
             compress_start = tplr.T()
@@ -611,7 +616,7 @@ class Miner:
 
             tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
             if self.world_size > 1:
-                dist.barrier()
+                dist.barrier(device_ids=[self.local_rank])
 
             sync_block = self.current_window * self.hparams.blocks_per_window
             retries = 0
@@ -679,7 +684,7 @@ class Miner:
                 tplr.logger.info("Gather task completed!")
                 gather_time = tplr.T() - gather_start
             if self.world_size > 1:
-                dist.barrier()
+                dist.barrier(device_ids=[self.local_rank])
 
             # 5. Calculate and log metrics
             duration = time.time() - train_start
@@ -953,7 +958,7 @@ class Miner:
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
 
             if self.world_size > 1:
-                dist.barrier()
+                dist.barrier(device_ids=[self.local_rank])
 
             # Delete local variables to clear up memory
             del loader, gather_result, shard_gradient
@@ -965,6 +970,180 @@ class Miner:
             tplr.logger.info("Wait for next window...")
             while self.current_window == step_window:
                 await asyncio.sleep(0.1)
+
+    def inner_steps(
+        self,
+        model: torch.nn.Module,
+        loader: DataLoader,
+        inner_optimizer: Optimizer,
+        inner_scheduler: LRScheduler,
+        step_window: int,
+    ) -> dict:
+        """
+        One inner-loop optimisation pass that is gradient-accumulation aware and
+        synchronised across distributed ranks.
+
+        Returns
+        -------
+        dict
+            Keys: total_loss (float), batch_count (int), batch_tokens (int)
+        """
+        inner_optimizer.zero_grad()
+
+        total_loss: float = 0.0
+        batch_count: int = 0
+        batch_tokens: int = 0
+        accum_batch_size: int = 0
+        first_loss = 0.0
+
+        self.params_offloaded = self._get_offloaded_param()
+
+        inner_step_count: int = 0
+        loader_iter = iter(loader)
+        rank = f"[{self.rank}] " if self.world_size > 1 else ""
+
+        while True:
+            # ------------------------------------------------------------------ #
+            # 1. Fetch a batch (or detect EOS) on *each* rank
+            # ------------------------------------------------------------------ #
+            try:
+                batch = next(loader_iter)
+                local_has_batch = True
+            except StopIteration:
+                local_has_batch = False
+                batch = None
+
+            # Decide collectively whether we should continue
+            if self.world_size > 1:
+                cont = self.should_continue(local_has_batch, self.device)
+                if not cont:
+                    if self.is_master:
+                        tplr.logger.info(
+                            "%sStopping batch loop: at least one rank exhausted.", rank
+                        )
+                    break
+                if not local_has_batch:  # exhausted only on this rank
+                    continue
+
+            # ------------------------------------------------------------------ #
+            # 2. Prepare inputs
+            # ------------------------------------------------------------------ #
+            if isinstance(batch, torch.Tensor):
+                input_ids = batch.to(self.device, dtype=torch.long, non_blocking=True)
+            else:
+                input_ids = torch.tensor(batch, dtype=torch.long, device=self.device)
+            tokens_this_batch = input_ids.numel()
+            batch_tokens += int(tokens_this_batch)
+
+            labels = input_ids.clone()
+            labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+
+            # ------------------------------------------------------------------ #
+            # 3. Global (cross-rank) accumulation of batch size
+            # ------------------------------------------------------------------ #
+            current_batch_size_local = len(batch)  # type: ignore
+            total_batch_tensor = torch.tensor(
+                [current_batch_size_local],
+                device=self.device,
+                dtype=torch.long,
+            )
+            if self.world_size > 1:
+                dist.all_reduce(total_batch_tensor, op=dist.ReduceOp.SUM)
+
+            global_batch_size_this_iter = int(total_batch_tensor.item())
+            accum_batch_size += global_batch_size_this_iter
+
+            # ------------------------------------------------------------------ #
+            # 4. Forward + backward
+            # ------------------------------------------------------------------ #
+            with autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                outputs = self.model(input_ids=input_ids, labels=labels)
+
+            loss = outputs.loss * self.world_size / self.hparams.batch_size
+            loss.backward()
+            total_loss += outputs.loss.item()
+            batch_count += 1
+            tplr.logger.info(
+                f"{rank}loss: {outputs.loss.item():.4f} [Batch {batch_count}]"
+            )
+
+            # ------------------------------------------------------------------ #
+            # 5. Step only when *global* accumulation threshold is hit
+            # ------------------------------------------------------------------ #
+            if accum_batch_size >= self.hparams.batch_size:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                self.inner_optimizer.step()
+                self.inner_scheduler.step()
+                self.inner_optimizer.zero_grad(set_to_none=True)
+
+                inner_step_count += 1
+                tplr.logger.info(
+                    f"{rank}Inner Step {inner_step_count}, "
+                    f"Batch {batch_count}, loss: {outputs.loss.item():.4f}, "
+                    f"accum: {accum_batch_size}/{self.hparams.batch_size}"
+                )
+                if first_loss == 0.0:
+                    first_loss = total_loss / batch_count
+                accum_batch_size = 0  # reset on *all* ranks
+
+            # ------------------------------------------------------------------ #
+            # 6. Outer-loop window control
+            # ------------------------------------------------------------------ #
+            window_changed = self.current_window != step_window
+            local_done = torch.tensor(
+                [window_changed or inner_step_count == self.hparams.inner_steps],
+                dtype=torch.uint8,
+                device=self.device,
+            )
+
+            if self.world_size > 1:
+                dist.all_reduce(local_done, op=dist.ReduceOp.MAX)
+            global_done = bool(local_done.item())
+
+            if global_done:
+                tplr.logger.info("%s<Exhausted window: exiting synchronously>", rank)
+                for _ in range(inner_step_count, self.hparams.inner_steps):
+                    inner_scheduler.step()
+                break
+
+        # ------------------------------------------------------------------ #
+        # 7. Your “parameter offloading” logic (unchanged)
+        # ------------------------------------------------------------------ #
+        bare_model = (
+            model.module
+            if isinstance(model, torch.nn.parallel.DistributedDataParallel)
+            else model
+        )
+        with torch.no_grad():
+            for saved_param, p in zip(params_offloaded, bare_model.parameters()):
+                saved_param = saved_param.to(p.device, non_blocking=True)
+
+                # (a) pseudo-gradient for outer step
+                p.grad = saved_param - p.data
+
+                # (b) ***in-place*** restore original weights
+                p.data.copy_(saved_param)
+
+        # ---------------------------------------------------------------------- #
+        # 8. Return aggregated metrics
+        # ---------------------------------------------------------------------- #
+        return {
+            "total_loss": total_loss,
+            "first_loss": first_loss,
+            "batch_count": batch_count,
+            "batch_tokens": batch_tokens,
+        }
+
+    def _get_offloaded_param(self):
+        """Get a copy of current parameters and offload them to CPU"""
+        bare_model = (
+            self.model
+            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
+            else self.model
+        )
+        return [
+            param.data.detach().clone().to("cpu") for param in bare_model.parameters()
+        ]
 
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""

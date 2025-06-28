@@ -31,7 +31,7 @@ class SharedShardedDataset(Dataset):
         self.world = world_size
         if self.world > 1:
             tplr.logger.info(f"[Dataset] rank {self.rank}: entering initial barrier")
-            dist.barrier()
+            dist.barrier(device_ids=[self.rank])
             tplr.logger.info(f"[Dataset] rank {self.rank}: exited initial barrier")
 
         # ────────────────────────── load / create memory-mapped file ──────────────────────────
@@ -71,7 +71,7 @@ class SharedShardedDataset(Dataset):
 
         # Ensure the file is written before other ranks touch it
         if self.world > 1:
-            dist.barrier()
+            dist.barrier(device_ids=[self.rank])
 
         # Map the file (read-only) on every rank
         num_int32 = mmap_file.stat().st_size // 4

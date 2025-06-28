@@ -1408,23 +1408,20 @@ class Comms(ChainManager):
     async def load_checkpoint(
         self,
         model,
-        optimizer,
-        scheduler,
         current_window: int,
         device: str,
         init_version: Optional[str] = None,
-    ) -> tuple[bool, int, torch.optim.Optimizer, torch.optim.lr_scheduler._LRScheduler]:
+    ) -> tuple[bool, int]:
         """
         Loads the latest checkpoint. No catchup or step simulation happens here.
         Returns:
-            tuple: (success: bool, momentum: dict, checkpoint_current_window: int,
-                    optimizer: Optimizer, scheduler: LRScheduler)
+            tuple: (success: bool, checkpoint_current_window: int)
         """
         init_version = init_version if init_version is not None else __version__
         result = await self.get_latest_checkpoint(init_version)
         if not result:
             tplr.logger.info("No valid checkpoints found")
-            return False, 0, optimizer, scheduler
+            return False, 0
 
         checkpoint_data, checkpoint_window = result
         try:
@@ -1437,14 +1434,6 @@ class Comms(ChainManager):
             )
             model.to(device)
 
-            for state in optimizer.state.values():
-                for k, v in state.items():
-                    if torch.is_tensor(v):
-                        state[k] = v.to(device)
-            optimizer.load_state_dict(checkpoint_data["optimizer_state_dict"])
-
-            scheduler.load_state_dict(checkpoint_data["scheduler_state_dict"])
-
             checkpoint_start_window = checkpoint_data.get("start_window")
             checkpoint_current_window = checkpoint_data.get("current_window")
             checkpoint_sync_window = checkpoint_data.get("sync_window")
@@ -1452,7 +1441,7 @@ class Comms(ChainManager):
                 tplr.logger.warning(
                     "Checkpoint missing start_window or current_window info"
                 )
-                return False, {}, 0, optimizer, scheduler
+                return False, 0
 
             tplr.logger.info(
                 f"Checkpoint loaded. start_window={checkpoint_start_window}, "
@@ -1461,14 +1450,14 @@ class Comms(ChainManager):
                 f"local_current_window={current_window}"
             )
 
-            return True, checkpoint_sync_window, optimizer, scheduler
+            return True, checkpoint_sync_window
 
         except KeyError as e:
             tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
-            return False, 0, optimizer, scheduler
+            return False, 0
         except Exception as e:
             tplr.logger.error(f"Failed to load checkpoint: {e}")
-            return False, 0, optimizer, scheduler
+            return False, 0
 
     async def post_peer_list(
         self,

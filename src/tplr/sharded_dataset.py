@@ -1,5 +1,7 @@
 import gc
+import hashlib
 import os
+import struct
 import time
 from pathlib import Path
 
@@ -24,6 +26,7 @@ class SharedShardedDataset(Dataset):
         self, shards_path: str, sequence_length: int, rank: int, world_size: int
     ):
         super().__init__()
+        t0 = time.perf_counter()
         self.seqlen = sequence_length
 
         # Detect DDP context (works in single-process mode too)
@@ -82,6 +85,25 @@ class SharedShardedDataset(Dataset):
         tokens_mem.flags.writeable = False  # 2️⃣ lock it right back to RO
         self.total_samples = len(self.tokens) // self.seqlen
 
+        # ────────────────────────── compute sample_ids locally (cheap) ──────────────────────────
+        tplr.logger.info(f"[Dataset] rank {self.rank}: computing sample_ids")
+        tok_u32 = self.tokens.numpy().view(np.uint32)
+        sample_ids = np.empty(self.total_samples, dtype=np.uint64)
+        for i in range(self.total_samples):
+            h = hashlib.blake2b(
+                tok_u32[i * self.seqlen : (i + 1) * self.seqlen].tobytes(),
+                digest_size=8,
+            )
+            sample_ids[i] = struct.unpack("<Q", h.digest())[0]
+
+        self.sample_ids = torch.from_numpy(sample_ids).to(
+            torch.uint64, non_blocking=True
+        )
+        tplr.logger.info(
+            f"[Dataset] rank {self.rank}: init done in {time.perf_counter() - t0:.1f}s "
+            f"({self.total_samples} samples)"
+        )
+
     def __len__(self):
         return self.total_samples
 
@@ -90,5 +112,7 @@ class SharedShardedDataset(Dataset):
             raise IndexError
         start = idx * self.seqlen
         end = start + self.seqlen
-        batch = self.tokens[start:end]
-        return batch
+        return self.tokens[start:end]
+
+    def sample_id(self, idx: int) -> int:
+        return int(self.sample_ids[idx].item())

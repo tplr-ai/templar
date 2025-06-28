@@ -20,6 +20,7 @@
 import argparse
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import os
 import random
@@ -328,7 +329,7 @@ class Miner:
             world_size=self.world_size,
         )
         self.sampler = tplr.MinerSampler(
-            dataset_len=len(self.dataset),
+            dataset=self.dataset,
             uid=self.uid,
             window=self.current_window,
             steps_per_window=self.hparams.inner_steps,
@@ -514,7 +515,9 @@ class Miner:
             else:  # single-GPU run
                 gathered = [shard_gradient]
 
-            # rank-0 merges & uploads the full gradient
+            # ------------------------------------------------------------
+            #  rank-0 merges & uploads the full gradient
+            # ------------------------------------------------------------
             gradient = {}
             processed_state_dict = {}
             if self.is_master:
@@ -522,8 +525,19 @@ class Miner:
                     if shard is not None:
                         gradient.update(shard)
 
+                # dataset metadata
+                gidx = self.sampler._global_indices()
+                ids = self.sampler.ids_for_indices(gidx.tolist())
+                h = hashlib.blake2b(digest_size=16)
+                h.update(np.asarray(sorted(ids), dtype=np.uint64).tobytes())
+                sample_digest = h.hexdigest()
+                sample_count = len(ids)
+
+                # ── attach window + sample receipt ─────────────────────
                 gradient["metadata"] = {
                     "window": step_window,
+                    "sample_digest": sample_digest,
+                    "sample_count": sample_count,
                 }
                 tplr.logger.info(
                     f"Attached metadata to gradient: {gradient['metadata']}"

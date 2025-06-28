@@ -844,12 +844,12 @@ class Comms(ChainManager):
                     tplr.logger.info(
                         f"Object for UID {uid}, window {window}, key {key} was uploaded too late. Skipping."
                     )
-                    return {"__status": "TOO_LATE"}
+                    return {"__status": "TOO_LATE"}, global_step
                 elif loaded_data.get("__status") == "TOO_EARLY":
                     tplr.logger.info(
                         f"Object for UID {uid}, window {window}, key {key} was uploaded too early. Skipping."
                     )
-                    return {"__status": "TOO_EARLY"}
+                    return {"__status": "TOO_EARLY"}, global_step
 
             if key == "checkpoint":
                 return loaded_data, None

@@ -297,6 +297,22 @@ class Miner:
         # Initialize peer related attributes
         self.next_peers: list[int] | None = None
         self.peers_update_window = -1
+        self.dataset = tplr.SharedShardedDataset(
+            shards_path=self.hparams.dataset_shards_path,
+            sequence_length=self.hparams.sequence_length,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+        self.sampler = tplr.MinerSampler(
+            dataset_len=len(self.dataset),
+            uid=self.uid,
+            window=self.current_window,
+            steps_per_window=self.hparams.inner_steps,
+            micro_bs=self.hparams.micro_batch_size,
+            batch_size=self.hparams.target_batch_size,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
 
     # Main training loop.
     async def run(self):
@@ -310,7 +326,7 @@ class Miner:
             args=(self.loop,),
             daemon=True,
         )
-        self.listener.start()  #
+        self.listener.start()
 
         # Use config peers if provided
         if self.config.peers:
@@ -431,36 +447,21 @@ class Miner:
                     instance=self, window=step_window, peer_start=peer_start
                 )
 
-            # 2. Load ONLY the pages that belong to *this* rank -------------------
+            # 2. Load data
             data_start = tplr.T()
-            total_pages = self.hparams.pages_per_window
-            start_idx, n_my_pages = self.pages_for_rank(
-                total_pages, self.rank, self.world_size
-            )
+            # Update sampler for current window
+            self.sampler.set_window_uid(self.uid, step_window)
 
-            pages = await tplr.r2_dataset.R2DatasetLoader.next_pages(
-                offset=step_window * total_pages,
-                n_pages=total_pages,
-                seed=self.uid,
-            )
-            own_pages = pages[start_idx : start_idx + n_my_pages]
-            tplr.logger.info(
-                f"[Rank {self.rank}/{self.world_size}] pages "
-                f"{list(range(start_idx, start_idx + n_my_pages))}"
-            )
-            loader = await tplr.r2_dataset.R2DatasetLoader.create(
-                batch_size=self.hparams.batch_size,
-                sequence_length=self.hparams.sequence_length,
-                pages_info=own_pages,
-                tokenizer=self.tokenizer,
+            loader = torch.utils.data.DataLoader(
+                dataset=self.dataset,
+                sampler=self.sampler,
+                batch_size=self.hparams.micro_batch_size,  # per-GPU micro-bs
+                num_workers=2,
+                pin_memory=True,
             )
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - data_start)} Loaded training data"
             )
-            tplr.logger.info(
-                f"Pages: {[p[1] for p in pages]} for  Window: {step_window}"
-            )  # type: ignore
-
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             tplr.logger.info("Start accumulating...")
@@ -951,16 +952,11 @@ class Miner:
             self.window_step += 1
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
 
-            # Log profiling summary every 10 windows
-            if self.current_window % 10 == 0:
-                tplr.logger.info("Logging performance profiling summary...")
-                tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
-
             if self.world_size > 1:
                 dist.barrier()
 
             # Delete local variables to clear up memory
-            del loader, pages, gather_result, shard_gradient
+            del loader, gather_result, shard_gradient
             if self.is_master:
                 del processed_state_dict, gradient, new_grad
 
@@ -969,18 +965,6 @@ class Miner:
             tplr.logger.info("Wait for next window...")
             while self.current_window == step_window:
                 await asyncio.sleep(0.1)
-
-    def pages_for_rank(
-        self, total_pages: int, rank: int, world: int
-    ) -> tuple[int, int]:
-        """
-        Returns (start_index, n_pages) for the slice assigned to `rank`.
-        First `rem` ranks get one extra page when total_pages % world != 0.
-        """
-        pages_per_rank, rem = divmod(total_pages, world)
-        my_pages = pages_per_rank + (1 if rank < rem else 0)
-        global_start = pages_per_rank * rank + min(rank, rem)
-        return global_start, my_pages
 
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""

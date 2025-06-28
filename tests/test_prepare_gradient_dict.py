@@ -122,34 +122,6 @@ def test_metadata_attachment():
     )
 
 
-def test_weight_decay_application():
-    """
-    Test 3: Weight Decay Application
-    ---------------------------------
-    - Initialize a dummy parameter tensor with a known value (e.g., torch.tensor([1.0, 2.0])).
-    - Set hparams.weight_decay to a known value (e.g., 0.1) and scheduler to return a specific lr (e.g., 0.01).
-    - After calling the function, check that for each parameter, p.data was multiplied by (1 - lr * weight_decay).
-      (For instance, expected new p.data == original_p.data * (1 - 0.01 * 0.1).)
-    """
-    # Create dummy miner instance.
-    miner = DummyMiner()
-    # Clone the original parameter value for later comparison.
-    original_weight_data = miner.model.weight.data.clone()
-
-    # Define arbitrary step_window value.
-    step_window = 5
-
-    # Call the prepare_gradient_dict helper.
-    _ = prepare_gradient_dict(miner, step_window)
-
-    # The expected decay factor is: 1 - 0.9 * 0.1 = 0.999.
-    expected_decay = 1 - 0.9 * 0.1
-    expected_weight_data = original_weight_data * expected_decay
-
-    # Assert that the updated parameter data matches the expected result.
-    torch.testing.assert_close(miner.model.weight.data, expected_weight_data)
-
-
 def test_momentum_decay_and_gradient_accumulation():
     """
     Test 4 – Momentum Calculation on First Iteration
@@ -428,33 +400,6 @@ def test_logging_behavior(caplog):
 
     with caplog.at_level("INFO", logger="templar"):
         prepare_gradient_dict(miner, step_window)
-
-
-def test_correct_use_of_scheduler_learning_rate():
-    """
-    Test 9: Correct Use of Scheduler Learning Rate
-    -----------------------------------------------
-    - Set up the dummy scheduler so get_last_lr() returns a list (e.g., [0.02]).
-    - Confirm through the parameter update calculations and weight decay adjustments that 0.02 is used
-      (i.e., check that p.data is scaled by (1 - 0.02 * weight_decay)).
-    """
-
-    # Create a dummy miner instance and update its scheduler.
-    miner = DummyMiner()
-
-    # Clone the original parameter data.
-    original_weight_data = miner.model.weight.data.clone()
-
-    step_window = 5
-
-    # Call the helper function (which applies weight decay).
-    prepare_gradient_dict(miner, step_window)
-
-    # Compute the expected decay: p.data should be multiplied by (1 - 0.9 * weight_decay)
-    expected_decay_factor = 1 - 0.9 * miner.hparams.weight_decay
-    expected_weight_data = original_weight_data * expected_decay_factor
-
-    torch.testing.assert_close(miner.model.weight.data, expected_weight_data)
 
 
 def test_propagation_of_compressor_failure():

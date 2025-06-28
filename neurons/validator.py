@@ -1740,9 +1740,6 @@ class Validator:
             update_start = tplr.T()
             self.optimizer.zero_grad()
             self.model.zero_grad()
-            # Apply weight decay just like in the miner
-            for p in self.model.parameters():
-                p.data.mul_(1.0 - self.lr * self.hparams.weight_decay)
 
             if gather_result is not None and gather_result.state_dict is not None:
                 tplr.neurons.outer_step(
@@ -2606,11 +2603,6 @@ async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
             await asyncio.sleep(delay)
     tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
     return None
-
-
-def sign_preserving_multiplication(a, b):
-    return -abs(a) * abs(b) if a < 0 or b < 0 else a * b
-
 
 if __name__ == "__main__":
     uvloop.install()

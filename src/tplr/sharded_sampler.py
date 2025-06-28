@@ -1,0 +1,155 @@
+import numpy as np
+from torch.utils.data import Sampler
+from abc import ABC, abstractmethod
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# helpers
+# ────────────────────────────────────────────────────────────────────────────
+def _window_seed(uid: int, window: int) -> int:
+    """Deterministic 32-bit seed for a (uid, window) pair."""
+    return (uid * 1_000_003 ^ window) & 0xFFFF_FFFF
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Base class containing all shared behaviour
+# ────────────────────────────────────────────────────────────────────────────
+class _BaseWindowSampler(Sampler, ABC):
+    """
+    Common functionality for MinerSampler / EvalSampler.
+
+    Subclasses implement `_global_indices()` which must return a 1-D
+    NumPy array of **global** indices (before rank slicing).
+    """
+
+    def __init__(
+        self,
+        dataset_len: int,
+        uid: int,
+        window: int,
+        *,
+        steps_per_window: int,
+        micro_bs: int,
+        batch_size: int,
+        rank: int = 0,
+        world_size: int = 1,
+    ):
+        self.dataset_len = dataset_len
+        self.steps_per_window = steps_per_window
+        self.micro_bs = micro_bs
+        self.batch_size = batch_size
+        self.rank = rank
+        self.world_size = world_size
+
+        # grad-accumulation factor (also serves as a symmetry check)
+        denom = micro_bs * world_size
+        if batch_size % denom != 0:
+            raise ValueError(
+                f"batch_size={batch_size} is not divisible by "
+                f"micro_bs·world_size={denom}"
+            )
+        self.grad_accum = batch_size // denom
+
+        self.set_window_uid(uid, window)
+
+    # --------------------------------------------------------------------- #
+    # public API
+    # --------------------------------------------------------------------- #
+    def set_window_uid(self, uid: int, window: int):
+        """Update to a new (uid, window) and recompute local indices."""
+        self.uid, self.window = uid, window
+
+        global_indices = self._global_indices()
+        self._local = global_indices[self.rank :: self.world_size].tolist()
+
+    def __iter__(self):
+        return iter(self._local)
+
+    def __len__(self):
+        return len(self._local)
+
+    # --------------------------------------------------------------------- #
+    # to be implemented by subclasses
+    # --------------------------------------------------------------------- #
+    @abstractmethod
+    def _global_indices(self) -> np.ndarray:  # noqa: N802
+        """
+        Return a NumPy array of indices for **all** GPUs in the window.
+        Must be deterministic w.r.t. `(uid, window)`.
+        """
+        raise NotImplementedError
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# MinerSampler
+# ────────────────────────────────────────────────────────────────────────────
+class MinerSampler(_BaseWindowSampler):
+    """
+    Deterministic, rank-aware sampler for miner training.
+    """
+
+    # only the constructor’s docstring differs from the base class,
+    # so we leave it out and rely on inheritance.
+
+    def _global_indices(self) -> np.ndarray:  # noqa: D401
+        wanted = self.steps_per_window * self.batch_size
+        if wanted > self.dataset_len:
+            raise ValueError(
+                f"Window needs {wanted} samples but dataset has only {self.dataset_len}"
+            )
+
+        rng = np.random.default_rng(_window_seed(self.uid, self.window))
+        return rng.choice(self.dataset_len, size=wanted, replace=False)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# EvalSampler
+# ────────────────────────────────────────────────────────────────────────────
+class EvalSampler(_BaseWindowSampler):
+    """
+    Deterministic sampler for validators.  Reproduces the miner’s
+    training pool first and then draws `validation_bs` examples from it.
+    """
+
+    def __init__(  # signature differs, so we must override
+        self,
+        dataset_len: int,
+        uid: int,
+        window: int,
+        *,
+        steps_per_window: int,
+        micro_bs: int,
+        batch_size: int,
+        validation_bs: int,
+        rank: int = 0,
+        world_size: int = 1,
+    ):
+        if validation_bs > batch_size:
+            raise ValueError("validation_bs must be ≤ batch_size")
+
+        self.validation_bs = validation_bs
+        super().__init__(
+            dataset_len,
+            uid,
+            window,
+            steps_per_window=steps_per_window,
+            micro_bs=micro_bs,
+            batch_size=batch_size,
+            rank=rank,
+            world_size=world_size,
+        )
+
+    def _global_indices(self) -> np.ndarray:
+        train_total = self.steps_per_window * self.batch_size
+        if train_total > self.dataset_len:
+            raise ValueError("Training pool larger than dataset!")
+
+        seed = _window_seed(self.uid, self.window)
+
+        # reconstruct miner training pool
+        rng_train = np.random.default_rng(seed)
+        pool = rng_train.choice(self.dataset_len, size=train_total, replace=False)
+
+        # draw validation subset from that pool
+        rng_val = np.random.default_rng(seed ^ 0xA5A5_A5A5)
+        return rng_val.choice(pool, size=self.validation_bs, replace=False)

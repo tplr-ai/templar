@@ -261,7 +261,8 @@ class CompressDCT(Generic[Q]):
         totalk: int,
         quantize_params: QuantParamsT | list[QuantParamsT] | None = None,
         *,
-        normalise: bool = True,
+        normalise: bool = False,
+        clip_norm: bool = True,
     ) -> torch.Tensor:
         if not isinstance(idx, list):
             idx = [idx]
@@ -272,10 +273,27 @@ class CompressDCT(Generic[Q]):
             quantize_params = [quantize_params] * len(val)  # type: ignore[list-item]
 
         processed_vals: list[torch.Tensor] = []
-        for i, v in enumerate(val):
+        dequant_vals = None
+        norms = None
+        clip_norm_val = None
+        if self.use_quantization and quantize_params:
+            dequant_vals = [
+                self._dequantize_values(v, quantize_params[i])
+                for i, v in enumerate(val)
+            ]
+        if clip_norm:
+            vals = dequant_vals if dequant_vals is not None else val
+            norms = torch.stack([torch.norm(sparse_vals, p=2) for sparse_vals in vals])
+            median_norm = torch.median(norms)
+            clip_norm_val = torch.clamp(
+                median_norm,
+                min=-10000,
+                max=100000,
+            )
+
+        vals = dequant_vals if dequant_vals is not None else val
+        for i, v in enumerate(vals):
             v = v.to(p.device)
-            if self.use_quantization and quantize_params:
-                v = self._dequantize_values(v, quantize_params[i])  # type: ignore[arg-type]
 
             if normalise:
                 eps = 1e-8
@@ -289,7 +307,10 @@ class CompressDCT(Generic[Q]):
                     l2_norm = torch.norm(v, p=2)
                     if l2_norm > eps:
                         v = v / l2_norm
-
+            elif clip_norm and norms is not None and clip_norm_val is not None:
+                current_norm = norms[i]
+                clip_factor = torch.clamp(clip_norm_val / (current_norm + 1e-8), max=1)
+                v = v * clip_factor
             processed_vals.append(v)
 
         # Concatenate everything

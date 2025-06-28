@@ -150,6 +150,10 @@ class Validator:
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
         self.model.to(self.config.device)  # type: ignore
+        compile_mode = "default"  # or "max-autotune" / "reduce-overhead"
+        self.model = cast(
+            LlamaForCausalLM, torch.compile(self.model, mode=compile_mode)
+        )
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
@@ -609,7 +613,7 @@ class Validator:
 
         with torch.no_grad():
             model.eval()
-            with autocast(device_type=self.model.device.type, dtype=torch.bfloat16):
+            with autocast(device_type=device.type, dtype=torch.bfloat16):
                 for i, batch in enumerate(loader):
                     if batch is None or len(batch) == 0:
                         tplr.log_with_context(

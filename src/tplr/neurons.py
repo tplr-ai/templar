@@ -19,20 +19,22 @@
 import asyncio
 import math
 import time
+import typing
 from typing import TYPE_CHECKING, TypeVar, cast
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch._prims_common import DeviceLikeType
+from torch.optim import Optimizer
 
 import tplr
 from tplr.logging import logger
 
-
 if TYPE_CHECKING:
+    from neurons.aggregator import AggregationServer
     from neurons.miner import Miner
     from neurons.validator import Validator
-    from neurons.aggregator import AggregationServer
 
 NeuronT = TypeVar("NeuronT", "Miner", "Validator")
 
@@ -116,6 +118,83 @@ def prepare_gradient_dict(miner, step_window):
     gradient["metadata"] = {"window": step_window}
 
     return gradient, xshapes, totalks
+
+
+def outer_step(
+    model: nn.Module,
+    optimizer: Optimizer,
+    *,
+    gather_result,
+    transformer: tplr.compress.TransformDCT,
+    compressor: tplr.compress.CompressDCT,
+    xshapes: dict,
+    totalks: dict,
+    device: str,
+    is_master: bool,
+    world_size: int,
+) -> None:
+    """
+    Synchronize gradients (if DDP) and apply optimizer step
+    """
+    bare_model = (
+        model.module
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel)
+        else model
+    )
+    if is_master:
+        new_grad = None
+        model.train()
+        optimizer.zero_grad()
+
+        new_grad = None
+        if gather_result is not None and gather_result.state_dict is not None:
+            for n, p in bare_model.named_parameters():
+                idxs_key = n + "idxs"
+                vals_key = n + "vals"
+                quant_key = n + "quant_params"
+
+                idxs = getattr(gather_result.state_dict, idxs_key, None)
+                vals = getattr(gather_result.state_dict, vals_key, None)
+                quant_params = getattr(gather_result.state_dict, quant_key, None)
+                if idxs is not None and vals is not None:
+                    if not isinstance(idxs, (list, tuple)):
+                        idxs = [idxs]
+                    if not isinstance(vals, (list, tuple)):
+                        vals = [vals]
+
+                    new_grad = transformer.decode(
+                        compressor.batch_decompress(
+                            p.to(device),  # type: ignore
+                            typing.cast(list[torch.Tensor], idxs),
+                            typing.cast(list[torch.Tensor], vals),
+                            xshapes[n],
+                            totalks[n],
+                            quant_params,
+                            normalise=False,
+                            clip_norm=True,
+                        )
+                    )
+
+                    if p.grad is None:
+                        p.grad = new_grad
+                    else:
+                        p.grad.copy_(new_grad)
+                else:
+                    tplr.logger.info(
+                        f"Gradient data missing for parameter {n}, skipping."
+                    )
+
+        optimizer.step()
+        torch.cuda.empty_cache()
+        if world_size > 1:
+            for t in bare_model.state_dict().values():
+                if torch.is_tensor(t):
+                    dist.broadcast(t.data, src=0)
+    else:
+        if world_size > 1:
+            for t in bare_model.state_dict().values():
+                if torch.is_tensor(t):
+                    dist.broadcast(t.data, src=0)
 
 
 async def update_peers(

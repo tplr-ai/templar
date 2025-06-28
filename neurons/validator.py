@@ -306,8 +306,8 @@ class Validator:
             window=self.current_window,
             steps_per_window=15,
             micro_bs=self.hparams.batch_size,
-            batch_size=256,
-            validation_bs=64,
+            batch_size=512,
+            validation_bs=32,
             rank=0,
             world_size=1,
         )

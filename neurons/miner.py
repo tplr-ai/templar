@@ -359,7 +359,7 @@ class Miner:
             window=self.current_window,
             steps_per_window=15,
             micro_bs=self.hparams.batch_size,
-            batch_size=self.config.batches_before_local_optimization,
+            batch_size=512,
             rank=self.rank,
             world_size=self.world_size,
         )
@@ -581,9 +581,7 @@ class Miner:
             # shard_gradient, _, _ = tplr.prepare_gradient_dict(
             #     self, own_pages, step_window
             # )
-            shard_gradient, _, _ = tplr.prepare_gradient_dict(
-                self, [], step_window
-            )
+            shard_gradient, _, _ = tplr.prepare_gradient_dict(self, [], step_window)
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - compress_start)} "
                 f"Compressed local shard with {len(shard_gradient) - 1} tensors"

@@ -57,23 +57,6 @@ def prepare_gradient_dict(miner, step_window):
     totalks = {}
     lr = miner.scheduler.get_last_lr()[0]
 
-    # Use an internal iteration counter stored in miner if it doesn't exist already
-    if not hasattr(miner, "gradient_iteration_counter"):
-        miner.gradient_iteration_counter = 0
-
-    # Increment the counter for this function call
-    miner.gradient_iteration_counter += 1
-
-    # Log the current iteration counter
-    logger.info(
-        f"Current gradient_iteration_counter: {miner.gradient_iteration_counter}"
-    )
-
-    # Track if this is the first iteration
-    is_first_iteration = miner.gradient_iteration_counter == 1
-    # Check if we're in the first 5 iterations
-    is_early_iteration = miner.gradient_iteration_counter <= 5
-
     if isinstance(miner.model, torch.nn.parallel.DistributedDataParallel):
         model_iterator = miner.model.module.named_parameters()
     else:
@@ -95,13 +78,8 @@ def prepare_gradient_dict(miner, step_window):
         if miner.momentum[n].device != p.device:
             miner.momentum[n] = miner.momentum[n].to(p.device)
 
-        # Update momentum
-        if is_first_iteration:
-            # Set momentum directly to grad (multiplied by lr to maintain scale)
-            miner.momentum[n] = grad.clone() * lr
-        else:
-            # Normal behavior for later iterations
-            miner.momentum[n].add_(grad, alpha=lr)
+        # Normal behavior for later iterations
+        miner.momentum[n].add_(grad, alpha=lr)
 
         # Compress momentum
         encoded = miner.transformer.encode(miner.momentum[n])
@@ -109,7 +87,7 @@ def prepare_gradient_dict(miner, step_window):
             encoded, miner.hparams.topk_compression
         )
         if totalk is None:
-            print("totalk is None")
+            tplr.logger.info("totalk is None")
         del encoded  # Free the encoded tensor immediately
 
         # Estimate transmitted gradient
@@ -119,9 +97,7 @@ def prepare_gradient_dict(miner, step_window):
         transmit_grad = miner.transformer.decode(decompressed)
         del decompressed  # Free intermediate tensor
 
-        # Skip subtracting transmitted gradient in the first 5 iterations
-        if not is_early_iteration:
-            miner.momentum[n].sub_(transmit_grad)
+        miner.momentum[n].sub_(transmit_grad)
 
         # Move compressed values to CPU to save GPU memory
         gradient[n + "idxs"] = idxs.cpu() if isinstance(idxs, torch.Tensor) else idxs

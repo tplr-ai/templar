@@ -6,6 +6,7 @@
     "micro_batch_size": 8,
     "target_batch_size": 512,
     "batch_size": 256,
+    "inner_steps": 15,
     "learning_rate": 2e-4,
     "blocks_per_window": 11,
     "windows_per_weights": 35,

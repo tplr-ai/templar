@@ -73,13 +73,12 @@ class DummyMiner:
 def test_return_structure_and_types(caplog):
     # Create dummy miner instance
     miner = DummyMiner()
-    # Define a valid pages list and step_window
-    pages = [["doc1", "page1"]]
+    # Define a valid step_window
     step_window = 5
 
     with caplog.at_level("INFO", logger="templar"):
         # Call the helper function.
-        result = prepare_gradient_dict(miner, pages, step_window)
+        result = prepare_gradient_dict(miner, step_window)
 
     # Check that we get exactly four items returned.
     assert isinstance(result, tuple)
@@ -95,7 +94,7 @@ def test_return_structure_and_types(caplog):
     # Verify that the metadata key exists
     assert "metadata" in gradient
     # Check that metadata equals the expected dictionary.
-    expected_metadata = {"pages_info": pages, "window": step_window}
+    expected_metadata = {"window": step_window}
     assert gradient["metadata"] == expected_metadata
 
     # Check that xshapes, totalks, are dictionaries.
@@ -110,21 +109,19 @@ def test_metadata_attachment():
     """
     Test 2: Metadata Attachment
     ---------------------------
-    - Provide a known pages list (e.g., pages = [["doc1", "page1"], ["doc2", "page2"]]) and a step_window value (e.g., 42).
     - Call prepare_gradient_dict.
-    - Verify that gradient["metadata"] exactly equals {"pages_info": pages, "window": step_window}.
+    - Verify that gradient["metadata"] exactly equals {"window": step_window}.
     """
     # Create dummy miner instance
     miner = DummyMiner()
-    # Define a known pages list and a step_window value.
-    pages = [["doc1", "page1"], ["doc2", "page2"]]
+    # Define a step_window value.
     step_window = 42
 
     # Call prepare_gradient_dict.
-    gradient, xshapes, totalks = prepare_gradient_dict(miner, pages, step_window)
+    gradient, xshapes, totalks = prepare_gradient_dict(miner, step_window)
 
     # Verify that gradient["metadata"] exactly equals the expected dictionary.
-    expected_metadata = {"pages_info": pages, "window": step_window}
+    expected_metadata = {"window": step_window}
     assert gradient.get("metadata") == expected_metadata, (
         f"Metadata does not match. Expected: {expected_metadata}, Got: {gradient.get('metadata')}"
     )
@@ -144,12 +141,11 @@ def test_weight_decay_application():
     # Clone the original parameter value for later comparison.
     original_weight_data = miner.model.weight.data.clone()
 
-    # Define arbitrary pages and step_window values.
-    pages = [["doc1", "page1"]]
+    # Define arbitrary step_window value.
     step_window = 5
 
     # Call the prepare_gradient_dict helper.
-    _ = prepare_gradient_dict(miner, pages, step_window)
+    _ = prepare_gradient_dict(miner, step_window)
 
     # The DummyScheduler returns lr 0.01 and hparams.weight_decay is set to 0.1.
     # Therefore, the expected decay factor is: 1 - 0.01 * 0.1 = 0.999.
@@ -184,10 +180,9 @@ def test_momentum_decay_and_gradient_accumulation():
     # Therefore, the final momentum after the first call should be [0.001, 0.002].
     expected_final_momentum = torch.tensor([0.001, 0.002])
 
-    pages = [["doc1", "page1"]]
     step_window = 5
     # This is the first call, so miner.gradient_iteration_counter will be 1.
-    prepare_gradient_dict(miner, pages, step_window)
+    prepare_gradient_dict(miner, step_window)
 
     # TODO: Add a separate test case to verify the momentum calculation logic
     #       for iterations > 5, where initial momentum is used, decay is applied,
@@ -265,11 +260,10 @@ def test_compressor_and_transformer_calls():
     # and then compressor.compress receives.
     expected_tensor_for_compression = torch.tensor([0.003, 0.004])
 
-    pages = [["doc_record"]]
     step_window = 7
     # Call the helper so that compressor.compress and transformer.decode are invoked.
     # This is the first call, miner.gradient_iteration_counter becomes 1.
-    gradient, xshapes, totalks = prepare_gradient_dict(miner, pages, step_window)
+    gradient, xshapes, totalks = prepare_gradient_dict(miner, step_window)
 
     # Check that compressor.compress was called with the expected encoded tensor and topk.
     recorder_compressor = miner.compressor
@@ -305,7 +299,6 @@ def test_compressor_and_transformer_calls():
     assert xshapes["weight"] == "recorded_dummy_xshape"
     assert totalks["weight"] == "recorded_dummy_totalk"
     # Verify metadata
-    assert gradient["metadata"]["pages_info"] == pages
     assert gradient["metadata"]["window"] == step_window
 
 
@@ -340,9 +333,8 @@ def test_handling_multiple_parameters():
         "weight2": torch.zeros_like(miner.model.weight2),
     }
 
-    pages = [["doc1", "page1"]]
     step_window = 10
-    gradient, xshapes, totalks = prepare_gradient_dict(miner, pages, step_window)
+    gradient, xshapes, totalks = prepare_gradient_dict(miner, step_window)
 
     # Check for gradient keys from both parameters.
     assert "weight1idxs" in gradient, "Missing key: weight1idxs"
@@ -378,11 +370,10 @@ def test_behavior_when_p_grad_is_none():
     # Reinitialize momentum accordingly.
     miner.momentum = {"weight": torch.zeros_like(miner.model.weight)}
 
-    pages = [["doc", "page"]]
     step_window = 3
 
     with pytest.raises(Exception) as excinfo:
-        prepare_gradient_dict(miner, pages, step_window)
+        prepare_gradient_dict(miner, step_window)
 
     # You might expect a TypeError or AttributeError; ensure some exception is raised.
     assert "None" in str(excinfo.value) or "grad" in str(excinfo.value)
@@ -394,14 +385,13 @@ def test_logging_behavior(caplog):
     ------------------------
     - Use the pytest caplog fixture to capture log calls.
     - Verify that when prepare_gradient_dict is executed, a log call is made that includes
-      the correct metadata string (containing pages_info and window).
+      the correct metadata string (containing window).
     """
     miner = DummyMiner()
-    pages = [["doc_log", "page_log"]]
     step_window = 15
 
     with caplog.at_level("INFO", logger="templar"):
-        prepare_gradient_dict(miner, pages, step_window)
+        prepare_gradient_dict(miner, step_window)
 
 
 def test_correct_use_of_scheduler_learning_rate():
@@ -425,11 +415,10 @@ def test_correct_use_of_scheduler_learning_rate():
     # Clone the original parameter data.
     original_weight_data = miner.model.weight.data.clone()
 
-    pages = [["doc1", "page1"]]
     step_window = 5
 
     # Call the helper function (which applies weight decay).
-    prepare_gradient_dict(miner, pages, step_window)
+    prepare_gradient_dict(miner, step_window)
 
     # Compute the expected decay: p.data should be multiplied by (1 - 0.02 * weight_decay)
     expected_decay_factor = 1 - 0.02 * miner.hparams.weight_decay
@@ -453,11 +442,10 @@ def test_propagation_of_compressor_failure():
 
     miner.compressor.compress = failing_compress
 
-    pages = [["doc1", "page1"]]
     step_window = 5
 
     with pytest.raises(RuntimeError, match="Compressor error"):
-        prepare_gradient_dict(miner, pages, step_window)
+        prepare_gradient_dict(miner, step_window)
 
 
 def test_propagation_of_transformer_failure():
@@ -475,8 +463,7 @@ def test_propagation_of_transformer_failure():
 
     miner.transformer.decode = failing_decode
 
-    pages = [["doc1", "page1"]]
     step_window = 5
 
     with pytest.raises(RuntimeError, match="Transformer error"):
-        prepare_gradient_dict(miner, pages, step_window)
+        prepare_gradient_dict(miner, step_window)

@@ -543,9 +543,7 @@ class Miner:
 
             # 1️⃣ every rank builds its momentum shard
             compress_start = tplr.T()
-            shard_gradient, _, _ = tplr.prepare_gradient_dict(
-                self, own_pages, step_window
-            )
+            shard_gradient, _, _ = tplr.prepare_gradient_dict(self, step_window)
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - compress_start)} "
                 f"Compressed local shard with {len(shard_gradient) - 1} tensors"
@@ -566,18 +564,11 @@ class Miner:
             gradient = {}
             processed_state_dict = {}
             if self.is_master:
-                merged_pages: list[tuple[int, int]] = []
-
                 for shard in gathered:
                     if shard is not None:
-                        m = shard.pop("metadata", None)
-                        if m and "pages_info" in m:
-                            merged_pages.extend(m["pages_info"])
-
                         gradient.update(shard)
 
                 gradient["metadata"] = {
-                    "pages_info": merged_pages,
                     "window": step_window,
                 }
                 tplr.logger.info(
@@ -585,9 +576,7 @@ class Miner:
                 )
 
                 tplr.logger.info(
-                    f"Merged {len(gathered)} shards → "
-                    f"{len(gradient) - 1} tensors  |  "
-                    f"pages_info len = {len(merged_pages)}"
+                    f"Merged {len(gathered)} shards → {len(gradient) - 1} tensors"
                 )
 
                 # move to CPU before R2 upload

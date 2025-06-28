@@ -37,14 +37,13 @@ if TYPE_CHECKING:
 NeuronT = TypeVar("NeuronT", "Miner", "Validator")
 
 
-def prepare_gradient_dict(miner, pages, step_window):
+def prepare_gradient_dict(miner, step_window):
     """
     Prepares the gradient dictionary for sharing by compressing the
     momentum for each parameter and attaching metadata.
 
     Args:
         miner (Miner): Instance of Miner containing model, scheduler, momentum, compressor, transformer and hparams.
-        pages (list): The pages information used for training data.
         step_window (int): The current window number.
 
     Returns:
@@ -138,7 +137,7 @@ def prepare_gradient_dict(miner, pages, step_window):
 
     torch.cuda.empty_cache()
 
-    gradient["metadata"] = {"pages_info": pages, "window": step_window}
+    gradient["metadata"] = {"window": step_window}
 
     return gradient, xshapes, totalks
 

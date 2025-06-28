@@ -276,3 +276,97 @@ async def test_custom_index_range(setup_model):
     assert mismatched_result["avg_steps_behind"] == pytest.approx(
         expected_diff, abs=0.5
     )
+
+
+# ---------------------------------------------------------------------- #
+#                     NEW TESTS FOR param_avg_change                     #
+# ---------------------------------------------------------------------- #
+
+
+# helper – returns a param_avg_change dict that matches “slice 0-2” length
+def _make_avg_change(model: nn.Module, value: float) -> dict[str, torch.Tensor]:
+    d: dict[str, torch.Tensor] = {}
+    for n, _ in model.named_parameters():
+        d[n] = torch.full((2,), value)
+    return d
+
+
+@pytest.mark.asyncio
+async def test_avg_change_one_step(setup_model):
+    """With param_avg_change == true step size, avg_steps_behind ≃ 1."""
+    model = setup_model
+
+    step = 0.05  # custom step size for this test
+    param_avg_change = _make_avg_change(model, step)
+
+    debug_dict = {}
+    for name, param in model.named_parameters():
+        base = param.flatten()[:2].cpu()
+        debug_dict[name + "_debug"] = (base + step).tolist()  # exactly one step
+
+    res = await compare_model_with_debug_dict(
+        model,
+        debug_dict,
+        learning_rate=0.01,  # LR should be ignored here
+        param_avg_change=param_avg_change,
+        index_range=(0, 2),
+    )
+
+    assert res["success"] is True
+    assert res["avg_steps_behind"] == pytest.approx(1.0, abs=1e-2)
+    assert res["max_steps_behind"] == pytest.approx(1.0, abs=1e-2)
+
+
+@pytest.mark.asyncio
+async def test_avg_change_half_step(setup_model):
+    """If avg-change is half the true diff, we expect ≃ 2 steps behind."""
+    model = setup_model
+
+    true_step = 0.04
+    avg_change = true_step / 2  # tell the function updates are smaller
+
+    param_avg_change = _make_avg_change(model, avg_change)
+
+    debug_dict = {}
+    for name, param in model.named_parameters():
+        base = param.flatten()[:2].cpu()
+        debug_dict[name + "_debug"] = (base + true_step).tolist()
+
+    res = await compare_model_with_debug_dict(
+        model,
+        debug_dict,
+        learning_rate=0.01,
+        param_avg_change=param_avg_change,
+        index_range=(0, 2),
+    )
+
+    assert res["avg_steps_behind"] == pytest.approx(2.0, abs=1e-2)
+
+
+@pytest.mark.asyncio
+async def test_avg_change_length_mismatch_fallback(setup_model):
+    """
+    If the stored slice length is wrong the helper should fall back to LR.
+    Expect ≃ 1 step with *learning_rate* instead of the bogus avg-change tensor.
+    """
+    model = setup_model
+    lr = 0.01
+
+    # Build an avg_change dict with *wrong* tensor length (size 1)
+    param_avg_change = {n: torch.tensor([lr]) for n, _ in model.named_parameters()}
+
+    debug_dict = {}
+    for name, param in model.named_parameters():
+        base = param.flatten()[:2].cpu()
+        debug_dict[name + "_debug"] = (base + lr).tolist()  # exactly LR ahead
+
+    res = await compare_model_with_debug_dict(
+        model,
+        debug_dict,
+        learning_rate=lr,
+        param_avg_change=param_avg_change,
+        index_range=(0, 2),
+    )
+
+    # Fallback should make it behave like LR-based comparison → 1 step
+    assert res["avg_steps_behind"] == pytest.approx(1.0, abs=1e-2)

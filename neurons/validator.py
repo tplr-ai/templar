@@ -287,6 +287,9 @@ class Validator:
         self.peers_update_window = -1
 
         self.peers_last_eval_window = {}
+        self.param_avg_change: dict[str, torch.Tensor] = {}
+        self.prev_param_state: dict[str, torch.Tensor] = {}
+        self.param_change_alpha = 0.2
 
         self.dataset = tplr.SharedShardedDataset(
             shards_path=self.hparams.dataset_shards_path,
@@ -344,6 +347,13 @@ class Validator:
         max_diff = float(sync_result.get("max_diff", 99.0))
         avg_steps_behind = float(sync_result.get("avg_steps_behind", 99.0))
         max_steps_behind = float(sync_result.get("max_steps_behind", 99.0))
+        tplr.log_with_context(
+            level="info",
+            message=f"Sync average steps behind: {avg_steps_behind:.3f}",
+            sync_window=self.sync_window,
+            current_window=self.current_window,
+            eval_uid=eval_uid,
+        )
         self.wandb.log(
             {
                 f"validator/sync/l2_norm/{eval_uid}": l2_norm,
@@ -1779,6 +1789,34 @@ class Validator:
                 current_window=self.current_window,
             )
 
+            with torch.no_grad():
+                slice_idx = slice(10, 12)  # indices published in miner debug dict
+
+                for n, p in self.model.named_parameters():
+                    if p.numel() < 12:
+                        continue
+
+                    # move current weights to CPU once
+                    curr_cpu = p.detach().cpu()
+
+                    # compute delta only if we have a previous slice
+                    if n in self.prev_param_state:
+                        prev_slice = self.prev_param_state[n]
+                        curr_slice = curr_cpu.flatten()[slice_idx]
+
+                        delta_slice = torch.abs(curr_slice - prev_slice)
+
+                        # lazy-init & EMA update
+                        if n not in self.param_avg_change:
+                            self.param_avg_change[n] = delta_slice.clone()
+                        else:
+                            self.param_avg_change[n].mul_(
+                                1 - self.param_change_alpha
+                            ).add_(delta_slice * self.param_change_alpha)
+
+                    # stash the new slice for next iteration
+                    self.prev_param_state[n] = curr_cpu.flatten()[slice_idx].clone()
+
             # Add debug data including successfully gathered peers
             debug_dict = {}
 
@@ -2125,6 +2163,7 @@ class Validator:
             debug_dict=miner_debug_dict,
             learning_rate=self.lr,
             index_range=(10, 12),
+            param_avg_change=self.param_avg_change,
         )
 
         if not comparison_metrics["success"]:

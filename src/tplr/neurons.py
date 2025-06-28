@@ -492,79 +492,82 @@ async def compare_model_with_debug_dict(
     model: nn.Module,
     debug_dict: dict[str, list[float]],
     learning_rate: float,
+    param_avg_change: dict[str, torch.Tensor] | None = None,
+    *,
+    min_step_size: float = 1e-9,
     index_range: tuple[int, int] = (0, 2),
 ) -> dict[str, bool | float | int]:
     """
-    Compares a model's parameters with a debug dictionary to measure synchronization.
-
-    Args:
-        model: The PyTorch model with parameters to compare
-        debug_dict: Debug dictionary containing parameter debug values
-        learning_rate: Current learning rate to normalize differences
-
-    Returns:
-        dict: Comparison metrics including L2 norm, absolute differences, and steps behind measurements
+    Compare weights with published debug snippets and return sync metrics.
     """
     # Initialize metrics
     total_squared_diff = 0.0
     total_abs_diff = 0.0
     param_count = 0
-    max_diff = 0.0
+    max_diff = 0.0  # largest raw parameter diff
+    max_steps = 0.0
 
-    # Compare each parameter with its debug entry
-    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-        model_iterator = model.module.named_parameters()
-    else:
-        model_iterator = model.named_parameters()
-    for name, param in model_iterator:
-        debug_key = name + "_debug"
+    steps_sum = 0.0
+    tensors = 0
 
-        if debug_key in debug_dict and isinstance(debug_dict[debug_key], list):
-            # Get the parameter values (first two elements to match debug dict)
-            param_data = param.data.flatten()[
-                index_range[0] : index_range[1]
-            ].detach()  # Keep on device
+    named_params = (
+        model.module.named_parameters()
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel)
+        else model.named_parameters()
+    )
 
-            # Convert debug data to tensor on the same device
-            debug_data = torch.tensor(
-                debug_dict[debug_key], device=param.device, dtype=param.dtype
+    for name, p in named_params:
+        key = name + "_debug"
+        if key not in debug_dict or not isinstance(debug_dict[key], list):
+            continue
+
+        # --- grab the slice we care about --------------------------------
+        curr_slice = p.data.flatten()[index_range[0] : index_range[1]]
+        debug_slice = torch.tensor(debug_dict[key], dtype=p.dtype, device=p.device)
+
+        diff_vec = curr_slice - debug_slice
+        abs_vec = torch.abs(diff_vec)
+
+        total_squared_diff += torch.sum(diff_vec**2).item()
+        total_abs_diff += abs_vec.sum().item()
+        raw_max = abs_vec.max().item()
+        max_diff = max(max_diff, raw_max)
+        param_count += abs_vec.numel()
+
+        # --- element-wise steps-behind -----------------------------------
+        if param_avg_change and name in param_avg_change:
+            step_vec = torch.clamp(
+                param_avg_change[name].to(p.device), min=min_step_size
             )
+            if step_vec.numel() != abs_vec.numel():
+                # fallback if stored slice has wrong length
+                step_vec = abs_vec.new_full(abs_vec.size(), learning_rate)
+        else:
+            step_vec = abs_vec.new_full(abs_vec.size(), learning_rate)
 
-            # Compute differences
-            diffs = param_data - debug_data
-            squared_diff = torch.sum(diffs**2).item()
-            abs_diff = torch.abs(diffs).sum().item()
-            max_param_diff = torch.max(torch.abs(diffs)).item()
+        step_ratio = abs_vec / step_vec
+        steps_sum += step_ratio.mean().item()
+        max_steps = max(max_steps, step_ratio.max().item())
+        tensors += 1
 
-            # Update totals
-            total_squared_diff += squared_diff
-            total_abs_diff += abs_diff
-            param_count += param_data.numel()
-            max_diff = max(max_diff, max_param_diff)
+    l2_norm = math.sqrt(total_squared_diff)
+    avg_l2_norm = math.inf if tensors == 0 else l2_norm / param_count
+    avg_abs_diff = math.inf if tensors == 0 else total_abs_diff / param_count
+    avg_steps = math.inf if tensors == 0 else steps_sum / tensors
+    if tensors == 0:
+        max_steps = math.inf  # nothing compared → undefined
 
-    # Calculate final metrics
-    l2_norm = torch.sqrt(torch.tensor(total_squared_diff)).item()
-    avg_l2_norm = l2_norm / param_count if param_count > 0 else math.inf
-    avg_abs_diff = total_abs_diff / param_count if param_count > 0 else math.inf
-
-    # Normalize differences by learning rate to get "steps behind" metric
-    avg_steps_behind = avg_abs_diff / learning_rate if learning_rate > 0 else math.inf
-    max_steps_behind = max_diff / learning_rate if learning_rate > 0 else math.inf
-
-    # Prepare return metrics
-    metrics: dict[str, bool | float | int] = {
+    return {
         "success": True,
         "l2_norm": l2_norm,
         "avg_l2_norm": avg_l2_norm,
         "avg_abs_diff": avg_abs_diff,
         "max_diff": max_diff,
-        "avg_steps_behind": avg_steps_behind,
-        "max_steps_behind": max_steps_behind,
+        "avg_steps_behind": avg_steps,
+        "max_steps_behind": max_steps,
         "param_count": param_count,
         "learning_rate": learning_rate,
     }
-
-    return metrics
 
 
 def unpack_binary_tensor(packed_tensor: torch.Tensor, original_shape: torch.Size):

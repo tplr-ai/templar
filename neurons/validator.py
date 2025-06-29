@@ -24,7 +24,6 @@ import hashlib
 import os
 import random
 import sys
-import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
@@ -46,8 +45,10 @@ from torch import autocast
 from torch.optim import SGD
 from transformers.models.llama import LlamaForCausalLM
 
-# Local
 import tplr
+
+# Local
+from neurons import BaseNode
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -77,7 +78,7 @@ def timer(name: str, wandb_obj=None, step=None, metrics_logger=None):
         )
 
 
-class Validator:
+class Validator(BaseNode):
     @staticmethod
     def validator_config():
         parser = argparse.ArgumentParser(description="Validator script")
@@ -137,6 +138,7 @@ class Validator:
             )
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+        super().__init__()
 
         try:
             version = tplr.__version__
@@ -207,7 +209,6 @@ class Validator:
         # self.comms.fetch_commitments()
 
         # Init state params
-        self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         self.start_window = self.current_window  # Record the start window
@@ -659,10 +660,6 @@ class Validator:
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
         self.loop.set_default_executor(self.executor)
 
-        self.listener = threading.Thread(
-            target=self.block_listener, args=(self.loop,), daemon=True
-        ).start()
-
         # Use config peers if provided
         if self.config.peers:
             self.comms.peers = self.config.peers
@@ -746,10 +743,11 @@ class Validator:
 
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
+        ts_value = 0.0
         time_min = None
         self.last_peer_update_window = None
         self.last_peer_post_window = None
-        while True:
+        while not self.stop_event.is_set():
             # 1. Wait for the validator window offset
             while self.sync_window >= (
                 self.current_window - self.hparams.validator_offset
@@ -927,38 +925,15 @@ class Validator:
             # Calculate time window for this sync window
 
             sync_block = (self.sync_window + 1) * self.hparams.blocks_per_window
-            retries = 0
-            delay = 1
-            max_retries = 2
-            max_delay = 60
-            while True:
-                try:
-                    response = self.subtensor.query_module(
-                        "Timestamp", "Now", block=sync_block
-                    )
-                    ts_value = cast(int, response.value) / 1000  # convert ms to seconds
-                    break
-                except Exception as e:
-                    tplr.log_with_context(
-                        level="error",
-                        message=f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                    retries += 1
-                    if retries > max_retries:
-                        tplr.log_with_context(
-                            level="error",
-                            message="Exceeded maximum retries for timestamp query. Falling back to current system time.",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-                        ts_value = (
-                            time.time()
-                        )  # Fallback: use current system time as timestamp
-                        break
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, max_delay)
+            ts_value = self.query_block_timestamp(sync_block)
+            if ts_value is None:
+                tplr.log_with_context(
+                    level="warning",
+                    message=f"Could not get timestamp for sync block {sync_block}. Using current time as fall back.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+                ts_value = time.time()
             time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
             time_max = time_min + timedelta(
                 seconds=self.hparams.time_window_delta_seconds
@@ -1839,7 +1814,7 @@ class Validator:
                 debug_dict["skipped_peers"] = sorted(list(skipped_uids))
 
             # 15. Store debug values and model metadata
-            asyncio.create_task(
+            t = asyncio.create_task(
                 self.comms.put(
                     state_dict=debug_dict,
                     uid=str(self.uid),
@@ -1848,6 +1823,9 @@ class Validator:
                     local=False,
                 )
             )
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+
             tplr.log_with_context(
                 level="info",
                 message=f"Stored debug values for window {self.current_window}",
@@ -1963,7 +1941,7 @@ class Validator:
                     "current_window": self.current_window,
                     "sync_window": self.sync_window,
                 }
-                asyncio.create_task(
+                t = asyncio.create_task(
                     self.comms.put(
                         state_dict=checkpoint_data,
                         uid=str(self.uid),
@@ -1973,6 +1951,8 @@ class Validator:
                         local=False,
                     )
                 )
+                self._bg_tasks.add(t)
+                t.add_done_callback(self._bg_tasks.discard)
 
             # 18. Log profiling summary every 10 windows
             if self.sync_window % 10 == 0:
@@ -2599,46 +2579,6 @@ class Validator:
         )
         return ok
 
-    # Listens for new blocks and sets self.current_block and self.current_window
-    def block_listener(self, loop):
-        import websockets.exceptions  # Ensure we catch websockets errors
-
-        def handler(event):
-            try:
-                self.current_block = int(event["header"]["number"])
-                new_window = int(self.current_block / self.hparams.blocks_per_window)
-                if new_window != self.current_window:
-                    self.current_window = new_window
-                    self.comms.current_window = self.current_window
-                    tplr.logger.info(
-                        f"New block received. Current window updated to: {self.current_window}"
-                    )
-            except Exception as e:
-                tplr.logger.error(f"Error processing block event: {e}")
-
-        backoff = 1  # initial backoff in seconds
-        max_backoff = 60  # maximum backoff limit
-
-        while not self.stop_event.is_set():
-            try:
-                # This call subscribes to block headers and might throw keepalive errors
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(
-                    handler
-                )
-                backoff = 1  # reset backoff if subscription exits without exception
-            except websockets.exceptions.ConnectionClosedError as e:
-                tplr.logger.warning(
-                    f"Websocket ConnectionClosedError caught: {e}. Retrying in {backoff} seconds."
-                )
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
-            except Exception as e:
-                tplr.logger.error(
-                    f"Block subscription error: {e}. Retrying in {backoff} seconds."
-                )
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
-
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):
     """Normalizes logits using a minimum power normalization approach.
@@ -2709,4 +2649,7 @@ async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
 
 if __name__ == "__main__":
     uvloop.install()
-    asyncio.run(Validator().run())
+    try:
+        asyncio.run(Validator().main())
+    except KeyboardInterrupt:
+        pass

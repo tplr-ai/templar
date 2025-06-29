@@ -25,7 +25,6 @@ import json
 import os
 import random
 import sys
-import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import cast
@@ -37,7 +36,6 @@ import torch.distributed as dist
 import uvloop
 
 # Third party
-from bittensor.core.subtensor import ScaleObj
 from torch import autocast
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.optim import SGD
@@ -50,6 +48,9 @@ from torch.utils.data import DataLoader
 from transformers.models.llama import LlamaForCausalLM
 
 import tplr
+
+# Local
+from neurons import BaseNode
 
 # Local
 
@@ -67,7 +68,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 
-class Miner:
+class Miner(BaseNode):
     # Command line config items.
     @staticmethod
     def miner_config():
@@ -138,14 +139,20 @@ class Miner:
         self.rank = int(os.getenv("RANK", 0))
         self.world_size = int(os.getenv("WORLD_SIZE", 1))
         self.local_rank = int(os.getenv("LOCAL_RANK", 0))
+        tplr.logger.info(
+            f"[Init] rank={self.rank}, world_size={self.world_size}, local_rank={self.local_rank}"
+        )
 
         if self.world_size >= 1:
             dist.init_process_group(
                 backend="nccl",
                 init_method="env://",
                 timeout=timedelta(minutes=45),
+                rank=self.rank,
+                world_size=self.world_size,
             )
             torch.cuda.set_device(self.local_rank)
+            tplr.logger.info("[Init] NCCL process-group ready and GPU selected")
             self.config.device = f"cuda:{self.local_rank}"
         else:
             self.config.device = self.config.device or "cuda"
@@ -167,17 +174,20 @@ class Miner:
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
+        tplr.logger.info("[Init] Bittensor wallet/metagraph loaded")
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             tplr.logger.error(
                 f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
             )
             sys.exit()
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+        super().__init__()
 
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
         self.model.to(self.device)  # type: ignore[reportArgumentType]
         self.model.gradient_checkpointing_enable()
+        tplr.logger.info("[Init] Llama model instantiated & on device")
 
         compile_mode = "default"
         self.model = cast(
@@ -191,6 +201,7 @@ class Miner:
                 output_device=self.local_rank,
                 gradient_as_bucket_view=True,
             )
+            tplr.logger.info("[Init] wrapped model with DistributedDataParallel")
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
@@ -202,6 +213,7 @@ class Miner:
             quantization_bins=self.hparams.quantization_bins,
             quantization_range=self.hparams.quantization_range,
         )
+        tplr.logger.info("[Init] compression pipeline ready")
 
         # Init optimizer and momentum
         self.momentum = {}
@@ -252,6 +264,8 @@ class Miner:
             schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
             milestones=[inner_steps_before_outer_step, self.hparams.warmup_steps],
         )
+        tplr.logger.info("[Init] optimizers & schedulers constructed")
+
         for idx, (n, p) in enumerate(model_iterator):
             if idx % self.world_size == self.rank:
                 # this rank “owns” the parameter
@@ -289,9 +303,12 @@ class Miner:
             dist.barrier(device_ids=[self.local_rank])
 
         # Init state params
-        self.stop_event = asyncio.Event()
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
+        tplr.logger.info(
+            f"[Init] chain at block {self.current_block}, window {self.current_window}"
+        )
+
         self.start_window = self.current_window  # Record the start window
         self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window
@@ -313,6 +330,7 @@ class Miner:
                 group="miner",
                 job_type="mining",
             )
+            tplr.logger.info("[Init] WandB session started")
 
             # Initialize metrics logger for InfluxDB
             self.metrics_logger = tplr.metrics.MetricsLogger(
@@ -343,6 +361,8 @@ class Miner:
             rank=self.rank,
             world_size=self.world_size,
         )
+        tplr.logger.info("[Init] dataset + sampler ready")
+        tplr.logger.info("[Init] ✔ fully done – entering run()")
 
     # Main training loop.
     async def run(self):
@@ -350,13 +370,6 @@ class Miner:
         self.loop = asyncio.get_running_loop()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
         self.loop.set_default_executor(self.executor)
-
-        self.listener = threading.Thread(
-            target=self.block_listener,
-            args=(self.loop,),
-            daemon=True,
-        )
-        self.listener.start()
 
         # Use config peers if provided
         if self.config.peers:
@@ -445,7 +458,8 @@ class Miner:
 
         self.comms.start_commitment_fetcher()
 
-        while True:
+        while not self.stop_event.is_set():
+            await asyncio.sleep(0)
             # 1. Initialize window and update peers
             window_start = tplr.T()
             # Start the gather in the background:
@@ -481,7 +495,7 @@ class Miner:
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             tplr.logger.info("Start accumulating...")
-            res = self.inner_steps(loader=loader, step_window=step_window)
+            res = await self.inner_steps(loader=loader, step_window=step_window)
             loss = res["first_loss"]
             n_batches = res["batch_count"]
             window_tokens = res["batch_tokens"]
@@ -586,34 +600,14 @@ class Miner:
                 dist.barrier(device_ids=[self.local_rank])
 
             sync_block = self.current_window * self.hparams.blocks_per_window
-            retries = 0
-            delay = 1
-            max_retries = 5
-            max_delay = 60
-            while True:
-                try:
-                    response = self.subtensor.query_module(
-                        "Timestamp", "Now", block=sync_block
-                    )
-                    if response is None or not isinstance(response, ScaleObj):
-                        raise ValueError(f"Could not query timestamp for {sync_block}")
-                    ts_value = (
-                        cast(int, response.value) / 1000
-                    )  # convert milliseconds to seconds
-                    break
-                except Exception as e:
-                    tplr.logger.error(
-                        f"Failed to query timestamp for block {sync_block}: {str(e)}. Retry {retries + 1}/{max_retries}"
-                    )
-                    retries += 1
-                    if retries > max_retries:
-                        tplr.logger.error(
-                            "Exceeded maximum retries for timestamp query."
-                        )
-                        raise e
-                    time.sleep(delay)
-                    delay = min(delay * 2, max_delay)
-
+            ts_value = await self.loop.run_in_executor(
+                None, self.query_block_timestamp, sync_block
+            )
+            if ts_value is None:
+                tplr.logger.warning(
+                    f"Could not get timestamp for sync block {sync_block}. Using current time as fall back.",
+                )
+                ts_value = time.time()
             time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
             time_max = time_min + timedelta(
                 seconds=self.hparams.time_window_delta_seconds
@@ -716,7 +710,7 @@ class Miner:
                     )
 
                 # Store the debug dictionary
-                asyncio.create_task(
+                t = asyncio.create_task(
                     self.comms.put(
                         state_dict=debug_dict,
                         uid=str(self.uid),
@@ -725,6 +719,9 @@ class Miner:
                         local=False,
                     )
                 )
+                self._bg_tasks.add(t)
+                t.add_done_callback(self._bg_tasks.discard)
+
                 tplr.logger.info(
                     f"Stored debug values for window {self.current_window}"
                 )
@@ -851,7 +848,7 @@ class Miner:
             while self.current_window == step_window:
                 await asyncio.sleep(0.1)
 
-    def inner_steps(
+    async def inner_steps(
         self,
         loader: DataLoader,
         step_window: int,
@@ -879,12 +876,12 @@ class Miner:
         loader_iter = iter(loader)
         rank = f"[{self.rank}] " if self.world_size > 1 else ""
 
-        while True:
+        while not self.stop_event.is_set():
             # ------------------------------------------------------------------ #
             # 1. Fetch a batch (or detect EOS) on *each* rank
             # ------------------------------------------------------------------ #
             try:
-                batch = next(loader_iter)
+                batch = await self.loop.run_in_executor(None, next, loader_iter)
                 local_has_batch = True
             except StopIteration:
                 local_has_batch = False
@@ -983,6 +980,8 @@ class Miner:
                     self.inner_scheduler.step()
                 break
 
+        await asyncio.sleep(0)
+
         # ------------------------------------------------------------------ #
         # 7. parameter offloading logic
         # ------------------------------------------------------------------ #
@@ -1040,48 +1039,11 @@ class Miner:
             f"After cleanup - GPU reserved: {torch.cuda.memory_reserved(self.device) / 1024**3:.2f} GB"
         )
 
-    # Listens for new blocks and sets self.current_block and self.current_window
-    def block_listener(self, _):
-        import websockets.exceptions  # Ensure we catch websockets errors
-
-        def handler(event):
-            try:
-                self.current_block = int(event["header"]["number"])
-                new_window = int(self.current_block / self.hparams.blocks_per_window)
-                if new_window != self.current_window:
-                    self.current_window = new_window
-                    self.comms.current_window = self.current_window
-                    tplr.logger.info(
-                        f"New block received. Current window updated to: {self.current_window}"
-                    )
-            except Exception as e:
-                tplr.logger.error(f"Error processing block event: {e}")
-
-        backoff = 1  # initial backoff in seconds
-        max_backoff = 60  # maximum backoff limit
-
-        while not self.stop_event.is_set():
-            try:
-                # This call subscribes to block headers and might throw keepalive errors
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(
-                    handler
-                )
-                backoff = 1  # reset backoff if subscription exits without exception
-            except websockets.exceptions.ConnectionClosedError as e:
-                tplr.logger.warning(
-                    f"Websocket ConnectionClosedError caught: {e}. Retrying in {backoff} seconds."
-                )
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
-            except Exception as e:
-                tplr.logger.error(
-                    f"Block subscription error: {e}. Retrying in {backoff} seconds."
-                )
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
-
 
 # Start miner.
 if __name__ == "__main__":
     uvloop.install()
-    asyncio.run(Miner().run())
+    try:
+        asyncio.run(Miner().main())
+    except KeyboardInterrupt:
+        pass

@@ -30,7 +30,7 @@
     "active_check_interval": 60,
     "recent_windows": 5,
     "power_normalisation": 2.0,
-    "validator_sample_rate": 0.6,
+    "validator_sample_micro_bs": 4,
     "gather_peers_slash_threshold": 0.4,
     "uids_per_window": 7,
     "time_window_delta_seconds": 10,

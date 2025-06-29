@@ -302,9 +302,10 @@ class Validator:
             uid=self.uid,
             window=self.current_window,
             steps_per_window=self.hparams.inner_steps,
-            micro_bs=self.hparams.batch_size,
+            micro_bs=self.hparams.micro_batch_size,
             batch_size=self.hparams.target_batch_size,
-            validation_bs=32,
+            validation_bs=self.hparams.validator_sample_micro_bs
+            * self.hparams.micro_batch_size,
             rank=0,
             world_size=1,
         )
@@ -1272,6 +1273,10 @@ class Validator:
 
                 meta = state_dict.get("metadata", {})
                 self.log_digest_match(eval_uid, meta)
+                _, total_samples = self._training_pool_digest(
+                    eval_uid, self.sync_window
+                )
+                total_batches = total_samples // self.hparams.micro_batch_size
 
                 # Loss before own data
                 model_before_update = copy.deepcopy(self.model)
@@ -1286,16 +1291,13 @@ class Validator:
                 loss_before_own, n_batches = self.evaluate_model(
                     model_before_update, loader_own
                 )
-                if n_batches == 0:
-                    tplr.log_with_context(
-                        level="warning",
-                        message=f"No valid batches processed for UID {eval_uid}, skipping evaluation without penalty (validator data issue)",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                        eval_uid=eval_uid,
-                    )
-                    continue
-
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Evaluating {n_batches}/{total_batches} batches ({n_batches / total_batches:.1%})",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                    eval_uid=eval_uid,
+                )
                 self.loss_before_per_batch_own = (
                     loss_before_own / n_batches if n_batches > 0 else 0
                 )
@@ -1569,7 +1571,7 @@ class Validator:
                 )
                 tplr.log_with_context(
                     level="info",
-                    message=f"Binary Indicator Score : {self.binary_indicator_scores[eval_uid]}",
+                    message=f"Binary Indicator Score: {self.binary_indicator_scores[eval_uid]}",
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                     eval_uid=eval_uid,
@@ -1587,7 +1589,7 @@ class Validator:
                 ]
                 tplr.log_with_context(
                     level="debug",
-                    message=f"Binary Moving Average Score : {self.binary_moving_averages[eval_uid]}",
+                    message=f"Binary Moving Average Score: {self.binary_moving_averages[eval_uid]}",
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                     eval_uid=eval_uid,

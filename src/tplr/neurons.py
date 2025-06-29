@@ -19,32 +19,34 @@
 import asyncio
 import math
 import time
+from types import SimpleNamespace
+import typing
 from typing import TYPE_CHECKING, TypeVar, cast
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch._prims_common import DeviceLikeType
+from torch.optim import Optimizer
 
 import tplr
 from tplr.logging import logger
 
-
 if TYPE_CHECKING:
+    from neurons.aggregator import AggregationServer
     from neurons.miner import Miner
     from neurons.validator import Validator
-    from neurons.aggregator import AggregationServer
 
 NeuronT = TypeVar("NeuronT", "Miner", "Validator")
 
 
-def prepare_gradient_dict(miner, pages, step_window):
+def prepare_gradient_dict(miner, step_window):
     """
     Prepares the gradient dictionary for sharing by compressing the
     momentum for each parameter and attaching metadata.
 
     Args:
         miner (Miner): Instance of Miner containing model, scheduler, momentum, compressor, transformer and hparams.
-        pages (list): The pages information used for training data.
         step_window (int): The current window number.
 
     Returns:
@@ -56,33 +58,13 @@ def prepare_gradient_dict(miner, pages, step_window):
     gradient = {}
     xshapes = {}
     totalks = {}
-    lr = miner.scheduler.get_last_lr()[0]
-
-    # Use an internal iteration counter stored in miner if it doesn't exist already
-    if not hasattr(miner, "gradient_iteration_counter"):
-        miner.gradient_iteration_counter = 0
-
-    # Increment the counter for this function call
-    miner.gradient_iteration_counter += 1
-
-    # Log the current iteration counter
-    logger.info(
-        f"Current gradient_iteration_counter: {miner.gradient_iteration_counter}"
-    )
-
-    # Track if this is the first iteration
-    is_first_iteration = miner.gradient_iteration_counter == 1
-    # Check if we're in the first 5 iterations
-    is_early_iteration = miner.gradient_iteration_counter <= 5
+    lr = float(miner.hparams.outer_learning_rate)
 
     if isinstance(miner.model, torch.nn.parallel.DistributedDataParallel):
         model_iterator = miner.model.module.named_parameters()
     else:
         model_iterator = miner.model.named_parameters()
     for n, p in model_iterator:
-        # Weight-decay is done by *every* rank
-        p.data.mul_(1.0 - lr * miner.hparams.weight_decay)
-
         # Skip parameters not owned by this rank
         if n not in miner.owned_params:
             p.grad = None
@@ -96,13 +78,8 @@ def prepare_gradient_dict(miner, pages, step_window):
         if miner.momentum[n].device != p.device:
             miner.momentum[n] = miner.momentum[n].to(p.device)
 
-        # Update momentum
-        if is_first_iteration:
-            # Set momentum directly to grad (multiplied by lr to maintain scale)
-            miner.momentum[n] = grad.clone() * lr
-        else:
-            # Normal behavior for later iterations
-            miner.momentum[n].add_(grad, alpha=lr)
+        # Normal behavior for later iterations
+        miner.momentum[n].add_(grad, alpha=lr)
 
         # Compress momentum
         encoded = miner.transformer.encode(miner.momentum[n])
@@ -110,7 +87,7 @@ def prepare_gradient_dict(miner, pages, step_window):
             encoded, miner.hparams.topk_compression
         )
         if totalk is None:
-            print("totalk is None")
+            tplr.logger.info("totalk is None")
         del encoded  # Free the encoded tensor immediately
 
         # Estimate transmitted gradient
@@ -120,9 +97,7 @@ def prepare_gradient_dict(miner, pages, step_window):
         transmit_grad = miner.transformer.decode(decompressed)
         del decompressed  # Free intermediate tensor
 
-        # Skip subtracting transmitted gradient in the first 5 iterations
-        if not is_early_iteration:
-            miner.momentum[n].sub_(transmit_grad)
+        miner.momentum[n].sub_(transmit_grad)
 
         # Move compressed values to CPU to save GPU memory
         gradient[n + "idxs"] = idxs.cpu() if isinstance(idxs, torch.Tensor) else idxs
@@ -138,9 +113,86 @@ def prepare_gradient_dict(miner, pages, step_window):
 
     torch.cuda.empty_cache()
 
-    gradient["metadata"] = {"pages_info": pages, "window": step_window}
+    gradient["metadata"] = {"window": step_window}
 
     return gradient, xshapes, totalks
+
+
+def outer_step(
+    model: nn.Module,
+    optimizer: Optimizer,
+    *,
+    gather_result: SimpleNamespace | None,
+    transformer: tplr.compress.TransformDCT,
+    compressor: tplr.compress.CompressDCT,
+    xshapes: dict,
+    totalks: dict,
+    device: str,
+    is_master: bool,
+    world_size: int,
+) -> None:
+    """
+    Synchronize gradients (if DDP) and apply optimizer step
+    """
+    bare_model = (
+        model.module
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel)
+        else model
+    )
+    if is_master:
+        new_grad = None
+        model.train()
+        optimizer.zero_grad()
+
+        new_grad = None
+        if gather_result is not None and gather_result.state_dict is not None:
+            for n, p in bare_model.named_parameters():
+                idxs_key = n + "idxs"
+                vals_key = n + "vals"
+                quant_key = n + "quant_params"
+
+                idxs = getattr(gather_result.state_dict, idxs_key, None)
+                vals = getattr(gather_result.state_dict, vals_key, None)
+                quant_params = getattr(gather_result.state_dict, quant_key, None)
+                if idxs is not None and vals is not None:
+                    if not isinstance(idxs, (list, tuple)):
+                        idxs = [idxs]
+                    if not isinstance(vals, (list, tuple)):
+                        vals = [vals]
+
+                    new_grad = transformer.decode(
+                        compressor.batch_decompress(
+                            p.to(device),  # type: ignore
+                            typing.cast(list[torch.Tensor], idxs),
+                            typing.cast(list[torch.Tensor], vals),
+                            xshapes[n],
+                            totalks[n],
+                            quant_params,
+                            normalise=False,
+                            clip_norm=True,
+                        )
+                    )
+
+                    if p.grad is None:
+                        p.grad = new_grad
+                    else:
+                        p.grad.copy_(new_grad)
+                else:
+                    tplr.logger.info(
+                        f"Gradient data missing for parameter {n}, skipping."
+                    )
+
+        optimizer.step()
+        torch.cuda.empty_cache()
+        if world_size > 1:
+            for t in bare_model.state_dict().values():
+                if torch.is_tensor(t):
+                    dist.broadcast(t.data, src=0)
+    else:
+        if world_size > 1:
+            for t in bare_model.state_dict().values():
+                if torch.is_tensor(t):
+                    dist.broadcast(t.data, src=0)
 
 
 async def update_peers(
@@ -440,79 +492,82 @@ async def compare_model_with_debug_dict(
     model: nn.Module,
     debug_dict: dict[str, list[float]],
     learning_rate: float,
+    param_avg_change: dict[str, torch.Tensor] | None = None,
+    *,
+    min_step_size: float = 1e-9,
     index_range: tuple[int, int] = (0, 2),
 ) -> dict[str, bool | float | int]:
     """
-    Compares a model's parameters with a debug dictionary to measure synchronization.
-
-    Args:
-        model: The PyTorch model with parameters to compare
-        debug_dict: Debug dictionary containing parameter debug values
-        learning_rate: Current learning rate to normalize differences
-
-    Returns:
-        dict: Comparison metrics including L2 norm, absolute differences, and steps behind measurements
+    Compare weights with published debug snippets and return sync metrics.
     """
     # Initialize metrics
     total_squared_diff = 0.0
     total_abs_diff = 0.0
     param_count = 0
-    max_diff = 0.0
+    max_diff = 0.0  # largest raw parameter diff
+    max_steps = 0.0
 
-    # Compare each parameter with its debug entry
-    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-        model_iterator = model.module.named_parameters()
-    else:
-        model_iterator = model.named_parameters()
-    for name, param in model_iterator:
-        debug_key = name + "_debug"
+    steps_sum = 0.0
+    tensors = 0
 
-        if debug_key in debug_dict and isinstance(debug_dict[debug_key], list):
-            # Get the parameter values (first two elements to match debug dict)
-            param_data = param.data.flatten()[
-                index_range[0] : index_range[1]
-            ].detach()  # Keep on device
+    named_params = (
+        model.module.named_parameters()
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel)
+        else model.named_parameters()
+    )
 
-            # Convert debug data to tensor on the same device
-            debug_data = torch.tensor(
-                debug_dict[debug_key], device=param.device, dtype=param.dtype
+    for name, p in named_params:
+        key = name + "_debug"
+        if key not in debug_dict or not isinstance(debug_dict[key], list):
+            continue
+
+        # --- grab the slice we care about --------------------------------
+        curr_slice = p.data.flatten()[index_range[0] : index_range[1]]
+        debug_slice = torch.tensor(debug_dict[key], dtype=p.dtype, device=p.device)
+
+        diff_vec = curr_slice - debug_slice
+        abs_vec = torch.abs(diff_vec)
+
+        total_squared_diff += torch.sum(diff_vec**2).item()
+        total_abs_diff += abs_vec.sum().item()
+        raw_max = abs_vec.max().item()
+        max_diff = max(max_diff, raw_max)
+        param_count += abs_vec.numel()
+
+        # --- element-wise steps-behind -----------------------------------
+        if param_avg_change and name in param_avg_change:
+            step_vec = torch.clamp(
+                param_avg_change[name].to(p.device), min=min_step_size
             )
+            if step_vec.numel() != abs_vec.numel():
+                # fallback if stored slice has wrong length
+                step_vec = abs_vec.new_full(abs_vec.size(), learning_rate)
+        else:
+            step_vec = abs_vec.new_full(abs_vec.size(), learning_rate)
 
-            # Compute differences
-            diffs = param_data - debug_data
-            squared_diff = torch.sum(diffs**2).item()
-            abs_diff = torch.abs(diffs).sum().item()
-            max_param_diff = torch.max(torch.abs(diffs)).item()
+        step_ratio = abs_vec / step_vec
+        steps_sum += step_ratio.mean().item()
+        max_steps = max(max_steps, step_ratio.max().item())
+        tensors += 1
 
-            # Update totals
-            total_squared_diff += squared_diff
-            total_abs_diff += abs_diff
-            param_count += param_data.numel()
-            max_diff = max(max_diff, max_param_diff)
+    l2_norm = math.sqrt(total_squared_diff)
+    avg_l2_norm = math.inf if tensors == 0 else l2_norm / param_count
+    avg_abs_diff = math.inf if tensors == 0 else total_abs_diff / param_count
+    avg_steps = math.inf if tensors == 0 else steps_sum / tensors
+    if tensors == 0:
+        max_steps = math.inf  # nothing compared → undefined
 
-    # Calculate final metrics
-    l2_norm = torch.sqrt(torch.tensor(total_squared_diff)).item()
-    avg_l2_norm = l2_norm / param_count if param_count > 0 else math.inf
-    avg_abs_diff = total_abs_diff / param_count if param_count > 0 else math.inf
-
-    # Normalize differences by learning rate to get "steps behind" metric
-    avg_steps_behind = avg_abs_diff / learning_rate if learning_rate > 0 else math.inf
-    max_steps_behind = max_diff / learning_rate if learning_rate > 0 else math.inf
-
-    # Prepare return metrics
-    metrics: dict[str, bool | float | int] = {
+    return {
         "success": True,
         "l2_norm": l2_norm,
         "avg_l2_norm": avg_l2_norm,
         "avg_abs_diff": avg_abs_diff,
         "max_diff": max_diff,
-        "avg_steps_behind": avg_steps_behind,
-        "max_steps_behind": max_steps_behind,
+        "avg_steps_behind": avg_steps,
+        "max_steps_behind": max_steps,
         "param_count": param_count,
         "learning_rate": learning_rate,
     }
-
-    return metrics
 
 
 def unpack_binary_tensor(packed_tensor: torch.Tensor, original_shape: torch.Size):

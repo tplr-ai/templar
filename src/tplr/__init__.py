@@ -35,3 +35,5 @@ from .schemas import *
 from .wandb import initialize_wandb
 from .metrics import *
 from .shard_index import ShardIndex
+from .sharded_dataset import SharedShardedDataset
+from .sharded_sampler import EvalSampler, MinerSampler

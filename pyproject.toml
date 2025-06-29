@@ -2,6 +2,10 @@
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+where   = ["src", "."]
+include = ["tplr*", "neurons*"]
+
 [project]
 name = "tplr"
 version = "0.1.0"

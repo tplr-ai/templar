@@ -378,6 +378,12 @@ class Miner(BaseNode):
         self.comms.commitments = await self.comms.get_commitments()
         tplr.logger.info("Loaded commitments")
 
+        peer_start = tplr.T()
+        if self.is_master:
+            await tplr.neurons.update_peers(
+                instance=self, window=self.current_window, peer_start=peer_start
+            )
+
         # Fetch start_window from highest stake validator
         self.start_window = await self.comms.get_start_window()
         if self.start_window is None:

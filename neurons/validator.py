@@ -171,7 +171,7 @@ class Validator(BaseNode):
 
         # Init optimizer
         self.lr = float(self.hparams.outer_learning_rate)
-        self.optimizer = SGD(self.model.parameters(), lr=self.lr)
+        self.outer_optimizer = SGD(self.model.parameters(), lr=self.lr)
         self.xshapes = {}
         self.totalks = {}
         for n, p in self.model.named_parameters():
@@ -1392,7 +1392,7 @@ class Validator(BaseNode):
                     continue
 
                 # 10. Compute loss after gradient application on own data
-                self.optimizer.zero_grad()
+                self.outer_optimizer.zero_grad()
                 model_after_update.zero_grad()
                 self.sampler.set_window_uid(eval_uid, self.sync_window)
                 loader_own = torch.utils.data.DataLoader(
@@ -1449,7 +1449,7 @@ class Validator(BaseNode):
                 )
 
                 # 10. Compute loss after gradient application for random data
-                self.optimizer.zero_grad()
+                self.outer_optimizer.zero_grad()
                 model_after_update.zero_grad()
 
                 self.sampler.set_window_uid(random_seed, self.sync_window)
@@ -1742,13 +1742,13 @@ class Validator(BaseNode):
             # 14. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
-            self.optimizer.zero_grad()
+            self.outer_optimizer.zero_grad()
             self.model.zero_grad()
 
             if gather_result is not None and gather_result.state_dict is not None:
                 tplr.neurons.outer_step(
                     self.model,
-                    self.optimizer,
+                    self.outer_optimizer,
                     gather_result=gather_result,
                     transformer=self.transformer,
                     compressor=self.compressor,

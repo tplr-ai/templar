@@ -358,7 +358,7 @@ class Comms(ChainManager):
                     await s3_client.put_object(Bucket=bucket.name, Key=key, Body=data)
             else:
                 # Multipart upload for large files
-                await self.upload_large_file(file_path, key, s3_client)
+                await self.upload_large_file(file_path, key, s3_client, bucket)
 
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(bucket)
@@ -429,7 +429,7 @@ class Comms(ChainManager):
             file_size = response["ContentLength"]  # type: ignore
 
             # Download the object
-            if file_size <= 5 * 1024 * 1024 * 1024:  # 5GB
+            if file_size <= 4 * 1024 * 1024 * 1024:  # 4GB
                 response = await asyncio.wait_for(
                     s3_client.get_object(Bucket=bucket.name, Key=key),
                     timeout=timeout,
@@ -475,18 +475,21 @@ class Comms(ChainManager):
 
     #  Large File Operations
 
-    async def upload_large_file(self, file_path: str, key: str, s3_client):
+    async def upload_large_file(
+        self, file_path: str, key: str, s3_client, bucket: Bucket | None = None
+    ):
         """Uploads a large file to S3 using asynchronous multipart upload with 5MB chunks."""
         upload_id = None
         MAX_RETRIES = 3
         PART_SIZE = 5 * 1024 * 1024  # 5MB
-
+        if bucket is None:
+            bucket = self.bucket
         try:
             async with self.client_semaphore:
                 for attempt in range(MAX_RETRIES):
                     try:
                         response = await s3_client.create_multipart_upload(
-                            Bucket=self.bucket.name, Key=key
+                            Bucket=bucket.name, Key=key
                         )
                         upload_id = response["UploadId"]
                         break
@@ -510,7 +513,7 @@ class Comms(ChainManager):
                                 data = await f.read(byte_range_end - byte_range_start)
 
                             response = await s3_client.upload_part(
-                                Bucket=self.bucket.name,
+                                Bucket=bucket.name,
                                 Key=key,
                                 PartNumber=part_number,
                                 UploadId=upload_id,
@@ -546,7 +549,7 @@ class Comms(ChainManager):
                 for attempt in range(MAX_RETRIES):
                     try:
                         await s3_client.complete_multipart_upload(
-                            Bucket=self.bucket.name,
+                            Bucket=bucket.name,
                             Key=key,
                             UploadId=upload_id,
                             MultipartUpload={"Parts": parts},
@@ -559,13 +562,13 @@ class Comms(ChainManager):
                         await asyncio.sleep(2**attempt)
 
         except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(self.bucket)
+            await self._purge_s3_client(bucket)
         except Exception as e:
             tplr.logger.error(f"Error during multipart upload of {key}: {e}")
             if upload_id:
                 try:
                     await s3_client.abort_multipart_upload(
-                        Bucket=self.bucket.name, Key=key, UploadId=upload_id
+                        Bucket=bucket.name, Key=key, UploadId=upload_id
                     )
                 except Exception as abort_e:
                     tplr.logger.error(f"Failed to abort multipart upload: {abort_e}")
@@ -807,14 +810,18 @@ class Comms(ChainManager):
         self,
         uid: str,
         window: int,
-        key: str,
+        key: Literal["checkpoint", "debug", "gradient", "aggregator"],
         local: bool = True,
         stale_retention: int = 10,
+        timeout: int = 15,
         time_min: datetime = None,
         time_max: datetime = None,
     ) -> Optional[tuple[dict, int]]:
         """GET operation."""
-        filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+        if key == "aggregator":
+            filename = f"{key}-{window}-v{__version__}.pt"
+        else:
+            filename = f"{key}-{window}-{uid}-v{__version__}.pt"
         tplr.logger.debug(f"GET {filename} -->")
 
         try:
@@ -837,14 +844,27 @@ class Comms(ChainManager):
                 return state_dict, global_step
 
             # Remote storage logic
-            peer_bucket = self.commitments.get(int(uid))
-            tplr.logger.debug(f"Peer bucket : {peer_bucket}")
-            if not peer_bucket:
+            if key == "aggregator":
+                bucket_config = BUCKET_SECRETS["aggregator"]
+                credentials = bucket_config["credentials"]["read"]
+
+                # Create a Bucket object using specified credentials
+                bucket = Bucket(
+                    name=bucket_config["name"],
+                    account_id=bucket_config["account_id"],
+                    access_key_id=credentials["access_key_id"],
+                    secret_access_key=credentials["secret_access_key"],
+                )
+            else:
+                bucket = self.commitments.get(int(uid))
+            tplr.logger.debug(f"Peer bucket : {bucket}")
+            if not bucket:
                 return None
 
             loaded_data = await self.s3_get_object(
                 key=filename,
-                bucket=peer_bucket,
+                bucket=bucket,
+                timeout=timeout,
                 time_min=time_min,
                 time_max=time_max,
             )
@@ -966,8 +986,8 @@ class Comms(ChainManager):
         totalks: dict,
         local: bool = True,
         stale_retention: int = 10,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
     ) -> Optional[SimpleNamespace]:
         """Gather operation with individual gradient normalization and connection management."""
         start_time = time.time()
@@ -1991,151 +2011,6 @@ class Comms(ChainManager):
             return None
         except Exception as e:
             tplr.logger.error(f"Error downloading range {start}-{end} for {key}: {e}")
-            return None
-
-    async def load_aggregation(
-        self,
-        window: int,
-        chunk_size: int = 50 * 1024 * 1024,
-        max_concurrent: int = 16,
-    ):
-        """
-        Load aggregated gradients for a specified window from the aggregation server.
-
-        Args:
-            window: Window number to load
-            chunk_size: Size of each chunk for multipart download (default 50MB)
-            max_concurrent: Maximum concurrent downloads (default 16)
-
-        Returns:
-            Processed aggregation data or None if failed
-        """
-        import uuid
-
-        try:
-            bucket_config = BUCKET_SECRETS["aggregator"]
-            credentials = bucket_config["credentials"]["read"]
-
-            # Create a Bucket object using specified credentials
-            bucket = Bucket(
-                name=bucket_config["name"],
-                account_id=bucket_config["account_id"],
-                access_key_id=credentials["access_key_id"],
-                secret_access_key=credentials["secret_access_key"],
-            )
-
-            filename = f"aggregator-{window}-v{tplr.__version__}.pt"
-
-            tplr.logger.info(f"Attempting to download aggregation file: {filename}")
-
-            # Get file size
-            file_size = await self.s3_get_object_size(bucket, filename)
-            if file_size is None:
-                tplr.logger.warning(f"No aggregation file found for window {window}")
-                return None
-
-            # For small files, use the existing s3_get_object method
-            if file_size <= 100 * 1024 * 1024:  # 100MB threshold
-                tplr.logger.info(
-                    f"File size {file_size} bytes, using standard download"
-                )
-                result = await self.s3_get_object(
-                    key=filename,
-                    bucket=bucket,
-                    timeout=45,  # Longer timeout for large files
-                )
-                if result is None:
-                    tplr.logger.warning(f"Failed to download {filename}")
-                    return None
-                tplr.logger.info(
-                    f"Successfully loaded aggregation data for window {window}"
-                )
-                return result
-
-            # For large files, use multipart download
-            tplr.logger.info(f"File size {file_size} bytes, using multipart download")
-
-            # Calculate chunks
-            chunks_info = []
-            for start in range(0, file_size, chunk_size):
-                end = min(start + chunk_size - 1, file_size - 1)
-                chunks_info.append((start, end))
-
-            tplr.logger.info(
-                f"Downloading {filename} in {len(chunks_info)} parallel chunks"
-            )
-
-            semaphore = asyncio.Semaphore(max_concurrent)
-
-            async def download_chunk(
-                start, end, max_retries: int = 3, backoff: float = 2.0
-            ):
-                """
-                Download a single byte-range with automatic retries.
-                `backoff` is an exponential factor (1 s, 2 s, 4 s, …).
-                """
-                delay = 1.0
-                for attempt in range(1, max_retries + 1):
-                    try:
-                        async with semaphore:
-                            return await self.s3_get_object_range(
-                                bucket=bucket,
-                                key=filename,
-                                start=start,
-                                end=end,
-                                timeout=45,
-                            )
-                    except Exception as exc:
-                        tplr.logger.warning(
-                            f"[Chunk {start}-{end}] attempt {attempt}/{max_retries} failed: {exc}"
-                        )
-                        if attempt == max_retries:
-                            raise  # bubble up → outer `except`
-                        await asyncio.sleep(delay)
-                        delay *= backoff
-
-            # Execute downloads
-            tasks = [download_chunk(start, end) for start, end in chunks_info]
-            chunks = await asyncio.gather(*tasks)
-
-            # Verify all chunks downloaded successfully
-            if None in chunks:
-                raise Exception("One or more chunks failed to download")
-
-            # Combine chunks in order
-            combined_bytes = b"".join(chunks)
-
-            # Create temporary file to deserialize
-            temp_file_path = os.path.join(
-                self.temp_dir, f"temp_aggregation_{window}_{uuid.uuid4().hex}.pt"
-            )
-
-            try:
-                # Write combined bytes to temporary file
-                async with aiofiles.open(temp_file_path, "wb") as f:
-                    await f.write(combined_bytes)
-
-                # Load the PyTorch data from the temporary file
-                loaded_data = torch.load(
-                    temp_file_path,
-                    map_location=self.config.device,
-                    weights_only=False,
-                )
-
-                tplr.logger.info(
-                    f"Successfully loaded aggregation data for window {window}"
-                )
-                return loaded_data
-
-            finally:
-                # Clean up temporary file
-                if os.path.exists(temp_file_path):
-                    os.remove(temp_file_path)
-
-        except Exception as e:
-            tplr.logger.error(
-                f"Error loading aggregation file for window {window}: {e}"
-            )
             return None
 
     async def get_debug_dict(self, window: int):

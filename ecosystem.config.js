@@ -80,22 +80,6 @@ module.exports = {
         '--use_wandb',
         `--project "${PROJECT_NAME}"`
       ].join(' ')
-    },
-
-    /*──────────────────────── Aggregator ─────────────────────*/
-    {
-      name: 'Aggregator',
-      script: 'neurons/aggregator.py',
-      interpreter: 'python3',
-      env: {
-        ...process.env,
-        PROJECT_NAME
-      },
-      args: [
-        '--netuid', '3',
-        '--device', 'cuda:7',
-        '--project', 'templar'
-      ].join(' ')
     }
   ]
 };

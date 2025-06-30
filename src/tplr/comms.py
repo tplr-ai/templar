@@ -318,7 +318,8 @@ class Comms(ChainManager):
     async def s3_put_object(
         self,
         key: str,
-        file_path: Optional[str] = None,
+        file_path: str | None = None,
+        bucket: Bucket | None = None,
     ):
         """
         Puts an object into S3 storage, handling different file types appropriately.
@@ -329,7 +330,9 @@ class Comms(ChainManager):
             bucket (Bucket, optional): The bucket to use. Defaults to self.bucket
         """
         try:
-            bucket = self.bucket
+            if bucket is None:
+                bucket = self.bucket
+
             s3_client = await self._get_s3_client(bucket)
 
             # Handle JSON files
@@ -696,9 +699,9 @@ class Comms(ChainManager):
     async def put(
         self,
         state_dict: dict,
-        uid: str | None,
         window: int,
         key: Literal["checkpoint", "debug", "gradient", "aggregator"],
+        uid: str | None = None,
         global_step: int = 0,
         local: bool = True,
         stale_retention: int = 10,
@@ -720,8 +723,19 @@ class Comms(ChainManager):
         """
         if key == "aggregator":
             filename = f"{key}-{window}-v{__version__}.pt"
+            bucket_config = BUCKET_SECRETS["aggregator"]
+            credentials = bucket_config["credentials"]["write"]
+
+            # Create a Bucket object using specified credentials
+            bucket = Bucket(
+                name=bucket_config["name"],
+                account_id=bucket_config["account_id"],
+                access_key_id=credentials["access_key_id"],
+                secret_access_key=credentials["secret_access_key"],
+            )
         else:
             filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+            bucket = None
         tplr.logger.debug(f"PUT {filename} -->")
 
         put_start = tplr.T()
@@ -754,7 +768,7 @@ class Comms(ChainManager):
                 final_path = os.path.join(local_dir, filename)
                 os.replace(temp_file_path, final_path)
             else:
-                await self.s3_put_object(filename, temp_file_path)
+                await self.s3_put_object(filename, temp_file_path, bucket)
                 # Remote storage with automatic handling of large files
                 asyncio.create_task(
                     self.cleanup_s3_data(

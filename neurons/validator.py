@@ -30,6 +30,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
+from types import SimpleNamespace
 from typing import Iterable, cast
 
 import bittensor as bt
@@ -614,7 +615,7 @@ class Validator(BaseNode):
                 current_window=self.current_window,
             )
 
-    def evaluate_model(
+    async def evaluate_model(
         self,
         model: torch.nn.Module,
         loader: Iterable[torch.Tensor],
@@ -651,6 +652,8 @@ class Validator(BaseNode):
                     n_batches += 1
                     del input_ids, labels, outputs
                     torch.cuda.empty_cache()
+
+                    await asyncio.sleep(0)
 
         return total_loss, n_batches
 
@@ -1008,6 +1011,11 @@ class Validator(BaseNode):
                 )
                 self.global_step += 1
                 continue
+
+            t = asyncio.create_task(self.upload_gather_results(gather_result))
+            self._bg_tasks.add(t)
+            t.add_done_callback(self._bg_tasks.discard)
+
             skipped_uids = gather_result.skipped_uids
             success_rate = gather_result.success_rate
             gather_time = tplr.T() - gather_start
@@ -1263,7 +1271,7 @@ class Validator(BaseNode):
                     num_workers=2,
                     pin_memory=True,
                 )
-                loss_before_own, n_batches = self.evaluate_model(
+                loss_before_own, n_batches = await self.evaluate_model(
                     model_before_update, loader_own
                 )
                 tplr.log_with_context(
@@ -1294,7 +1302,7 @@ class Validator(BaseNode):
                     num_workers=2,
                     pin_memory=True,
                 )
-                loss_before_random, n_batches = self.evaluate_model(
+                loss_before_random, n_batches = await self.evaluate_model(
                     model_before_update, loader_random
                 )
                 if n_batches == 0:
@@ -1394,7 +1402,7 @@ class Validator(BaseNode):
                     num_workers=2,
                     pin_memory=True,
                 )
-                loss_after_own, n_batches = self.evaluate_model(
+                loss_after_own, n_batches = await self.evaluate_model(
                     model_after_update, loader_own
                 )
                 # Clean up stored batches
@@ -1452,7 +1460,7 @@ class Validator(BaseNode):
                     num_workers=2,
                     pin_memory=True,
                 )
-                loss_after_random, n_batches = self.evaluate_model(
+                loss_after_random, n_batches = await self.evaluate_model(
                     model_after_update,
                     loader_random,
                 )
@@ -2578,6 +2586,54 @@ class Validator(BaseNode):
             eval_uid=uid,
         )
         return ok
+
+    async def upload_gather_results(self, gather_result: SimpleNamespace) -> None:
+        def to_cpu(obj):
+            """Recursively move all tensors in an arbitrary container to CPU."""
+            if torch.is_tensor(obj):
+                return obj.detach().cpu()
+            if isinstance(obj, (list, tuple)):
+                return type(obj)(to_cpu(x) for x in obj)
+            if isinstance(obj, dict):
+                return {k: to_cpu(v) for k, v in obj.items()}
+            return obj  # leave ints, floats, strings … untouched
+
+        if self.uid == self.metagraph.S.argmax().item():
+            try:
+                raw_state = gather_result.state_dict
+                # Accept both SimpleNamespace and plain dict
+                if isinstance(raw_state, SimpleNamespace):
+                    raw_state = vars(raw_state)  # same as .__dict__
+
+                cpu_state = {k: to_cpu(v) for k, v in raw_state.items()}
+                payload = {
+                    # SimpleNamespace → plain dict for Torch serialization
+                    "state_dict": cpu_state,
+                    "uids": gather_result.uids,
+                    "skipped_uids": gather_result.skipped_uids,
+                    "success_rate": gather_result.success_rate,
+                }
+
+                await self.comms.put(
+                    state_dict=payload,
+                    window=self.sync_window,
+                    key="aggregator",
+                    local=False,
+                )
+
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Uploaded aggregated gradients for window {self.sync_window}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+            except Exception as e:
+                tplr.log_with_context(
+                    level="warning",
+                    message=f"Failed to upload aggregated gradients: {e}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
 
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):

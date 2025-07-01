@@ -816,13 +816,15 @@ class Miner:
                 self.optimizer.step()
                 self.scheduler.step()
                 torch.cuda.empty_cache()
-                for t in bare_model.state_dict().values():
-                    if torch.is_tensor(t):
-                        dist.broadcast(t.data, src=0)
+                if self.world_size > 1:
+                    for t in bare_model.state_dict().values():
+                        if torch.is_tensor(t):
+                            dist.broadcast(t.data, src=0)
             else:
-                for t in bare_model.state_dict().values():
-                    if torch.is_tensor(t):
-                        dist.broadcast(t.data, src=0)
+                if self.world_size > 1:
+                    for t in bare_model.state_dict().values():
+                        if torch.is_tensor(t):
+                            dist.broadcast(t.data, src=0)
 
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - update_start)} Updated model"

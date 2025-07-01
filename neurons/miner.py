@@ -385,7 +385,16 @@ class Miner(BaseNode):
             )
 
         # Fetch start_window from highest stake validator
-        self.start_window = await self.comms.get_start_window()
+        if self.is_master:
+            self.start_window = await self.comms.get_start_window()
+            val = -1 if self.start_window is None else self.start_window
+            tensor = torch.tensor([val], dtype=torch.long, device=self.device)
+            dist.broadcast(tensor, src=0)
+        else:
+            tensor = torch.zeros(1, dtype=torch.long, device=self.device)
+            dist.broadcast(tensor, src=0)
+            val = tensor.item()
+            self.start_window = None if val == -1 else int(val)
         if self.start_window is None:
             raise RuntimeError(
                 "Could not find a valid start window. This should not be possible."

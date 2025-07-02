@@ -9,6 +9,7 @@ class DummyHparams:
         self.momentum_decay = 0.9
         self.topk_compression = 5
         self.outer_learning_rate = 0.9
+        self.use_dct = False
 
 
 class DummyCompressor:
@@ -25,10 +26,10 @@ class DummyCompressor:
 
 
 class DummyTransformer:
-    def encode(self, tensor):
+    def encode(self, tensor, use_dct):
         return tensor
 
-    def decode(self, tensor):
+    def decode(self, tensor, use_dct):
         return torch.tensor([0.1, 0.1])
 
 
@@ -143,10 +144,10 @@ def test_momentum_decay_and_gradient_accumulation():
             return torch.zeros_like(p)
 
     class DummyPassThroughTransformer:
-        def encode(self, tensor):  # identity
+        def encode(self, tensor, use_dct):  # identity
             return tensor
 
-        def decode(self, tensor):  # returns tensor as-is
+        def decode(self, tensor, use_dct):  # returns tensor as-is
             return tensor
 
     # ------------------------------------------------------------------ #
@@ -233,11 +234,11 @@ def test_compressor_and_transformer_calls():
         def __init__(self):
             self.decode_called_with = None
 
-        def encode(self, tensor):
+        def encode(self, tensor, use_dct):
             # Identity for easier reasoning
             return tensor
 
-        def decode(self, tensor):
+        def decode(self, tensor, use_dct):
             self.decode_called_with = tensor.clone()
             return torch.tensor([0.1, 0.1])  # value not important for this test
 
@@ -380,11 +381,8 @@ def test_behavior_when_p_grad_is_none():
 
     step_window = 3
 
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(AssertionError):
         prepare_gradient_dict(miner, step_window)
-
-    # You might expect a TypeError or AttributeError; ensure some exception is raised.
-    assert "None" in str(excinfo.value) or "grad" in str(excinfo.value)
 
 
 def test_logging_behavior(caplog):
@@ -433,7 +431,7 @@ def test_propagation_of_transformer_failure():
     miner = DummyMiner()
 
     # Override transformer.decode to throw an exception.
-    def failing_decode(tensor):
+    def failing_decode(tensor, use_dct):
         raise RuntimeError("Transformer error")
 
     miner.transformer.decode = failing_decode

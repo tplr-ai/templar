@@ -272,7 +272,9 @@ class Miner(BaseNode):
                 self.owned_params.add(n)
                 self.momentum[n] = torch.zeros_like(p, device=self.device)
             _, _, xshape, totalk, _ = self.compressor.compress(
-                self.transformer.encode(torch.zeros_like(p)),
+                self.transformer.encode(
+                    torch.zeros_like(p), use_dct=self.hparams.use_dct
+                ),
                 self.hparams.topk_compression,
             )
             self.xshapes[n] = xshape
@@ -693,6 +695,7 @@ class Miner(BaseNode):
                 device=str(self.device),
                 is_master=self.is_master,
                 world_size=self.world_size,
+                use_dct=self.hparams.use_dct,
             )
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - update_start)} Updated model"

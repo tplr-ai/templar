@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 NeuronT = TypeVar("NeuronT", "Miner", "Validator")
 
 
-def prepare_gradient_dict(miner, step_window):
+def prepare_gradient_dict(miner: "Miner", step_window: int):
     """
     Prepares the gradient dictionary for sharing by compressing the
     momentum for each parameter and attaching metadata.
@@ -71,6 +71,7 @@ def prepare_gradient_dict(miner, step_window):
         miner.momentum[n].mul_(miner.hparams.momentum_decay)
 
         # Ensure the gradient is on the same device as the parameter.
+        assert p.grad is not None
         grad = p.grad.to(p.device)
         if miner.momentum[n].device != p.device:
             miner.momentum[n] = miner.momentum[n].to(p.device)
@@ -79,7 +80,9 @@ def prepare_gradient_dict(miner, step_window):
         miner.momentum[n].add_(grad, alpha=lr)
 
         # Compress momentum
-        encoded = miner.transformer.encode(miner.momentum[n])
+        encoded = miner.transformer.encode(
+            miner.momentum[n], use_dct=miner.hparams.use_dct
+        )
         idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
             encoded, miner.hparams.topk_compression
         )
@@ -91,7 +94,9 @@ def prepare_gradient_dict(miner, step_window):
         decompressed = miner.compressor.decompress(
             p, idxs, vals, xshape, totalk, quant_params
         )
-        transmit_grad = miner.transformer.decode(decompressed)
+        transmit_grad = miner.transformer.decode(
+            decompressed, use_dct=miner.hparams.use_dct
+        )
         del decompressed  # Free intermediate tensor
 
         miner.momentum[n].sub_(transmit_grad)
@@ -127,6 +132,7 @@ def outer_step(
     device: str,
     is_master: bool,
     world_size: int,
+    use_dct: bool = False,
 ) -> None:
     """
     Synchronize gradients (if DDP) and apply optimizer step
@@ -167,7 +173,8 @@ def outer_step(
                             quant_params,
                             normalise=False,
                             clip_norm=True,
-                        )
+                        ),
+                        use_dct=use_dct,
                     )
 
                     if p.grad is None:
@@ -393,6 +400,7 @@ async def catchup_with_aggregation_server(
             device=instance.config.device,
             is_master=True,
             world_size=1,
+            use_dct=instance.hparams.use_dct,
         )
 
         # advance LR scheduler if one exists.

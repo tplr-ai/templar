@@ -176,7 +176,9 @@ class Validator(BaseNode):
         self.totalks = {}
         for n, p in self.model.named_parameters():
             _, _, xshape, totalk, _ = self.compressor.compress(
-                self.transformer.encode(torch.zeros_like(p)),
+                self.transformer.encode(
+                    torch.zeros_like(p), use_dct=self.hparams.use_dct
+                ),
                 self.hparams.topk_compression,
             )
             self.xshapes[n] = xshape
@@ -1757,6 +1759,7 @@ class Validator(BaseNode):
                     device=cast(str, self.config.device),
                     is_master=True,
                     world_size=1,
+                    use_dct=self.hparams.use_dct,
                 )
             else:
                 tplr.log_with_context(
@@ -2248,7 +2251,8 @@ class Validator(BaseNode):
                         self.xshapes[n],
                         self.totalks[n],
                         quant_params,
-                    )
+                    ),
+                    use_dct=self.hparams.use_dct,
                 ).to(self.config.device)
 
                 # Final safety check on the gradient itself

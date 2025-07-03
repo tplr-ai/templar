@@ -52,7 +52,7 @@ class DummyMiner:
     def __init__(self):
         self.model = DummyModel()
         self.hparams = DummyHparams()
-        self.momentum = {"weight": torch.zeros_like(self.model.weight)}
+        self.error_feedback = {"weight": torch.zeros_like(self.model.weight)}
         self.owned_params = {"weight", "weight1", "weight2"}
         self.compressor = DummyCompressor()
         self.transformer = DummyTransformer()
@@ -123,9 +123,9 @@ def test_metadata_attachment():
     )
 
 
-def test_momentum_decay_and_gradient_accumulation():
+def test_error_feedback_decay_and_gradient_accumulation():
     """
-    Test 4 – Momentum Calculation on First Iteration
+    Test 4 – Error feedback Calculation on First Iteration
     ------------------------------------------------
     When  momentum_decay == 0.0  and the transmitted gradient is 0,
     the final momentum must be  lr * grad  after prepare_gradient_dict.
@@ -165,7 +165,7 @@ def test_momentum_decay_and_gradient_accumulation():
     lr = miner.hparams.outer_learning_rate  # e.g. 0.9
 
     # Provide momentum and gradient for the *single* parameter "weight"
-    miner.momentum["weight"] = torch.tensor([0.2, 0.3])  # will be nulled
+    miner.error_feedback["weight"] = torch.tensor([0.2, 0.3])  # will be nulled
     miner.model.weight.grad = torch.tensor([0.1, 0.2])
 
     # ------------------------------------------------------------------ #
@@ -182,7 +182,7 @@ def test_momentum_decay_and_gradient_accumulation():
     #  Assert
     # ------------------------------------------------------------------ #
     torch.testing.assert_close(
-        miner.momentum["weight"],
+        miner.error_feedback["weight"],
         expected_final_momentum,
         msg=(
             "Final momentum should equal lr * grad when "
@@ -250,7 +250,7 @@ def test_compressor_and_transformer_calls():
     miner.transformer = DummyRecordingTransformer()
 
     # Provide a single parameter called "weight"
-    miner.momentum["weight"] = torch.tensor([1.0, 1.0])
+    miner.error_feedback["weight"] = torch.tensor([1.0, 1.0])
     miner.model.weight.grad = torch.tensor([0.3, 0.4])
 
     lr = miner.hparams.outer_learning_rate  # e.g. 0.9
@@ -263,7 +263,7 @@ def test_compressor_and_transformer_calls():
     #   momentum.mul_(momentum_decay)
     #   momentum.add_(grad, alpha=lr)
     expected_tensor_for_compression = (
-        miner.momentum["weight"] * momentum_decay + miner.model.weight.grad * lr
+        miner.error_feedback["weight"] * momentum_decay + miner.model.weight.grad * lr
     )
 
     # ------------------------------------------------------------------ #
@@ -337,7 +337,7 @@ def test_handling_multiple_parameters():
 
     miner = DummyMiner()
     miner.model = DummyMultiModel()
-    miner.momentum = {
+    miner.error_feedback = {
         "weight1": torch.zeros_like(miner.model.weight1),
         "weight2": torch.zeros_like(miner.model.weight2),
     }
@@ -377,7 +377,7 @@ def test_behavior_when_p_grad_is_none():
     miner = DummyMiner()
     miner.model = DummyNoGradModel()
     # Reinitialize momentum accordingly.
-    miner.momentum = {"weight": torch.zeros_like(miner.model.weight)}
+    miner.error_feedback = {"weight": torch.zeros_like(miner.model.weight)}
 
     step_window = 3
 

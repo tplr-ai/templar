@@ -68,20 +68,20 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
             continue
 
         # Apply momentum decay.
-        miner.momentum[n].mul_(miner.hparams.momentum_decay)
+        miner.error_feedback[n].mul_(miner.hparams.momentum_decay)
 
         # Ensure the gradient is on the same device as the parameter.
         assert p.grad is not None
         grad = p.grad.to(p.device)
-        if miner.momentum[n].device != p.device:
-            miner.momentum[n] = miner.momentum[n].to(p.device)
+        if miner.error_feedback[n].device != p.device:
+            miner.error_feedback[n] = miner.error_feedback[n].to(p.device)
 
         # Normal behavior for later iterations
-        miner.momentum[n].add_(grad, alpha=lr)
+        miner.error_feedback[n].add_(grad, alpha=lr)
 
         # Compress momentum
         encoded = miner.transformer.encode(
-            miner.momentum[n], use_dct=miner.hparams.use_dct
+            miner.error_feedback[n], use_dct=miner.hparams.use_dct
         )
         idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
             encoded, miner.hparams.topk_compression
@@ -99,7 +99,7 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
         )
         del decompressed  # Free intermediate tensor
 
-        miner.momentum[n].sub_(transmit_grad)
+        miner.error_feedback[n].sub_(transmit_grad)
 
         # Move compressed values to CPU to save GPU memory
         gradient[n + "idxs"] = idxs.cpu() if isinstance(idxs, torch.Tensor) else idxs

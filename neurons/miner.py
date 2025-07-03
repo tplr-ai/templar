@@ -216,7 +216,7 @@ class Miner(BaseNode):
         tplr.logger.info("[Init] compression pipeline ready")
 
         # Init optimizer and momentum
-        self.momentum = {}
+        self.error_feedback = {}
         self.owned_params = set()
 
         self.xshapes = {}
@@ -270,7 +270,7 @@ class Miner(BaseNode):
             if idx % self.world_size == self.rank:
                 # this rank “owns” the parameter
                 self.owned_params.add(n)
-                self.momentum[n] = torch.zeros_like(p, device=self.device)
+                self.error_feedback[n] = torch.zeros_like(p, device=self.device)
             _, _, xshape, totalk, _ = self.compressor.compress(
                 self.transformer.encode(
                     torch.zeros_like(p), use_dct=self.hparams.use_dct
@@ -752,7 +752,7 @@ class Miner(BaseNode):
 
             # ─────────────── momentum norms (gathered across ranks) ─────────
             local_mom_norms: list[float] = [
-                m.norm().item() for m in self.momentum.values()
+                m.norm().item() for m in self.error_feedback.values()
             ]
             if self.world_size > 1:
                 gathered_mom: list[list[float]] = [None] * self.world_size  # type: ignore[var-annotated]

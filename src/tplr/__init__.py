@@ -28,7 +28,6 @@ from .comms import *
 from .compress import *
 from .dataset import *
 from .neurons import *
-from .r2_dataset import *
 from .hparams import *
 from .logging import *
 from .schemas import *

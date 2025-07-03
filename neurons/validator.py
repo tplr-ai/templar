@@ -829,11 +829,12 @@ class Validator(BaseNode):
             await tplr.neurons.update_peers(
                 instance=self, window=self.sync_window, peer_start=peer_start
             )
+            peer_update_time = tplr.T() - peer_start
 
             self.eval_peers = self.comms.eval_peers
             tplr.log_with_context(
                 level="info",
-                message=f"{tplr.P(self.sync_window, tplr.T() - peer_start)} Updated peers - eval:{len(self.eval_peers)}",
+                message=f"{tplr.P(self.sync_window, peer_update_time)} Updated peers - eval:{len(self.eval_peers)}",
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
@@ -1603,6 +1604,9 @@ class Validator(BaseNode):
 
             torch.cuda.empty_cache()
 
+            # elapsed time for full peer-evaluation loop
+            evaluation_time = tplr.T() - eval_start
+
             self.update_openskill_ratings()
             self.update_weights()
             # Log scores and metrics for evaluated UIDs as a table
@@ -1770,9 +1774,10 @@ class Validator(BaseNode):
                 )
                 torch.cuda.empty_cache()
 
+            model_update_time = tplr.T() - update_start
             tplr.log_with_context(
                 level="info",
-                message=f"{tplr.P(self.sync_window, tplr.T() - update_start)} Updated model",
+                message=f"{tplr.P(self.sync_window, model_update_time)} Updated model",
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
@@ -1843,13 +1848,6 @@ class Validator(BaseNode):
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
-            # Log total window time and metrics
-            tplr.log_with_context(
-                level="info",
-                message=f"{tplr.P(self.sync_window, tplr.T() - window_start)} Completed window iteration",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
 
             if evaluated_peers == 0:
                 # Use the values from the previous step
@@ -1871,6 +1869,7 @@ class Validator(BaseNode):
                 self.previous_avg_loss_after_random = avg_loss_after_per_batch_random
 
             # 16. Log evaluation metrics once all evaluations are done
+            window_total_time = tplr.T() - window_start
             evaluation_metrics = {
                 "validator/loss/own/before": avg_loss_before_per_batch_own,
                 "validator/loss/own/after": avg_loss_after_per_batch_own,
@@ -1885,11 +1884,11 @@ class Validator(BaseNode):
                 "validator/optimizer/learning_rate": self.lr,
                 "validator/network/active_miners": len(self.valid_score_indices),
                 "validator/gather/success_rate": success_rate * 100,
-                "validator/timing/window_total": tplr.T() - window_start,
-                "validator/timing/peer_update": tplr.T() - peer_start,
+                "validator/timing/window_total": window_total_time,
+                "validator/timing/peer_update": peer_update_time,
                 "validator/timing/gather": gather_time,
-                "validator/timing/evaluation": tplr.T() - eval_start,
-                "validator/timing/model_update": tplr.T() - update_start,
+                "validator/timing/evaluation": evaluation_time,
+                "validator/timing/model_update": model_update_time,
             }
             self.wandb.log(evaluation_metrics, step=self.global_step)
 
@@ -1915,11 +1914,11 @@ class Validator(BaseNode):
                     "learning_rate": float(self.lr),
                     "active_miners_count": int(len(self.valid_score_indices)),
                     "gather_success_rate": gather_success_rate,
-                    "window_total_time": float(tplr.T() - window_start),
-                    "peer_update_time": float(tplr.T() - peer_start),
+                    "window_total_time": float(window_total_time),
+                    "peer_update_time": float(peer_update_time),
                     "gather_time": float(gather_time),
-                    "evaluation_time": float(tplr.T() - eval_start),
-                    "model_update_time": float(tplr.T() - update_start),
+                    "evaluation_time": float(evaluation_time),
+                    "model_update_time": float(model_update_time),
                     "total_peers": int(len(self.comms.peers)),
                     "total_skipped": int(total_skipped),
                 },
@@ -1929,6 +1928,13 @@ class Validator(BaseNode):
             tplr.log_with_context(
                 level="info",
                 message="Finished metrics logging call for validator",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            # Log total window time and metrics
+            tplr.log_with_context(
+                level="info",
+                message=f"{tplr.P(self.sync_window, window_total_time)} Completed window iteration",
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
@@ -1964,11 +1970,6 @@ class Validator(BaseNode):
                 )
                 self._bg_tasks.add(t)
                 t.add_done_callback(self._bg_tasks.discard)
-
-            # 18. Log profiling summary every 10 windows
-            if self.sync_window % 10 == 0:
-                tplr.logger.info("Logging performance profiling summary...")
-                tplr.r2_dataset.R2DatasetLoader.log_profiling_summary()
 
             # 19. Increment global step
             self.global_step += 1

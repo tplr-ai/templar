@@ -321,7 +321,6 @@ class Miner(BaseNode):
 
         # Track additional metrics
         self.total_tokens_processed = 0
-        self.batch_times = []  # For tracking processing speed
 
         if self.is_master:
             # Initialize WandB
@@ -493,6 +492,7 @@ class Miner(BaseNode):
                 await tplr.neurons.update_peers(
                     instance=self, window=step_window, peer_start=peer_start
                 )
+            peer_update_time = tplr.T() - peer_start
 
             # 2. Load data
             data_start = tplr.T()
@@ -506,13 +506,15 @@ class Miner(BaseNode):
                 num_workers=2,
                 pin_memory=True,
             )
+            data_loading_time = tplr.T() - data_start
             tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - data_start)} Loaded training data"
+                f"{tplr.P(step_window, data_loading_time)} Loaded training data"
             )
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             tplr.logger.info("Start accumulating...")
             res = await self.inner_steps(loader=loader, step_window=step_window)
+            training_time = tplr.T() - train_start
             loss = res["first_loss"]
             n_batches = res["batch_count"]
             window_tokens = res["batch_tokens"]
@@ -535,8 +537,9 @@ class Miner(BaseNode):
             # 1️⃣ every rank builds its momentum shard
             compress_start = tplr.T()
             shard_gradient, _, _ = tplr.prepare_gradient_dict(self, step_window)
+            compression_time = tplr.T() - compress_start
             tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - compress_start)} "
+                f"{tplr.P(step_window, compression_time)} "
                 f"Compressed local shard with {len(shard_gradient) - 1} tensors"
             )
 
@@ -589,7 +592,8 @@ class Miner(BaseNode):
                     for k, v in gradient.items()
                 }
 
-                put_completion_time = await self.comms.put(
+                put_start = tplr.T()
+                await self.comms.put(
                     state_dict=processed_state_dict,
                     uid=str(self.uid),
                     window=step_window,
@@ -604,13 +608,14 @@ class Miner(BaseNode):
                     for t in processed_state_dict.values()
                     if isinstance(t, torch.Tensor)
                 )
+                put_time = tplr.T() - put_start  # ⏱ done
                 tplr.logger.info(
                     f"Uploaded {upload_size / 1e6:.1f} MB shard-merged gradient"
                 )
 
             else:
                 # non-master ranks simply wait; they don't upload
-                put_completion_time = 0.0
+                put_time = 0.0
 
             tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
             if self.world_size > 1:
@@ -665,10 +670,8 @@ class Miner(BaseNode):
                 dist.barrier(device_ids=[self.local_rank])
 
             # 5. Calculate and log metrics
-            duration = time.time() - train_start
-            self.batch_times.append(duration)
             self.total_tokens_processed += window_tokens
-            tokens_per_sec = window_tokens / duration
+            tokens_per_sec = window_tokens / training_time if training_time else 0.0
 
             # ─────────────── gradient & weight norms (local) ────────────────
             grad_norms = [
@@ -697,9 +700,8 @@ class Miner(BaseNode):
                 world_size=self.world_size,
                 use_dct=self.hparams.use_dct,
             )
-            tplr.logger.info(
-                f"{tplr.P(step_window, tplr.T() - update_start)} Updated model"
-            )
+            model_update_time = tplr.T() - update_start
+            tplr.logger.info(f"{tplr.P(step_window, model_update_time)} Updated model")
 
             if self.is_master:
                 # Add debug data including successfully gathered peers
@@ -776,11 +778,6 @@ class Miner(BaseNode):
                     sum(momentum_norms) / len(momentum_norms) if momentum_norms else 0
                 )
                 window_total_time = tplr.T() - window_start
-                peer_update_time = tplr.T() - peer_start
-                data_loading_time = tplr.T() - data_start
-                training_time = tplr.T() - train_start
-                compression_time = tplr.T() - compress_start
-                model_update_time = tplr.T() - update_start
                 gather_success_rate = (
                     gather_result.success_rate * 100 if gather_result else 0.0
                 )
@@ -795,7 +792,7 @@ class Miner(BaseNode):
                         "miner/timing/training": training_time,
                         "miner/timing/compression": compression_time,
                         "miner/timing/gather": gather_time,
-                        "miner/timing/put": put_completion_time,
+                        "miner/timing/put": put_time,
                         "miner/timing/model_update": model_update_time,
                         # Existing metrics
                         "miner/loss": loss,
@@ -841,7 +838,7 @@ class Miner(BaseNode):
                         "peer_update_time": peer_update_time,
                         "compression_time": compression_time,
                         "gather_time": gather_time,
-                        "put_time": put_completion_time,
+                        "put_time": put_time,
                         "model_update_time": model_update_time,
                         "tokens_per_sec": tokens_per_sec,
                     },

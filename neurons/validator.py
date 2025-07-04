@@ -997,7 +997,7 @@ class Validator(BaseNode):
                 uids=self.comms.peers,
                 window=self.sync_window,
                 key="gradient",
-                timeout=45,
+                timeout=60,
                 device=cast(str, self.config.device),
                 local=False,
                 totalks=self.totalks,

@@ -370,7 +370,7 @@ class Comms(ChainManager):
         self,
         key: str,
         bucket: Bucket = None,
-        timeout: int = 15,
+        timeout: int = 20,
         time_min: datetime = None,
         time_max: datetime = None,
     ):
@@ -813,7 +813,7 @@ class Comms(ChainManager):
         key: Literal["checkpoint", "debug", "gradient", "aggregator"],
         local: bool = True,
         stale_retention: int = 10,
-        timeout: int = 15,
+        timeout: int = 20,
         time_min: datetime = None,
         time_max: datetime = None,
     ) -> Optional[tuple[dict, int]]:

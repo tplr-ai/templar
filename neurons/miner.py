@@ -358,7 +358,8 @@ class Miner(BaseNode):
             window=self.current_window,
             steps_per_window=self.hparams.inner_steps,
             micro_bs=self.hparams.micro_batch_size,
-            batch_size=self.hparams.target_batch_size,
+            batch_size=self.hparams.batch_size,
+            target_batch_size=self.hparams.target_batch_size,
             rank=self.rank,
             world_size=self.world_size,
         )
@@ -928,27 +929,12 @@ class Miner(BaseNode):
             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
 
             # ------------------------------------------------------------------ #
-            # 3. Global (cross-rank) accumulation of batch size
-            # ------------------------------------------------------------------ #
-            current_batch_size_local = len(batch)  # type: ignore
-            total_batch_tensor = torch.tensor(
-                [current_batch_size_local],
-                device=self.device,
-                dtype=torch.long,
-            )
-            if self.world_size > 1:
-                dist.all_reduce(total_batch_tensor, op=dist.ReduceOp.SUM)
-
-            global_batch_size_this_iter = int(total_batch_tensor.item())
-            accum_batch_size += global_batch_size_this_iter
-
-            # ------------------------------------------------------------------ #
-            # 4. Forward + backward
+            # 3. Forward + backward
             # ------------------------------------------------------------------ #
             with autocast(device_type=self.device.type, dtype=torch.bfloat16):
                 outputs = self.model(input_ids=input_ids, labels=labels)
 
-            loss = outputs.loss * self.world_size / self.hparams.batch_size
+            loss = outputs.loss / self.sampler.grad_accum_steps
             loss.backward()
             total_loss += outputs.loss.item()
             batch_count += 1
@@ -957,9 +943,9 @@ class Miner(BaseNode):
             )
 
             # ------------------------------------------------------------------ #
-            # 5. Step only when *global* accumulation threshold is hit
+            # 4. Step only when *global* accumulation threshold is hit
             # ------------------------------------------------------------------ #
-            if accum_batch_size >= self.hparams.batch_size:
+            if batch_count % self.sampler.grad_accum_steps == 0:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.inner_optimizer.step()
                 self.inner_scheduler.step()
@@ -976,7 +962,7 @@ class Miner(BaseNode):
                 accum_batch_size = 0  # reset on *all* ranks
 
             # ------------------------------------------------------------------ #
-            # 6. Outer-loop window control
+            # 5. Outer-loop window control
             # ------------------------------------------------------------------ #
             window_changed = self.current_window != step_window
             local_done = torch.tensor(
@@ -998,7 +984,7 @@ class Miner(BaseNode):
         await asyncio.sleep(0)
 
         # ------------------------------------------------------------------ #
-        # 7. parameter offloading logic
+        # 6. parameter offloading logic
         # ------------------------------------------------------------------ #
         bare_model = (
             self.model.module
@@ -1016,7 +1002,7 @@ class Miner(BaseNode):
                 p.data.copy_(saved_param)
 
         # ---------------------------------------------------------------------- #
-        # 8. Return aggregated metrics
+        # 7. Return aggregated metrics
         # ---------------------------------------------------------------------- #
         return {
             "total_loss": total_loss,

@@ -657,7 +657,7 @@ class Miner(BaseNode):
                     uids=self.comms.peers,
                     window=step_window,
                     key="gradient",
-                    timeout=45,
+                    timeout=60,
                     device=str(self.device),
                     local=False,
                     stale_retention=100,

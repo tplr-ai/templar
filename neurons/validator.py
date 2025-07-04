@@ -2552,7 +2552,8 @@ class Validator(BaseNode):
             window=window,
             steps_per_window=self.hparams.inner_steps,
             micro_bs=self.hparams.micro_batch_size,
-            batch_size=self.hparams.target_batch_size,
+            batch_size=self.hparams.batch_size,
+            target_batch_size=self.hparams.target_batch_size,
             rank=0,
             world_size=1,
         )

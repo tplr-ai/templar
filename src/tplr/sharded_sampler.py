@@ -65,7 +65,7 @@ class _BaseWindowSampler(Sampler, ABC):
 
         # grad-accumulation factor (also serves as a symmetry check)
         denom = micro_bs * world_size
-        self.grad_accum = batch_size // denom
+        self.grad_accum_steps = batch_size // denom
         self.set_window_uid(uid, window)
 
     # --------------------------------------------------------------------- #
@@ -121,9 +121,11 @@ class MinerSampler(_BaseWindowSampler):
         steps_per_window: int,
         micro_bs: int,
         batch_size: int,
+        target_batch_size: int,
         rank: int = 0,
         world_size: int = 1,
     ):
+        self.target_batch_size = target_batch_size
         super().__init__(
             dataset,
             uid,
@@ -136,7 +138,7 @@ class MinerSampler(_BaseWindowSampler):
         )
 
     def _global_indices(self) -> np.ndarray:
-        wanted = self.steps_per_window * self.batch_size
+        wanted = self.steps_per_window * self.target_batch_size
         if wanted > self.dataset_len:
             raise ValueError(
                 f"Window needs {wanted} samples but dataset has only {self.dataset_len}"

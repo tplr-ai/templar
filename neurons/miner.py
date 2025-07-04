@@ -520,13 +520,12 @@ class Miner(BaseNode):
             n_batches = res["batch_count"]
             window_tokens = res["batch_tokens"]
 
-            # If training completes before the window is exhausted, wait until the window ends.
+            # If training finishes early, wait until the *next* chain-window starts.
             if self.current_window == step_window:
                 tplr.logger.info(
                     "Training complete; waiting for window to be exhausted..."
                 )
-                while self.current_window == step_window:
-                    await asyncio.sleep(0.1)
+                await self.wait_until_window(step_window + 1)
             tplr.logger.info(
                 f"{tplr.P(step_window, tplr.T() - train_start)} Completed training"
             )
@@ -861,8 +860,7 @@ class Miner(BaseNode):
             await self.cleanup_window()
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
-            while self.current_window == step_window:
-                await asyncio.sleep(0.1)
+            await self.wait_until_window(step_window + 1)
 
     async def inner_steps(
         self,

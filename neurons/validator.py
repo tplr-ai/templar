@@ -753,17 +753,20 @@ class Validator(BaseNode):
         self.last_peer_update_window = None
         self.last_peer_post_window = None
         while not self.stop_event.is_set():
-            # 1. Wait for the validator window offset
-            while self.sync_window >= (
-                self.current_window - self.hparams.validator_offset
-            ):
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Waiting for validator window offset, synced: {self.sync_window}, current:{self.current_window}, offset:{self.hparams.validator_offset}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                await asyncio.sleep(12)
+            # 1. Wait until the chain has moved `validator_offset` windows ahead
+            tplr.log_with_context(
+                level="info",
+                message=(
+                    f"Waiting for validator window offset "
+                    f"(sync={self.sync_window}, current={self.current_window}, "
+                    f"offset={self.hparams.validator_offset})"
+                ),
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            await self.wait_until_window(
+                self.sync_window + self.hparams.validator_offset + 1
+            )
 
             # 2. Increment sync window and update peer lists
             window_start = tplr.T()

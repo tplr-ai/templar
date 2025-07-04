@@ -1,11 +1,25 @@
-import gc
-import hashlib
-import os
-import struct
+# The MIT License (MIT)
+# © 2025 tplr.ai
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+# the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+
 import time
 from pathlib import Path
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch.distributed as dist
 from torch.utils.data import Dataset
@@ -15,15 +29,21 @@ import tplr
 
 class SharedShardedDataset(Dataset):
     """
-    • Rank 0 concatenates every train_*.npy shard, calls .share_memory_(),
-      then broadcasts the tensor handle.
-    • All ranks slice that single tensor; no extra copies are made.
-    • Each worker gets ⌈N/ world_size⌉ samples (last worker may get fewer).
-    • Batches are returned on the given CUDA device.
+    Memory-maps the *pre-processed* dataset produced by `run_preprocessing()`.
+
+    • Zero runtime concatenation or hashing – everything is done offline.
+    • All ranks slice the same mmap; no extra copies.
+    • Each worker sees ⌈N / world_size⌉ samples (last worker may get fewer).
     """
 
     def __init__(
-        self, shards_path: str, sequence_length: int, rank: int, world_size: int
+        self,
+        shards_path: str,
+        sequence_length: int,
+        rank: int,
+        world_size: int,
+        *,
+        token_dtype: npt.DTypeLike = np.uint16,  # MUST match preprocessing
     ):
         super().__init__()
         t0 = time.perf_counter()
@@ -33,72 +53,32 @@ class SharedShardedDataset(Dataset):
         self.rank = rank
         self.world = world_size
         if self.world > 1:
-            tplr.logger.info(f"[Dataset] rank {self.rank}: entering initial barrier")
             dist.barrier(device_ids=[self.rank])
-            tplr.logger.info(f"[Dataset] rank {self.rank}: exited initial barrier")
 
-        # ────────────────────────── load / create memory-mapped file ──────────────────────────
         shards_dir = Path(shards_path)
-        mmap_file = shards_dir / "tokens.bin"
+        tokens_file = shards_dir / "tokens.bin"
+        ids_file = shards_dir / "sample_ids.bin"
 
-        # ──────────────── rank-0 creates the mmap *atomically* (temp + rename) ───────────────
-        if self.rank == 0 and not mmap_file.exists():
-            tplr.logger.info(f"[Dataset] rank0: concatenating shards → {mmap_file}")
-            files = sorted(shards_dir.glob("train_*.npy"))
-            if not files:
-                raise FileNotFoundError(f"No train_*.npy shards in {shards_dir}")
-
-            load_start = time.perf_counter()
-            tokens_np = np.concatenate([np.load(f).astype(np.int32) for f in files])
-            tplr.logger.info(
-                f"[Dataset] rank0: loaded {len(files)} shards "
-                f"in {time.perf_counter() - load_start:.1f}s"
+        if not tokens_file.exists() or not ids_file.exists():
+            raise FileNotFoundError(
+                f"Pre-processed files not found in {shards_dir}. "
+                "Run the preprocessing script first."
             )
 
-            tmp_path = mmap_file.with_suffix(".bin.tmp")
-            tplr.logger.info(
-                f"[Dataset] rank0: writing {tokens_np.nbytes / 1e6:.1f} MB to {tmp_path}"
-            )
-            tokens_np.tofile(tmp_path)  # 1️⃣ write to temp file
-
-            # 2️⃣ flush & fsync to be safe
-            with open(tmp_path, "rb+") as _f:
-                _f.flush()
-                os.fsync(_f.fileno())
-
-            # 3️⃣ atomic move – if another job won the race, this just replaces tmp file
-            os.replace(tmp_path, mmap_file)
-
-            del tokens_np, files
-            gc.collect()
-
-        # Ensure the file is written before other ranks touch it
-        if self.world > 1:
-            dist.barrier(device_ids=[self.rank])
-
-        # Map the file (read-only) on every rank
-        num_int32 = mmap_file.stat().st_size // 4
-        tokens_mem = np.memmap(mmap_file, dtype=np.int32, mode="r+", shape=(num_int32,))
-
-        tokens_mem.flags.writeable = True  # 1️⃣ make Torch happy
+        # ────────────────────────── mmap tokens & ids ───────────────────────────
+        # Normalise once for safety; still type-checks
+        tokens_mem = np.memmap(tokens_file, dtype=np.dtype(token_dtype), mode="r+")
+        tokens_mem.flags.writeable = True
         self.tokens = torch.from_numpy(tokens_mem)
-        tokens_mem.flags.writeable = False  # 2️⃣ lock it right back to RO
-        self.total_samples = len(self.tokens) // self.seqlen
+        tokens_mem.flags.writeable = False
 
-        # ────────────────────────── compute sample_ids locally (cheap) ──────────────────────────
-        tplr.logger.info(f"[Dataset] rank {self.rank}: computing sample_ids")
-        tok_u32 = self.tokens.numpy().view(np.uint32)
-        sample_ids = np.empty(self.total_samples, dtype=np.uint64)
-        for i in range(self.total_samples):
-            h = hashlib.blake2b(
-                tok_u32[i * self.seqlen : (i + 1) * self.seqlen].tobytes(),
-                digest_size=8,
-            )
-            sample_ids[i] = struct.unpack("<Q", h.digest())[0]
+        ids_mem = np.memmap(ids_file, dtype=np.uint64, mode="r+")
+        ids_mem.flags.writeable = True
+        self.sample_ids = torch.from_numpy(ids_mem).to(torch.uint64)
+        ids_mem.flags.writeable = False
 
-        self.sample_ids = torch.from_numpy(sample_ids).to(
-            torch.uint64, non_blocking=True
-        )
+        self.total_samples = len(self.sample_ids)
+
         tplr.logger.info(
             f"[Dataset] rank {self.rank}: init done in {time.perf_counter() - t0:.1f}s "
             f"({self.total_samples} samples)"

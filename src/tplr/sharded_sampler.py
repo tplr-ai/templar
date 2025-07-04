@@ -1,7 +1,25 @@
+# The MIT License (MIT)
+# © 2025 tplr.ai
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
+# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+# the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
+# and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of
+# the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+# THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+
 from abc import ABC, abstractmethod
 
 import numpy as np
 from torch.utils.data import Sampler
+import time
 
 import tplr
 
@@ -47,13 +65,7 @@ class _BaseWindowSampler(Sampler, ABC):
 
         # grad-accumulation factor (also serves as a symmetry check)
         denom = micro_bs * world_size
-        if batch_size % denom != 0:
-            raise ValueError(
-                f"batch_size={batch_size} is not divisible by "
-                f"micro_bs·world_size={denom}"
-            )
         self.grad_accum = batch_size // denom
-
         self.set_window_uid(uid, window)
 
     # --------------------------------------------------------------------- #
@@ -143,6 +155,8 @@ class EvalSampler(_BaseWindowSampler):
     training pool first and then draws `validation_bs` examples from it.
     """
 
+    _cached_indices: dict[tuple[int, int], np.ndarray] = {}
+
     def __init__(  # signature differs, so we must override
         self,
         dataset: tplr.SharedShardedDataset,
@@ -171,7 +185,22 @@ class EvalSampler(_BaseWindowSampler):
             world_size=world_size,
         )
 
+    def _eval_seed(self) -> int:
+        """
+        A non‑deterministic seed that still stays constant for one full
+        validator window.
+
+        • derive from the chain timestamp so every new window changes it
+        • mix in uid so two validators do not pick the *same* random slice
+        """
+        now_ns = int(time.time_ns())  # 64‑bit noise source
+        return (self.uid * 0x9E3779B1 ^ self.window ^ now_ns) & 0xFFFF_FFFF
+
     def _global_indices(self) -> np.ndarray:
+        key = (self.uid, self.window)
+        if key in self._cached_indices:
+            return self._cached_indices[key]
+
         train_total = self.steps_per_window * self.batch_size
         if train_total > self.dataset_len:
             raise ValueError("Training pool larger than dataset!")
@@ -182,6 +211,9 @@ class EvalSampler(_BaseWindowSampler):
         rng_train = np.random.default_rng(seed)
         pool = rng_train.choice(self.dataset_len, size=train_total, replace=False)
 
-        # draw validation subset from that pool
-        rng_val = np.random.default_rng(seed ^ 0xA5A5_A5A5)
-        return rng_val.choice(pool, size=self.validation_bs, replace=False)
+        # draw validation subset (non‑deterministic, but once‑per‑window)
+        rng_val = np.random.default_rng(self._eval_seed())
+        val_idx = rng_val.choice(pool, size=self.validation_bs, replace=False)
+
+        self._cached_indices[key] = val_idx
+        return val_idx

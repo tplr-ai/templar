@@ -1603,6 +1603,7 @@ class Validator(BaseNode):
                 )
 
             torch.cuda.empty_cache()
+            self.sampler._cached_indices.clear()
 
             # elapsed time for full peer-evaluation loop
             evaluation_time = tplr.T() - eval_start

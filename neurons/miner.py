@@ -26,6 +26,7 @@ import os
 import random
 import sys
 import time
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
@@ -33,9 +34,10 @@ import bittensor as bt
 import numpy as np
 import torch
 import torch.distributed as dist
-import uvloop
 
 # Third party
+import torch.nn.parallel
+import uvloop
 from torch import autocast
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.optim import SGD
@@ -127,6 +129,32 @@ class Miner(BaseNode):
         flag_tensor = torch.tensor([int(local_has_batch)], device=device)
         dist.all_reduce(flag_tensor, op=dist.ReduceOp.MIN)
         return bool(flag_tensor.item())
+
+    def _is_distributed(self) -> bool:
+        """True iff torch.distributed is initialised and world_size > 1."""
+        return dist.is_available() and dist.is_initialized() and self.world_size > 1
+
+    def _ddp_reduce(
+        self,
+        value: int | float | torch.Tensor,
+        op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
+    ) -> float:
+        """
+        Reduce ``value`` across all ranks and return a **python float**.
+        Use ``op=dist.ReduceOp.AVG`` for mean; default is SUM.
+        """
+        # single-GPU fast path
+        if not self._is_distributed():
+            return float(value.item() if isinstance(value, torch.Tensor) else value)
+
+        # convert to tensor on the right device
+        if not isinstance(value, torch.Tensor):
+            tensor = torch.tensor(float(value), device=self.device)
+        else:
+            tensor = value.to(self.device)
+
+        dist.all_reduce(tensor, op=op)
+        return float(tensor.item())
 
     def __init__(self):
         tplr.logger.debug("Starting initialization...")
@@ -881,15 +909,18 @@ class Miner(BaseNode):
 
         total_loss: float = 0.0
         batch_count: int = 0
-        batch_tokens: int = 0
+        batch_tokens: int = 0  # local counter
         accum_batch_size: int = 0
-        first_loss = 0.0
+        first_loss: float = 0.0
+        global_tokens: int = 0  # after cross-rank reduction
+        global_loss_sum: float = 0.0
+        local_tokens_sum: int = 0  # local running totals
+        local_loss_sum: float = 0.0
 
         params_offloaded = self._get_offloaded_param()
 
         inner_step_count: int = 0
         loader_iter = iter(loader)
-        rank = f"[{self.rank}] " if self.world_size > 1 else ""
 
         while not self.stop_event.is_set():
             # ------------------------------------------------------------------ #
@@ -908,7 +939,7 @@ class Miner(BaseNode):
                 if not cont:
                     if self.is_master:
                         tplr.logger.info(
-                            "%sStopping batch loop: at least one rank exhausted.", rank
+                            "Stopping batch loop: at least one rank exhausted."
                         )
                     break
                 if not local_has_batch:  # exhausted only on this rank
@@ -921,8 +952,13 @@ class Miner(BaseNode):
                 input_ids = batch.to(self.device, dtype=torch.long, non_blocking=True)
             else:
                 input_ids = torch.tensor(batch, dtype=torch.long, device=self.device)
+
+            local_bs = len(batch)  # type: ignore
+            accum_batch_size += local_bs
+
             tokens_this_batch = input_ids.numel()
-            batch_tokens += int(tokens_this_batch)
+            batch_tokens += tokens_this_batch
+            local_tokens_sum += tokens_this_batch
 
             labels = input_ids.clone()
             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
@@ -934,48 +970,79 @@ class Miner(BaseNode):
                 outputs = self.model(input_ids=input_ids, labels=labels)
 
             loss = outputs.loss / self.sampler.grad_accum_steps
-            loss.backward()
-            total_loss += outputs.loss.item()
+            loss_item = outputs.loss.detach().item()
+
+            # -------------------------------------------------------------- #
+            # 3-a.  Back-prop with no_sync() on non-final micro-batches
+            # -------------------------------------------------------------- #
+            final_micro_batch = (batch_count + 1) % self.sampler.grad_accum_steps == 0
+            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) and (
+                self.world_size > 1 and not final_micro_batch
+            ):
+                sync_ctx = self.model.no_sync()
+            else:
+                sync_ctx = nullcontext()
+            with sync_ctx:
+                loss.backward()
+            total_loss += loss_item
+            local_loss_sum += loss_item  # defer collective
+
             batch_count += 1
-            tplr.logger.info(
-                f"{rank}loss: {outputs.loss.item():.4f} [Batch {batch_count}]"
-            )
             window_changed = self.current_window != step_window
 
             # ------------------------------------------------------------------ #
             # 4. Step only when *global* accumulation threshold is hit
             # ------------------------------------------------------------------ #
-            if batch_count % self.sampler.grad_accum_steps == 0 or window_changed:
+            if final_micro_batch or window_changed:
+                # ── one collective for scalar stats per inner step ───────────
+                global_tokens_step = int(self._ddp_reduce(local_tokens_sum))
+                global_loss_step = self._ddp_reduce(local_loss_sum)
+                global_tokens += global_tokens_step
+                global_loss_sum += global_loss_step
+
+                # mean loss of this accumulation step for logging
+                log_loss = self._ddp_reduce(loss_item, op=dist.ReduceOp.AVG)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+
                 self.inner_optimizer.step()
                 self.inner_scheduler.step()
                 self.inner_optimizer.zero_grad(set_to_none=True)
 
                 inner_step_count += 1
-                tplr.logger.info(
-                    f"{rank}Inner Step {inner_step_count}, "
-                    f"Batch {batch_count}, loss: {outputs.loss.item():.4f}, "
-                    f"accum: {accum_batch_size}/{self.hparams.batch_size}"
-                )
+
+                # reset local accumulators BEFORE the next micro-batch
+                local_tokens_sum = 0
+                local_loss_sum = 0
+
+                accum_batch_size = int(self._ddp_reduce(accum_batch_size))
+                if self.is_master:
+                    tplr.logger.info(
+                        f"Inner Step {inner_step_count}, "
+                        f"Batch {batch_count}, loss: {log_loss:.4f}, "
+                        f"accum: {accum_batch_size}/{self.hparams.batch_size}"
+                    )
                 if first_loss == 0.0:
-                    first_loss = total_loss / batch_count
+                    total_batches_first_step = int(self._ddp_reduce(batch_count))
+                    first_loss = global_loss_sum / total_batches_first_step
                 accum_batch_size = 0  # reset on *all* ranks
 
             # ------------------------------------------------------------------ #
             # 5. Outer-loop window control
             # ------------------------------------------------------------------ #
+            need_sync = window_changed or inner_step_count == self.hparams.inner_steps
             local_done = torch.tensor(
-                [window_changed or inner_step_count == self.hparams.inner_steps],
+                [need_sync],
                 dtype=torch.uint8,
                 device=self.device,
             )
 
-            if self.world_size > 1:
+            if self.world_size > 1 and need_sync:
                 dist.all_reduce(local_done, op=dist.ReduceOp.MAX)
-            global_done = bool(local_done.item())
+            global_done = bool(local_done.item()) if need_sync else False
 
             if global_done:
-                tplr.logger.info("%s<Exhausted window: exiting synchronously>", rank)
+                if self.is_master:
+                    tplr.logger.info("<Exhausted window: exiting synchronously>")
                 for _ in range(inner_step_count, self.hparams.inner_steps):
                     self.inner_scheduler.step()
                 break
@@ -1003,11 +1070,12 @@ class Miner(BaseNode):
         # ---------------------------------------------------------------------- #
         # 7. Return aggregated metrics
         # ---------------------------------------------------------------------- #
+        batch_count = int(self._ddp_reduce(batch_count))
         return {
-            "total_loss": total_loss,
+            "total_loss": global_loss_sum,  # cross-rank sum
             "first_loss": first_loss,
-            "batch_count": batch_count,
-            "batch_tokens": batch_tokens,
+            "batch_count": batch_count,  # cross-rank sum
+            "batch_tokens": global_tokens,  # cross-rank sum
         }
 
     def _get_offloaded_param(self):

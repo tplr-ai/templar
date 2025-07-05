@@ -186,7 +186,8 @@ class Miner(BaseNode):
         # Init model with hparams config
         self.model = LlamaForCausalLM(self.hparams.model_config)
         self.model.to(self.device)  # type: ignore[reportArgumentType]
-        self.model.gradient_checkpointing_enable()
+        if self.world_size < 4:
+            self.model.gradient_checkpointing_enable()
         tplr.logger.info("[Init] Llama model instantiated & on device")
 
         compile_mode = "default"
@@ -233,7 +234,7 @@ class Miner(BaseNode):
         self.inner_optimizer = ZeroRedundancyOptimizer(
             self.model.parameters(),
             optimizer_class=torch.optim.AdamW,
-            lr=self.hparams.learning_rate,
+            lr=self.hparams.inner_learning_rate,
             weight_decay=self.hparams.weight_decay,
             betas=(0.9, 0.95),
             parameters_as_bucket_view=True,
@@ -257,7 +258,7 @@ class Miner(BaseNode):
         cosine_scheduler = CosineAnnealingLR(
             self.inner_optimizer,
             T_max=self.hparams.t_max,
-            eta_min=self.hparams.learning_rate * 0.1,
+            eta_min=self.hparams.inner_learning_rate * 0.1,
         )
         self.inner_scheduler = SequentialLR(
             self.inner_optimizer,

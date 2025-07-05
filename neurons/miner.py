@@ -940,11 +940,12 @@ class Miner(BaseNode):
             tplr.logger.info(
                 f"{rank}loss: {outputs.loss.item():.4f} [Batch {batch_count}]"
             )
+            window_changed = self.current_window != step_window
 
             # ------------------------------------------------------------------ #
             # 4. Step only when *global* accumulation threshold is hit
             # ------------------------------------------------------------------ #
-            if batch_count % self.sampler.grad_accum_steps == 0:
+            if batch_count % self.sampler.grad_accum_steps == 0 or window_changed:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.inner_optimizer.step()
                 self.inner_scheduler.step()
@@ -963,7 +964,6 @@ class Miner(BaseNode):
             # ------------------------------------------------------------------ #
             # 5. Outer-loop window control
             # ------------------------------------------------------------------ #
-            window_changed = self.current_window != step_window
             local_done = torch.tensor(
                 [window_changed or inner_step_count == self.hparams.inner_steps],
                 dtype=torch.uint8,

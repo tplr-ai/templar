@@ -124,6 +124,7 @@ class MinerSampler(_BaseWindowSampler):
         rank: int = 0,
         world_size: int = 1,
     ):
+        self.target_batch_size = target_batch_size
         super().__init__(
             dataset,
             uid,
@@ -134,7 +135,6 @@ class MinerSampler(_BaseWindowSampler):
             rank=rank,
             world_size=world_size,
         )
-        self.target_batch_size = target_batch_size
 
     def _global_indices(self) -> np.ndarray:
         wanted = self.steps_per_window * self.target_batch_size

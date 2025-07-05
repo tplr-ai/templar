@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 
 # from .hparams import HParams
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional
 
 import aiofiles
 import bittensor as bt
@@ -36,16 +36,12 @@ import torch
 from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
 from botocore.exceptions import ClientError, ConnectionClosedError
-from torch.optim import SGD
-from torch.optim.lr_scheduler import SequentialLR
 from tqdm import tqdm as std_tqdm
-from transformers import LlamaForCausalLM
 
 import tplr as tplr
 
 from . import __version__
 from .chain import ChainManager
-from .compress import CompressDCT, TransformDCT
 from .config import BUCKET_SECRETS, client_config
 from .schemas import Bucket
 
@@ -420,10 +416,7 @@ class Comms(ChainManager):
             except (ConnectionClosedError, ClientError) as e:
                 await self._purge_s3_client(bucket)
                 if "404" in str(e):
-                    tplr.log_with_context(
-                        level="debug",
-                        message=f"Object {key} not found in bucket {bucket.name}",
-                    )
+                    tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
                     return None
 
             file_size = response["ContentLength"]  # type: ignore
@@ -1229,11 +1222,7 @@ class Comms(ChainManager):
                     if e.response["Error"]["Code"] not in ["404", "403", "401"]:
                         tplr.logger.error(f"Error checking activity for {uid}: {e}")
                         return False
-                    tplr.log_with_context(
-                        level="debug",
-                        message=f"{filename} not found for UID {uid}",
-                        current_window=self.current_window,
-                    )
+                    tplr.logger.debug(f"{filename} not found for UID {uid}")
 
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(peer_bucket)
@@ -1798,83 +1787,6 @@ class Comms(ChainManager):
                 w: None for w in batch_windows
             }  # Return dict with None values on failure
 
-    async def _apply_gathered_gradients(
-        self,
-        gather_result,
-        model: LlamaForCausalLM,
-        optimizer: SGD,
-        scheduler: SequentialLR,
-        transformer: TransformDCT,
-        compressor: CompressDCT,
-        device: str,
-        window: int,
-        global_step: int,
-    ) -> Tuple[bool, int]:
-        """Apply gathered gradients to model parameters.
-
-        Args:
-            gather_result: Gathered gradient data
-            model: The model to update
-            optimizer: SGD optimizer
-            scheduler: Learning rate scheduler
-            transformer: DCT transformer
-            compressor: Gradient compressor
-            device: Computing device
-            window: Current window number
-            global_step: Global step counter
-
-        Returns:
-            Tuple[bool, int]: (success, new_global_step)
-        """
-        try:
-            if not gather_result or not gather_result.state_dict:
-                return False, global_step
-
-            model.train()
-            optimizer.zero_grad()
-            model.zero_grad()
-
-            # Apply gradients
-            for n, p in model.named_parameters():
-                idxs = getattr(gather_result.state_dict, f"{n}idxs", None)
-                vals = getattr(gather_result.state_dict, f"{n}vals", None)
-
-                if idxs is not None and vals is not None:
-                    if not isinstance(idxs, (list, tuple)):
-                        idxs = [idxs]
-                    if not isinstance(vals, (list, tuple)):
-                        vals = [vals]
-
-                    new_grad = transformer.decode(
-                        compressor.batch_decompress(
-                            p.to(device),
-                            idxs,
-                            vals,
-                            transformer.shapes[n],
-                            transformer.totalks[n],
-                        )
-                    )
-                    if p.grad is None:
-                        p.grad = new_grad
-                    else:
-                        p.grad.copy_(new_grad)
-                    p.grad.sign_()
-
-            optimizer.step()
-            scheduler.step()
-            global_step += 1
-
-            tplr.logger.info(
-                f"Applied gradients for window {window}, global_step => {global_step}"
-            )
-            return True, global_step
-
-        except Exception as e:
-            tplr.logger.error(
-                f"Failed to apply gradients for window {window}: {str(e)}"
-            )
-            return False, global_step
-
     def check_compressed_indices(
         self,
         param_name: str,
@@ -1962,10 +1874,7 @@ class Comms(ChainManager):
         except (ConnectionClosedError, ClientError) as e:
             await self._purge_s3_client(bucket)
             if "404" in str(e):
-                tplr.log_with_context(
-                    level="debug",
-                    message=f"Object {key} not found in bucket {bucket.name}",
-                )
+                tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
                 return None
             tplr.logger.error(f"Error getting object size for {key}: {e}")
             return None

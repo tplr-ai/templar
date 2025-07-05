@@ -107,7 +107,6 @@ class ChainManager:
                 commitments = await self.get_commitments()
                 if commitments:
                     self.commitments = commitments
-                    self.update_peers_with_buckets()
                     logger.debug(f"Updated commitments: {self.commitments}")
             except Exception as e:
                 logger.error(f"Error fetching commitments: {e}")
@@ -420,7 +419,6 @@ class ChainManager:
         commitments = await self.get_commitments()
         if commitments:
             self.commitments = commitments
-            self.update_peers_with_buckets()
             logger.debug(f"Fetched commitments: {self.commitments}")
         else:
             logger.warning("No commitments fetched.")

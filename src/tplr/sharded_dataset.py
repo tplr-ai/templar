@@ -15,6 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import os
 import time
 from pathlib import Path
 
@@ -38,7 +39,6 @@ class SharedShardedDataset(Dataset):
 
     def __init__(
         self,
-        shards_path: str,
         sequence_length: int,
         rank: int,
         world_size: int,
@@ -54,6 +54,13 @@ class SharedShardedDataset(Dataset):
         self.world = world_size
         if self.world > 1:
             dist.barrier(device_ids=[self.rank])
+
+        shards_path = os.getenv("DATASET_SHARDS_PATH")
+        if shards_path is None:
+            raise ValueError(
+                "Dataset path not configured. Set $DATASET_SHARDS_PATH or keep "
+                "`dataset_shards_path` in hparams."
+            )
 
         shards_dir = Path(shards_path)
         tokens_file = shards_dir / "tokens.bin"

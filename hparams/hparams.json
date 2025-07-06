@@ -1,7 +1,6 @@
 {
     "spec_version": 5,
     "project": "dough",
-    "dataset_shards_path": "~/datasets/dclm_tokenized_llama2_cleaned",
     "sequence_length": 2048,
     "micro_batch_size": 2,
     "target_batch_size": 1024,

@@ -296,7 +296,6 @@ class Validator(BaseNode):
         self.param_change_alpha = 0.2
 
         self.dataset = tplr.SharedShardedDataset(
-            shards_path=self.hparams.dataset_shards_path,
             sequence_length=self.hparams.sequence_length,
             rank=0,
             world_size=1,

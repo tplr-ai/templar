@@ -2,11 +2,15 @@
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+where   = ["src", "."]
+include = ["tplr*", "neurons*"]
+
 [project]
 name = "tplr"
-version = "0.1.0"
 description = "Incentivised Internet-Wide Training"
 readme = "README.md"
+dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = [
     "bittensor==9.1.0",
@@ -35,6 +39,9 @@ dependencies = [
     "openskill>=6.0.2",
     "dnspython>=2.7.0",
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "tplr.__version__"}
 
 [project.optional-dependencies]
 dev = [

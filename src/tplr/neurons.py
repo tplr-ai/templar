@@ -16,35 +16,34 @@
 # DEALINGS IN THE SOFTWARE.
 
 
-import asyncio
 import math
-import time
-from typing import TYPE_CHECKING, TypeVar, cast
+import typing
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
-from torch._prims_common import DeviceLikeType
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LRScheduler
 
 import tplr
-from tplr.logging import logger
-
 
 if TYPE_CHECKING:
     from neurons.miner import Miner
     from neurons.validator import Validator
-    from neurons.aggregator import AggregationServer
 
 NeuronT = TypeVar("NeuronT", "Miner", "Validator")
 
 
-def prepare_gradient_dict(miner, pages, step_window):
+def prepare_gradient_dict(miner: "Miner", step_window: int):
     """
     Prepares the gradient dictionary for sharing by compressing the
     momentum for each parameter and attaching metadata.
 
     Args:
         miner (Miner): Instance of Miner containing model, scheduler, momentum, compressor, transformer and hparams.
-        pages (list): The pages information used for training data.
         step_window (int): The current window number.
 
     Returns:
@@ -56,73 +55,51 @@ def prepare_gradient_dict(miner, pages, step_window):
     gradient = {}
     xshapes = {}
     totalks = {}
-    lr = miner.scheduler.get_last_lr()[0]
-
-    # Use an internal iteration counter stored in miner if it doesn't exist already
-    if not hasattr(miner, "gradient_iteration_counter"):
-        miner.gradient_iteration_counter = 0
-
-    # Increment the counter for this function call
-    miner.gradient_iteration_counter += 1
-
-    # Log the current iteration counter
-    logger.info(
-        f"Current gradient_iteration_counter: {miner.gradient_iteration_counter}"
-    )
-
-    # Track if this is the first iteration
-    is_first_iteration = miner.gradient_iteration_counter == 1
-    # Check if we're in the first 5 iterations
-    is_early_iteration = miner.gradient_iteration_counter <= 5
+    lr = float(miner.hparams.outer_learning_rate)
 
     if isinstance(miner.model, torch.nn.parallel.DistributedDataParallel):
         model_iterator = miner.model.module.named_parameters()
     else:
         model_iterator = miner.model.named_parameters()
     for n, p in model_iterator:
-        # Weight-decay is done by *every* rank
-        p.data.mul_(1.0 - lr * miner.hparams.weight_decay)
-
         # Skip parameters not owned by this rank
         if n not in miner.owned_params:
             p.grad = None
             continue
 
         # Apply momentum decay.
-        miner.momentum[n].mul_(miner.hparams.momentum_decay)
+        miner.error_feedback[n].mul_(miner.hparams.momentum_decay)
 
         # Ensure the gradient is on the same device as the parameter.
+        assert p.grad is not None
         grad = p.grad.to(p.device)
-        if miner.momentum[n].device != p.device:
-            miner.momentum[n] = miner.momentum[n].to(p.device)
+        if miner.error_feedback[n].device != p.device:
+            miner.error_feedback[n] = miner.error_feedback[n].to(p.device)
 
-        # Update momentum
-        if is_first_iteration:
-            # Set momentum directly to grad (multiplied by lr to maintain scale)
-            miner.momentum[n] = grad.clone() * lr
-        else:
-            # Normal behavior for later iterations
-            miner.momentum[n].add_(grad, alpha=lr)
+        # Normal behavior for later iterations
+        miner.error_feedback[n].add_(grad, alpha=lr)
 
         # Compress momentum
-        encoded = miner.transformer.encode(miner.momentum[n])
+        encoded = miner.transformer.encode(
+            miner.error_feedback[n], use_dct=miner.hparams.use_dct
+        )
         idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
             encoded, miner.hparams.topk_compression
         )
         if totalk is None:
-            print("totalk is None")
+            tplr.logger.info("totalk is None")
         del encoded  # Free the encoded tensor immediately
 
         # Estimate transmitted gradient
         decompressed = miner.compressor.decompress(
             p, idxs, vals, xshape, totalk, quant_params
         )
-        transmit_grad = miner.transformer.decode(decompressed)
+        transmit_grad = miner.transformer.decode(
+            decompressed, use_dct=miner.hparams.use_dct
+        )
         del decompressed  # Free intermediate tensor
 
-        # Skip subtracting transmitted gradient in the first 5 iterations
-        if not is_early_iteration:
-            miner.momentum[n].sub_(transmit_grad)
+        miner.error_feedback[n].sub_(transmit_grad)
 
         # Move compressed values to CPU to save GPU memory
         gradient[n + "idxs"] = idxs.cpu() if isinstance(idxs, torch.Tensor) else idxs
@@ -138,30 +115,107 @@ def prepare_gradient_dict(miner, pages, step_window):
 
     torch.cuda.empty_cache()
 
-    gradient["metadata"] = {"pages_info": pages, "window": step_window}
+    gradient["metadata"] = {"window": step_window}
 
     return gradient, xshapes, totalks
 
 
-async def update_peers(
-    instance: NeuronT | "AggregationServer", window: int, peer_start: float
+def outer_step(
+    model: nn.Module,
+    optimizer: Optimizer,
+    *,
+    gather_result: SimpleNamespace | None,
+    transformer: tplr.compress.TransformDCT,
+    compressor: tplr.compress.CompressDCT,
+    xshapes: dict,
+    totalks: dict,
+    device: str,
+    is_master: bool,
+    world_size: int,
+    use_dct: bool = False,
 ) -> None:
+    """
+    Synchronize gradients (if DDP) and apply optimizer step
+    """
+    bare_model = (
+        model.module
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel)
+        else model
+    )
+    if is_master:
+        new_grad = None
+        model.train()
+        optimizer.zero_grad()
+
+        new_grad = None
+        if gather_result is not None and gather_result.state_dict is not None:
+            for n, p in bare_model.named_parameters():
+                idxs_key = n + "idxs"
+                vals_key = n + "vals"
+                quant_key = n + "quant_params"
+
+                idxs = getattr(gather_result.state_dict, idxs_key, None)
+                vals = getattr(gather_result.state_dict, vals_key, None)
+                quant_params = getattr(gather_result.state_dict, quant_key, None)
+                if idxs is not None and vals is not None:
+                    if not isinstance(idxs, (list, tuple)):
+                        idxs = [idxs]
+                    if not isinstance(vals, (list, tuple)):
+                        vals = [vals]
+
+                    new_grad = transformer.decode(
+                        compressor.batch_decompress(
+                            p.to(device),  # type: ignore
+                            typing.cast(list[torch.Tensor], idxs),
+                            typing.cast(list[torch.Tensor], vals),
+                            xshapes[n],
+                            totalks[n],
+                            quant_params,
+                            normalise=False,
+                            clip_norm=True,
+                        ),
+                        use_dct=use_dct,
+                    )
+
+                    if p.grad is None:
+                        p.grad = new_grad
+                    else:
+                        p.grad.copy_(new_grad)
+                else:
+                    tplr.logger.info(
+                        f"Gradient data missing for parameter {n}, skipping."
+                    )
+
+        optimizer.step()
+        torch.cuda.empty_cache()
+        if world_size > 1:
+            for t in bare_model.state_dict().values():
+                if torch.is_tensor(t):
+                    dist.broadcast(t.data, src=0)
+    else:
+        if world_size > 1:
+            for t in bare_model.state_dict().values():
+                if torch.is_tensor(t):
+                    dist.broadcast(t.data, src=0)
+
+
+async def update_peers(instance: NeuronT, window: int, peer_start: float) -> None:
     # Check if peers list is empty and fetch previous list if needed
     if len(instance.comms.peers) == 0:
-        logger.info(
+        tplr.logger.info(
             "Current peers list is empty, attempting to fetch previous peer list"
         )
         result = await instance.comms.get_peer_list(fetch_previous=True)
         if result is not None:
             prev_peers, prev_update_window = result
-            logger.info(
+            tplr.logger.info(
                 f"Got previous peer list with {len(prev_peers)} peers "
                 f"and update window {prev_update_window}"
             )
             instance.comms.peers = prev_peers
             # Don't set next_peers here, as we want the normal update process to continue
         else:
-            logger.warning(
+            tplr.logger.warning(
                 "Failed to fetch previous peer list, continuing with empty peers"
             )
 
@@ -175,10 +229,10 @@ async def update_peers(
     ):
         result = await instance.comms.get_peer_list()
         if result is None:
-            logger.info("Unable to get peer list from bucket")
+            tplr.logger.info("Unable to get peer list from bucket")
         else:
             next_peers, peers_update_window = result
-            logger.info(
+            tplr.logger.info(
                 f"Got peer list {next_peers} and update window "
                 f"{peers_update_window} from bucket"
             )
@@ -188,7 +242,7 @@ async def update_peers(
             ):
                 instance.next_peers = next_peers
                 instance.peers_update_window = peers_update_window
-                logger.info("This list is new, updating next_peers")
+                tplr.logger.info("This list is new, updating next_peers")
 
     # Update peers, if it's time
     if instance.next_peers is not None and window >= instance.peers_update_window:
@@ -198,7 +252,7 @@ async def update_peers(
             if window - instance.peers_update_window > 0
             else "on time"
         )
-        logger.info(
+        tplr.logger.info(
             f"{tplr.P(window, tplr.T() - peer_start)} Updated peers "
             f"{late_text} - gather:{len(instance.comms.peers)}. Next update "
             f"expected on step window "
@@ -212,348 +266,300 @@ async def update_peers(
             else f"sync window is {window} and peers update window "
             f"is {instance.peers_update_window}"
         )
-        logger.info(f"Not time to replace peers: {reason}")
+        tplr.logger.info(f"Not time to replace peers: {reason}")
 
 
 async def catchup_with_aggregation_server(
     instance: NeuronT, checkpoint_current_window: int
-):
+) -> None:
     """
-    Catch up the model by applying aggregated gradients from the aggregation server
-    and verifying against the validator's debug dict. Uses retry logic for the most
-    recent window if needed.
+    Synchronise the local model with the chain.
+
+    For every window between the checkpoint and the current chain head:
+
+    1. **Primary path** – download the pre-computed `aggregated_gradients`
+       object uploaded by the *leader* validator and apply it via
+       `tplr.neurons.outer_step`.
+
+    2. **Fallback for the final window only** – if the leader has not yet
+       published an aggregator object for `target_window - 1`, perform a live
+       `instance.comms.gather( ..., key="gradient", ... )` against the current
+       peer-set and apply those gradients instead.
+
+    After each application we advance the inner LR scheduler, clear CUDA
+    cache, and (optionally) log a debug-dict comparison so we can estimate how
+    many optimisation steps we were behind the leader.
+
+    The loop exits when `start_w` has caught up with `instance.current_window`
+    (taking into account that the chain head may advance while we are replaying).
     """
-    logger.info("Starting catchup with aggregation server...")
+    tplr.logger.info("Starting catch‑up using aggregated_gradients...")
+    assert instance.start_window is not None
 
-    # Start from the checkpoint window and continue until we reach the current window
-    checkpoint_window = checkpoint_current_window + 1
-    target_window = instance.current_window
+    leader_uid: int = instance.metagraph.S.argmax().item()
 
-    logger.info(
-        f"Catching up from window {checkpoint_window} to current window {target_window}"
-    )
+    start_w = checkpoint_current_window + 1
+    target_w = instance.current_window
+    tplr.logger.info(f"Replaying windows {start_w} ... {target_w - 1}")
 
-    # Apply aggregation for each step, checking for current window changes
-    current_step = checkpoint_window
-    while current_step < target_window:
-        logger.info(
-            f"\nProcessing catchup for window {current_step} (Target: {target_window})"
+    prev_param_state: dict[str, torch.Tensor] = {}
+    param_avg_change: dict[str, torch.Tensor] = {}
+    alpha: float = 0.20
+    slice_idx = slice(0, 2)
+
+    while start_w < target_w:
+        tplr.logger.info(f"  • window {start_w}")
+
+        # ------------------------------------------------------------------
+        # 1) Fetch the aggregated object dumped by the leader validator.
+        # ------------------------------------------------------------------
+        fetch = await instance.comms.get(
+            uid=str(leader_uid),
+            window=start_w,
+            key="aggregator",
+            timeout=60,
+            local=False,
+            stale_retention=10,
         )
 
-        # Load aggregation for current window
-        agg_data = await instance.comms.load_aggregation(window=current_step)
+        # ── A. aggregated object exists → normal path ────────────────────
+        if fetch is not None and fetch[0] is not None and "state_dict" in fetch[0]:
+            payload, _ = fetch
 
-        # For the last window in catchup, we might need to retry a few times
-        if agg_data is None and current_step == target_window - 1:
-            max_retries = 7
-            retry_count = 0
-            retry_delay = 10
-
-            logger.info(
-                f"No aggregation for latest window {current_step}, will retry up to {max_retries} times"
+            # ------------------------------------------------------------------
+            # Re‑create the SimpleNamespace expected by `outer_step`.
+            # ------------------------------------------------------------------
+            gather_ns = SimpleNamespace(
+                state_dict=SimpleNamespace(**payload["state_dict"]),
+                uids=payload.get("uids", []),
+                skipped_uids=payload.get("skipped_uids", []),
+                success_rate=payload.get("success_rate", 0.0),
             )
 
-            while retry_count < max_retries and agg_data is None:
-                retry_count += 1
-                logger.info(
-                    f"Retry {retry_count}/{max_retries} for window {current_step}"
+        # ── B. aggregated object *missing* or *malformed* ────────────────
+        else:
+            is_last_window = start_w == target_w - 1
+            tplr.logger.warning(
+                "    ↳ %s – %s",
+                "not available" if fetch is None else "malformed payload",
+                "attempting gather‑fallback" if is_last_window else "skipping",
+            )
+
+            if not is_last_window:
+                start_w += 1
+                continue
+
+            sync_block = (start_w + 1) * instance.hparams.blocks_per_window
+            ts_value = await instance.loop.run_in_executor(
+                None, instance.query_block_timestamp, sync_block
+            )
+            if ts_value is None:
+                tplr.logger.warning(
+                    f"Could not get timestamp for sync block {sync_block}.",
                 )
-                await asyncio.sleep(retry_delay)
+                time_min = time_max = None
+            else:
+                time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
+                time_max = time_min + timedelta(
+                    seconds=instance.hparams.time_window_delta_seconds
+                )
 
-                # Try to load aggregation again
-                agg_data = await instance.comms.load_aggregation(window=current_step)
+            # ---- Gather fallback ----------------------------------------
+            gather_ns = await instance.comms.gather(
+                my_uid=instance.uid,
+                uids=instance.comms.peers,
+                window=start_w,
+                key="gradient",
+                timeout=45,
+                device=str(instance.config.device),
+                local=False,
+                stale_retention=10,
+                totalks=instance.totalks,
+                time_min=time_min,
+                time_max=time_max,
+            )
 
-                if agg_data is not None:
-                    logger.info(
-                        f"Successfully loaded aggregation on retry {retry_count}"
+            if gather_ns is None:
+                tplr.logger.warning("    ↳ gather‑fallback failed – skipping")
+                start_w += 1
+                continue
+
+            tplr.logger.info("    ↳ gather‑fallback succeeded – applying")
+
+        # ------------------------------------------------------------------
+        # 2) Apply those gradients through the shared helper.
+        # ------------------------------------------------------------------
+        tplr.neurons.outer_step(
+            instance.model,
+            instance.outer_optimizer,
+            gather_result=gather_ns,
+            transformer=instance.transformer,
+            compressor=instance.compressor,
+            xshapes=instance.xshapes,
+            totalks=instance.totalks,
+            device=instance.config.device,
+            is_master=True,
+            world_size=1,
+            use_dct=instance.hparams.use_dct,
+        )
+
+        # advance LR scheduler if one exists.
+        inner_sched: LRScheduler | None = getattr(instance, "inner_scheduler", None)
+        if inner_sched is not None:
+            for _ in range(instance.hparams.inner_steps):
+                inner_sched.step()
+
+        torch.cuda.empty_cache()
+        # ──────────────────────────────────────────────────────────────────────
+        # 3) Debug‑dict comparison to estimate “how many steps behind” we are
+        # ──────────────────────────────────────────────────────────────────────
+        try:
+            debug_fetch = await instance.comms.get(
+                uid=str(leader_uid),
+                window=start_w,
+                key="debug",
+                local=False,
+                stale_retention=10,
+            )
+
+            if debug_fetch is not None and isinstance(debug_fetch[0], dict):
+                debug_dict = debug_fetch[0]  # validator’s payload
+
+                # --- update EMA of parameter‑slice changes ------------------
+                bare_model = (
+                    instance.model.module
+                    if isinstance(
+                        instance.model, torch.nn.parallel.DistributedDataParallel
                     )
-
-            if agg_data is None:
-                logger.warning(
-                    f"Failed to load aggregation after {max_retries} retries"
+                    else instance.model
                 )
-
-        # Process the aggregation data if available
-        if agg_data:
-            update_start = time.time()
-
-            # Process the loaded data
-            processed_agg_data = process_loaded_data(instance.model, agg_data)
-
-            if processed_agg_data is not None:
-                # Get learning rate for this step
-                lr = instance.scheduler.get_last_lr()[0]
-                weight_decay = instance.hparams.weight_decay
-
-                # Apply the gradients to the model parameters
-                if isinstance(
-                    instance.model, torch.nn.parallel.DistributedDataParallel
-                ):
-                    model_iterator = instance.model.module.named_parameters()
-                else:
-                    model_iterator = instance.model.named_parameters()
-                for name, param in model_iterator:
-                    if name in processed_agg_data["tensors"]:
-                        # Apply weight decay to the parameter manually if needed
-                        if weight_decay > 0:
-                            with torch.no_grad():
-                                param.data.mul_(1.0 - lr * weight_decay)
-
-                        # Move aggregation tensor to device
-                        agg_tensor = processed_agg_data["tensors"][name].to(
-                            instance.config.device  # type: ignore
-                        )
-
-                        # Set the gradient instead of directly updating the parameter
-                        if param.grad is None:
-                            param.grad = agg_tensor
+                for name, p in bare_model.named_parameters():
+                    if p.numel() < 2:
+                        continue
+                    curr_slice = p.detach().cpu().flatten()[slice_idx]
+                    if name in prev_param_state:
+                        delta = (curr_slice - prev_param_state[name]).abs()
+                        if name not in param_avg_change:
+                            param_avg_change[name] = delta.clone()
                         else:
-                            param.grad.copy_(agg_tensor)
+                            param_avg_change[name].mul_(1 - alpha).add_(delta * alpha)
+                    prev_param_state[name] = curr_slice.clone()
 
-                        del agg_tensor
-                        torch.cuda.empty_cache()
-
-                logger.info(
-                    f"Window {current_step} - Set gradients in {time.time() - update_start:.2f}s"
+                # --- call shared comparison helper --------------------------
+                lr = instance.outer_optimizer.param_groups[0]["lr"]
+                cmp = await tplr.neurons.compare_model_with_debug_dict(
+                    model=instance.model,
+                    debug_dict=debug_dict,
+                    learning_rate=lr,
+                    index_range=(0, 2),
+                    param_avg_change=param_avg_change,
                 )
 
-                # Let the optimizer handle the parameter updates
-                instance.optimizer.step()
-                instance.scheduler.step()
-                torch.cuda.empty_cache()
-
-                logger.info(
-                    f"Successfully applied aggregation for window {current_step}"
-                )
-
-                # Get debug dict and compare with current model parameters
-                debug_dict_result = await instance.comms.get_debug_dict(current_step)
-                if (
-                    isinstance(debug_dict_result, dict)
-                    and "state_dict" in debug_dict_result
-                ):
-                    debug_state_dict = cast(
-                        dict[str, list[float]], debug_dict_result["state_dict"]
+                if cmp["success"]:
+                    tplr.logger.info(
+                        f"[catch‑up] window {start_w} "
+                        f"avg_steps_behind={cmp['avg_steps_behind']:.3f}, "
+                        f"l2_norm={cmp['l2_norm']:.4f}"
                     )
-
-                    # Use our new function to compare model with debug dict
-                    comparison_metrics = await compare_model_with_debug_dict(
-                        model=instance.model,
-                        debug_dict=debug_state_dict,
-                        learning_rate=lr,
-                    )
-
-                    if comparison_metrics["success"]:
-                        # Log the comparison metrics
-                        logger.info(
-                            f"Window {current_step} - L2 norm difference between model and debug values: "
-                            f"{comparison_metrics['l2_norm']}"
-                        )
-                        logger.info(
-                            f"Window {current_step} - Average L2 norm per parameter: "
-                            f"{comparison_metrics['avg_l2_norm']}"
-                        )
-                        logger.info(
-                            f"Window {current_step} - Average absolute difference per parameter: "
-                            f"{comparison_metrics['avg_abs_diff']}"
-                        )
-                        logger.info(
-                            f"Window {current_step} - Average steps behind: "
-                            f"{comparison_metrics['avg_steps_behind']}"
-                        )
-                    else:
-                        logger.warning(
-                            f"Failed to compare model with debug dict for window {current_step}"
-                        )
                 else:
-                    logger.warning(
-                        f"Invalid debug dict format for window {current_step}"
+                    tplr.logger.warning(
+                        f"[catch‑up] debug‑dict comparison failed for window {start_w}"
                     )
             else:
-                logger.warning(
-                    f"Failed to process aggregation data for window {current_step}"
+                tplr.logger.warning(
+                    f"[catch‑up] no debug‑dict found for window {start_w}"
                 )
-                # Still advance the optimizer and scheduler
-                instance.optimizer.step()
-                instance.scheduler.step()
+        except Exception as exc:
+            tplr.logger.warning(f"[catch‑up] debug‑dict processing error: {exc}")
 
-            del processed_agg_data
-            torch.cuda.empty_cache()
-        else:
-            logger.warning(f"No aggregation data found for window {current_step}")
-            # Don't advance the optimizer and scheduler
+        instance.global_step = start_w - instance.start_window
+        start_w += 1
 
-        # Update global step and move to next window
-        instance.global_step = current_step - instance.start_window
-        current_step += 1
+        # If the chain progressed while we were busy, extend the target.
+        if instance.current_window > target_w:
+            target_w = instance.current_window
 
-        # Check if current_window has changed during processing
-        if instance.current_window > target_window:
-            target_window = instance.current_window
-            logger.info(
-                f"Current window advanced during catchup, new target: {target_window}"
-            )
-
-    # Update global step after catchup
-    instance.global_step = target_window - instance.start_window
-    logger.info(f"Catchup complete. Global step updated to {instance.global_step}")
-
-
-def process_loaded_data(model: torch.nn.Module, compressed_data: dict) -> dict | None:
-    """
-    Unpack the compressed tensor data from the aggregation server.
-
-    Args:
-        compressed_data: The compressed tensor data
-
-    Returns:
-        Dictionary with unpacked tensors
-    """
-    state_dict = compressed_data.get("state_dict")
-    if state_dict is None:
-        return None
-
-    result = {
-        "timestamp": state_dict.get("timestamp", None),
-        "window": state_dict.get("window", None),
-        "version": state_dict.get("version", None),
-        "tensors": {},
-    }
-
-    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-        model_iterator = model.module.named_parameters()
-    else:
-        model_iterator = model.named_parameters()
-    for name, param in model_iterator:
-        if name in state_dict:
-            original_shape = param.shape
-            # Use unpack_binary_tensor from the sample, but in our context
-            unpacked = unpack_binary_tensor(state_dict[name], original_shape)
-            result["tensors"][name] = unpacked
-            logger.debug(f"Unpacked tensor {name} with shape {original_shape}")
-
-    logger.info(f"Successfully unpacked {len(result['tensors'])} tensors")
-    return result
+    instance.global_step = target_w - instance.start_window
+    tplr.logger.info("Catch‑up finished – model now in sync.")
 
 
 async def compare_model_with_debug_dict(
     model: nn.Module,
     debug_dict: dict[str, list[float]],
     learning_rate: float,
+    param_avg_change: dict[str, torch.Tensor] | None = None,
+    *,
+    min_step_size: float = 1e-9,
     index_range: tuple[int, int] = (0, 2),
 ) -> dict[str, bool | float | int]:
     """
-    Compares a model's parameters with a debug dictionary to measure synchronization.
-
-    Args:
-        model: The PyTorch model with parameters to compare
-        debug_dict: Debug dictionary containing parameter debug values
-        learning_rate: Current learning rate to normalize differences
-
-    Returns:
-        dict: Comparison metrics including L2 norm, absolute differences, and steps behind measurements
+    Compare weights with published debug snippets and return sync metrics.
     """
     # Initialize metrics
     total_squared_diff = 0.0
     total_abs_diff = 0.0
     param_count = 0
-    max_diff = 0.0
+    max_diff = 0.0  # largest raw parameter diff
+    max_steps = 0.0
 
-    # Compare each parameter with its debug entry
-    if isinstance(model, torch.nn.parallel.DistributedDataParallel):
-        model_iterator = model.module.named_parameters()
-    else:
-        model_iterator = model.named_parameters()
-    for name, param in model_iterator:
-        debug_key = name + "_debug"
+    steps_sum = 0.0
+    tensors = 0
 
-        if debug_key in debug_dict and isinstance(debug_dict[debug_key], list):
-            # Get the parameter values (first two elements to match debug dict)
-            param_data = param.data.flatten()[
-                index_range[0] : index_range[1]
-            ].detach()  # Keep on device
+    named_params = (
+        model.module.named_parameters()
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel)
+        else model.named_parameters()
+    )
 
-            # Convert debug data to tensor on the same device
-            debug_data = torch.tensor(
-                debug_dict[debug_key], device=param.device, dtype=param.dtype
+    for name, p in named_params:
+        key = name + "_debug"
+        if key not in debug_dict or not isinstance(debug_dict[key], list):
+            continue
+
+        # --- grab the slice we care about --------------------------------
+        curr_slice = p.data.flatten()[index_range[0] : index_range[1]]
+        debug_slice = torch.tensor(debug_dict[key], dtype=p.dtype, device=p.device)
+
+        diff_vec = curr_slice - debug_slice
+        abs_vec = torch.abs(diff_vec)
+
+        total_squared_diff += torch.sum(diff_vec**2).item()
+        total_abs_diff += abs_vec.sum().item()
+        raw_max = abs_vec.max().item()
+        max_diff = max(max_diff, raw_max)
+        param_count += abs_vec.numel()
+
+        # --- element-wise steps-behind -----------------------------------
+        if param_avg_change and name in param_avg_change:
+            step_vec = torch.clamp(
+                param_avg_change[name].to(p.device), min=min_step_size
             )
+            if step_vec.numel() != abs_vec.numel():
+                # fallback if stored slice has wrong length
+                step_vec = abs_vec.new_full(abs_vec.size(), learning_rate)
+        else:
+            step_vec = abs_vec.new_full(abs_vec.size(), learning_rate)
 
-            # Compute differences
-            diffs = param_data - debug_data
-            squared_diff = torch.sum(diffs**2).item()
-            abs_diff = torch.abs(diffs).sum().item()
-            max_param_diff = torch.max(torch.abs(diffs)).item()
+        step_ratio = abs_vec / step_vec
+        steps_sum += step_ratio.mean().item()
+        max_steps = max(max_steps, step_ratio.max().item())
+        tensors += 1
 
-            # Update totals
-            total_squared_diff += squared_diff
-            total_abs_diff += abs_diff
-            param_count += param_data.numel()
-            max_diff = max(max_diff, max_param_diff)
+    l2_norm = math.sqrt(total_squared_diff)
+    avg_l2_norm = math.inf if tensors == 0 else l2_norm / param_count
+    avg_abs_diff = math.inf if tensors == 0 else total_abs_diff / param_count
+    avg_steps = math.inf if tensors == 0 else steps_sum / tensors
+    if tensors == 0:
+        max_steps = math.inf  # nothing compared → undefined
 
-    # Calculate final metrics
-    l2_norm = torch.sqrt(torch.tensor(total_squared_diff)).item()
-    avg_l2_norm = l2_norm / param_count if param_count > 0 else math.inf
-    avg_abs_diff = total_abs_diff / param_count if param_count > 0 else math.inf
-
-    # Normalize differences by learning rate to get "steps behind" metric
-    avg_steps_behind = avg_abs_diff / learning_rate if learning_rate > 0 else math.inf
-    max_steps_behind = max_diff / learning_rate if learning_rate > 0 else math.inf
-
-    # Prepare return metrics
-    metrics: dict[str, bool | float | int] = {
+    return {
         "success": True,
         "l2_norm": l2_norm,
         "avg_l2_norm": avg_l2_norm,
         "avg_abs_diff": avg_abs_diff,
         "max_diff": max_diff,
-        "avg_steps_behind": avg_steps_behind,
-        "max_steps_behind": max_steps_behind,
+        "avg_steps_behind": avg_steps,
+        "max_steps_behind": max_steps,
         "param_count": param_count,
         "learning_rate": learning_rate,
     }
-
-    return metrics
-
-
-def unpack_binary_tensor(packed_tensor: torch.Tensor, original_shape: torch.Size):
-    """
-    Unpack a 1-bit representation tensor back to ±1 values.
-
-    Args:
-        packed_tensor: The packed binary tensor
-        original_shape: The original shape of the tensor
-
-    Returns:
-        Unpacked tensor with original shape
-    """
-    device = packed_tensor.device
-    packed_flat = packed_tensor.to(device=device, dtype=torch.uint8).view(-1)
-
-    n_vals = int(torch.tensor(original_shape).prod().item())
-    n_bytes = (n_vals + 7) // 8
-    packed_flat = packed_flat[:n_bytes]  # drop any padding
-
-    bits = torch.stack(
-        [(packed_flat >> i) & 1 for i in range(8)],
-        dim=1,
-    ).reshape(-1)[:n_vals]
-
-    # {0,1} → {-1,+1}
-    bits = bits.to(torch.float32).mul_(2).sub_(1)
-
-    return bits.reshape(original_shape)
-
-
-# Function to pack signed weights into 1-bit representation
-def pack_binary_tensor(tensor: torch.Tensor, device: DeviceLikeType):
-    """Pack a tensor of +1/-1 values into a compact binary representation."""
-    tensor = (tensor > 0).to(torch.uint8)  # Convert +1 to 1, -1 to 0
-    tensor = tensor.view(-1)  # Flatten
-    packed_tensor = torch.zeros(
-        (tensor.shape[0] + 7) // 8, dtype=torch.uint8, device=device
-    )
-
-    for i in range(8):
-        packed_tensor |= tensor[i::8] << i  # Pack 8 values per byte
-
-    return packed_tensor

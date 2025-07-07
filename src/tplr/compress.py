@@ -22,10 +22,13 @@
 
 import math
 from typing import Generic, Literal, TypeAlias, TypeVar, cast, overload
+
 import torch
 import torch.fft
-
+import wandb
 from einops import rearrange
+
+import tplr
 
 # ---------- type aliases ---------- #
 IdxT: TypeAlias = torch.Tensor  # int16 indices
@@ -83,7 +86,7 @@ class TransformDCT:
             return torch.einsum("...ijkl, kb, ld -> ...ibjd", x, b, d)
 
     @torch.no_grad()
-    def encode(self, x):
+    def encode(self, x: torch.Tensor, *, use_dct: bool = False) -> torch.Tensor:
         if len(x.shape) > 1:  # 2D weights
             n1 = self.shape_dict[x.shape[0]]
             n2 = self.shape_dict[x.shape[1]]
@@ -93,7 +96,8 @@ class TransformDCT:
             self.f_dict[n2] = n2w
 
             x = rearrange(x, "(y h) (x w) -> y h x w", h=n1, w=n2)
-            x = self.einsum_2d(x, n1w, n2w)
+            if use_dct:
+                x = self.einsum_2d(x, n1w, n2w)
 
         else:  # 1D weights
             n1 = self.shape_dict[x.shape[0]]
@@ -101,29 +105,32 @@ class TransformDCT:
             self.f_dict[n1] = n1w
 
             x = rearrange(x, "(x w) -> x w", w=n1)
-            x = self.einsum_2d(x, n1w)
+            if use_dct:
+                x = self.einsum_2d(x, n1w)
 
         return x
 
     @torch.no_grad()
-    def decode(self, x):
+    def decode(self, x: torch.Tensor, *, use_dct: bool = False):
         if len(x.shape) > 2:  # 2D weights
-            n1 = x.shape[2]
-            n2 = x.shape[3]
-            n1w = self.b_dict[n1].to(x.device)
-            n2w = self.b_dict[n2].to(x.device)
-            self.b_dict[n1] = n1w
-            self.b_dict[n2] = n2w
+            if use_dct:
+                n1 = x.shape[2]
+                n2 = x.shape[3]
+                n1w = self.b_dict[n1].to(x.device)
+                n2w = self.b_dict[n2].to(x.device)
+                self.b_dict[n1] = n1w
+                self.b_dict[n2] = n2w
 
-            x = self.einsum_2d_t(x, n1w, n2w)
+                x = self.einsum_2d_t(x, n1w, n2w)
             x = rearrange(x, "y h x w -> (y h) (x w)")
 
         else:  # 1D weights
-            n1 = x.shape[1]
-            n1w = self.b_dict[n1].to(x.device)
-            self.b_dict[n1] = n1w
+            if use_dct:
+                n1 = x.shape[1]
+                n1w = self.b_dict[n1].to(x.device)
+                self.b_dict[n1] = n1w
 
-            x = self.einsum_2d_t(x, n1w)
+                x = self.einsum_2d_t(x, n1w)
             x = rearrange(x, "x w -> (x w)")
 
         return x
@@ -261,7 +268,8 @@ class CompressDCT(Generic[Q]):
         totalk: int,
         quantize_params: QuantParamsT | list[QuantParamsT] | None = None,
         *,
-        normalise: bool = True,
+        normalise: bool = False,
+        clip_norm: bool = True,
     ) -> torch.Tensor:
         if not isinstance(idx, list):
             idx = [idx]
@@ -272,10 +280,35 @@ class CompressDCT(Generic[Q]):
             quantize_params = [quantize_params] * len(val)  # type: ignore[list-item]
 
         processed_vals: list[torch.Tensor] = []
-        for i, v in enumerate(val):
+        dequant_vals = None
+        norms = None
+        clip_norm_val = None
+        if self.use_quantization and quantize_params:
+            dequant_vals = [
+                self._dequantize_values(v, quantize_params[i])
+                for i, v in enumerate(val)
+            ]
+        if clip_norm:
+            vals = dequant_vals if dequant_vals is not None else val
+            norms = torch.stack([torch.norm(sparse_vals, p=2) for sparse_vals in vals])
+            median_norm = torch.median(norms)
+            tplr.logger.debug(
+                "[batch_decompress] median L2-norm across %d sparse blocks: %.6f",
+                norms.numel(),
+                median_norm.item(),
+            )
+            if wandb.run is not None:  # make sure a run is active
+                wandb.log({"compress/median_block_norm": median_norm.item()})
+
+            clip_norm_val = torch.clamp(
+                median_norm,
+                min=-10000,
+                max=100000,
+            )
+
+        vals = dequant_vals if dequant_vals is not None else val
+        for i, v in enumerate(vals):
             v = v.to(p.device)
-            if self.use_quantization and quantize_params:
-                v = self._dequantize_values(v, quantize_params[i])  # type: ignore[arg-type]
 
             if normalise:
                 eps = 1e-8
@@ -289,7 +322,10 @@ class CompressDCT(Generic[Q]):
                     l2_norm = torch.norm(v, p=2)
                     if l2_norm > eps:
                         v = v / l2_norm
-
+            elif clip_norm and norms is not None and clip_norm_val is not None:
+                current_norm = norms[i]
+                clip_factor = torch.clamp(clip_norm_val / (current_norm + 1e-8), max=1)
+                v = v * clip_factor
             processed_vals.append(v)
 
         # Concatenate everything

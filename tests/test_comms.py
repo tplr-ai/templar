@@ -873,8 +873,6 @@ async def test_load_checkpoint_success(monkeypatch):
     # --- Fake checkpoint data in exactly the structure the impl expects ----
     checkpoint_data = {
         "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict(),
         "start_window": 0,
         "current_window": 1,
         "sync_window": 7,  # any int works
@@ -888,11 +886,9 @@ async def test_load_checkpoint_success(monkeypatch):
 
     monkeypatch.setattr(comms, "get_latest_checkpoint", _fake_get_latest_checkpoint)
 
-    # --- Call & unpack (must be 5 returns) ---------------------------------
-    success, sync_window, opt_out, sched_out = await comms.load_checkpoint(
+    # --- Call & unpack (must be 2 returns) ---------------------------------
+    success, sync_window = await comms.load_checkpoint(
         model=model,
-        optimizer=optimizer,
-        scheduler=scheduler,
         current_window=1,
         device="cpu",
     )
@@ -900,9 +896,6 @@ async def test_load_checkpoint_success(monkeypatch):
     # --- Assertions --------------------------------------------------------
     assert success is True
     assert sync_window == 7
-    # Optimiser & scheduler objects are returned unchanged
-    assert opt_out is optimizer
-    assert sched_out is scheduler
 
 
 @pytest.mark.asyncio
@@ -927,67 +920,18 @@ async def test_load_checkpoint_missing_data(comms_instance):
     mock_optimizer = MagicMock()
     mock_scheduler = MagicMock()
 
-    # load_checkpoint returns: success, momentum, sync_window, optimizer, scheduler
+    # load_checkpoint returns: success, sync_window
     (
         success,
         sync_window,
-        optimizer,
-        scheduler,
     ) = await comms_instance.load_checkpoint(
         model=mock_model,
-        optimizer=mock_optimizer,
-        scheduler=mock_scheduler,
         current_window=1,
         device="cpu",
     )
 
     assert not success
     assert sync_window == 0
-    assert (
-        optimizer == mock_optimizer
-    )  # Check it returns the same optimizer we passed in
-    assert (
-        scheduler == mock_scheduler
-    )  # Check it returns the same scheduler we passed in
-
-
-async def test_gather_timeout(comms_instance):
-    """Test 17: Verify gather operation timeout handling
-
-    Tests the timeout mechanism in gather operations.
-    Checks:
-    - Proper timeout handling
-    - Error response
-    - Resource cleanup
-    """
-
-    async def slow_get(*args, **kwargs):
-        await asyncio.sleep(2)
-        return None
-
-    comms_instance.get_with_retry = AsyncMock(side_effect=Exception("Test error"))
-
-    # Mock logger to avoid actual logging
-    with (
-        patch("tplr.logger.error"),
-        patch("tplr.logger.debug"),
-        patch("tplr.logger.info"),
-        patch("tplr.logger.warning"),
-    ):
-        result = await comms_instance.gather(
-            my_uid="0",
-            uids=["1"],
-            window=1,
-            key="gradient",
-            timeout=5,
-            device="cpu",
-            local=True,  # Use local=True to avoid S3 operations
-            stale_retention=10,
-            totalks={},
-        )
-
-        # Should return None on error
-        assert result is None
 
 
 async def test_gather_timeout(comms_instance):
@@ -1037,204 +981,6 @@ async def test_get_start_window_retry(comms_instance):
 
     start_window = await comms_instance.get_start_window()
     assert start_window == 100
-
-
-class TestCommsGradientOperations:
-    """Test gradient application and gathering operations"""
-
-    async def test_apply_gathered_gradients_empty_result(self):
-        """Should handle empty gather results gracefully"""
-        comms_instance = await setup_test_comms()
-        model = setup_test_model()
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-        scheduler = setup_test_scheduler(optimizer)
-        transformer = MockTransformer()
-        compressor = MockCompressor()
-
-        success, new_global_step = await comms_instance._apply_gathered_gradients(
-            gather_result=None,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            transformer=transformer,
-            compressor=compressor,
-            device="cpu",
-            window=1,
-            global_step=0,
-        )
-
-        assert not success
-        assert new_global_step == 0
-
-    async def test_apply_gathered_gradients_missing_params(self):
-        """Should handle missing parameters gracefully by skipping them"""
-        comms_instance = await setup_test_comms()
-        model = setup_test_model()
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-        scheduler = setup_test_scheduler(optimizer)
-
-        class TestTransformer:
-            def __init__(self):
-                self.shapes = {}
-                self.totalks = {}
-                for name, param in model.named_parameters():
-                    self.shapes[name] = param.shape
-                    self.totalks[name] = param.numel()
-
-            def decode(self, x):
-                return x
-
-        transformer = TestTransformer()
-        compressor = MockCompressor()
-
-        # Create gather result with partial parameter data
-        gather_result = SimpleNamespace(state_dict=SimpleNamespace(), global_steps=[1])
-
-        # Only add gradient data for weight, leaving bias missing
-        weight_param_name = "0.weight"  # First layer's weight in sequential model
-        param = next(p for n, p in model.named_parameters() if n == weight_param_name)
-        setattr(
-            gather_result.state_dict,
-            f"{weight_param_name}idxs",
-            torch.zeros(param.numel(), dtype=torch.long),
-        )
-        setattr(
-            gather_result.state_dict,
-            f"{weight_param_name}vals",
-            torch.ones(param.numel()) * 0.1,
-        )
-
-        # Store initial parameters
-        initial_params = {n: p.clone() for n, p in model.named_parameters()}
-
-        success, new_global_step = await comms_instance._apply_gathered_gradients(
-            gather_result=gather_result,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            transformer=transformer,
-            compressor=compressor,
-            device="cpu",
-            window=1,
-            global_step=0,
-        )
-
-        # Verify behavior:
-        # 1. Operation should succeed even with missing parameters
-        assert success
-        assert new_global_step == 1
-
-        # 2. Weight parameter should be updated
-        assert not torch.equal(
-            next(p for n, p in model.named_parameters() if n == weight_param_name),
-            initial_params[weight_param_name],
-        ), "Weight parameter should have been updated"
-
-        # 3. Bias parameter should remain unchanged
-        bias_param_name = "0.bias"  # First layer's bias
-        assert torch.equal(
-            next(p for n, p in model.named_parameters() if n == bias_param_name),
-            initial_params[bias_param_name],
-        ), "Bias parameter should not have been updated"
-
-    async def test_apply_gathered_gradients_device_mismatch(self):
-        """Should handle tensor device mismatches"""
-        comms_instance = await setup_test_comms()
-        model = setup_test_model()
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-        scheduler = setup_test_scheduler(optimizer)
-        transformer = MockTransformer()
-        compressor = MockCompressor()
-
-        # Create gather result with tensors on CPU
-        gather_result = create_mock_gather_result(model, "cpu")
-
-        success, new_global_step = await comms_instance._apply_gathered_gradients(
-            gather_result=gather_result,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            transformer=transformer,
-            compressor=compressor,
-            device="cpu",
-            window=1,
-            global_step=0,
-        )
-
-        assert success
-        assert new_global_step == 1
-
-    async def test_apply_gathered_gradients_success(self):
-        """Should successfully apply gathered gradients"""
-        comms_instance = await setup_test_comms()
-        model = setup_test_model()
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-        scheduler = setup_test_scheduler(optimizer)
-
-        class RealTransformer:
-            def __init__(self):
-                self.shapes = {}  # Required by validator.py
-                self.totalks = {}  # Add totalks dict
-                for name, param in model.named_parameters():
-                    self.shapes[name] = param.shape  # Store by name instead of shape
-                    self.totalks[name] = param.numel()  # Store total elements
-
-            def decode(self, x):
-                return torch.ones_like(x) * 0.1  # Return non-zero gradient
-
-        class RealCompressor:
-            def batch_decompress(self, p, idxs, vals, xshape, totalk):
-                # Match validator.py behavior
-                if not isinstance(idxs, list):
-                    idxs = [idxs]
-                if not isinstance(vals, list):
-                    vals = [vals]
-                return torch.ones_like(p) * 0.1
-
-            def decompress(self, p, idxs, vals, xshape, totalk):
-                return torch.ones_like(p) * 0.1
-
-        transformer = RealTransformer()
-        compressor = RealCompressor()
-
-        # Store initial parameters
-        initial_params = {n: p.clone() for n, p in model.named_parameters()}
-
-        # Create gather result with actual gradients
-        gather_result = SimpleNamespace(
-            state_dict=SimpleNamespace(), global_steps=[1], uids=[0]
-        )
-
-        # Add compressed gradient info for each parameter exactly as validator expects
-        for name, param in model.named_parameters():
-            # Add both idxs and vals with correct shapes
-            setattr(
-                gather_result.state_dict,
-                f"{name}idxs",
-                torch.zeros(param.numel(), dtype=torch.long),
-            )
-            setattr(
-                gather_result.state_dict, f"{name}vals", torch.ones(param.numel()) * 0.1
-            )
-
-        success, new_global_step = await comms_instance._apply_gathered_gradients(
-            gather_result=gather_result,
-            model=model,
-            optimizer=optimizer,
-            scheduler=scheduler,
-            transformer=transformer,
-            compressor=compressor,
-            device="cpu",
-            window=1,
-            global_step=0,
-        )
-
-        assert success
-        assert new_global_step == 1
-
-        # Verify parameters were actually updated
-        for name, param in model.named_parameters():
-            assert not torch.equal(param, initial_params[name])
 
 
 class MockTransformer:

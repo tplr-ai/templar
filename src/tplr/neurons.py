@@ -172,18 +172,28 @@ def outer_step(
                         vals = [vals]
 
                     # --- NEW: compute per-block norms once ---
+                    if compressor.use_quantization:
+                        assert quant_params is not None
+                        vals_f32 = [
+                            compressor._dequantize_values(
+                                v.to(device), quant_params[i]
+                            ).to(device)
+                            for i, v in enumerate(vals)
+                        ]
+                    else:
+                        vals_f32 = vals
                     block_norms = torch.stack(
-                        [torch.norm(v.to(device), p=2) for v in vals]
+                        [torch.norm(v.to(device), p=2) for v in vals_f32]
                     )
 
                     new_grad = transformer.decode(
                         compressor.batch_decompress(
                             p.to(device),
                             typing.cast(list[torch.Tensor], idxs),
-                            typing.cast(list[torch.Tensor], vals),
+                            typing.cast(list[torch.Tensor], vals_f32),
                             xshapes[n],
                             totalks[n],
-                            quant_params,
+                            quantize_params=None,
                             block_norms=block_norms,
                             normalise=False,
                             clip_norm=True,

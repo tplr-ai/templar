@@ -27,6 +27,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
+from wandb.sdk.wandb_run import Run
 
 import tplr
 
@@ -133,6 +134,8 @@ def outer_step(
     is_master: bool,
     world_size: int,
     use_dct: bool = False,
+    wandb_run: Run | None = None,
+    global_step: int | None = None,
 ) -> None:
     """
     Synchronize gradients (if DDP) and apply optimizer step
@@ -143,6 +146,11 @@ def outer_step(
         else model
     )
     if is_master:
+        # ────────────────────────────────────────────────
+        # track min / max median-norm across all layers
+        # ────────────────────────────────────────────────
+        min_median_norm = float("inf")
+        max_median_norm = float("-inf")
         new_grad = None
         model.train()
         optimizer.zero_grad()
@@ -163,19 +171,32 @@ def outer_step(
                     if not isinstance(vals, (list, tuple)):
                         vals = [vals]
 
+                    # --- NEW: compute per-block norms once ---
+                    block_norms = torch.stack(
+                        [torch.norm(v.to(device), p=2) for v in vals]
+                    )
+
                     new_grad = transformer.decode(
                         compressor.batch_decompress(
-                            p.to(device),  # type: ignore
+                            p.to(device),
                             typing.cast(list[torch.Tensor], idxs),
                             typing.cast(list[torch.Tensor], vals),
                             xshapes[n],
                             totalks[n],
                             quant_params,
+                            block_norms=block_norms,
                             normalise=False,
                             clip_norm=True,
                         ),
                         use_dct=use_dct,
                     )
+
+                    # ── update global min / max ───────────────────────
+                    median_norm_val = torch.median(block_norms).item()
+                    if median_norm_val < min_median_norm:
+                        min_median_norm = median_norm_val
+                    if median_norm_val > max_median_norm:
+                        max_median_norm = median_norm_val
 
                     if p.grad is None:
                         p.grad = new_grad
@@ -185,6 +206,22 @@ def outer_step(
                     tplr.logger.info(
                         f"Gradient data missing for parameter {n}, skipping."
                     )
+
+        # ────────────────────────────────────────────────
+        # log aggregated stats once per outer-step
+        # ────────────────────────────────────────────────
+        if (
+            wandb_run is not None
+            and global_step is not None
+            and max_median_norm > float("-inf")
+        ):
+            wandb_run.log(
+                {
+                    "compress/min_median_block_norm": min_median_norm,
+                    "compress/max_median_block_norm": max_median_norm,
+                },
+                step=global_step,
+            )
 
         optimizer.step()
         torch.cuda.empty_cache()

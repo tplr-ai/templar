@@ -17,8 +17,10 @@
 
 # Global imports
 import json
+from pathlib import Path
 from types import SimpleNamespace
-from transformers import AutoTokenizer, LlamaConfig
+from transformers.models.auto.tokenization_auto import AutoTokenizer
+from transformers.models.llama import LlamaConfig
 
 # Local imports
 from .logging import logger
@@ -104,41 +106,78 @@ def create_namespace(hparams: dict) -> SimpleNamespace:
 
 
 def load_hparams(
-    hparams_file: str = "hparams.json", use_local_run_hparams: bool = False
+    hparams_dir: str = "hparams", use_local_run_hparams: bool = False
 ) -> SimpleNamespace:
     """
-    Load hyperparameters from a JSON file.
+    Load hyperparameters by discovering the model_size from the base hparams.json.
+
+    The merge order is:
+    1. `DEFAULT_HPARAMS` (lowest priority)
+    2. Base `hparams.json` (which defines the model_size)
+    3. Model-specific `[model_size].json`
+    4. `hparams-local-run.json` (if requested, highest priority)
 
     Args:
-        hparams_file (str): Path to the hyperparameters JSON file.
+        hparams_dir (str): The directory containing the hyperparameter files.
+        use_local_run_hparams (bool): If True, override with `hparams-local-run.json`.
 
     Returns:
-        SimpleNamespace: A namespace containing the hyperparameters and model configuration.
-
-    Example:
-        hparams = load_hparams()
-        print(hparams.hidden_size)
-        print(hparams.model_config)
+        SimpleNamespace: A namespace containing the final hyperparameters and model config.
     """
+    hparams = DEFAULT_HPARAMS.copy()
+    hparams_dir_path = Path(hparams_dir)
+    base_hparams_file = hparams_dir_path / "hparams.json"
+
+    # 1. Load the base hparams file first to discover the model_size
     try:
-        with open(hparams_file, "r") as f:
-            hparams = json.load(f)
-        if use_local_run_hparams:
-            with open("hparams-local-run.json", "r") as f:
-                hparams_local_run = json.load(f)
-            hparams.update(hparams_local_run)
-            logger.info(
-                f"Using these special hparams for a local run: {hparams_local_run}"
-            )
-        else:
-            logger.info("Using hparams for a normal run (not local)")
-        return create_namespace(hparams)
+        with open(base_hparams_file, "r") as f:
+            base_hparams = json.load(f)
+            hparams.update(base_hparams)
+        logger.info(f"Loaded base config from {base_hparams_file}")
     except FileNotFoundError:
-        logger.warning(f"No {hparams_file} found, using default hyperparameters")
-        return create_namespace({})
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in {hparams_file}: {e}")
+        logger.error(f"CRITICAL: Base config file not found at {base_hparams_file}")
         raise
     except Exception as e:
-        logger.error(f"Error loading hyperparameters: {e}")
+        logger.error(f"Error loading {base_hparams_file}: {e}")
         raise
+
+    # 2. Get model_size from the loaded hparams and load the specific file
+    model_size = hparams.get("model_size")
+    if not model_size:
+        raise ValueError(
+            f"CRITICAL: 'model_size' must be defined in {base_hparams_file}"
+        )
+
+    model_hparams_file = hparams_dir_path / f"{model_size}.json"
+    try:
+        with open(model_hparams_file, "r") as f:
+            model_specific_hparams = json.load(f)
+            hparams.update(model_specific_hparams)
+        logger.info(f"Loaded model-specific config from {model_hparams_file}")
+    except FileNotFoundError:
+        logger.error(f"Model-specific config file not found: {model_hparams_file}")
+        raise ValueError(f"Could not find hparams for model_size '{model_size}'")
+    except Exception as e:
+        logger.error(f"Error loading {model_hparams_file}: {e}")
+        raise
+
+    # 3. (Optional) Load and merge local run overrides
+    if use_local_run_hparams:
+        local_run_file = hparams_dir_path / "hparams-local-run.json"
+        try:
+            with open(local_run_file, "r") as f:
+                local_run_hparams = json.load(f)
+                hparams.update(local_run_hparams)
+            logger.info(
+                f"Loaded and applied local run overrides from {local_run_file}: {local_run_hparams}"
+            )
+        except FileNotFoundError:
+            logger.warning(f"Local run specified but {local_run_file} not found.")
+        except Exception as e:
+            logger.error(f"Error loading {local_run_file}: {e}")
+            raise
+
+    logger.info(
+        f"Final project: '{hparams.get('project')}', Model size: '{hparams.get('model_size')}'"
+    )
+    return create_namespace(hparams)

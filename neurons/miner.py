@@ -990,9 +990,15 @@ class Miner(BaseNode):
             window_changed = self.current_window != step_window
 
             # ------------------------------------------------------------------ #
-            # 4. Step only when *global* accumulation threshold is hit
+            # 4. Decide *together* whether to take an optimiser step
             # ------------------------------------------------------------------ #
-            if final_micro_batch or window_changed:
+            step_now = final_micro_batch or window_changed
+            if self.world_size > 1:
+                flag = torch.tensor([int(step_now)], device=self.device)
+                dist.all_reduce(flag, op=dist.ReduceOp.MAX)  # 1-byte sync
+                step_now = bool(flag.item())  # identical on all ranks
+
+            if step_now:
                 # ── one collective for scalar stats per inner step ───────────
                 global_tokens_step = int(self._ddp_reduce(local_tokens_sum))
                 global_loss_step = self._ddp_reduce(local_loss_sum)
@@ -1035,9 +1041,9 @@ class Miner(BaseNode):
                 device=self.device,
             )
 
-            if self.world_size > 1 and need_sync:
+            if self.world_size > 1:
                 dist.all_reduce(local_done, op=dist.ReduceOp.MAX)
-            global_done = bool(local_done.item()) if need_sync else False
+            global_done = bool(local_done.item())
 
             if global_done:
                 if self.is_master:

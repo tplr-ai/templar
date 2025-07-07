@@ -544,7 +544,7 @@ class Miner(BaseNode):
             tplr.logger.info("Start accumulating...")
             res = await self.inner_steps(loader=loader, step_window=step_window)
             training_time = tplr.T() - train_start
-            loss = res["first_loss"]
+            window_entry_loss = res["window_entry_loss"]
             n_batches = res["batch_count"]
             window_tokens = res["batch_tokens"]
 
@@ -823,7 +823,7 @@ class Miner(BaseNode):
                         "miner/timing/put": put_time,
                         "miner/timing/model_update": model_update_time,
                         # Existing metrics
-                        "miner/loss": loss,
+                        "miner/window_entry_loss": window_entry_loss,
                         "miner/tokens_per_sec": tokens_per_sec,
                         "miner/total_tokens": self.total_tokens_processed,
                         "miner/batch_tokens": window_tokens,
@@ -855,7 +855,7 @@ class Miner(BaseNode):
                         "global_step": self.global_step,
                     },
                     fields={
-                        "loss": loss,
+                        "loss": window_entry_loss,
                         "n_gather_peers": int(len(self.comms.peers)),
                         "gather_success_rate": gather_success_rate,
                         "gather_peers": json.dumps(self.comms.peers),
@@ -910,7 +910,7 @@ class Miner(BaseNode):
         batch_count: int = 0
         batch_tokens: int = 0  # local counter
         accum_batch_size: int = 0
-        first_loss: float = 0.0
+        window_entry_loss: float = 0.0
         global_tokens: int = 0  # after cross-rank reduction
         global_loss_sum: float = 0.0
         local_tokens_sum: int = 0  # local running totals
@@ -1020,9 +1020,9 @@ class Miner(BaseNode):
                         f"Batch {batch_count}, loss: {log_loss:.4f}, "
                         f"accum: {accum_batch_size}/{self.hparams.batch_size}"
                     )
-                if first_loss == 0.0:
+                if window_entry_loss == 0.0:
                     total_batches_first_step = int(self._ddp_reduce(batch_count))
-                    first_loss = global_loss_sum / total_batches_first_step
+                    window_entry_loss = global_loss_sum / total_batches_first_step
                 accum_batch_size = 0  # reset on *all* ranks
 
             # ------------------------------------------------------------------ #
@@ -1072,7 +1072,7 @@ class Miner(BaseNode):
         batch_count = int(self._ddp_reduce(batch_count))
         return {
             "total_loss": global_loss_sum,  # cross-rank sum
-            "first_loss": first_loss,
+            "window_entry_loss": window_entry_loss,
             "batch_count": batch_count,  # cross-rank sum
             "batch_tokens": global_tokens,  # cross-rank sum
         }

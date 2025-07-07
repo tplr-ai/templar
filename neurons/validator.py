@@ -1767,6 +1767,8 @@ class Validator(BaseNode):
                     is_master=True,
                     world_size=1,
                     use_dct=self.hparams.use_dct,
+                    wandb_run=self.wandb,
+                    global_step=self.global_step,
                 )
             else:
                 tplr.log_with_context(

@@ -25,10 +25,7 @@ from typing import Generic, Literal, TypeAlias, TypeVar, cast, overload
 
 import torch
 import torch.fft
-import wandb
 from einops import rearrange
-
-import tplr
 
 # ---------- type aliases ---------- #
 IdxT: TypeAlias = torch.Tensor  # int16 indices
@@ -268,6 +265,7 @@ class CompressDCT(Generic[Q]):
         totalk: int,
         quantize_params: QuantParamsT | list[QuantParamsT] | None = None,
         *,
+        block_norms: torch.Tensor | None = None,
         normalise: bool = False,
         clip_norm: bool = True,
     ) -> torch.Tensor:
@@ -289,22 +287,16 @@ class CompressDCT(Generic[Q]):
                 for i, v in enumerate(val)
             ]
         if clip_norm:
-            vals = dequant_vals if dequant_vals is not None else val
-            norms = torch.stack([torch.norm(sparse_vals, p=2) for sparse_vals in vals])
+            # If caller already supplied per-block norms, trust them.
+            if block_norms is not None:
+                norms = block_norms.to(p.device)
+            else:
+                vals_for_norm = dequant_vals if dequant_vals is not None else val
+                norms = torch.stack(
+                    [torch.norm(sparse_vals, p=2) for sparse_vals in vals_for_norm]
+                )
             median_norm = torch.median(norms)
-            tplr.logger.debug(
-                "[batch_decompress] median L2-norm across %d sparse blocks: %.6f",
-                norms.numel(),
-                median_norm.item(),
-            )
-            if wandb.run is not None:  # make sure a run is active
-                wandb.log({"compress/median_block_norm": median_norm.item()})
-
-            clip_norm_val = torch.clamp(
-                median_norm,
-                min=-10000,
-                max=100000,
-            )
+            clip_norm_val = torch.clamp(median_norm, min=-1e4, max=1e5)
 
         vals = dequant_vals if dequant_vals is not None else val
         for i, v in enumerate(vals):

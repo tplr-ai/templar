@@ -46,6 +46,7 @@ import os
 import shutil
 import time
 from typing import Optional, Tuple
+import typing
 
 import bittensor as bt
 import torch
@@ -181,6 +182,9 @@ class Evaluator:
         self.uid = 1
 
         self.model = LlamaForCausalLM(config=self.hparams.model_config)
+        self.model = typing.cast(
+            LlamaForCausalLM, torch.compile(self.model, mode="default")
+        )
         self.model.to("cpu")
 
         self.tokenizer = self.hparams.tokenizer
@@ -266,7 +270,7 @@ class Evaluator:
 
         # Debug: Check checkpoint model dimensions
         if "model_state_dict" in checkpoint_data:
-            k_proj_key = "model.layers.0.self_attn.k_proj.weight"
+            k_proj_key = "_orig_mod.model.layers.0.self_attn.k_proj.weight"
             if k_proj_key in checkpoint_data["model_state_dict"]:
                 k_proj_shape = checkpoint_data["model_state_dict"][k_proj_key].shape
                 tplr.logger.info(f"[DEBUG] Checkpoint k_proj shape: {k_proj_shape}")

@@ -55,12 +55,9 @@ class SharedShardedDataset(Dataset):
         if self.world > 1:
             dist.barrier(device_ids=[self.rank])
 
-        shards_path = os.getenv("DATASET_SHARDS_PATH")
+        shards_path = os.getenv("DATASET_BINS_PATH")
         if shards_path is None:
-            raise ValueError(
-                "Dataset path not configured. Set $DATASET_SHARDS_PATH or keep "
-                "`dataset_shards_path` in hparams."
-            )
+            raise ValueError("Dataset path not configured. Set $DATASET_BINS_PATH.")
 
         shards_dir = Path(shards_path)
         tokens_file = shards_dir / "tokens.bin"

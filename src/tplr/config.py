@@ -122,7 +122,7 @@ def load_bucket_secrets():
         "R2_AGGREGATOR_BUCKET_NAME",
         "R2_AGGREGATOR_READ_ACCESS_KEY_ID",
         "R2_AGGREGATOR_READ_SECRET_ACCESS_KEY",
-        "DATASET_SHARDS_PATH",
+        "DATASET_BINS_PATH",
     ]
 
     missing_vars = [var for var in required_vars if not os.environ.get(var)]

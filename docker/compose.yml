@@ -6,7 +6,7 @@ services:
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
-      - ${DATASET_SHARDS_PATH:?Set DATASET_SHARDS_PATH}:/datasets:ro
+      - ${DATASET_BINS_PATH:?Set DATASET_BINS_PATH}:/datasets:ro
 
     environment:
       - NODE_TYPE=${NODE_TYPE:-miner}
@@ -30,7 +30,7 @@ services:
       - R2_AGGREGATOR_READ_SECRET_ACCESS_KEY=${R2_AGGREGATOR_READ_SECRET_ACCESS_KEY}
       - R2_AGGREGATOR_WRITE_ACCESS_KEY_ID=${R2_AGGREGATOR_WRITE_ACCESS_KEY_ID:-""}
       - R2_AGGREGATOR_WRITE_SECRET_ACCESS_KEY=${R2_AGGREGATOR_WRITE_SECRET_ACCESS_KEY:-""}
-      - DATASET_SHARDS_PATH=/datasets
+      - DATASET_BINS_PATH=/datasets
     deploy:
       resources:
         reservations:

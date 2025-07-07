@@ -1787,6 +1787,79 @@ class Validator(BaseNode):
                 current_window=self.current_window,
             )
 
+            # ------ NEW: gradient & weight-norm statistics (outer-step) ------------
+            grad_norms, weight_norms = [], []
+            for p in self.model.parameters():
+                if p.grad is not None:
+                    grad_norms.append(p.grad.data.norm().item())
+                    weight_norms.append(p.data.norm().item())
+
+            if grad_norms:
+                mean_grad_norm = sum(grad_norms) / len(grad_norms)
+                max_grad_norm = max(grad_norms)
+                min_grad_norm = min(grad_norms)
+                median_grad_norm = float(np.median(grad_norms))
+                grad_norm_std = torch.tensor(grad_norms).std().item()
+            else:  # remember: tensors → floats
+                mean_grad_norm = max_grad_norm = min_grad_norm = median_grad_norm = (
+                    grad_norm_std
+                ) = 0.0
+
+            mean_weight_norm = (
+                (sum(weight_norms) / len(weight_norms)) if weight_norms else 0.0
+            )
+            grad_to_weight_ratio = (
+                (mean_grad_norm / mean_weight_norm) if mean_weight_norm else 0.0
+            )
+
+            # Console / Loki
+            tplr.log_with_context(
+                level="info",
+                message=(
+                    f"GradNorm μ={mean_grad_norm:.4f} σ={grad_norm_std:.4f} "
+                    f"median={median_grad_norm:.4f} min={min_grad_norm:.4f} "
+                    f"max={max_grad_norm:.4f} | "
+                    f"WeightNorm μ={mean_weight_norm:.4f} | "
+                    f"g/w={grad_to_weight_ratio:.4f}"
+                ),
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+
+            # ↳ WandB
+            self.wandb.log(
+                {
+                    "gradient/mean_grad_norm": mean_grad_norm,
+                    "gradient/max_grad_norm": max_grad_norm,
+                    "gradient/min_grad_norm": min_grad_norm,
+                    "gradient/median_grad_norm": median_grad_norm,
+                    "gradient/grad_norm_std": grad_norm_std,
+                    "gradient/mean_weight_norm": mean_weight_norm,
+                    "gradient/grad_to_weight_ratio": grad_to_weight_ratio,
+                },
+                step=self.global_step,
+            )
+
+            # ↳ InfluxDB (metrics_logger)
+            self.metrics_logger.log(
+                measurement="validator_gradient_stats",
+                tags={
+                    "window": int(self.sync_window),
+                    "global_step": int(self.global_step),
+                },
+                fields={
+                    "mean_grad_norm": mean_grad_norm,
+                    "max_grad_norm": max_grad_norm,
+                    "min_grad_norm": min_grad_norm,
+                    "median_grad_norm": median_grad_norm,
+                    "grad_norm_std": grad_norm_std,
+                    "mean_weight_norm": mean_weight_norm,
+                    "grad_to_weight_ratio": grad_to_weight_ratio,
+                },
+                with_system_metrics=True,
+                with_gpu_metrics=True,
+            )
+
             with torch.no_grad():
                 slice_idx = slice(10, 12)  # indices published in miner debug dict
 

@@ -296,7 +296,7 @@ class CompressDCT(Generic[Q]):
                     [torch.norm(sparse_vals, p=2) for sparse_vals in vals_for_norm]
                 )
             median_norm = torch.median(norms)
-            clip_norm_val = torch.clamp(median_norm, min=-1e4, max=1e5)
+            clip_norm_val = torch.clamp(median_norm, min=1, max=10)
 
         vals = dequant_vals if dequant_vals is not None else val
         for i, v in enumerate(vals):

@@ -89,6 +89,13 @@ def mock_config():
         yield
 
 
+@pytest.fixture(scope="session")
+def dummy_compressor():
+    from tplr.compress import CompressDCT
+
+    return CompressDCT(use_quantization=False)
+
+
 from tplr.schemas import Bucket
 from tplr.compress import TransformDCT, CompressDCT
 
@@ -100,52 +107,6 @@ import tplr
 from tplr import logger, debug
 
 debug()
-
-
-# Test fixture for comms instance
-@pytest.fixture
-async def comms_instance():
-    # Mock wallet
-    mock_wallet = MagicMock()
-    mock_wallet.hotkey.ss58_address = "test_address"
-
-    # Mock config and other dependencies
-    mock_config = MagicMock()
-    mock_metagraph = MagicMock()
-    mock_hparams = MagicMock()
-    mock_hparams.active_check_interval = 60
-    mock_hparams.recent_windows = 3
-
-    # Create comms instance with mocked get_own_bucket
-    with patch(
-        "tplr.comms.Comms.get_own_bucket",
-        return_value=Bucket(
-            name="test-bucket",
-            account_id="test-account",
-            access_key_id="test-key",
-            secret_access_key="test-secret",
-        ),
-    ):
-        comms = tplr.comms.Comms(
-            wallet=mock_wallet,
-            save_location="/tmp",
-            key_prefix="test",
-            config=mock_config,
-            netuid=1,
-            metagraph=mock_metagraph,
-            hparams=mock_hparams,
-            uid="test_uid",
-        )
-
-        yield comms
-
-        # Cleanup
-        if os.path.exists(comms.temp_dir):
-            import shutil
-
-            shutil.rmtree(comms.temp_dir)
-        if os.path.exists(comms.save_location):
-            shutil.rmtree(comms.save_location)
 
 
 # Existing mock functions
@@ -182,19 +143,6 @@ class MockMetagraph:
 @pytest.fixture
 def mock_metagraph():
     return MockMetagraph()
-
-
-@pytest.fixture
-async def comms_instance(mock_wallet, mock_metagraph):
-    return Comms(
-        wallet=mock_wallet,
-        save_location="/tmp",
-        key_prefix="test",
-        config=SimpleNamespace(netuid=1),
-        metagraph=mock_metagraph,
-        hparams=MockHParams(),
-        uid=1,
-    )
 
 
 """
@@ -324,6 +272,7 @@ async def test_gather_basic_functionality(comms_instance):
         local=True,
         stale_retention=10,
         totalks=totalks,
+        compressor=dummy_compressor,
     )
 
     assert result is not None, "Expected a non-None result"
@@ -378,8 +327,100 @@ async def test_gather_normalization(comms_instance):
         local=True,
         stale_retention=10,
         totalks={"0.weight": totalk_value},
+        compressor=dummy_compressor,
     )
     assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_gather_quant_params_validation(comms_instance):
+    """
+    Scenario
+    --------
+    • peer 1 sends bad `quant_params` (shift = NaN) → must be skipped
+    • peer 2 sends good `quant_params`             → must be accepted
+
+    The test passes when:
+      – gather() returns only peer-2 data
+      – peer-1 UID appears in skipped_uids
+      – returned vals tensor is already de-quantised (i.e. not uint8)
+    """
+    # ------------------------------------------------------------------
+    # 1.  Build fake gradient payloads
+    # ------------------------------------------------------------------
+    totalk_value = 10
+    param_base = "layer"  # parameter base name
+    idx_key = f"{param_base}idxs"
+    val_key = f"{param_base}vals"
+    qp_key = f"{param_base}quant_params"
+
+    idxs = torch.tensor([0, 1, 2], dtype=torch.int16)
+    vals = torch.tensor([0.1, 0.2, 0.3], dtype=torch.uint8)  # still quantised
+
+    lookup = torch.zeros(256, dtype=torch.float32)  # dummy LUT
+    bad_qp = (torch.tensor(float("nan")), 1.0, 128, lookup, torch.float32)
+    good_qp = (torch.tensor(0.0), 1.0, 128, lookup, torch.float32)
+
+    peer1_response = (
+        {
+            idx_key: idxs,
+            val_key: vals,
+            qp_key: bad_qp,
+            "totalks": {param_base: totalk_value},
+        },
+        1,  # global_step
+    )
+    peer2_response = (
+        {
+            idx_key: idxs,
+            val_key: vals,
+            qp_key: good_qp,
+            "totalks": {param_base: totalk_value},
+        },
+        2,
+    )
+
+    # ------------------------------------------------------------------
+    # 2.  Patch helper functions on the fixture instance
+    # ------------------------------------------------------------------
+    comms_instance.check_compressed_indices = (
+        lambda p, i, t, allowed_topk=None: None  # no-op for this test
+    )
+    comms_instance.get_with_retry = AsyncMock(
+        side_effect=[peer1_response, peer2_response]
+    )
+
+    compressor = CompressDCT(use_quantization=True)  # needed by gather()
+
+    # ------------------------------------------------------------------
+    # 3.  Run gather()
+    # ------------------------------------------------------------------
+    res = await comms_instance.gather(
+        my_uid="0",
+        uids=["1", "2"],
+        window=1,
+        key="gradient",
+        timeout=5,
+        device="cpu",
+        totalks={param_base: totalk_value},
+        compressor=compressor,
+    )
+
+    # ------------------------------------------------------------------
+    # 4.  Assertions
+    # ------------------------------------------------------------------
+    assert res is not None, "gather() returned None"
+
+    # Only peer 2 should survive
+    assert res.uids == ["2"], f"expected only peer 2, got {res.uids}"
+    assert res.skipped_uids == ["1"], f"peer 1 should be skipped"
+
+    # Global step list should match accepted peer
+    assert res.global_steps == [2], f"unexpected global_steps {res.global_steps}"
+
+    # Returned vals must be de-quantised (no uint8)
+    vals_list = getattr(res.state_dict, val_key)
+    assert vals_list[0].dtype != torch.uint8, "vals tensor still quantised"
 
 
 @pytest.mark.asyncio
@@ -405,6 +446,7 @@ async def test_gather_empty_responses(comms_instance):
         local=True,
         stale_retention=10,
         totalks={"0.weight": 100},
+        compressor=dummy_compressor,
     )
     assert result is None
 
@@ -450,48 +492,9 @@ async def test_gather_averaging(comms_instance):
         local=True,
         stale_retention=10,
         totalks={"0.weight": totalk_value},
+        compressor=dummy_compressor,
     )
     assert result.global_steps == [1, 2]
-
-
-@pytest.mark.asyncio
-async def test_gather_complex_normalization(comms_instance):
-    """Test 7: Complex Normalization Scenarios
-
-    Tests advanced normalization cases by:
-    - Validating handling of multiple keys in gradient responses
-    - Verifying normalization behavior with complex data structures
-    - Ensuring proper handling of multi-dimensional tensors
-    """
-    comms_instance.check_compressed_indices = (
-        lambda param_name, idxs, totalk, allowed_topk=None: None
-    )
-    comms_instance.get_with_retry = AsyncMock()
-    totalk_value = 100
-    peer_response = (
-        {
-            "0.weightidxs": torch.tensor([0, 1, 2]),
-            "0.weightvals": torch.tensor([0.3, 0.4, 0.5]),
-            "totalks": {"0.weight": totalk_value},
-        },
-        3,
-    )
-    comms_instance.get_with_retry.side_effect = [peer_response]
-    result = await comms_instance.gather(
-        my_uid="0",
-        uids=["1"],
-        window=1,
-        key="gradient",
-        timeout=5,
-        device="cpu",
-        local=True,
-        stale_retention=10,
-        totalks={"0.weight": totalk_value},
-    )
-    assert result is not None
-    assert hasattr(result.state_dict, "0.weightvals")
-    vals = result.state_dict.__dict__["0.weightvals"][0]
-    assert torch.allclose(vals, torch.tensor([0.3, 0.4, 0.5]))
 
 
 #  TODO: Move to analyser when refactored
@@ -586,6 +589,7 @@ async def test_gather_averaging(comms_instance):
         timeout=5,
         device="cpu",
         totalks=totalks_arg,
+        compressor=dummy_compressor,
     )
 
     # Validate the aggregated result.
@@ -663,6 +667,7 @@ async def test_gather_complex_normalization(comms_instance):
         timeout=5,
         device="cpu",
         totalks={"layer.": totalk_value},
+        compressor=dummy_compressor,
     )
 
     assert result is not None
@@ -952,6 +957,7 @@ async def test_gather_timeout(comms_instance):
         timeout=5,
         device="cpu",
         totalks={},
+        compressor=dummy_compressor,
     )
     assert result is None
 
@@ -1203,6 +1209,7 @@ async def test_valid_response_handling(comms_instance):
         timeout=5,
         device="cpu",
         totalks=totalks_arg,
+        compressor=dummy_compressor,
     )
 
     assert result is not None, "Expected gather result to be non-None"
@@ -1288,6 +1295,7 @@ async def test_missing_idxs_key(comms_instance, model):
         device=device,
         local=False,
         totalks=totalks,
+        compressor=dummy_compressor,
     )
 
     # Validate the result.
@@ -1399,6 +1407,7 @@ async def test_missing_vals_key(comms_instance, model):
         device=device,
         local=False,
         totalks=totalks,
+        compressor=dummy_compressor,
     )
 
     assert result is not None, "Expected non-None result from gather()"
@@ -1475,6 +1484,7 @@ async def test_empty_or_none_state_dict(comms_instance, model):
         device=device,
         local=False,
         totalks=totalks,
+        compressor=dummy_compressor,
     )
 
     # Since only UID "uid1" returns a valid response,
@@ -2473,6 +2483,7 @@ async def test_s3_get_object_gather_integration(comms_instance):
         timeout=5,
         device="cpu",
         totalks=None,
+        compressor=dummy_compressor,
         time_min=None,
         time_max=None,
         **kwargs,
@@ -2510,6 +2521,7 @@ async def test_s3_get_object_gather_integration(comms_instance):
                 timeout=5,
                 device="cpu",
                 totalks=totalks,
+                compressor=dummy_compressor,
                 time_min=time_min,
                 time_max=time_max,
             )

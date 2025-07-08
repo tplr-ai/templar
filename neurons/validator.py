@@ -1003,6 +1003,7 @@ class Validator(BaseNode):
                 device=cast(str, self.config.device),
                 local=False,
                 totalks=self.totalks,
+                compressor=self.compressor,
                 time_min=time_min,
                 time_max=time_max,
             )

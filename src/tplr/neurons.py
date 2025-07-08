@@ -17,10 +17,10 @@
 
 
 import math
-import typing
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeVar
+import typing
 
 import torch
 import torch.distributed as dist
@@ -146,80 +146,77 @@ def outer_step(
         else model
     )
     if is_master:
-        # ────────────────────────────────────────────────
-        # track min / max median-norm across all layers
-        # ────────────────────────────────────────────────
         min_median_norm = float("inf")
         max_median_norm = float("-inf")
-        new_grad = None
+
         model.train()
         optimizer.zero_grad()
 
-        new_grad = None
         if gather_result is not None and gather_result.state_dict is not None:
             for n, p in bare_model.named_parameters():
-                idxs_key = n + "idxs"
-                vals_key = n + "vals"
-                quant_key = n + "quant_params"
+                idxs = getattr(gather_result.state_dict, n + "idxs", None)
+                vals = getattr(gather_result.state_dict, n + "vals", None)
+                qps = getattr(gather_result.state_dict, n + "quant_params", None)
 
-                idxs = getattr(gather_result.state_dict, idxs_key, None)
-                vals = getattr(gather_result.state_dict, vals_key, None)
-                quant_params = getattr(gather_result.state_dict, quant_key, None)
-                if idxs is not None and vals is not None:
-                    if not isinstance(idxs, (list, tuple)):
-                        idxs = [idxs]
-                    if not isinstance(vals, (list, tuple)):
-                        vals = [vals]
+                if idxs is None or vals is None:
+                    tplr.logger.info(f"Gradient data missing for {n}, skipping.")
+                    continue
 
-                    # --- NEW: compute per-block norms once ---
-                    if compressor.use_quantization:
-                        assert quant_params is not None
-                        vals_f32 = [
-                            compressor._dequantize_values(
-                                v.to(device), quant_params[i]
-                            ).to(device)
-                            for i, v in enumerate(vals)
-                        ]
-                    else:
-                        vals_f32 = vals
-                    block_norms = torch.stack(
-                        [torch.norm(v.to(device), p=2) for v in vals_f32]
-                    )
+                # normalise container types
+                if not isinstance(idxs, (list, tuple)):
+                    idxs = [idxs]
+                if not isinstance(vals, (list, tuple)):
+                    vals = [vals]
 
-                    new_grad = transformer.decode(
-                        compressor.batch_decompress(
-                            p.to(device),
-                            typing.cast(list[torch.Tensor], idxs),
-                            typing.cast(list[torch.Tensor], vals_f32),
-                            xshapes[n],
-                            totalks[n],
-                            quantize_params=None,
-                            block_norms=block_norms,
-                            normalise=False,
-                            clip_norm=True,
-                        ),
-                        use_dct=use_dct,
-                    )
+                # ------------------------------------------------------------------
+                # 1️⃣  Ensure every vals tensor is fp32/fp16 (de-quant if needed)
+                # ------------------------------------------------------------------
+                vals_f32: list[torch.Tensor] = []
+                for i, v in enumerate(vals):
+                    v = v.to(device)
+                    if v.dtype == torch.uint8:  # still quantised → decode
+                        if qps is None:
+                            tplr.logger.warning(f"Missing quant_params for {n}; skip.")
+                            break
+                        qp = qps[i] if isinstance(qps, (list, tuple)) else qps
+                        v = compressor._dequantize_values(v, qp).to(device)
+                    vals_f32.append(v)
 
-                    # ── update global min / max ───────────────────────
-                    median_norm_val = torch.median(block_norms).item()
-                    if median_norm_val < min_median_norm:
-                        min_median_norm = median_norm_val
-                    if median_norm_val > max_median_norm:
-                        max_median_norm = median_norm_val
+                if len(vals_f32) != len(vals):  # some decode failed
+                    continue
 
-                    if p.grad is None:
-                        p.grad = new_grad
-                    else:
-                        p.grad.copy_(new_grad)
-                else:
-                    tplr.logger.info(
-                        f"Gradient data missing for parameter {n}, skipping."
-                    )
+                block_norms = torch.stack([torch.norm(v, p=2) for v in vals_f32])
 
-        # ────────────────────────────────────────────────
-        # log aggregated stats once per outer-step
-        # ────────────────────────────────────────────────
+                new_grad = transformer.decode(
+                    compressor.batch_decompress(
+                        p.to(device),
+                        typing.cast(list[torch.Tensor], idxs),
+                        typing.cast(list[torch.Tensor], vals_f32),
+                        xshapes[n],
+                        totalks[n],
+                        quantize_params=None,  # already de-quantised
+                        block_norms=block_norms,
+                        normalise=False,
+                        clip_norm=True,
+                    ),
+                    use_dct=use_dct,
+                )
+
+                # 2️⃣  last-chance validation
+                if (not torch.isfinite(new_grad).all()) or new_grad.abs().max() > 1e3:
+                    tplr.logger.warning(f"Non-finite gradient for {n}; dropping.")
+                    continue
+
+                # track stats
+                med = torch.median(block_norms).item()
+                min_median_norm = min(min_median_norm, med)
+                max_median_norm = max(max_median_norm, med)
+
+                p.grad = new_grad if p.grad is None else p.grad.copy_(new_grad)
+
+        # ------------------------------------------------------------------
+        # log med-norm range
+        # ------------------------------------------------------------------
         if (
             wandb_run is not None
             and global_step is not None
@@ -233,13 +230,19 @@ def outer_step(
                 step=global_step,
             )
 
+        # ------------------------------------------------------------------
+        # 4️⃣  global grad-norm clip then optimiser step
+        # ------------------------------------------------------------------
         optimizer.step()
         torch.cuda.empty_cache()
+
+        # broadcast updated weights to other ranks
         if world_size > 1:
             for t in bare_model.state_dict().values():
                 if torch.is_tensor(t):
                     dist.broadcast(t.data, src=0)
-    else:
+
+    else:  # non-master ranks just receive the broadcast
         if world_size > 1:
             for t in bare_model.state_dict().values():
                 if torch.is_tensor(t):
@@ -422,6 +425,7 @@ async def catchup_with_aggregation_server(
                 local=False,
                 stale_retention=10,
                 totalks=instance.totalks,
+                compressor=instance.compressor,
                 time_min=time_min,
                 time_max=time_max,
             )

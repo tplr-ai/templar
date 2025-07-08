@@ -39,6 +39,7 @@ from botocore.exceptions import ClientError, ConnectionClosedError
 from tqdm import tqdm as std_tqdm
 
 import tplr as tplr
+from tplr.compress import CompressDCT
 
 from . import __version__
 from .chain import ChainManager
@@ -977,6 +978,7 @@ class Comms(ChainManager):
         timeout: int,
         device: str,
         totalks: dict,
+        compressor: CompressDCT,
         local: bool = True,
         stale_retention: int = 10,
         time_min: datetime | None = None,
@@ -1060,9 +1062,41 @@ class Comms(ChainManager):
                         skipped_uids.append(uid)
                         continue
 
+                    decoded_cache: dict[str, torch.Tensor] = {}
+
                     # ---------- Begin Compressed Indices and Values Check ----------
                     valid_response = True
                     for param_name, tensor in state_dict_resp.items():
+                        # ----------------------------------------------------------
+                        # (1)  Validate quantisation parameters themselves
+                        # ----------------------------------------------------------
+                        if param_name.endswith("quant_params"):
+                            shift, scale, offset, lookup, dtype = tensor
+                            if (
+                                (not torch.isfinite(shift))
+                                or isinstance(scale, float)
+                                and (
+                                    not math.isfinite(scale)
+                                    or abs(scale) < 1e-12
+                                    or abs(scale) > 1e4
+                                )
+                            ):
+                                tplr.logger.warning(
+                                    f"Bad quant‑params in {param_name} from UID {uid}; "
+                                    f"shift={shift}, scale={scale}"
+                                )
+                                valid_response = False
+                                break
+                            if torch.is_tensor(lookup) and (
+                                not torch.isfinite(lookup).all()
+                            ):
+                                tplr.logger.warning(
+                                    f"Lookup table contains non‑finite values in {param_name} "
+                                    f"from UID {uid}"
+                                )
+                                valid_response = False
+                                break
+
                         if param_name.endswith("idxs"):
                             base_name = param_name[:-4]
                             totalk = totalks.get(base_name)
@@ -1098,6 +1132,34 @@ class Comms(ChainManager):
                                 valid_response = False
                                 break
 
+                            # ------------------------------------------------------
+                            # (2)  De‑quantise *just for validation* (cheap‑ish)
+                            # ------------------------------------------------------
+                            qparams = state_dict_resp.get(
+                                param_name[:-4] + "quant_params", None
+                            )
+                            if qparams is not None:
+                                try:
+                                    vals_f32 = compressor._dequantize_values(
+                                        tensor_to_check, qparams
+                                    )
+                                    if (
+                                        not torch.isfinite(vals_f32).all()
+                                    ) or vals_f32.abs().max() > 1e3:
+                                        tplr.logger.warning(
+                                            f"Decoded values in {param_name} from UID {uid} "
+                                            f"are non‑finite or too large; max={vals_f32.abs().max()}"
+                                        )
+                                        valid_response = False
+                                        break
+                                    decoded_cache[param_name] = vals_f32
+                                except Exception as e:
+                                    tplr.logger.warning(
+                                        f"De‑quantisation failed for {param_name} from UID {uid}: {e}"
+                                    )
+                                    valid_response = False
+                                    break
+
                     # If any check failed, skip this UID entirely
                     if not valid_response:
                         tplr.logger.info(
@@ -1109,16 +1171,36 @@ class Comms(ChainManager):
 
                     # Process tensors (with normalization on 'vals' keys).
                     for param_name, tensor in state_dict_resp.items():
-                        if isinstance(tensor, torch.Tensor):
+                        # 1️⃣  Indices are kept as‑is -----------------------------------------
+                        if param_name.endswith("idxs"):
                             aggregated_state_dict.setdefault(param_name, []).append(
                                 tensor.to(device)
                             )
                             metrics["download_bytes"] += (
                                 tensor.element_size() * tensor.nelement()
                             )
-                        elif param_name.endswith("quant_params"):
+
+                        # 2️⃣  Values → de‑quantise once and store as fp32 --------------------
+                        elif param_name.endswith("vals"):
+                            # Re-use if we already decoded during validation
+                            tensor = decoded_cache.get(param_name, tensor.to(device))
+
+                            # If still uint8 it means we skipped validation (unlikely),
+                            # so decode now.
+                            if tensor.dtype == torch.uint8:
+                                qparams = state_dict_resp.get(
+                                    param_name[:-4] + "quant_params", None
+                                )
+                                if qparams is not None:
+                                    tensor = compressor._dequantize_values(
+                                        tensor, qparams
+                                    )
+
                             aggregated_state_dict.setdefault(param_name, []).append(
                                 tensor
+                            )
+                            metrics["download_bytes"] += (
+                                tensor.element_size() * tensor.nelement()
                             )
 
                     valid_uids.append(uid)

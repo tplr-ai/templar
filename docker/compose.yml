@@ -6,7 +6,7 @@ services:
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
-      - ${DATASET_BINS_PATH:?Set DATASET_BINS_PATH}:/datasets:ro
+      - ${DATASET_BINS_PATH:?Set DATASET_BINS_PATH}:/datasets
 
     environment:
       - NODE_TYPE=${NODE_TYPE:-miner}

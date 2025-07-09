@@ -785,7 +785,7 @@ class Validator(BaseNode):
             )
 
             # Save state
-            self.save_state()
+            await self.save_state()
 
             # Create and post peers
             initial_selection = False
@@ -2376,20 +2376,15 @@ class Validator(BaseNode):
             },
         }
 
-    def save_state(self):
-        """Saves the current validator state to disk.
-
-        This method serializes the validator's state dictionary to the configured state path.
-        The state includes global step, various score metrics, and weights.
-
-        Exceptions during saving are caught and logged as warnings.
-        """
+    async def save_state(self):
+        """Saves the current validator state to disk asynchronously."""
         try:
             tplr.log_with_context(
                 level="info",
                 message="Saving validator state",
             )
-            torch.save(self._state_dict(), self.state_path)
+            # Run the blocking torch.save in a separate thread
+            await asyncio.to_thread(torch.save, self._state_dict(), self.state_path)
         except Exception as e:
             tplr.log_with_context(
                 level="warning",
@@ -2747,45 +2742,6 @@ def min_power_normalization(logits, power=2.0, epsilon=1e-8):
         probabilities = torch.zeros_like(powered_logits)
 
     return probabilities
-
-
-async def retry_call(func, *args, attempts=3, delay=1, context="", **kwargs):
-    """
-    Calls an async function with retries.
-
-    Args:
-        func (Callable): An async function.
-        *args: Positional arguments to pass to func.
-        attempts (int): Number of retries.
-        delay (int): Delay between attempts in seconds.
-        context (str): Context description for logging.
-        **kwargs: Keyword arguments to pass to func.
-
-    Returns:
-        The result of func(*args, **kwargs) or None if all attempts fail.
-    """
-    for attempt in range(attempts):
-        try:
-            if asyncio.iscoroutinefunction(func):
-
-                def wrapper(*w_args, **w_kwargs):
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        return loop.run_until_complete(func(*w_args, **w_kwargs))
-                    finally:
-                        loop.close()
-
-                return await asyncio.to_thread(wrapper, *args, **kwargs)
-            else:
-                return await asyncio.to_thread(func, *args, **kwargs)
-        except Exception as e:
-            tplr.logger.error(
-                f"Attempt {attempt + 1}/{attempts} failed for {context}: {e}"
-            )
-            await asyncio.sleep(delay)
-    tplr.logger.error(f"Failed to complete {context} after {attempts} attempts.")
-    return None
 
 
 if __name__ == "__main__":

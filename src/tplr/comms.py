@@ -475,7 +475,14 @@ class Comms(ChainManager):
         """Uploads a large file to S3 using asynchronous multipart upload with 5MB chunks."""
         upload_id = None
         MAX_RETRIES = 3
-        PART_SIZE = 5 * 1024 * 1024  # 5MB
+        file_size_gb = os.path.getsize(file_path) / (1024 * 1024 * 1024)
+        if file_size_gb > 10:
+            PART_SIZE = 128 * 1024 * 1024
+        elif file_size_gb > 1:
+            PART_SIZE = 64 * 1024 * 1024
+        else:
+            PART_SIZE = 32 * 1024 * 1024
+
         if bucket is None:
             bucket = self.bucket
         try:

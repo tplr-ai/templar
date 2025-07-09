@@ -760,7 +760,7 @@ class Comms(ChainManager):
                 }
 
             # Save to temp file
-            torch.save(save_data, temp_file_path)
+            await asyncio.to_thread(torch.save, save_data, temp_file_path)
 
             if local:
                 # Local storage with per-uid directories

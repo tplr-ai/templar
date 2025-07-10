@@ -1,17 +1,20 @@
 import abc
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import functools
+import os
 import signal
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, cast
 
 import bittensor as bt
-from bittensor.core.subtensor import ScaleObj
+import psutil
+import torch
 import torch.distributed as dist
 import websockets.exceptions  # ensure import before threads start
+from bittensor.core.subtensor import ScaleObj
 
 import tplr
 
@@ -61,6 +64,11 @@ class BaseNode:
         t.start()
         self._threads.append(t)
 
+        # Start diagnostics task
+        diagnostics_task = asyncio.create_task(self._run_diagnostics())
+        self._bg_tasks.add(diagnostics_task)
+        diagnostics_task.add_done_callback(self._bg_tasks.discard)
+
         # subclasses do their normal work here ----------------------------
         try:
             await self.run()
@@ -72,6 +80,106 @@ class BaseNode:
     @abc.abstractmethod
     async def run(self):
         raise NotImplementedError
+
+    async def _run_diagnostics(self):
+        """Periodically collect and log diagnostic information"""
+        while not self.stop_event.is_set():
+            try:
+                await asyncio.sleep(300)  # 5 minutes
+
+                # Log summary
+                summary = []
+
+                # Memory
+                try:
+                    process = psutil.Process()
+                    mem_info = process.memory_info()
+                    summary.append(f"Memory: {mem_info.rss / (1024**3):.2f}GB")
+                except Exception:
+                    pass
+
+                # File descriptors
+                try:
+                    import resource
+
+                    soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+                    try:
+                        open_fds = len(os.listdir("/proc/self/fd"))
+                        summary.append(f"FDs: {open_fds}/{soft_limit}")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+                # S3 clients
+                if hasattr(self, "comms") and hasattr(self.comms, "_s3_clients"):
+                    summary.append(f"S3 Clients: {len(self.comms._s3_clients)}")
+
+                # Threads
+                summary.append(f"Threads: {threading.active_count()}")
+
+                # AsyncIO tasks
+                summary.append(f"Tasks: {len(asyncio.all_tasks())}")
+
+                # GPU
+                if torch.cuda.is_available():
+                    mem_alloc = torch.cuda.memory_allocated() / (1024**3)
+                    mem_reserved = torch.cuda.memory_reserved() / (1024**3)
+                    summary.append(f"GPU: {mem_alloc:.2f}/{mem_reserved:.2f}GB")
+
+                tplr.logger.info(f"Diagnostics - {' | '.join(summary)}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                tplr.logger.error(f"Error in diagnostics: {e}")
+
+    async def collect_diagnostics(self) -> dict:
+        """Collect diagnostic information"""
+        diagnostics = {
+            "timestamp": time.time(),
+            "window": self.current_window,
+            "block": self.current_block,
+        }
+
+        # Memory
+        try:
+            import psutil
+
+            process = psutil.Process()
+            mem_info = process.memory_info()
+            diagnostics["memory_gb"] = mem_info.rss / (1024**3)
+            diagnostics["memory_percent"] = process.memory_percent()
+        except Exception:
+            pass
+
+        # File descriptors
+        try:
+            import resource
+
+            soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+            diagnostics["fd_limit"] = soft_limit
+            try:
+                diagnostics["fd_open"] = len(os.listdir("/proc/self/fd"))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # S3 clients
+        if hasattr(self, "comms") and hasattr(self.comms, "_s3_clients"):
+            diagnostics["s3_clients"] = len(self.comms._s3_clients)
+
+        # Threads and tasks
+        diagnostics["threads"] = threading.active_count()
+        diagnostics["asyncio_tasks"] = len(asyncio.all_tasks())
+
+        # GPU
+        if torch.cuda.is_available():
+            diagnostics["gpu_allocated_gb"] = torch.cuda.memory_allocated() / (1024**3)
+            diagnostics["gpu_reserved_gb"] = torch.cuda.memory_reserved() / (1024**3)
+
+        return diagnostics
 
     # ──────────────────────────────────────────────────────────────────────
     #  Shared helper: wait until the chain reaches a specific window

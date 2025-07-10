@@ -2029,14 +2029,10 @@ class Validator(BaseNode):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                checkpoint_data = {
-                    "model_state_dict": {
-                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                    },
-                    "start_window": self.start_window,
-                    "current_window": self.current_window,
-                    "sync_window": self.sync_window,
-                }
+
+                checkpoint_data = await self.create_checkpoint_async()
+
+                # Then save asynchronously
                 t = asyncio.create_task(
                     self.comms.put(
                         state_dict=checkpoint_data,
@@ -2054,6 +2050,27 @@ class Validator(BaseNode):
             self.global_step += 1
 
             torch.cuda.empty_cache()
+
+    async def create_checkpoint_async(self):
+        """Create checkpoint in a thread pool to avoid blocking"""
+
+        def _create_checkpoint():
+            # This runs in a thread, not blocking the event loop
+            return {
+                "model_state_dict": {
+                    k: v.cpu().clone() for k, v in self.model.state_dict().items()
+                },
+                "start_window": self.start_window,
+                "current_window": self.current_window,
+                "sync_window": self.sync_window,
+            }
+
+        # Run in thread pool
+        checkpoint_data = await asyncio.get_event_loop().run_in_executor(
+            self.executor,  # Your ThreadPoolExecutor
+            _create_checkpoint,
+        )
+        return checkpoint_data
 
     def select_initial_peers(self) -> list[int] | None:
         """

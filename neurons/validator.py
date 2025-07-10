@@ -312,10 +312,10 @@ class Validator(BaseNode):
             rank=0,
             world_size=1,
         )
-        # Convenience kwargs reused every time we build a DataLoader
-        self._loader_kwargs = dict(
+        self.loader = torch.utils.data.DataLoader(
             dataset=self.dataset,
-            batch_size=self.hparams.batch_size,
+            sampler=self.sampler,
+            batch_size=self.hparams.micro_batch_size,
             num_workers=2,
             pin_memory=True,
         )
@@ -1270,15 +1270,8 @@ class Validator(BaseNode):
                 # Loss before own data
                 model_before_update = copy.deepcopy(self.model)
                 self.sampler.set_window_uid(eval_uid, self.sync_window)
-                loader_own = torch.utils.data.DataLoader(
-                    dataset=self.dataset,
-                    sampler=self.sampler,
-                    batch_size=self.hparams.micro_batch_size,
-                    num_workers=2,
-                    pin_memory=True,
-                )
                 loss_before_own, n_batches = await self.evaluate_model(
-                    model_before_update, loader_own
+                    model_before_update, self.loader
                 )
                 tplr.log_with_context(
                     level="info",
@@ -1297,19 +1290,11 @@ class Validator(BaseNode):
                     current_window=self.current_window,
                     eval_uid=eval_uid,
                 )
-                del loader_own
 
                 # Loss before random data
                 self.sampler.set_window_uid(random_seed, self.sync_window)
-                loader_random = torch.utils.data.DataLoader(
-                    dataset=self.dataset,
-                    sampler=self.sampler,
-                    batch_size=self.hparams.micro_batch_size,
-                    num_workers=2,
-                    pin_memory=True,
-                )
                 loss_before_random, n_batches = await self.evaluate_model(
-                    model_before_update, loader_random
+                    model_before_update, self.loader
                 )
                 if n_batches == 0:
                     tplr.log_with_context(
@@ -1330,7 +1315,7 @@ class Validator(BaseNode):
                     current_window=self.current_window,
                     eval_uid=eval_uid,
                 )
-                del loader_random, model_before_update
+                del model_before_update
 
                 model_after_update = copy.deepcopy(self.model)
                 # 9. Apply gradient and compute loss after
@@ -1401,18 +1386,10 @@ class Validator(BaseNode):
                 self.outer_optimizer.zero_grad()
                 model_after_update.zero_grad()
                 self.sampler.set_window_uid(eval_uid, self.sync_window)
-                loader_own = torch.utils.data.DataLoader(
-                    dataset=self.dataset,
-                    sampler=self.sampler,
-                    batch_size=self.hparams.micro_batch_size,
-                    num_workers=2,
-                    pin_memory=True,
-                )
                 loss_after_own, n_batches = await self.evaluate_model(
-                    model_after_update, loader_own
+                    model_after_update, self.loader
                 )
                 # Clean up stored batches
-                del loader_own
                 torch.cuda.empty_cache()
 
                 self.loss_after_per_batch_own = (
@@ -1459,23 +1436,13 @@ class Validator(BaseNode):
                 model_after_update.zero_grad()
 
                 self.sampler.set_window_uid(random_seed, self.sync_window)
-                loader_random = torch.utils.data.DataLoader(
-                    dataset=self.dataset,
-                    sampler=self.sampler,
-                    batch_size=self.hparams.micro_batch_size,
-                    num_workers=2,
-                    pin_memory=True,
-                )
                 loss_after_random, n_batches = await self.evaluate_model(
                     model_after_update,
-                    loader_random,
+                    self.loader,
                 )
 
                 # Clean up
-                del (
-                    loader_random,
-                    model_after_update,
-                )
+                del model_after_update
                 torch.cuda.empty_cache()
 
                 self.loss_after_per_batch_random = (

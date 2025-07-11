@@ -75,7 +75,7 @@ def _make_validator(tmp_path, device="cpu"):
 # --------------------------------------------------------------------------------------------------
 
 
-def test_save_and_load_roundtrip(tmp_path):
+async def test_save_and_load_roundtrip(tmp_path):
     """
     Verifies the *happy path* — state saved by `save_state()` is bit‑wise identical after a fresh
     `load_state()`.
@@ -88,7 +88,7 @@ def test_save_and_load_roundtrip(tmp_path):
     """
     # set‑up
     v1 = _make_validator(tmp_path, device="cpu")
-    v1.save_state()
+    await v1.save_state()
 
     # new instance with zeroed tensors
     v2 = _make_validator(tmp_path, device="cpu")
@@ -122,13 +122,13 @@ def test_save_and_load_roundtrip(tmp_path):
         assert pytest.approx(r1.sigma) == r2.sigma, f"sigma mismatch for uid {uid}"
 
 
-def test_save_path_extension_is_pt(tmp_path):
+async def test_save_path_extension_is_pt(tmp_path):
     """
     Regression guard: make sure we never accidentally revert to `.npz`.
     """
     v = _make_validator(tmp_path)
     assert v.state_path.endswith(".pt")  # by construction
-    v.save_state()
+    await v.save_state()
     assert os.path.exists(v.state_path)
     assert v.state_path.endswith(".pt")
 
@@ -188,7 +188,7 @@ def test_load_state_wrong_schema(tmp_path):
     assert not torch.allclose(v.gradient_scores, torch.zeros_like(v.gradient_scores))
 
 
-def test_gpu_cpu_roundtrip(tmp_path):
+async def test_gpu_cpu_roundtrip(tmp_path):
     """
     Edge Case: save on 'cuda' and load on 'cpu'.
     ‑ ensures .cpu() conversion in `_state_dict` works and map_location honours device.
@@ -199,7 +199,7 @@ def test_gpu_cpu_roundtrip(tmp_path):
 
     # save on GPU
     vg = _make_validator(tmp_path, device="cuda")
-    vg.save_state()
+    await vg.save_state()
 
     # load on CPU
     vc = _make_validator(tmp_path, device="cpu")

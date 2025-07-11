@@ -46,6 +46,8 @@ class BaseNode:
         # ---- things your subclasses already set -----------------------------
         self.current_block = 0
         self.current_window = 0
+        self.subtensor_rpc: bt.Subtensor | None = None
+        self.subtensor_client: bt.Subtensor | None = None
         # self.config, self.world_size …  come from the concrete node
 
     async def main(self):
@@ -140,6 +142,19 @@ class BaseNode:
         for th in self._threads:
             th.join(timeout=2)
 
+        # close shared subtensor client
+        if self.subtensor_rpc is not None:
+            try:
+                self.subtensor_rpc.close()
+            except Exception:
+                pass
+
+        if self.subtensor_client is not None:
+            try:
+                self.subtensor_client.close()
+            except Exception:
+                pass
+
         # external resources
         if hasattr(self, "executor"):
             self.executor.shutdown(wait=False, cancel_futures=True)
@@ -168,10 +183,14 @@ class BaseNode:
           no clash with the streaming websocket in `block_listener`.
         • Retries with exponential back-off.
         """
+        if self.subtensor_client is None:
+            st = bt.subtensor(config=self.config)
+            self.subtensor_client = st
+
         delay = init_delay
         for attempt in range(1, retries + 1):
             try:
-                resp = bt.subtensor(config=self.config).query_module(
+                resp = self.subtensor_client.query_module(
                     "Timestamp", "Now", block=block
                 )
                 if resp is None or not isinstance(resp, ScaleObj):
@@ -186,6 +205,13 @@ class BaseNode:
                 )
                 if attempt == retries:
                     return None
+
+                # reconnect once before the next retry
+                try:
+                    self.subtensor_client.close()
+                except Exception:
+                    pass
+                self.subtensor_client = bt.subtensor(config=self.config)
                 time.sleep(delay)
                 delay = min(delay * 2, max_delay)
 
@@ -209,22 +235,28 @@ class BaseNode:
                 tplr.logger.error(f"block-handler err: {e}")
 
         while not self.stop_event.is_set():
+            st = bt.subtensor(config=self.config)
+            self.subtensor_rpc = st
+
             try:
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(
-                    handler
-                )
+                st.substrate.subscribe_block_headers(handler)
                 backoff = 1  # normal exit ⇒ reset back-off
             except websockets.exceptions.ConnectionClosedError as e:
                 if self.stop_event.is_set():  # shutting down → leave loop
                     break
                 tplr.logger.warning(f"ws closed: {e} – retrying in {backoff}s")
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
             except Exception as e:
                 if self.stop_event.is_set():
                     break
                 tplr.logger.error(
                     f"block subscription err: {e} – retrying in {backoff}s"
                 )
-                time.sleep(backoff)
-                backoff = min(backoff * 2, max_backoff)
+            finally:
+                # always kill helper thread for this client
+                try:
+                    st.close()
+                except Exception:
+                    pass
+
+            time.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)

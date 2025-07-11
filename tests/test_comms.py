@@ -96,6 +96,24 @@ def dummy_compressor():
     return CompressDCT(use_quantization=False)
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _patch_bittensor_subtensor():
+    """Make every bt.subtensor(...) call return the same lightweight stub."""
+    stub = MagicMock(name="Stubtensor")
+
+    # minimal attrs/methods your code uses during tests
+    stub.block = 0
+    stub.commit.return_value = None
+    stub.get_commitment.return_value = "0" * 128  # 128-char dummy string
+    stub.sync.return_value = None
+    stub.close.return_value = None
+    stub.substrate = MagicMock(query_map=lambda *a, **k: [])
+    # if you later need more methods, add them here.
+
+    with patch("bittensor.subtensor", return_value=stub):
+        yield
+
+
 from tplr.schemas import Bucket
 from tplr.compress import TransformDCT, CompressDCT
 

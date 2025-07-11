@@ -391,6 +391,14 @@ class Miner(BaseNode):
             rank=self.rank,
             world_size=self.world_size,
         )
+        self.loader = torch.utils.data.DataLoader(
+            dataset=self.dataset,
+            sampler=self.sampler,
+            batch_size=self.hparams.micro_batch_size,
+            num_workers=2,
+            pin_memory=True,
+        )
+
         tplr.logger.info("[Init] dataset + sampler ready")
         tplr.logger.info("[Init] ✔ fully done – entering run()")
 
@@ -528,13 +536,6 @@ class Miner(BaseNode):
             # Update sampler for current window
             self.sampler.set_window_uid(self.uid, step_window)
 
-            loader = torch.utils.data.DataLoader(
-                dataset=self.dataset,
-                sampler=self.sampler,
-                batch_size=self.hparams.micro_batch_size,  # per-GPU micro-bs
-                num_workers=2,
-                pin_memory=True,
-            )
             data_loading_time = tplr.T() - data_start
             tplr.logger.info(
                 f"{tplr.P(step_window, data_loading_time)} Loaded training data"
@@ -542,7 +543,7 @@ class Miner(BaseNode):
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             tplr.logger.info("Start accumulating...")
-            res = await self.inner_steps(loader=loader, step_window=step_window)
+            res = await self.inner_steps(loader=self.loader, step_window=step_window)
             training_time = tplr.T() - train_start
             window_entry_loss = res["window_entry_loss"]
             n_batches = res["batch_count"]
@@ -882,7 +883,7 @@ class Miner(BaseNode):
                 dist.barrier(device_ids=[self.local_rank])
 
             # Delete local variables to clear up memory
-            del loader, gather_result, shard_gradient
+            del gather_result, shard_gradient
             if self.is_master:
                 del processed_state_dict, gradient
 

@@ -312,13 +312,15 @@ class Validator(BaseNode):
             rank=0,
             world_size=1,
         )
-        # Convenience kwargs reused every time we build a DataLoader
-        self._loader_kwargs = dict(
+        self.loader = torch.utils.data.DataLoader(
             dataset=self.dataset,
-            batch_size=self.hparams.batch_size,
+            sampler=self.sampler,
+            batch_size=self.hparams.micro_batch_size,
             num_workers=2,
             pin_memory=True,
         )
+
+        self.burn_uid = 1
 
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
@@ -615,6 +617,28 @@ class Validator(BaseNode):
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
+
+        # clip to [0,1] and renormalise the remainder so everything sums to 1
+        br = max(0.0, min(1.0, self.hparams.burn_rate))
+        remaining = 1.0 - br
+        if remaining < 0:
+            tplr.logger.warning(
+                f"burn_rate={self.hparams.burn_rate} is larger than 1. Using 1.0."
+            )
+            br, remaining = 1.0, 0.0
+
+        # distribute the *remaining* proportionally among the other peers
+        others_mask = torch.ones_like(self.weights, dtype=torch.bool)
+        others_mask[self.burn_uid] = False
+        others_sum = self.weights[others_mask].sum().item()
+
+        if others_sum > 0:
+            self.weights[others_mask] = (
+                self.weights[others_mask] / others_sum * remaining
+            )
+        else:
+            self.weights[others_mask] = 0.0
+        self.weights[self.burn_uid] = br
 
     async def evaluate_model(
         self,
@@ -1270,15 +1294,8 @@ class Validator(BaseNode):
                 # Loss before own data
                 model_before_update = copy.deepcopy(self.model)
                 self.sampler.set_window_uid(eval_uid, self.sync_window)
-                loader_own = torch.utils.data.DataLoader(
-                    dataset=self.dataset,
-                    sampler=self.sampler,
-                    batch_size=self.hparams.micro_batch_size,
-                    num_workers=2,
-                    pin_memory=True,
-                )
                 loss_before_own, n_batches = await self.evaluate_model(
-                    model_before_update, loader_own
+                    model_before_update, self.loader
                 )
                 tplr.log_with_context(
                     level="info",
@@ -1297,19 +1314,11 @@ class Validator(BaseNode):
                     current_window=self.current_window,
                     eval_uid=eval_uid,
                 )
-                del loader_own
 
                 # Loss before random data
                 self.sampler.set_window_uid(random_seed, self.sync_window)
-                loader_random = torch.utils.data.DataLoader(
-                    dataset=self.dataset,
-                    sampler=self.sampler,
-                    batch_size=self.hparams.micro_batch_size,
-                    num_workers=2,
-                    pin_memory=True,
-                )
                 loss_before_random, n_batches = await self.evaluate_model(
-                    model_before_update, loader_random
+                    model_before_update, self.loader
                 )
                 if n_batches == 0:
                     tplr.log_with_context(
@@ -1330,7 +1339,7 @@ class Validator(BaseNode):
                     current_window=self.current_window,
                     eval_uid=eval_uid,
                 )
-                del loader_random, model_before_update
+                del model_before_update
 
                 model_after_update = copy.deepcopy(self.model)
                 # 9. Apply gradient and compute loss after
@@ -1401,18 +1410,10 @@ class Validator(BaseNode):
                 self.outer_optimizer.zero_grad()
                 model_after_update.zero_grad()
                 self.sampler.set_window_uid(eval_uid, self.sync_window)
-                loader_own = torch.utils.data.DataLoader(
-                    dataset=self.dataset,
-                    sampler=self.sampler,
-                    batch_size=self.hparams.micro_batch_size,
-                    num_workers=2,
-                    pin_memory=True,
-                )
                 loss_after_own, n_batches = await self.evaluate_model(
-                    model_after_update, loader_own
+                    model_after_update, self.loader
                 )
                 # Clean up stored batches
-                del loader_own
                 torch.cuda.empty_cache()
 
                 self.loss_after_per_batch_own = (
@@ -1459,23 +1460,13 @@ class Validator(BaseNode):
                 model_after_update.zero_grad()
 
                 self.sampler.set_window_uid(random_seed, self.sync_window)
-                loader_random = torch.utils.data.DataLoader(
-                    dataset=self.dataset,
-                    sampler=self.sampler,
-                    batch_size=self.hparams.micro_batch_size,
-                    num_workers=2,
-                    pin_memory=True,
-                )
                 loss_after_random, n_batches = await self.evaluate_model(
                     model_after_update,
-                    loader_random,
+                    self.loader,
                 )
 
                 # Clean up
-                del (
-                    loader_random,
-                    model_after_update,
-                )
+                del model_after_update
                 torch.cuda.empty_cache()
 
                 self.loss_after_per_batch_random = (
@@ -2029,14 +2020,10 @@ class Validator(BaseNode):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                checkpoint_data = {
-                    "model_state_dict": {
-                        k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                    },
-                    "start_window": self.start_window,
-                    "current_window": self.current_window,
-                    "sync_window": self.sync_window,
-                }
+
+                checkpoint_data = await self.create_checkpoint_async()
+
+                # Then save asynchronously
                 t = asyncio.create_task(
                     self.comms.put(
                         state_dict=checkpoint_data,
@@ -2054,6 +2041,27 @@ class Validator(BaseNode):
             self.global_step += 1
 
             torch.cuda.empty_cache()
+
+    async def create_checkpoint_async(self):
+        """Create checkpoint in a thread pool to avoid blocking"""
+
+        def _create_checkpoint():
+            # This runs in a thread, not blocking the event loop
+            return {
+                "model_state_dict": {
+                    k: v.cpu().clone() for k, v in self.model.state_dict().items()
+                },
+                "start_window": self.start_window,
+                "current_window": self.current_window,
+                "sync_window": self.sync_window,
+            }
+
+        # Run in thread pool
+        checkpoint_data = await asyncio.get_event_loop().run_in_executor(
+            self.executor,  # Your ThreadPoolExecutor
+            _create_checkpoint,
+        )
+        return checkpoint_data
 
     def select_initial_peers(self) -> list[int] | None:
         """

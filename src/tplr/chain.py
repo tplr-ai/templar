@@ -18,7 +18,6 @@
 
 # Global imports
 import asyncio
-import time
 from collections import defaultdict
 from typing import Dict, Optional
 
@@ -85,6 +84,7 @@ class ChainManager:
         # Store wallet and bucket
         self.wallet = wallet
         self.bucket = bucket
+        self.subtensor_sync = bt.subtensor(config=self.config)
 
     def start_commitment_fetcher(self):
         """Attach to the already-running event loop."""
@@ -98,9 +98,8 @@ class ChainManager:
         while True:
             try:
                 # Create new subtensor instance for metagraph sync
-                subtensor_sync = bt.subtensor(config=self.config)
                 await asyncio.to_thread(
-                    lambda: self.metagraph.sync(subtensor=subtensor_sync)
+                    lambda: self.metagraph.sync(subtensor=self.subtensor_sync)
                 )
 
                 # Create new subtensor instance for commitments
@@ -110,6 +109,8 @@ class ChainManager:
                     logger.debug(f"Updated commitments: {self.commitments}")
             except Exception as e:
                 logger.error(f"Error fetching commitments: {e}")
+                self.subtensor_sync.close()
+                self.subtensor_sync = bt.subtensor(config=self.config)
             await asyncio.sleep(self.fetch_interval)
 
     def get_bucket(self, uid: int) -> Optional[Bucket]:
@@ -131,45 +132,6 @@ class ChainManager:
         """
         return {uid: self.get_bucket(uid) for uid in self.metagraph.uids}
 
-    def block_to_window(self, block: int) -> int:
-        """Returns the slice window based on a block."""
-        return int(block / self.hparams.window_length)
-
-    def window_to_seed(self, window: int) -> str:
-        """Returns the slice window based on a block."""
-        return str(self.subtensor.get_block_hash(window * self.hparams.window_length))
-
-    def block_listener(self, loop):
-        """Listens for new blocks and updates current block/window state.
-
-        Args:
-            loop: The event loop to run the listener in
-
-        This method subscribes to block headers from the subtensor network and:
-        - Updates self.current_block with the latest block number
-        - Updates self.current_window when crossing window boundaries
-        - Retries on connection errors until stop_event is set
-        """
-
-        def handler(event, _u, _s):
-            self.current_block = int(event["header"]["number"])
-            if (
-                int(self.current_block / self.hparams.blocks_per_window)
-                != self.current_window
-            ):
-                self.current_window = int(
-                    self.current_block / self.hparams.blocks_per_window
-                )
-
-        while not self.stop_event.is_set():
-            try:
-                bt.subtensor(config=self.config).substrate.subscribe_block_headers(
-                    handler
-                )
-                break
-            except Exception:
-                time.sleep(1)
-
     def commit(self, wallet: "bt.wallet", bucket: Bucket) -> None:
         """Commits bucket configuration to the chain.
 
@@ -177,11 +139,10 @@ class ChainManager:
             wallet (bt.wallet): Wallet to sign the commitment
             bucket (Bucket): Bucket configuration to commit
         """
-        subtensor = bt.subtensor(config=self.config)
         concatenated = (
             bucket.account_id + bucket.access_key_id + bucket.secret_access_key
         )
-        subtensor.commit(wallet, self.netuid, concatenated)
+        self.subtensor_sync.commit(wallet, self.netuid, concatenated)
         logger.info(
             f"Committed bucket configuration to chain for hotkey {wallet.hotkey.ss58_address}"
         )
@@ -228,6 +189,8 @@ class ChainManager:
                 f"Error while verifying commitment: {str(e)}\n"
                 "Committing the bucket details from the environment."
             )
+            self.subtensor_sync.close()
+            self.subtensor_sync = bt.subtensor(config=self.config)
             self.commit(wallet, bucket)
 
     def get_commitment(self, uid: int) -> Bucket:
@@ -271,9 +234,8 @@ class ChainManager:
                 from the subtensor network.
         """
 
-        subtensor = bt.subtensor(config=self.config)
         try:
-            concatenated = subtensor.get_commitment(self.netuid, uid)
+            concatenated = self.subtensor_sync.get_commitment(self.netuid, uid)
             logger.success(f"Commitment fetched: {concatenated}")
         except Exception as e:
             raise Exception(f"Couldn't get commitment from uid {uid} because {e}")
@@ -309,91 +271,56 @@ class ChainManager:
         Returns:
             Dict[int, Bucket]: Mapping of UIDs to their bucket configurations
         """
-        subtensor = bt.subtensor(config=self.config)
-        substrate = subtensor.substrate
-        # Query commitments via substrate.query_map
-        query_result = substrate.query_map(
-            module="Commitments",
-            storage_function="CommitmentOf",
-            params=[self.netuid],
-            block_hash=None if block is None else substrate.get_block_hash(block),
-        )
+        try:
+            substrate = self.subtensor_sync.substrate
+            # Query commitments via substrate.query_map
+            query_result = substrate.query_map(
+                module="Commitments",
+                storage_function="CommitmentOf",
+                params=[self.netuid],
+                block_hash=None if block is None else substrate.get_block_hash(block),
+            )
 
-        hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids))
-        commitments = {}
+            hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids))
+            commitments = {}
 
-        for key, value in query_result:
-            try:
-                decoded_ss58, commitment_str = self.decode_metadata(key, value.value)
-            except Exception as e:
-                logger.error(f"Failed to decode metadata for key {key.value}: {e}")
-                continue
+            for key, value in query_result:
+                try:
+                    decoded_ss58, commitment_str = self.decode_metadata(
+                        key, value.value
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to decode metadata for key {key.value}: {e}")
+                    continue
 
-            if decoded_ss58 not in hotkey_to_uid:
-                continue
+                if decoded_ss58 not in hotkey_to_uid:
+                    continue
 
-            uid = hotkey_to_uid[decoded_ss58]
-            if len(commitment_str) != 128:
-                logger.error(
-                    f"Invalid commitment length for UID {uid}: {len(commitment_str)}"
-                )
-                continue
+                uid = hotkey_to_uid[decoded_ss58]
+                if len(commitment_str) != 128:
+                    logger.error(
+                        f"Invalid commitment length for UID {uid}: {len(commitment_str)}"
+                    )
+                    continue
 
-            try:
-                bucket = Bucket(
-                    name=commitment_str[:32],
-                    account_id=commitment_str[:32],
-                    access_key_id=commitment_str[32:64],
-                    secret_access_key=commitment_str[64:],
-                )
-                commitments[uid] = bucket
-                logger.debug(f"Retrieved bucket commitment for UID {uid}")
-            except Exception as e:
-                logger.error(f"Failed to build bucket for UID {uid}: {e}")
-                continue
+                try:
+                    bucket = Bucket(
+                        name=commitment_str[:32],
+                        account_id=commitment_str[:32],
+                        access_key_id=commitment_str[32:64],
+                        secret_access_key=commitment_str[64:],
+                    )
+                    commitments[uid] = bucket
+                    logger.debug(f"Retrieved bucket commitment for UID {uid}")
+                except Exception as e:
+                    logger.error(f"Failed to build bucket for UID {uid}: {e}")
+                    continue
 
-        return commitments
-
-    def get_commitments_sync(self, block: Optional[int] = None) -> Dict[int, Bucket]:
-        """
-        Retrieves all bucket commitments from the chain.
-
-        Args:
-            block (int, optional): Block number to query at
-
-        Returns:
-            Dict[int, Bucket]: Mapping of UIDs to their bucket configurations
-        """
-        subtensor = bt.subtensor(config=self.config)
-        # Use the new API. It returns a dict mapping hotkeys to the decoded commitment string.
-        all_commitments = subtensor.get_all_commitments(self.netuid, block)
-        hotkey_to_uid = dict(zip(self.metagraph.hotkeys, self.metagraph.uids))
-        commitments = {}
-
-        for hotkey, commitment in all_commitments.items():
-            if hotkey not in hotkey_to_uid:
-                continue
-            uid = hotkey_to_uid[hotkey]
-            if len(commitment) != 128:
-                logger.error(
-                    f"Invalid commitment length for UID {uid}: {len(commitment)}"
-                )
-                continue
-
-            try:
-                bucket = Bucket(
-                    name=commitment[:32],
-                    account_id=commitment[:32],
-                    access_key_id=commitment[32:64],
-                    secret_access_key=commitment[64:],
-                )
-                commitments[uid] = bucket
-                logger.debug(f"Retrieved bucket commitment for UID {uid}")
-            except Exception as e:
-                logger.error(f"Failed to decode commitment for UID {uid}: {e}")
-                continue
-
-        return commitments
+            return commitments
+        except Exception:
+            self.subtensor_sync.close()
+            self.subtensor_sync = bt.subtensor(config=self.config)
+            return
 
     async def get_bucket_for_neuron(self, wallet: "bt.wallet") -> Optional[Bucket]:
         """Get bucket configuration for a specific neuron's wallet
@@ -407,7 +334,7 @@ class ChainManager:
         try:
             # Get UID by finding hotkey's index in metagraph
             uid = self.metagraph.hotkeys.index(wallet.hotkey.ss58_address)
-            return await self.get_bucket(uid)
+            return self.get_bucket(uid)
         except ValueError:
             logger.warning(
                 f"Hotkey {wallet.hotkey.ss58_address} not found in metagraph"

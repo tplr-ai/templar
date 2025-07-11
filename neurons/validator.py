@@ -320,6 +320,8 @@ class Validator(BaseNode):
             pin_memory=True,
         )
 
+        self.burn_uid = 1
+
     def reset_peer(self, inactive_since: int, uid: int) -> bool:
         if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
             self.final_scores[uid] = 0.0
@@ -615,6 +617,28 @@ class Validator(BaseNode):
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
+
+        # clip to [0,1] and renormalise the remainder so everything sums to 1
+        br = max(0.0, min(1.0, self.hparams.burn_rate))
+        remaining = 1.0 - br
+        if remaining < 0:
+            tplr.logger.warning(
+                f"burn_rate={self.hparams.burn_rate} is larger than 1. Using 1.0."
+            )
+            br, remaining = 1.0, 0.0
+
+        # distribute the *remaining* proportionally among the other peers
+        others_mask = torch.ones_like(self.weights, dtype=torch.bool)
+        others_mask[self.burn_uid] = False
+        others_sum = self.weights[others_mask].sum().item()
+
+        if others_sum > 0:
+            self.weights[others_mask] = (
+                self.weights[others_mask] / others_sum * remaining
+            )
+        else:
+            self.weights[others_mask] = 0.0
+        self.weights[self.burn_uid] = br
 
     async def evaluate_model(
         self,

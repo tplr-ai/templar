@@ -5,7 +5,7 @@
     "micro_batch_size": 2,
     "target_batch_size": 1024,
     "batch_size": 256,
-    "inner_steps": 25,
+    "inner_steps": 30,
     "inner_learning_rate": 2e-4,
     "outer_learning_rate": 0.9,
     "blocks_per_window": 50,

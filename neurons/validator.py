@@ -1730,6 +1730,13 @@ class Validator(BaseNode):
                 positive_weighted_uids = sorted(
                     [uid for uid in self.evaluated_uids if self.weights[uid] > 0]
                 )
+                if (
+                    self.hparams.burn_rate > 0
+                    and self.weights[self.burn_uid] > 0
+                    and self.burn_uid not in positive_weighted_uids
+                ):
+                    positive_weighted_uids.append(self.burn_uid)
+                    positive_weighted_uids.sort()
                 if positive_weighted_uids:
                     self.subtensor.set_weights(
                         wallet=self.wallet,

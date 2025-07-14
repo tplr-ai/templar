@@ -48,7 +48,6 @@ from .schemas import Bucket
 
 # Constants
 CF_REGION_NAME: str = "enam"
-LOCAL_TMP_DIR = "/tmp/local_store"
 PEERS_FILE_PREFIX = "peers_"
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -71,8 +70,11 @@ class Comms(ChainManager):
         self.wallet = wallet
 
         # Create temp directory for this instance
-        self.temp_dir = os.path.join("/tmp", f"templar_{self.uid}")
+        self.save_location = save_location
+        self.temp_dir = os.path.join(save_location, f"templar_{self.uid}")
         os.makedirs(self.temp_dir, exist_ok=True)
+        self.local_tmp_dir = os.path.join(save_location, f"local_store")
+        os.makedirs(self.local_tmp_dir, exist_ok=True)
         # Get the bucket directly
         self.bucket = self.get_own_bucket("gradients", "write")
         # Now initialize ChainManager with the bucket
@@ -88,7 +90,7 @@ class Comms(ChainManager):
         # Use the hotkey directly in the save_location
         if self.wallet is not None:
             hotkey = self.wallet.hotkey.ss58_address
-            self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
+            self.save_location = os.path.join(save_location, f"hotkey_{hotkey}")
             os.makedirs(self.save_location, exist_ok=True)
         self.key_prefix = key_prefix
 
@@ -230,7 +232,7 @@ class Comms(ChainManager):
         self, uid: str, current_window: int, stale_retention: int
     ):
         """Clean up stale local data for a given uid."""
-        user_dir = os.path.join(LOCAL_TMP_DIR, str(uid))
+        user_dir = os.path.join(self.local_tmp_dir, str(uid))
         if not os.path.exists(user_dir):
             return
 
@@ -745,7 +747,7 @@ class Comms(ChainManager):
         put_start = tplr.T()
 
         # Create per-uid temp directory
-        temp_dir = os.path.join("/tmp", str(self.uid))
+        temp_dir = os.path.join(self.save_location, str(self.uid))
         os.makedirs(temp_dir, exist_ok=True)
         temp_file_path = os.path.join(temp_dir, f"temp_{filename}")
 
@@ -767,7 +769,7 @@ class Comms(ChainManager):
                 await self.cleanup_local_data(
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
-                local_dir = os.path.join(LOCAL_TMP_DIR, str(uid), str(window))
+                local_dir = os.path.join(self.local_tmp_dir, str(uid), str(window))
                 os.makedirs(local_dir, exist_ok=True)
                 final_path = os.path.join(local_dir, filename)
                 os.replace(temp_file_path, final_path)
@@ -832,7 +834,7 @@ class Comms(ChainManager):
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
                 local_path = os.path.join(
-                    LOCAL_TMP_DIR, str(uid), str(window), filename
+                    self.local_tmp_dir, str(uid), str(window), filename
                 )
                 if not os.path.exists(local_path):
                     tplr.logger.debug(f"Local file not found: {local_path}")
@@ -1421,7 +1423,7 @@ class Comms(ChainManager):
 
     def _load_latest_local_checkpoint(self, version: str):
         try:
-            local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
+            local_dir = os.path.join(self.local_tmp_dir, str(self.uid))
             pattern = rf"checkpoint-(\d+)-{self.uid}-v{re.escape(version)}\.pt$"
 
             if not os.path.exists(local_dir):

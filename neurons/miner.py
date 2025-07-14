@@ -110,6 +110,12 @@ class Miner(BaseNode):
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        parser.add_argument(
+            "--save-location",
+            type=str,
+            default="/tmp",
+            help="Directory to save temporary files, gradients, checkpoints, and debug data.",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -318,7 +324,7 @@ class Miner(BaseNode):
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
-            save_location="/tmp",
+            save_location=self.config.save_location,
             key_prefix="model",
             config=self.config,
             netuid=self.config.netuid,

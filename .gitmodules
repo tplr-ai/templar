@@ -1,0 +1,3 @@
+[submodule "external/torchtitan"]
+	path = external/torchtitan
+	url = https://github.com/pytorch/torchtitan

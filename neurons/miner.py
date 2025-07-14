@@ -47,7 +47,15 @@ from torch.optim.lr_scheduler import (
     SequentialLR,
 )
 from torch.utils.data import DataLoader
-from transformers.models.llama import LlamaForCausalLM
+
+
+from torchtitan.models.llama3 import (
+    Transformer as TitanLlama,
+    TransformerModelArgs,
+)
+from torchtitan.models.llama3.infra.parallelize import parallelize_llama
+from torchtitan.distributed import ParallelDims
+from torch.distributed.device_mesh import init_device_mesh
 
 import tplr
 
@@ -89,6 +97,12 @@ class Miner(BaseNode):
         )
         parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
+        )
+        parser.add_argument(
+            "--tp-degree",
+            type=int,
+            default=1,
+            help="Tensor-parallel degree for TorchTitan (defaults to 1 – no TP)",
         )
         parser.add_argument(
             "--local_rank", type=int, default=int(os.getenv("LOCAL_RANK", 0))
@@ -182,6 +196,7 @@ class Miner(BaseNode):
             torch.cuda.set_device(self.local_rank)
             tplr.logger.info("[Init] NCCL process-group ready and GPU selected")
             self.config.device = f"cuda:{self.local_rank}"
+            self.config.tp_degree = int(getattr(self.config, "tp_degree", 1))
         else:
             self.config.device = self.config.device or "cuda"
         self.device = torch.device(self.config.device)
@@ -212,25 +227,52 @@ class Miner(BaseNode):
         super().__init__()
 
         # Init model with hparams config
-        self.model = LlamaForCausalLM(self.hparams.model_config)
+        hf_cfg = self.hparams.model_config   # a transformers.LlamaConfig
+        titan_args = TransformerModelArgs(
+            dim              = hf_cfg.hidden_size,
+            n_layers         = hf_cfg.num_hidden_layers,
+            n_heads          = hf_cfg.num_attention_heads,
+            n_kv_heads       = getattr(hf_cfg, "num_key_value_heads", None),
+            vocab_size       = hf_cfg.vocab_size,
+            multiple_of      = 256,
+            max_seq_len      = self.hparams.sequence_length,
+            rope_theta       = getattr(hf_cfg, "rope_theta", 1e4),
+            depth_init       = True,
+        )
+        with torch.device("meta"):
+            self.model = TitanLlama(titan_args)
+
+        tp_degree = max(1, self.config.tp_degree)
+
+        pdims = ParallelDims(
+            dp_replicate = 1,
+            dp_shard     = -1,
+            cp           = 1,
+            tp           = tp_degree,
+            pp           = 1,
+            ep           = 1,
+            world_size   = self.world_size,
+            enable_loss_parallel = False,
+        )
+
+        #self.tensor_parallel_degree   = getattr(self.hparams, "tensor_parallel_degree", self.world_size)
+        #self.pipeline_parallel_degree = getattr(self.hparams, "pipeline_parallel_degree", 1)
+        #self.context_parallel_degree  = getattr(self.hparams, "context_parallel_degree", 1)
+
+        world_mesh = pdims.build_mesh(device_type="cuda")
+
+        self.model = parallelize_llama(
+            self.model,
+            world_mesh      = world_mesh,
+            parallel_dims   = pdims,
+            job_config      = self.hparams,
+        )
+
         self.model.to(self.device)  # type: ignore[reportArgumentType]
         if self.world_size < 4:
             self.model.gradient_checkpointing_enable()
         tplr.logger.info("[Init] Llama model instantiated & on device")
 
-        compile_mode = "default"
-        self.model = cast(
-            LlamaForCausalLM, torch.compile(self.model, mode=compile_mode)
-        )
-
-        if self.world_size > 1:
-            self.model = torch.nn.parallel.DistributedDataParallel(
-                self.model,
-                device_ids=[self.local_rank],
-                output_device=self.local_rank,
-                gradient_as_bucket_view=True,
-            )
-            tplr.logger.info("[Init] wrapped model with DistributedDataParallel")
         self.bare_model = getattr(self.model, "module", self.model)
         self.tokenizer = self.hparams.tokenizer
 

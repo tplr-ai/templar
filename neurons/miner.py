@@ -243,13 +243,18 @@ class Miner(BaseNode):
             self.model = TitanLlama(titan_args)
 
         tp_degree = max(1, self.config.tp_degree)
+        if self.world_size % tp_degree != 0:
+            raise ValueError(
+                f"World size ({self.world_size}) must be divisible by tensor-parallel degree ({tp_degree})"
+            )
+        dp_degree = self.world_size // tp_degree
 
         pdims = ParallelDims(
             dp_replicate = 1,
-            dp_shard     = -1,
-            cp           = 1,
+            dp_shard     = dp_degree,
             tp           = tp_degree,
             pp           = 1,
+            cp           = 1,
             ep           = 1,
             world_size   = self.world_size,
             enable_loss_parallel = False,
@@ -269,9 +274,11 @@ class Miner(BaseNode):
         )
 
         self.model.to(self.device)  # type: ignore[reportArgumentType]
-        if self.world_size < 4:
-            self.model.gradient_checkpointing_enable()
-        tplr.logger.info("[Init] Llama model instantiated & on device")
+        if self.dp_degree < 4:
+            self.model.gradient_checkpointing_enable() # Quentin: I think this should always be enabled instead
+            tplr.logger.info("[Init] Gradient checkpointing enabled.")
+
+        tplr.logger.info(f"[Init] Llama model parallelized with TP={tp_degree} and DP={dp_degree}, and on device")
 
         self.tokenizer = self.hparams.tokenizer
 
@@ -292,11 +299,14 @@ class Miner(BaseNode):
 
         self.xshapes = {}
         self.totalks = {}
-        model_iterator = (
-            self.model.module.named_parameters()
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model.named_parameters()
-        )
+        model_to_iterate = getattr(self.model, "module", self.model)
+        model_iterator = model_to_iterate.named_parameters()
+
+
+        dp_group = None
+        if dp_degree > 1:
+            dp_group = world_mesh.get_group('dp_shard')
+            tplr.logger.info(f"[Init] Using data-parallel group for optimizer sharding (size={dp_degree}).")
 
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
@@ -308,6 +318,7 @@ class Miner(BaseNode):
             weight_decay=self.hparams.weight_decay,
             betas=(0.9, 0.95),
             parameters_as_bucket_view=True,
+            process_group=dp_group,
             overlap_with_ddp=False,
         )
         inner_steps_before_outer_step = self.hparams.inner_steps * (
@@ -496,11 +507,7 @@ class Miner(BaseNode):
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
 
-        bare_model = (
-            self.model.module
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
+        bare_model = getattr(self.model, "module", self.model)
 
         if self.world_size == 1 or self.is_master:
             (
@@ -780,10 +787,8 @@ class Miner(BaseNode):
                 debug_dict = {}
 
                 # Add model parameters debug info
-                if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-                    model_iterator = self.model.module.named_parameters()
-                else:
-                    model_iterator = self.model.named_parameters()
+                model_to_iterate = getattr(self.model, "module", self.model)
+                model_iterator = model_to_iterate.named_parameters()
                 for name, param in model_iterator:
                     if (
                         param is not None and param.numel() >= 2
@@ -1019,9 +1024,7 @@ class Miner(BaseNode):
             # 3-a.  Back-prop with no_sync() on non-final micro-batches
             # -------------------------------------------------------------- #
             final_micro_batch = (batch_count + 1) % self.sampler.grad_accum_steps == 0
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) and (
-                self.world_size > 1 and not final_micro_batch
-            ):
+            if hasattr(self.model, "no_sync") and self.world_size > 1 and not final_micro_batch:
                 sync_ctx = self.model.no_sync()
             else:
                 sync_ctx = nullcontext()
@@ -1101,11 +1104,7 @@ class Miner(BaseNode):
         # ------------------------------------------------------------------ #
         # 6. parameter offloading logic
         # ------------------------------------------------------------------ #
-        bare_model = (
-            self.model.module
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
+        bare_model = getattr(self.model, "module", self.model)
         with torch.no_grad():
             for saved_param, p in zip(params_offloaded, bare_model.parameters()):
                 saved_param = saved_param.to(p.device, non_blocking=True)
@@ -1129,11 +1128,7 @@ class Miner(BaseNode):
 
     def _get_offloaded_param(self):
         """Get a copy of current parameters and offload them to CPU"""
-        bare_model = (
-            self.model
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
+        bare_model = getattr(self.model, "module", self.model)
         return [
             param.data.detach().clone().to("cpu") for param in bare_model.parameters()
         ]

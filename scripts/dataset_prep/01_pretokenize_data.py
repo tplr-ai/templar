@@ -126,6 +126,8 @@ def main(args):
         cc.partition_all(1024), # seqs_per_shard
         enumerate,
         cc.map(c.curry(write_shards, args, logger)),
+        c.curry(tqdm, total=4),
+        cc.take(4),
         cc.filter(bool), # remove None outputs for RAM safety
         list,
     )

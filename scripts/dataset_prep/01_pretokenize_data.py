@@ -1,16 +1,18 @@
-import os
 import argparse
+import glob
+import math
 import multiprocessing as mp
+import requests
+import os
+
 import cytoolz as c
 import cytoolz.curried as cc
 import numpy as np
-from transformers import AutoTokenizer
 from datasets import load_dataset
-from tqdm.auto import tqdm
-import math
-import glob
-
 from dotenv import load_dotenv
+from tqdm.auto import tqdm
+from transformers import AutoTokenizer
+
 load_dotenv()
 
 from tplr import logger 
@@ -53,6 +55,9 @@ def main(args):
     debug = args.debug
     target_tokens = args.total_tokens
     shard_size = args.shard_size
+    seq_len = args.seq_len
+    
+    seqs_per_shard = shard_size // seq_len
     expected_shards = math.ceil(target_tokens / shard_size)
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -78,56 +83,49 @@ def main(args):
     logger.info(f"Shard size: {shard_size / 1e6:.0f}M tokens")
     logger.info(f"Expected shards: {expected_shards}")
 
-    # # Load and shuffle dataset
+    # Load and shuffle dataset
     dataset = load_dataset(
         args.dataset, split="train", streaming=True, trust_remote_code=True
     )
     dataset = dataset.shuffle(seed=args.seed, buffer_size=args.buffer_size)
+    dataset_row_count = retrieve_hf_rowcount(args.dataset)
 
+    # Get tokenizer and potentially modify dtype 
     tokenizer = instantiate_tokenizer(args.tokenizer)
-    tokenize_fn = c.curry(tokenize_doc, tokenizer)  
+    max_token_id = len(tokenizer) - 1
+    token_dtype = handle_token_dtype(max_token_id)
 
     # would we ever want fewer workers? 1 is good only if the loop is misbehaving
     num_proc = 1 if debug else min(os.cpu_count() - 1, int(os.cpu_count() * .9))  
     logger.info(f"Using {num_proc} processes")
-
-    # Initialize processing variables
-    seq_len = 2048
-    seqs_per_shard = 1024 # shard_size // seq_len
-
-    # tokens dtype
-    token_dtype = np.uint16 # 65_535 max token value
 
     # was using args.chunk_size previously
     map_fn = cc.map if num_proc == 1 else get_pmap_fn(num_proc) 
 
     writer = c.pipe(
         tqdm(
-            # (manual_dataset() for _ in range(10000000)), 
             dataset,
-            total=204800,
-            # total=target_tokens, 
-            # unit="tokens", 
+            total=dataset_row_count, 
+            unit="documents", 
             desc="Tokenizing",
         ),  
-        cc.take(204800),
         cc.partition_all(1), 
         cc.filter(lambda d: filter_dataset(d[0])),
         map_fn(
             cc.compose_left(
                 c.first,
-                tokenize_fn,
+                c.curry(tokenize_doc, tokenizer),
                 iter,
             ),
         ),
         cc.concat,
-        cc.partition_all(2048), # seq_len number of tokens
+        cc.partition_all(seq_len), 
         cc.map(c.curry(np.array, dtype=token_dtype)),
-        cc.partition_all(1024), # seqs_per_shard
+        cc.partition_all(seqs_per_shard),  
         enumerate,
         cc.map(c.curry(write_shards, args, logger)),
-        c.curry(tqdm, total=4),
-        cc.take(4),
+        c.curry(tqdm, total=expected_shards),
+        cc.take(expected_shards), # stop iterating when we have correct shards
         cc.filter(bool), # remove None outputs for RAM safety
         list,
     )
@@ -146,7 +144,7 @@ def get_pmap_fn(num_proc: int):
 
 
 def filter_dataset(d: dict) -> bool:
-    has_length = False 
+    has_length = False
 
     text = d.get("text", "")
 
@@ -170,14 +168,28 @@ def write_shards(args, logger, enumerated_tokens):
     return
 
 
-def manual_dataset():
-    d = {'text': 'Gulf of Ob\n\nGulf of Ob, Russian Obskaya Guba, large inlet of the Kara Sea indenting northwestern Siberia, between the peninsulas of Yamal and Gyda, in north-central Russia. The gulf forms the outlet for the Ob River, the delta of which is choked by a huge sandbar. The gulf is about 500 miles (800 km) in length and has a breadth varying between 20 and 60 miles (32 and 97 km). The depth of the sea at this point is 33–40 feet (10–12 m). Its eastern coastline is steep and rugged; the west is low-lying and marshy. Novy Port is the main port of the gulf.', 'url': 'https://www.britannica.com/print/article/423566', 'id': '<urn:uuid:b8f22bed-4bef-4da4-893a-3fc1afc83874>', 'language': 'en', 'language_score': 0.9554803371429443, 'fasttext_score': 0.20887362957000732}
-    return d
+def handle_token_dtype(max_token_id: int) -> np.dtype:
+    token_dtype = np.uint16 # 65_535 max token value
+    if max_token_id > 65_535:
+        token_dtype = np.uint32
+    return token_dtype
 
 
-def passthrough_print(x):
-    print(type(x), x)
-    return x
+def retrieve_hf_rowcount(dataset_name: str) -> int:
+    """Retrieve the row count of a HuggingFace dataset."""
+
+    dataset_name = "ibm/duorc"
+    url = f"https://datasets-server.huggingface.co/size?dataset={dataset_name}"
+    response = requests.get(url).json()
+
+    if "size" not in response:
+        total_rows = 1_000_000_000 # default to 1B if not found
+        logger.info(f"Dataset {dataset_name} size not found or no size available. Defaulting to {total_rows:,} rows.")
+    else:
+        total_rows = response["size"]["dataset"]["num_rows"]
+        logger.info(f"Total rows in {dataset_name}: {total_rows}")
+
+    return total_rows
 
 
 if __name__ == "__main__":
@@ -207,26 +219,29 @@ if __name__ == "__main__":
         default=1 * (1024**3),
         help="Tokens per shard (default: 1G)",
     )
+    
     parser.add_argument(
         "--total_tokens",
         type=int,
         default=150 * (1024**3),
         help="Total tokens to process (default: 150G)",
     )
+    
+    parser.add_argument(
+        "--seq_len",
+        type=int,
+        default=2048,
+        help="Model context length for sequence chunking (default: 2048)",
+    )
 
     parser.add_argument(
         "--seed", type=int, default=42, help="Seed for dataset shuffling"
     )
+    
     parser.add_argument(
-        "--buffer_size", type=int, default=10000, help="Shuffle buffer size"
+        "--buffer_size", type=int, default=10240, help="Shuffle buffer size"
     )
 
-    parser.add_argument(
-        "--num_proc", type=int, default=-1, help="Number of processes (-1 for auto)"
-    )
-    parser.add_argument(
-        "--chunk_size", type=int, default=256, help="Processing chunk size"
-    )
     parser.add_argument(
         "--debug", type=bool, default=False, help="use 1 proc for debugging"
     )

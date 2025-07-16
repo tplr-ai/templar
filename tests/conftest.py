@@ -31,6 +31,9 @@ os.environ.setdefault("R2_DATASET_READ_ACCESS_KEY_ID", "mock-dataset-read-key-id
 os.environ.setdefault(
     "R2_DATASET_READ_SECRET_ACCESS_KEY", "mock-dataset-read-secret-key"
 )
+os.environ.setdefault(
+    "DATASET_BINS_PATH", "mock-dataset-bins-path"
+)
 
 import pytest
 import torch

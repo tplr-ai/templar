@@ -40,8 +40,6 @@ def tokenize_doc(
     tokens = tokenizer.encode(text, add_special_tokens=False)
     tokens.append(tokenizer.eos_token_id)
 
-
-
     # tokens_array = np.array(tokens, dtype=dtype) 
 
     # if not ((0 <= tokens_array) & (tokens_array < 2**16)).all(): # can do this with a filter over a chunk?
@@ -98,6 +96,9 @@ def main(args):
     seq_len = 2048
     seqs_per_shard = 1024 # shard_size // seq_len
 
+    # tokens dtype
+    token_dtype = np.uint16 # 65_535 max token value
+
     # was using args.chunk_size previously
     map_fn = cc.map if num_proc == 1 else get_pmap_fn(num_proc) 
 
@@ -122,7 +123,7 @@ def main(args):
         ),
         cc.concat,
         cc.partition_all(2048), # seq_len number of tokens
-        cc.map(arrayify_list),
+        cc.map(c.curry(np.array, dtype=token_dtype)),
         cc.partition_all(1024), # seqs_per_shard
         enumerate,
         cc.map(c.curry(write_shards, args, logger)),
@@ -155,10 +156,6 @@ def filter_dataset(d: dict) -> bool:
     return all([is_valid_object, is_string, has_length])
 
 
-def arrayify_list(l: list, dtype: np.dtype = np.uint16) -> np.ndarray:
-    return np.array(l, dtype=dtype)
-
-
 def write_shards(args, logger, enumerated_tokens):
     shard_idx, tokens = enumerated_tokens
     tokens = np.concat(tokens)
@@ -171,11 +168,6 @@ def write_shards(args, logger, enumerated_tokens):
     return
 
 
-def break_list(l: list):
-    for i in l:
-        yield i
-
-
 def manual_dataset():
     d = {'text': 'Gulf of Ob\n\nGulf of Ob, Russian Obskaya Guba, large inlet of the Kara Sea indenting northwestern Siberia, between the peninsulas of Yamal and Gyda, in north-central Russia. The gulf forms the outlet for the Ob River, the delta of which is choked by a huge sandbar. The gulf is about 500 miles (800 km) in length and has a breadth varying between 20 and 60 miles (32 and 97 km). The depth of the sea at this point is 33–40 feet (10–12 m). Its eastern coastline is steep and rugged; the west is low-lying and marshy. Novy Port is the main port of the gulf.', 'url': 'https://www.britannica.com/print/article/423566', 'id': '<urn:uuid:b8f22bed-4bef-4da4-893a-3fc1afc83874>', 'language': 'en', 'language_score': 0.9554803371429443, 'fasttext_score': 0.20887362957000732}
     return d
@@ -184,7 +176,6 @@ def manual_dataset():
 def passthrough_print(x):
     print(type(x), x)
     return x
-
 
 
 if __name__ == "__main__":

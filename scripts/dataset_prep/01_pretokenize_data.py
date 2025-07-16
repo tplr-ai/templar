@@ -1,140 +1,190 @@
 import os
 import argparse
 import multiprocessing as mp
+import cytoolz as c
+import cytoolz.curried as cc
 import numpy as np
 from transformers import AutoTokenizer
 from datasets import load_dataset
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import math
 import glob
 
-# Global tokenizer for multiprocessing
-_tokenizer = None
+from dotenv import load_dotenv
+load_dotenv()
 
 
-def init_worker(tokenizer_name):
+from tplr import logger 
+
+
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
+
+def instantiate_tokenizer(tokenizer_name: str) -> AutoTokenizer:
     """Initialize tokenizer in each worker process."""
-    global _tokenizer
-    _tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
-    _tokenizer.model_max_length = int(1e9)
-    if _tokenizer.eos_token_id is None:
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    tokenizer.model_max_length = int(1e9)
+    if tokenizer.eos_token_id is None:
         raise ValueError(f"Tokenizer {tokenizer_name} must have an EOS token.")
+    return tokenizer
 
 
-def tokenize_doc(doc):
+def tokenize_doc(
+    tokenizer: AutoTokenizer, 
+    doc: list[dict[str, str]],
+) -> list:
     """Tokenize a single document and append EOS token."""
-    global _tokenizer
-    text = doc.get("text")
 
-    if not text or not isinstance(text, str):
-        return np.array([], dtype=np.uint16)
+    text = doc["text"] # fail fast due to filter checks 
 
-    tokens = _tokenizer.encode(text, add_special_tokens=False)
-    tokens.append(_tokenizer.eos_token_id)
+    tokens = tokenizer.encode(text, add_special_tokens=False)
+    tokens.append(tokenizer.eos_token_id)
 
-    tokens_array = np.array(tokens, dtype=np.uint16)
 
-    if not ((0 <= tokens_array) & (tokens_array < 2**16)).all():
-        raise ValueError(
-            f"Token IDs exceed uint16 range. Vocab size: {_tokenizer.vocab_size}"
-        )
 
-    return tokens_array
+    # tokens_array = np.array(tokens, dtype=dtype) 
+
+    # if not ((0 <= tokens_array) & (tokens_array < 2**16)).all(): # can do this with a filter over a chunk?
+    #     raise ValueError(
+    #         f"Token IDs exceed uint16 range. Vocab size: {tokenizer.vocab_size}"
+    #     )
+
+    return tokens # tokens_array
 
 
 def main(args):
+    debug = args.debug
     target_tokens = args.total_tokens
     shard_size = args.shard_size
     expected_shards = math.ceil(target_tokens / shard_size)
 
-    # Check existing shards
-    if os.path.isdir(args.output_dir):
-        existing = glob.glob(os.path.join(args.output_dir, "train_*.npy"))
-        existing_count = sum(1 for f in existing if os.path.basename(f)[6:-4].isdigit())
-
-        if existing_count >= expected_shards:
-            print(
-                f"Found {existing_count} shards (>= {expected_shards} expected). Skipping."
-            )
-            return
-        else:
-            print(f"Found {existing_count}/{expected_shards} shards. Continuing.")
-
     os.makedirs(args.output_dir, exist_ok=True)
 
-    print(f"Dataset: {args.dataset}")
-    print(f"Tokenizer: {args.tokenizer}")
-    print(f"Target: {target_tokens / 1e9:.1f}B tokens")
-    print(f"Shard size: {shard_size / 1e6:.0f}M tokens")
-    print(f"Expected shards: {expected_shards}")
+    # Check existing shards
+    existing = glob.glob(os.path.join(args.output_dir, "train_*.npy"))
 
-    # Load and shuffle dataset
+    # could we do this as a function / class+attribute so that if our indices change we can still check?
+    number_existing_shards = sum(1 for f in existing if os.path.basename(f)[6:-4].isdigit())
+
+    if number_existing_shards >= expected_shards:
+        logger.info(
+            f"Found {number_existing_shards} shards (>= {expected_shards} expected). Skipping."
+        )
+        return
+    else:
+        logger.info(f"Found {number_existing_shards}/{expected_shards} shards. Continuing.")
+
+
+    logger.info(f"Dataset: {args.dataset}")
+    logger.info(f"Tokenizer: {args.tokenizer}")
+    logger.info(f"Target: {target_tokens / 1e9:.1f}B tokens")
+    logger.info(f"Shard size: {shard_size / 1e6:.0f}M tokens")
+    logger.info(f"Expected shards: {expected_shards}")
+
+    # # Load and shuffle dataset
     dataset = load_dataset(
         args.dataset, split="train", streaming=True, trust_remote_code=True
     )
     dataset = dataset.shuffle(seed=args.seed, buffer_size=args.buffer_size)
 
-    num_proc = args.num_proc if args.num_proc > 0 else max(1, os.cpu_count() * 3 // 4)
-    print(f"Using {num_proc} processes")
+    tokenizer = instantiate_tokenizer(args.tokenizer)
+    tokenize_fn = c.curry(tokenize_doc, tokenizer)  
+
+    # would we ever want fewer workers? 1 is good only if the loop is misbehaving
+    num_proc = 1 if debug else min(os.cpu_count() - 1, int(os.cpu_count() * .9))  
+    logger.info(f"Using {num_proc} processes")
 
     # Initialize processing variables
-    shard_idx = 0
-    shard_buffer = np.empty(shard_size, dtype=np.uint16)
-    tokens_in_shard = 0
-    total_tokens = 0
+    seq_len = 2048
+    seqs_per_shard = 1024 # shard_size // seq_len
 
-    with mp.Pool(num_proc, initializer=init_worker, initargs=(args.tokenizer,)) as pool:
-        with tqdm(total=target_tokens, unit="tokens", desc="Tokenizing") as pbar:
-            for doc_tokens in pool.imap(
-                tokenize_doc, iter(dataset), chunksize=args.chunk_size
-            ):
-                if total_tokens >= target_tokens:
-                    break
+    # was using args.chunk_size previously
+    map_fn = cc.map if num_proc == 1 else get_pmap_fn(num_proc) 
 
-                if len(doc_tokens) == 0:
-                    continue
+    writer = c.pipe(
+        tqdm(
+            # (manual_dataset() for _ in range(10000000)), 
+            dataset,
+            total=204800,
+            # total=target_tokens, 
+            # unit="tokens", 
+            desc="Tokenizing",
+        ),  
+        cc.take(204800),
+        cc.partition_all(1), 
+        cc.filter(lambda d: filter_dataset(d[0])),
+        map_fn(
+            cc.compose_left(
+                c.first,
+                tokenize_fn,
+                iter,
+            ),
+        ),
+        cc.concat,
+        cc.partition_all(2048), # seq_len number of tokens
+        cc.map(arrayify_list),
+        cc.partition_all(1024), # seqs_per_shard
+        enumerate,
+        cc.map(c.curry(write_shards, args, logger)),
+        list,
+    )
 
-                # Process tokens from this document
-                doc_idx = 0
-                while doc_idx < len(doc_tokens) and total_tokens < target_tokens:
-                    space_left = shard_size - tokens_in_shard
-                    doc_left = len(doc_tokens) - doc_idx
-                    global_left = target_tokens - total_tokens
+    total_tokens = seq_len * seqs_per_shard
 
-                    take = min(space_left, doc_left, global_left)
-                    if take == 0:
-                        break
+    logger.info(f"Completed. Total tokens: {total_tokens:,}")
+    return
 
-                    # Copy tokens to shard buffer
-                    shard_buffer[tokens_in_shard : tokens_in_shard + take] = doc_tokens[
-                        doc_idx : doc_idx + take
-                    ]
-                    tokens_in_shard += take
-                    total_tokens += take
-                    pbar.update(take)
-                    doc_idx += take
 
-                    # Save shard if full
-                    if tokens_in_shard == shard_size:
-                        shard_path = os.path.join(
-                            args.output_dir, f"train_{shard_idx:06d}.npy"
-                        )
-                        np.save(shard_path, shard_buffer)
-                        tqdm.write(
-                            f"Saved shard {shard_idx} ({shard_size / 1e6:.0f}M tokens)"
-                        )
-                        shard_idx += 1
-                        tokens_in_shard = 0
+def get_pmap_fn(num_proc: int):
+    return c.curry(
+        mp.Pool(num_proc).imap, 
+        chunksize=1, 
+    )
 
-    # Save final partial shard
-    if tokens_in_shard > 0:
-        shard_path = os.path.join(args.output_dir, f"train_{shard_idx:06d}.npy")
-        np.save(shard_path, shard_buffer[:tokens_in_shard])
-        tqdm.write(
-            f"Saved final shard {shard_idx} ({tokens_in_shard / 1e6:.1f}M tokens)"
-        )
 
-    print(f"Completed. Total tokens: {total_tokens:,}")
+def filter_dataset(d: dict) -> bool:
+    has_length = False 
+
+    text = d.get("text", "")
+
+    is_valid_object = bool(text)
+    is_string = isinstance(text, str)
+    if is_string:
+        has_length = len(text) > 0
+
+    return all([is_valid_object, is_string, has_length])
+
+
+def arrayify_list(l: list, dtype: np.dtype = np.uint16) -> np.ndarray:
+    return np.array(l, dtype=dtype)
+
+
+def write_shards(args, logger, enumerated_tokens):
+    shard_idx, tokens = enumerated_tokens
+    tokens = np.concat(tokens)
+
+    shard_path = os.path.join(
+        args.output_dir, f"train_{shard_idx:06d}.npy"
+    )
+    np.save(shard_path, tokens)
+    logger.info(f"Saved shard {shard_idx} ({len(tokens) / 1e6:.0f}M tokens)")
+    return
+
+
+def break_list(l: list):
+    for i in l:
+        yield i
+
+
+def manual_dataset():
+    d = {'text': 'Gulf of Ob\n\nGulf of Ob, Russian Obskaya Guba, large inlet of the Kara Sea indenting northwestern Siberia, between the peninsulas of Yamal and Gyda, in north-central Russia. The gulf forms the outlet for the Ob River, the delta of which is choked by a huge sandbar. The gulf is about 500 miles (800 km) in length and has a breadth varying between 20 and 60 miles (32 and 97 km). The depth of the sea at this point is 33–40 feet (10–12 m). Its eastern coastline is steep and rugged; the west is low-lying and marshy. Novy Port is the main port of the gulf.', 'url': 'https://www.britannica.com/print/article/423566', 'id': '<urn:uuid:b8f22bed-4bef-4da4-893a-3fc1afc83874>', 'language': 'en', 'language_score': 0.9554803371429443, 'fasttext_score': 0.20887362957000732}
+    return d
+
+
+def passthrough_print(x):
+    print(type(x), x)
+    return x
+
 
 
 if __name__ == "__main__":
@@ -183,6 +233,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--chunk_size", type=int, default=256, help="Processing chunk size"
+    )
+    parser.add_argument(
+        "--debug", type=bool, default=False, help="use 1 proc for debugging"
     )
 
     args = parser.parse_args()

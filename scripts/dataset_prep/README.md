@@ -91,3 +91,34 @@ After running both scripts, your data directory will contain:
 rm <DATA_ROOT>/train_*.npy
 ```
 Only `tokens.bin` and `sample_ids.bin` are needed for training.
+
+
+
+## Local Testing with Single Shard
+
+To quickly verify the end-to-end data preparation pipeline without processing the full dataset, you can generate a single representative shard and run the consolidation process on it.
+
+The process involves two main steps:
+
+### Generate a Test Shard
+
+First, use the provided script to generate a single shard. The script creates a statistically representative sample from the source dataset.
+
+```
+python single_testing_shard.py --output_dir ./test_shard
+```
+
+This command will produce a single file: ./test_shard/train_000000.npy.
+
+### Run Consolidation on the Test Shard
+
+Next, run the consolidation script on the directory containing your single shard.
+
+Important: You must use the --skip-validation flag. The standard validation checks are configured for the final, multi-terabyte dataset and are guaranteed to fail when run against a single, smaller test shard.
+
+```
+python 02_consolidate_shards.py --data_root ./test_shard --seq_len 2048 --skip-validation
+```
+This will create tokens.bin and sample_ids.bin inside the ./test_shard directory, confirming the pipeline logic works correctly.
+
+One can then run local tests like `torchrun scripts/local_miner_test.py` once you point the script to your local test shard with `DATASET_BINS_PATH`.

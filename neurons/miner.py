@@ -39,6 +39,7 @@ import torch.distributed as dist
 import torch.nn.parallel
 import uvloop
 from torch import autocast
+from torch.cuda.amp import GradScaler
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
@@ -48,7 +49,7 @@ from torch.optim.lr_scheduler import (
 )
 from torch.utils.data import DataLoader
 
-
+from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.models.llama3 import (
     Transformer as TitanLlama,
     TransformerModelArgs,
@@ -97,6 +98,12 @@ class Miner(BaseNode):
         )
         parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
+        )
+        parser.add_argument(
+            "--amp-dtype",
+            choices=["bf16", "fp16"],
+            default="bf16",
+            help="Mixed-precision data type. Use «fp16» to enable GradScaler.",
         )
         parser.add_argument(
             "--tp-degree",
@@ -202,6 +209,13 @@ class Miner(BaseNode):
         self.device = torch.device(self.config.device)
         tplr.logger.info(f"[Init] device set → {self.device}")
 
+        # Mixed precision setup
+        self.amp_dtype = torch.bfloat16 if self.config.amp_dtype == "bf16" else torch.float16
+        self.scaler = GradScaler(
+            enabled=(self.amp_dtype is torch.float16 and self.device.type == "cuda")
+        )
+        tplr.logger.info(f"[Init] Using {self.config.amp_dtype}. GradScaler enabled: {self.scaler.is_enabled()}")
+
         # Convenience flags
         self.is_master = self.rank == 0
         self.config.local = cast(bool, self.config.local)
@@ -249,6 +263,9 @@ class Miner(BaseNode):
             )
         dp_degree = self.world_size // tp_degree
 
+        self.tp_degree = tp_degree
+        self.dp_degree = dp_degree
+
         pdims = ParallelDims(
             dp_replicate = 1,
             dp_shard     = dp_degree,
@@ -257,26 +274,49 @@ class Miner(BaseNode):
             cp           = 1,
             ep           = 1,
             world_size   = self.world_size,
-            enable_loss_parallel = False,
         )
 
         #self.tensor_parallel_degree   = getattr(self.hparams, "tensor_parallel_degree", self.world_size)
         #self.pipeline_parallel_degree = getattr(self.hparams, "pipeline_parallel_degree", 1)
         #self.context_parallel_degree  = getattr(self.hparams, "context_parallel_degree", 1)
 
-        world_mesh = pdims.build_mesh(device_type="cuda")
+        world_mesh = pdims.build_mesh()
+
+        from types import SimpleNamespace
+
+        job_config_for_titan = SimpleNamespace(
+            training=SimpleNamespace(
+                seq_len=self.hparams.sequence_length,
+                compile=getattr(self.hparams, "compile", False),
+                enable_cpu_offload=getattr(self.hparams, "enable_cpu_offload", False),
+                mixed_precision_param=getattr(self.hparams, "mixed_precision_param", "fp32"),
+                mixed_precision_reduce=getattr(self.hparams, "mixed_precision_reduce", "fp32"),
+            ),
+            parallelism=SimpleNamespace(
+                enable_async_tensor_parallel=getattr(self.hparams, "enable_async_tensor_parallel", False),
+                disable_loss_parallel=getattr(self.hparams, "disable_loss_parallel", True),
+                fsdp_reshard_after_forward=getattr(self.hparams, "fsdp_reshard_after_forward", "default"),
+                enable_compiled_autograd=getattr(self.hparams, "enable_compiled_autograd", False)
+            ),
+            model=SimpleNamespace(
+                converters=getattr(self.hparams, "converters", {}),
+            ),
+            float8=SimpleNamespace(
+                recipe_name=getattr(self.hparams, "recipe_name", ""),
+            ),
+            activation_checkpoint=SimpleNamespace(
+                mode="selective",
+                selective_ac_option="op"
+            )
+        )
 
         self.model = parallelize_llama(
             self.model,
-            world_mesh      = world_mesh,
-            parallel_dims   = pdims,
-            job_config      = self.hparams,
+            parallel_dims  = pdims,
+            job_config     = job_config_for_titan,
         )
 
-        self.model.to(self.device)  # type: ignore[reportArgumentType]
-        if self.dp_degree < 4:
-            self.model.gradient_checkpointing_enable() # Quentin: I think this should always be enabled instead
-            tplr.logger.info("[Init] Gradient checkpointing enabled.")
+        self.model.to_empty(device=self.device)  # type: ignore[reportArgumentType]
 
         tplr.logger.info(f"[Init] Llama model parallelized with TP={tp_degree} and DP={dp_degree}, and on device")
 
@@ -959,6 +999,14 @@ class Miner(BaseNode):
         dict
             Keys: total_loss (float), batch_count (int), batch_tokens (int)
         """
+
+        # Ensure the event loop and executor are initialized, which is normally
+        # done in the `run()` method. This makes the method safe for isolated testing.
+        if not hasattr(self, "loop"):
+            self.loop = asyncio.get_running_loop()
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
+            self.loop.set_default_executor(self.executor)
+
         self.inner_optimizer.zero_grad()
 
         total_loss: float = 0.0
@@ -1020,11 +1068,13 @@ class Miner(BaseNode):
             # ------------------------------------------------------------------ #
             # 3. Forward + backward
             # ------------------------------------------------------------------ #
-            with autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                outputs = self.model(input_ids=input_ids, labels=labels)
+            with autocast(device_type=self.device.type, dtype=self.amp_dtype):
+                outputs = self.model(input_ids, labels)
 
-            loss = outputs.loss / self.sampler.grad_accum_steps
-            loss_item = outputs.loss.detach().item()
+            calculated_loss = cross_entropy_loss(outputs, labels)
+
+            loss = calculated_loss / self.sampler.grad_accum_steps
+            loss_item = calculated_loss.detach().item()
 
             # -------------------------------------------------------------- #
             # 3-a.  Back-prop with no_sync() on non-final micro-batches
@@ -1035,7 +1085,8 @@ class Miner(BaseNode):
             else:
                 sync_ctx = nullcontext()
             with sync_ctx:
-                loss.backward()
+                self.scaler.scale(loss).backward()
+
             total_loss += loss_item
             local_loss_sum += loss_item  # defer collective
 
@@ -1062,7 +1113,11 @@ class Miner(BaseNode):
                 log_loss = self._ddp_reduce(loss_item, op=dist.ReduceOp.AVG)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
-                self.inner_optimizer.step()
+                # Unscale, clip, then step via GradScaler if using fp16
+                self.scaler.unscale_(self.inner_optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                self.scaler.step(self.inner_optimizer)
+                self.scaler.update()
                 self.inner_scheduler.step()
                 self.inner_optimizer.zero_grad(set_to_none=True)
 

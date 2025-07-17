@@ -172,6 +172,45 @@ class Validator(BaseNode):
         # Init optimizer
         self.lr = float(self.hparams.outer_learning_rate)
         self.outer_optimizer = SGD(self.model.parameters(), lr=self.lr)
+
+        # inner scheduler and dummy optimizer for logging purposes
+
+        _dummy_param = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+        # Any optimiser will do; SGD is the simplest and has no extra state.
+        self.inner_optimizer = torch.optim.SGD(
+            [_dummy_param],
+            lr=self.hparams.inner_learning_rate,
+        )
+        inner_steps_before_outer_step = self.hparams.inner_steps * (
+            self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
+        )
+
+        init_scheduler = torch.optim.lr_scheduler.LinearLR(
+            self.inner_optimizer,
+            start_factor=0.1,
+            end_factor=0.1,
+            total_iters=inner_steps_before_outer_step,
+        )
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            self.inner_optimizer,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=self.hparams.warmup_steps,
+        )
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.inner_optimizer,
+            T_max=self.hparams.t_max,
+            eta_min=self.hparams.inner_learning_rate * 0.1,
+        )
+        self.inner_scheduler = torch.optim.lr_scheduler.SequentialLR(
+            self.inner_optimizer,
+            schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
+            milestones=[
+                inner_steps_before_outer_step,
+                inner_steps_before_outer_step + self.hparams.warmup_steps,
+            ],
+        )
+
         self.xshapes = {}
         self.totalks = {}
         for n, p in self.model.named_parameters():
@@ -769,6 +808,11 @@ class Validator(BaseNode):
         if success:
             tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
             # Only catch up if we're behind
+            for _ in range(
+                self.start_window,
+                (loaded_checkpoint_window + 1) * self.hparams.inner_steps,
+            ):
+                self.inner_scheduler.step()
             if (
                 loaded_checkpoint_window < self.current_window
                 and self.global_step > checkpoint_window_buffer
@@ -810,6 +854,16 @@ class Validator(BaseNode):
 
             # 2. Increment sync window and update peer lists
             window_start = tplr.T()
+
+            # --------------------------------------------------------------+
+            #  Simulate the miner’s *inner* loop so the LR schedule advances │
+            # --------------------------------------------------------------+
+            for _ in range(self.hparams.inner_steps):
+                self.inner_scheduler.step()
+
+            # current inner‑LR after simulation
+            current_inner_lr = self.inner_scheduler.get_last_lr()[0]
+
             self.sync_window += 1
             tplr.log_with_context(
                 level="info",
@@ -2010,7 +2064,8 @@ class Validator(BaseNode):
                 "validator/network/window": self.sync_window,
                 "validator/network/step": self.global_step,
                 "validator/network/evaluated_uids": len(self.evaluated_uids),
-                "validator/optimizer/learning_rate": self.lr,
+                "validator/optimizer/outer_lr": self.lr,
+                "validator/optimizer/inner_lr": current_inner_lr,
                 "validator/network/active_miners": len(self.valid_score_indices),
                 "validator/gather/success_rate": success_rate * 100,
                 "validator/timing/window_total": window_total_time,
@@ -2050,7 +2105,8 @@ class Validator(BaseNode):
                     "loss_random_improvement": float(self.relative_improvement_random),
                     "current_block": int(self.current_block),
                     "evaluated_uids_count": int(len(self.evaluated_uids)),
-                    "learning_rate": float(self.lr),
+                    "outer_lr": float(self.lr),
+                    "inner_lr": float(current_inner_lr),
                     "active_miners_count": int(len(self.valid_score_indices)),
                     "gather_success_rate": gather_success_rate,
                     "window_total_time": float(window_total_time),

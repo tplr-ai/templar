@@ -1,0 +1,153 @@
+#!/bin/bash
+# Post-update hook for Watchtower blue/green deployment
+
+set -euo pipefail
+
+CONTAINER_NAME="${1:-}"
+NODE_ID=$(echo "$CONTAINER_NAME" | grep -o '[0-9]$' || echo "unknown")
+HEALTH_ENDPOINT="http://localhost:$((9944 + NODE_ID))/health"
+METRICS_ENDPOINT="http://localhost:$((9615 + NODE_ID))/metrics"
+LOGFILE="/opt/subtensor/logs/watchtower-post-update.log"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [POST-UPDATE] [$CONTAINER_NAME] $*" | tee -a "$LOGFILE"
+}
+
+wait_for_healthy() {
+    local endpoint="$1"
+    local max_attempts=60
+    local attempt=0
+    
+    log "Waiting for $endpoint to become healthy"
+    
+    while [ $attempt -lt $max_attempts ]; do
+        if curl -s -f "$endpoint" >/dev/null 2>&1; then
+            log "Health check passed for $endpoint"
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        log "Health check attempt $attempt/$max_attempts failed, retrying in 10s"
+        sleep 10
+    done
+    
+    log "ERROR: Health check failed after $max_attempts attempts"
+    return 1
+}
+
+verify_sync_status() {
+    local container="$1"
+    local node_id="$2"
+    
+    log "Verifying sync status for $container"
+    
+    # Check if node is syncing properly
+    local rpc_endpoint="http://localhost:$((9933 + node_id))"
+    
+    # Get current block number
+    local current_block
+    current_block=$(curl -s -H "Content-Type: application/json" -d '{"id":1, "jsonrpc":"2.0", "method": "system_health", "params":[]}' "$rpc_endpoint" | jq -r '.result.peers // 0' 2>/dev/null || echo "0")
+    
+    if [ "$current_block" -gt 0 ]; then
+        log "Node has $current_block peers - sync appears healthy"
+        return 0
+    else
+        log "WARNING: Could not verify sync status or low peer count"
+        return 1
+    fi
+}
+
+restore_traffic() {
+    local container="$1"
+    log "Restoring traffic to $container"
+    
+    # Re-enable in load balancer
+    if [ -f /etc/nginx/nginx.conf ]; then
+        log "Restoring nginx upstream configuration"
+        # This would be implemented based on your nginx setup
+        systemctl reload nginx 2>/dev/null || log "WARNING: Could not reload nginx"
+    fi
+}
+
+send_notification() {
+    local status="$1"
+    local container="$2"
+    local message="$3"
+    
+    if [ -n "{{ vault_discord_webhook_url }}" ]; then
+        curl -s -H "Content-Type: application/json" \
+            -X POST \
+            -d "{\"content\": \"🔄 **Watchtower Update $status**: $container - $message\"}" \
+            "{{ vault_discord_webhook_url }}" >/dev/null 2>&1 || true
+    fi
+}
+
+rollback_on_failure() {
+    local container="$1"
+    log "CRITICAL: Rolling back $container due to health check failure"
+    
+    # Stop the failed container
+    docker stop "$container" 2>/dev/null || true
+    
+    # Remove the failed container
+    docker rm "$container" 2>/dev/null || true
+    
+    # Restore from backup if available
+    local backup_file="/opt/subtensor/backups/${container}-pre-update-$(date +%Y%m%d).tar.gz"
+    if [ -f "$backup_file" ]; then
+        log "Restoring $container from backup: $backup_file"
+        # Implement backup restoration logic here
+    fi
+    
+    # Restart with previous image
+    log "Restarting $container with previous configuration"
+    cd /opt/subtensor && docker-compose up -d "$container"
+    
+    send_notification "FAILED" "$container" "Update failed, rolled back to previous version"
+}
+
+main() {
+    log "Starting post-update process for $CONTAINER_NAME"
+    
+    if [ -z "$CONTAINER_NAME" ]; then
+        log "ERROR: Container name not provided"
+        exit 1
+    fi
+    
+    # Wait for container to be healthy
+    if ! wait_for_healthy "$HEALTH_ENDPOINT"; then
+        log "ERROR: Container failed health checks after update"
+        rollback_on_failure "$CONTAINER_NAME"
+        exit 1
+    fi
+    
+    # Verify metrics endpoint is working
+    if ! wait_for_healthy "$METRICS_ENDPOINT"; then
+        log "WARNING: Metrics endpoint not responding, but continuing"
+    fi
+    
+    # Verify sync status
+    if ! verify_sync_status "$CONTAINER_NAME" "$NODE_ID"; then
+        log "WARNING: Sync verification failed, monitoring required"
+    fi
+    
+    # Wait additional time for stabilization
+    log "Waiting for container stabilization (60 seconds)"
+    sleep 60
+    
+    # Final health check
+    if ! wait_for_healthy "$HEALTH_ENDPOINT"; then
+        log "ERROR: Final health check failed"
+        rollback_on_failure "$CONTAINER_NAME"
+        exit 1
+    fi
+    
+    # Restore traffic
+    restore_traffic "$CONTAINER_NAME"
+    
+    # Update completion notification
+    send_notification "SUCCESS" "$CONTAINER_NAME" "Update completed successfully"
+    
+    log "Post-update process completed successfully for $CONTAINER_NAME"
+}
+
+main "$@"

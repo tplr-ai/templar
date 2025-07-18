@@ -1,0 +1,19 @@
+---
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: restart subtensor
+  systemd:
+    name: subtensor
+    state: restarted
+
+- name: stop subtensor
+  systemd:
+    name: subtensor
+    state: stopped
+
+- name: start subtensor
+  systemd:
+    name: subtensor
+    state: started

@@ -1,0 +1,46 @@
+---
+nginx_version: "latest"
+nginx_user: "www-data"
+nginx_group: "www-data"
+
+nginx_server_names_hash_bucket_size: 128
+nginx_types_hash_max_size: 2048
+nginx_keepalive_timeout: 65
+nginx_tcp_nopush: true
+nginx_tcp_nodelay: true
+nginx_sendfile: true
+nginx_server_tokens: false
+
+nginx_rate_limit_zone: "subtensor_api"
+nginx_rate_limit_requests: "50r/s"
+nginx_rate_limit_burst: 100
+
+nginx_health_check_uri: "/health"
+nginx_health_check_interval: "{{ nginx_health_check_interval | default('30s') }}"
+nginx_health_check_fails: "{{ nginx_health_check_fails | default(3) }}"
+nginx_health_check_passes: "{{ nginx_health_check_passes | default(2) }}"
+
+nginx_upstream_keepalive: 32
+nginx_upstream_keepalive_requests: 100
+nginx_upstream_keepalive_timeout: "60s"
+
+nginx_ssl_protocols: "TLSv1.2 TLSv1.3"
+nginx_ssl_ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
+nginx_ssl_prefer_server_ciphers: true
+nginx_ssl_session_cache: "shared:SSL:10m"
+nginx_ssl_session_timeout: "10m"
+nginx_ssl_dhparam_bits: 2048
+
+nginx_security_headers:
+  - "X-Frame-Options DENY"
+  - "X-Content-Type-Options nosniff"
+  - "X-XSS-Protection '1; mode=block'"
+  - "Referrer-Policy strict-origin-when-cross-origin"
+  - "Content-Security-Policy 'default-src self; script-src self unsafe-inline; style-src self unsafe-inline'"
+
+nginx_log_format: |
+  '$remote_addr - $remote_user [$time_local] "$request" '
+  '$status $body_bytes_sent "$http_referer" '
+  '"$http_user_agent" "$http_x_forwarded_for" '
+  'rt=$request_time uct="$upstream_connect_time" '
+  'uht="$upstream_header_time" urt="$upstream_response_time"'

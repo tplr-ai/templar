@@ -39,7 +39,7 @@ import torch.distributed as dist
 import torch.nn.parallel
 import uvloop
 from torch import autocast
-from torch.cuda.amp import GradScaler
+from torch.amp.grad_scaler import GradScaler
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
@@ -210,11 +210,15 @@ class Miner(BaseNode):
         tplr.logger.info(f"[Init] device set → {self.device}")
 
         # Mixed precision setup
-        self.amp_dtype = torch.bfloat16 if self.config.amp_dtype == "bf16" else torch.float16
+        self.amp_dtype = (
+            torch.bfloat16 if self.config.amp_dtype == "bf16" else torch.float16
+        )
         self.scaler = GradScaler(
             enabled=(self.amp_dtype is torch.float16 and self.device.type == "cuda")
         )
-        tplr.logger.info(f"[Init] Using {self.config.amp_dtype}. GradScaler enabled: {self.scaler.is_enabled()}")
+        tplr.logger.info(
+            f"[Init] Using {self.config.amp_dtype}. GradScaler enabled: {self.scaler.is_enabled()}"
+        )
 
         # Convenience flags
         self.is_master = self.rank == 0
@@ -241,17 +245,17 @@ class Miner(BaseNode):
         super().__init__()
 
         # Init model with hparams config
-        hf_cfg = self.hparams.model_config   # a transformers.LlamaConfig
+        hf_cfg = self.hparams.model_config  # a transformers.LlamaConfig
         titan_args = TransformerModelArgs(
-            dim              = hf_cfg.hidden_size,
-            n_layers         = hf_cfg.num_hidden_layers,
-            n_heads          = hf_cfg.num_attention_heads,
-            n_kv_heads       = getattr(hf_cfg, "num_key_value_heads", None),
-            vocab_size       = hf_cfg.vocab_size,
-            multiple_of      = 256,
-            max_seq_len      = self.hparams.sequence_length,
-            rope_theta       = getattr(hf_cfg, "rope_theta", 1e4),
-            depth_init       = True,
+            dim=hf_cfg.hidden_size,
+            n_layers=hf_cfg.num_hidden_layers,
+            n_heads=hf_cfg.num_attention_heads,
+            n_kv_heads=getattr(hf_cfg, "num_key_value_heads", None),
+            vocab_size=hf_cfg.vocab_size,
+            multiple_of=256,
+            max_seq_len=self.hparams.sequence_length,
+            rope_theta=getattr(hf_cfg, "rope_theta", 1e4),
+            depth_init=True,
         )
         with torch.device("meta"):
             self.model = TitanLlama(titan_args)
@@ -267,18 +271,24 @@ class Miner(BaseNode):
         self.dp_degree = dp_degree
 
         pdims = ParallelDims(
-            dp_replicate = 1,
-            dp_shard     = dp_degree,
-            tp           = tp_degree,
-            pp           = 1,
-            cp           = 1,
-            ep           = 1,
-            world_size   = self.world_size,
+            dp_replicate=1,
+            dp_shard=dp_degree,
+            tp=tp_degree,
+            pp=1,
+            cp=1,
+            ep=1,
+            world_size=self.world_size,
         )
 
-        #self.tensor_parallel_degree   = getattr(self.hparams, "tensor_parallel_degree", self.world_size)
-        #self.pipeline_parallel_degree = getattr(self.hparams, "pipeline_parallel_degree", 1)
-        #self.context_parallel_degree  = getattr(self.hparams, "context_parallel_degree", 1)
+        self.tensor_parallel_degree = getattr(
+            self.hparams, "tensor_parallel_degree", self.world_size
+        )
+        self.pipeline_parallel_degree = getattr(
+            self.hparams, "pipeline_parallel_degree", 1
+        )
+        self.context_parallel_degree = getattr(
+            self.hparams, "context_parallel_degree", 1
+        )
 
         world_mesh = pdims.build_mesh()
 
@@ -289,14 +299,26 @@ class Miner(BaseNode):
                 seq_len=self.hparams.sequence_length,
                 compile=getattr(self.hparams, "compile", False),
                 enable_cpu_offload=getattr(self.hparams, "enable_cpu_offload", False),
-                mixed_precision_param=getattr(self.hparams, "mixed_precision_param", "fp32"),
-                mixed_precision_reduce=getattr(self.hparams, "mixed_precision_reduce", "fp32"),
+                mixed_precision_param=getattr(
+                    self.hparams, "mixed_precision_param", "fp32"
+                ),
+                mixed_precision_reduce=getattr(
+                    self.hparams, "mixed_precision_reduce", "fp32"
+                ),
             ),
             parallelism=SimpleNamespace(
-                enable_async_tensor_parallel=getattr(self.hparams, "enable_async_tensor_parallel", False),
-                disable_loss_parallel=getattr(self.hparams, "disable_loss_parallel", True),
-                fsdp_reshard_after_forward=getattr(self.hparams, "fsdp_reshard_after_forward", "default"),
-                enable_compiled_autograd=getattr(self.hparams, "enable_compiled_autograd", False)
+                enable_async_tensor_parallel=getattr(
+                    self.hparams, "enable_async_tensor_parallel", False
+                ),
+                disable_loss_parallel=getattr(
+                    self.hparams, "disable_loss_parallel", True
+                ),
+                fsdp_reshard_after_forward=getattr(
+                    self.hparams, "fsdp_reshard_after_forward", "default"
+                ),
+                enable_compiled_autograd=getattr(
+                    self.hparams, "enable_compiled_autograd", False
+                ),
             ),
             model=SimpleNamespace(
                 converters=getattr(self.hparams, "converters", {}),
@@ -305,20 +327,21 @@ class Miner(BaseNode):
                 recipe_name=getattr(self.hparams, "recipe_name", ""),
             ),
             activation_checkpoint=SimpleNamespace(
-                mode="selective",
-                selective_ac_option="op"
-            )
+                mode="selective", selective_ac_option="op"
+            ),
         )
 
         self.model = parallelize_llama(
             self.model,
-            parallel_dims  = pdims,
-            job_config     = job_config_for_titan,
+            parallel_dims=pdims,
+            job_config=job_config_for_titan,
         )
 
         self.model.to_empty(device=self.device)  # type: ignore[reportArgumentType]
 
-        tplr.logger.info(f"[Init] Llama model parallelized with TP={tp_degree} and DP={dp_degree}, and on device")
+        tplr.logger.info(
+            f"[Init] Llama model parallelized with TP={tp_degree} and DP={dp_degree}, and on device"
+        )
 
         self.bare_model = getattr(self.model, "module", self.model)
         self.tokenizer = self.hparams.tokenizer
@@ -340,8 +363,10 @@ class Miner(BaseNode):
 
         dp_group = None
         if dp_degree > 1:
-            dp_group = world_mesh.get_group('dp_shard')
-            tplr.logger.info(f"[Init] Using data-parallel group for optimizer sharding (size={dp_degree}).")
+            dp_group = world_mesh.get_group("dp_shard")
+            tplr.logger.info(
+                f"[Init] Using data-parallel group for optimizer sharding (size={dp_degree})."
+            )
 
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
@@ -1080,7 +1105,11 @@ class Miner(BaseNode):
             # 3-a.  Back-prop with no_sync() on non-final micro-batches
             # -------------------------------------------------------------- #
             final_micro_batch = (batch_count + 1) % self.sampler.grad_accum_steps == 0
-            if hasattr(self.model, "no_sync") and self.world_size > 1 and not final_micro_batch:
+            if (
+                hasattr(self.model, "no_sync")
+                and self.world_size > 1
+                and not final_micro_batch
+            ):
                 sync_ctx = self.model.no_sync()
             else:
                 sync_ctx = nullcontext()

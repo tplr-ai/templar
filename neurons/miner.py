@@ -40,7 +40,9 @@ import torch.nn.parallel
 import uvloop
 from torch import autocast
 from torch.amp.grad_scaler import GradScaler
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.optim import ZeroRedundancyOptimizer
+from torch.distributed.tensor import DTensor
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
@@ -48,15 +50,15 @@ from torch.optim.lr_scheduler import (
     SequentialLR,
 )
 from torch.utils.data import DataLoader
-
 from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3 import (
     Transformer as TitanLlama,
+)
+from torchtitan.models.llama3 import (
     TransformerModelArgs,
 )
 from torchtitan.models.llama3.infra.parallelize import parallelize_llama
-from torchtitan.distributed import ParallelDims
-from torch.distributed.device_mesh import init_device_mesh
 
 import tplr
 
@@ -300,10 +302,10 @@ class Miner(BaseNode):
                 compile=getattr(self.hparams, "compile", False),
                 enable_cpu_offload=getattr(self.hparams, "enable_cpu_offload", False),
                 mixed_precision_param=getattr(
-                    self.hparams, "mixed_precision_param", "fp32"
+                    self.hparams, "mixed_precision_param", "float32"
                 ),
                 mixed_precision_reduce=getattr(
-                    self.hparams, "mixed_precision_reduce", "fp32"
+                    self.hparams, "mixed_precision_reduce", "float32"
                 ),
             ),
             parallelism=SimpleNamespace(
@@ -338,6 +340,7 @@ class Miner(BaseNode):
         )
 
         self.model.to_empty(device=self.device)  # type: ignore[reportArgumentType]
+        self.model.init_weights()
 
         tplr.logger.info(
             f"[Init] Llama model parallelized with TP={tp_degree} and DP={dp_degree}, and on device"
@@ -371,15 +374,11 @@ class Miner(BaseNode):
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
         )
-        self.inner_optimizer = ZeroRedundancyOptimizer(
+        self.inner_optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            optimizer_class=torch.optim.AdamW,
             lr=self.hparams.inner_learning_rate,
-            weight_decay=self.hparams.weight_decay,
             betas=(0.9, 0.95),
-            parameters_as_bucket_view=True,
-            process_group=dp_group,
-            overlap_with_ddp=False,
+            weight_decay=self.hparams.weight_decay,
         )
         inner_steps_before_outer_step = self.hparams.inner_steps * (
             self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
@@ -611,7 +610,7 @@ class Miner(BaseNode):
 
             # 1) parameters & buffers
             for tensor in self.bare_model.state_dict().values():
-                if torch.is_tensor(tensor):
+                if torch.is_tensor(tensor) and not isinstance(tensor, DTensor):
                     dist.broadcast(tensor.data, src=0)
 
             bcast_time = tplr.T() - bcast_start

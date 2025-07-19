@@ -38,13 +38,30 @@ import numpy as np
 
 # Third party
 import torch
+import torch.distributed as dist
 import uvloop
 from openskill.models import PlackettLuce
 from rich.console import Console
 from rich.table import Table
 from torch import autocast
 from torch.optim import SGD
-from transformers.models.llama import LlamaForCausalLM
+
+# Fallback CE helper (Titan returns raw logits)
+from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.config_manager import (
+    ActivationCheckpoint,
+    Float8,
+    JobConfig,
+    Model,
+    Parallelism,
+    Training,
+)
+from torchtitan.distributed import ParallelDims
+
+# Third‑party – TorchTitan
+from torchtitan.models.llama3 import Transformer as TitanLlama
+from torchtitan.models.llama3 import TransformerModelArgs
+from torchtitan.models.llama3.infra.parallelize import parallelize_llama
 
 import tplr
 
@@ -125,6 +142,32 @@ class Validator(BaseNode):
 
         # Init config and load hparams
         self.config = Validator.validator_config()
+
+        # ────────────────────────────────────────────────────────────────
+        # Distributed initialisation ─ exactly the same pattern as *miner*
+        # ────────────────────────────────────────────────────────────────
+        self.rank = int(os.getenv("RANK", 0))
+        self.world_size = int(os.getenv("WORLD_SIZE", 1))
+        self.local_rank = int(os.getenv("LOCAL_RANK", 0))
+
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="nccl" if torch.cuda.is_available() else "gloo",
+                init_method="env://",
+                rank=self.rank,
+                world_size=self.world_size,
+                timeout=timedelta(minutes=30),
+            )
+
+        if torch.cuda.is_available():
+            torch.cuda.set_device(self.local_rank)
+
+        self.is_master = self.rank == 0
+        tplr.logger.info(
+            f"[Init] rank={self.rank}, world_size={self.world_size}, "
+            f"local_rank={self.local_rank}, master={self.is_master}"
+        )
+
         self.hparams = tplr.load_hparams(
             use_local_run_hparams=cast(bool, self.config.local)
         )
@@ -152,13 +195,59 @@ class Validator(BaseNode):
         except Exception as e:
             tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
-        # Init model with hparams config
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)  # type: ignore
-        compile_mode = "default"  # or "max-autotune" / "reduce-overhead"
-        self.model = cast(
-            LlamaForCausalLM, torch.compile(self.model, mode=compile_mode)
+        # ────────────────────────────────────────────────────────────
+        # 1 | Instantiate TorchTitan Llama (weights replicated, no TP)
+        # ────────────────────────────────────────────────────────────
+        hf_cfg = self.hparams.model_config  # transformers.LlamaConfig
+        titan_args = TransformerModelArgs(
+            dim=hf_cfg.hidden_size,
+            n_layers=hf_cfg.num_hidden_layers,
+            n_heads=hf_cfg.num_attention_heads,
+            n_kv_heads=getattr(hf_cfg, "num_key_value_heads", None),
+            vocab_size=hf_cfg.vocab_size,
+            multiple_of=256,
+            max_seq_len=self.hparams.sequence_length,
+            rope_theta=getattr(hf_cfg, "rope_theta", 1e4),
+            depth_init=True,
         )
+        with torch.device("meta"):
+            self.model = TitanLlama(titan_args)
+
+        # 2 | Build a “no‑sharding” ParallelDims (dp_replicate = 1)
+        pdims = ParallelDims(
+            dp_replicate=self.world_size,
+            dp_shard=1,  # ← no weight‑sharding
+            tp=1,  # ← no tensor‑parallel
+            pp=1,
+            cp=1,
+            ep=1,
+            world_size=self.world_size,
+        )
+
+        job_config = JobConfig(
+            training=Training(
+                seq_len=self.hparams.sequence_length,
+                compile=getattr(self.hparams, "compile", False),
+            ),
+            parallelism=Parallelism(
+                enable_async_tensor_parallel=False,
+                disable_loss_parallel=True,
+            ),
+            model=Model(converters=[]),
+            float8=Float8(recipe_name=None),
+            activation_checkpoint=ActivationCheckpoint(
+                mode="selective", selective_ac_option="op"
+            ),
+        )
+        self.model = parallelize_llama(
+            self.model,
+            parallel_dims=pdims,
+            job_config=job_config,
+        )
+
+        # Materialise weights on GPU and initialise
+        self.model.to_empty(device=self.config.device)
+        self.model.init_weights()  # type: ignore
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
@@ -680,36 +769,37 @@ class Validator(BaseNode):
         total_loss = 0.0
         n_batches = 0
 
-        with torch.no_grad():
+        with torch.inference_mode():
             model.eval()
-            with autocast(device_type=device.type, dtype=torch.bfloat16):
-                for i, batch in enumerate(loader):
-                    if batch is None or len(batch) == 0:
-                        tplr.log_with_context(
-                            level="warning",
-                            message=f"Empty batch at index {i}, skipping",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-                        continue
-
-                    if isinstance(batch, torch.Tensor):
-                        input_ids = batch.to(
-                            device, dtype=torch.long, non_blocking=True
-                        )
-                    else:
-                        input_ids = torch.tensor(batch, dtype=torch.long, device=device)
-                    labels = input_ids.clone()
-                    labels = torch.where(
-                        labels == self.tokenizer.pad_token_id, -100, labels
+            for i, batch in enumerate(loader):
+                if batch is None or len(batch) == 0:
+                    tplr.log_with_context(
+                        level="warning",
+                        message=f"Empty batch at index {i}, skipping",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
                     )
-                    outputs = model(input_ids=input_ids, labels=labels)
-                    total_loss += outputs.loss.item()
-                    n_batches += 1
-                    del input_ids, labels, outputs
-                    torch.cuda.empty_cache()
+                    continue
 
-                    await asyncio.sleep(0)
+                if isinstance(batch, torch.Tensor):
+                    input_ids = batch.to(device, dtype=torch.long, non_blocking=True)
+                else:
+                    input_ids = torch.tensor(batch, dtype=torch.long, device=device)
+                labels = input_ids.clone()
+                labels[:, :-1] = input_ids[:, 1:]  # shift left by one
+                labels[:, -1] = self.tokenizer.pad_token_id
+                labels = torch.where(
+                    labels == self.tokenizer.pad_token_id, -100, labels
+                )
+                with autocast(device_type=device.type, dtype=torch.bfloat16):
+                    logits = model(input_ids)
+                loss = cross_entropy_loss(logits, labels)
+                total_loss += loss.item()
+                n_batches += 1
+                del input_ids, labels, logits
+                torch.cuda.empty_cache()
+
+                await asyncio.sleep(0)
 
         return total_loss, n_batches
 

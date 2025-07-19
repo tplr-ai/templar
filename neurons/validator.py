@@ -1046,6 +1046,38 @@ class Validator(BaseNode):
             self._bg_tasks.add(t)
             t.add_done_callback(self._bg_tasks.discard)
 
+            idx_overlap = await tplr.neurons.check_uid_index_overlap(
+                self,
+                gather_result,
+                self.sync_window,
+                overlap_threshold=self.hparams.idx_overlap_threshold,
+            )
+            idx_overlap_peers = idx_overlap.get("uids_over_thresh", [])
+            for uid in idx_overlap_peers:
+                old_score = self.final_scores[uid].item()
+
+                # Only reduce positive scores
+                if self.final_scores[uid] > 0:
+                    self.final_scores[uid] *= self.idx_similarity_slashing_rate
+                    self.binary_moving_averages[uid] *= (
+                        self.idx_similarity_slashing_rate
+                    )
+
+                    new_score = self.final_scores[uid].item()
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to similarity in idxs.",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+                else:
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Skipped score of UID {uid} (current score: {old_score:.4f}) due to negative or zero value.",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+
             skipped_uids = gather_result.skipped_uids
             success_rate = gather_result.success_rate
             gather_time = tplr.T() - gather_start

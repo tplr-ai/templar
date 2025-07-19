@@ -36,7 +36,6 @@ import torch
 import torch.distributed as dist
 
 # Third party
-import torch.nn.parallel
 import uvloop
 from torch import autocast
 from torch.amp.grad_scaler import GradScaler
@@ -273,8 +272,8 @@ class Miner(BaseNode):
         self.dp_degree = dp_degree
 
         pdims = ParallelDims(
-            dp_replicate=1,
-            dp_shard=dp_degree,
+            dp_replicate=self.world_size,
+            dp_shard=1,
             tp=tp_degree,
             pp=1,
             cp=1,
@@ -364,9 +363,9 @@ class Miner(BaseNode):
         self.error_feedback = {}
         self.owned_params = set()
 
-        dp_group = None
+        # dp_group = None
         if dp_degree > 1:
-            dp_group = world_mesh.get_group("dp_shard")
+            # dp_group = world_mesh.get_group("dp_shard")
             tplr.logger.info(
                 f"[Init] Using data-parallel group for optimizer sharding (size={dp_degree})."
             )
@@ -374,11 +373,14 @@ class Miner(BaseNode):
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
         )
-        self.inner_optimizer = torch.optim.AdamW(
+        self.inner_optimizer = ZeroRedundancyOptimizer(
             self.model.parameters(),
+            optimizer_class=torch.optim.AdamW,
             lr=self.hparams.inner_learning_rate,
-            betas=(0.9, 0.95),
             weight_decay=self.hparams.weight_decay,
+            betas=(0.9, 0.95),
+            parameters_as_bucket_view=True,
+            overlap_with_ddp=False,
         )
         inner_steps_before_outer_step = self.hparams.inner_steps * (
             self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
@@ -1087,6 +1089,8 @@ class Miner(BaseNode):
             local_tokens_sum += tokens_this_batch
 
             labels = input_ids.clone()
+            labels[:, :-1] = input_ids[:, 1:]  # ✓ shift by +1
+            labels[:, -1] = self.tokenizer.pad_token_id
             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
 
             # ------------------------------------------------------------------ #

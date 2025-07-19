@@ -291,7 +291,10 @@ class Miner(BaseNode):
         self.inner_scheduler = SequentialLR(
             self.inner_optimizer,
             schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
-            milestones=[inner_steps_before_outer_step, self.hparams.warmup_steps],
+            milestones=[
+                inner_steps_before_outer_step,
+                inner_steps_before_outer_step + self.hparams.warmup_steps,
+            ],
         )
         tplr.logger.info("[Init] optimizers & schedulers constructed")
 
@@ -344,9 +347,6 @@ class Miner(BaseNode):
         self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window
         self.step_counter = 0
-
-        # Add step tracking
-        self.window_step = 0
 
         # Track additional metrics
         self.total_tokens_processed = 0
@@ -460,6 +460,8 @@ class Miner(BaseNode):
             else self.model
         )
 
+        ckpt_ok = False
+        ckpt_sync_win = self.start_window
         if self.world_size == 1 or self.is_master:
             (
                 ckpt_ok,
@@ -475,7 +477,6 @@ class Miner(BaseNode):
 
             if ckpt_ok:
                 tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
-
                 # catch-up only if the checkpoint lags behind
                 if (
                     ckpt_sync_win < self.current_window
@@ -492,6 +493,13 @@ class Miner(BaseNode):
                 await tplr.neurons.catchup_with_aggregation_server(
                     self, self.start_window
                 )
+
+        if ckpt_ok:
+            steps_to_replay = (
+                ckpt_sync_win - self.start_window + 1
+            ) * self.hparams.inner_steps
+            for _ in range(steps_to_replay):
+                self.inner_scheduler.step()
 
         # ---- broadcast to other ranks (if any) --------------------------------
         if self.world_size > 1:
@@ -876,7 +884,6 @@ class Miner(BaseNode):
                 tplr.logger.info("Finished metrics logging call for miner")
 
             self.global_step += 1
-            self.window_step += 1
             tplr.logger.info(f"Total optimization steps: {self.global_step}")
 
             if self.world_size > 1:

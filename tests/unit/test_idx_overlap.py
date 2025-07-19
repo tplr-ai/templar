@@ -7,6 +7,7 @@ import pytest
 from tplr.neurons import check_uid_index_overlap  # <-- fix this path
 # -----------------------------------------------------------------------------
 
+
 class _FakeComms:
     """Minimal stub for neuron.comms that just returns preset timestamps."""
 

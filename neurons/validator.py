@@ -1978,6 +1978,7 @@ class Validator(BaseNode):
                 self.previous_avg_loss_after_random = avg_loss_after_per_batch_random
 
             # 16. Log evaluation metrics once all evaluations are done
+            threshold_pct = int(round(self.hparams.idx_overlap_threshold * 100))
             window_total_time = tplr.T() - window_start
             evaluation_metrics = {
                 "validator/loss/own/before": avg_loss_before_per_batch_own,
@@ -1998,6 +1999,16 @@ class Validator(BaseNode):
                 "validator/timing/gather": gather_time,
                 "validator/timing/evaluation": evaluation_time,
                 "validator/timing/model_update": model_update_time,
+                "validator/overlap/pairs_checked": idx_overlap["pairs_checked"],
+                f"validator/overlap/pairs_over_{threshold_pct}": idx_overlap[
+                    "pairs_high_ovlap"
+                ],
+                f"validator/overlap/ratio_over_{threshold_pct}": idx_overlap[
+                    "ratio_high_ovlap"
+                ],
+                "validator/overlap/mean": idx_overlap["mean_overlap"],
+                "validator/overlap/min": idx_overlap["min_overlap"],
+                "validator/overlap/max": idx_overlap["max_overlap"],
             }
             self.wandb.log(evaluation_metrics, step=self.global_step)
 

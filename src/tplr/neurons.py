@@ -736,6 +736,8 @@ async def check_uid_index_overlap(
         pairs_high_ovlap=pairs_high,
         ratio_high_ovlap=ratio_high,
         mean_overlap=mean_overlap,
+        min_overlap=min_val,
+        max_overlap=max_val,
         pairs_over_thresh=pairs_over,
         uids_over_thresh=uids_over,
     )

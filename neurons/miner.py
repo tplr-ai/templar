@@ -344,6 +344,7 @@ class Miner(BaseNode):
         self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window
         self.step_counter = 0
+        # self.windows_per_shard = 500
 
         # Add step tracking
         self.window_step = 0
@@ -375,11 +376,22 @@ class Miner(BaseNode):
         # Initialize peer related attributes
         self.next_peers: list[int] | None = None
         self.peers_update_window = -1
-        self.dataset = tplr.SharedShardedDataset(
+        
+        self.dataset_manager = tplr.ShardedDatasetManager(
+            # I think I should revert this to base_path=os.getenv(DATASET_BINS_PATH)
+            local_dataset_path="./",
             sequence_length=self.hparams.sequence_length,
             rank=self.rank,
             world_size=self.world_size,
+            comms=self.comms,
         )
+        
+        self.dataset = self.dataset_manager.active_dataset
+        # tplr.SharedShardedDataset(
+        #     sequence_length=self.hparams.sequence_length,
+        #     rank=self.rank,
+        #     world_size=self.world_size,
+        # )
         self.sampler = tplr.MinerSampler(
             dataset=self.dataset,
             uid=self.uid,
@@ -397,6 +409,7 @@ class Miner(BaseNode):
             batch_size=self.hparams.micro_batch_size,
             num_workers=2,
             pin_memory=True,
+            prefetch_factor=10,
         )
 
         tplr.logger.info("[Init] dataset + sampler ready")
@@ -454,11 +467,7 @@ class Miner(BaseNode):
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
 
-        bare_model = (
-            self.model.module
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
+        bare_model = getattr(self.model, 'module', self.model)
 
         if self.world_size == 1 or self.is_master:
             (
@@ -533,13 +542,36 @@ class Miner(BaseNode):
 
             # 2. Load data
             data_start = tplr.T()
+            
+            windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
             # Update sampler for current window
-            self.sampler.set_window_uid(self.uid, step_window)
+            self.sampler.set_window_uid(self.uid, step_window % windows_per_shard)
+            
+            # +1 or check for > 0?
+            if step_window + 1 % windows_per_shard == 0:
+                tplr.logger.info(f"Swapping dataset at wondow {step_window}")
+                await self.dataset_manager.swap_datasets()
+                self.dataset = self.dataset_manager.active_dataset
+                self.sampler.dataset = self.dataset
+                self.loader = torch.utils.data.DataLoader(
+                    dataset=self.dataset,
+                    sampler=self.sampler,
+                    batch_size=self.hparams.micro_batch_size,
+                    num_workers=2,
+                    pin_memory=True,
+                    prefetch_factor=10,
+                )
+                
+                # first shard exists, fetch next shard. Do we call await?
+                # here the current behavior is basically a check that the current dataset exists via await and then awaits the next one
+                # does this need to be in an `asyncio.create_task`` style in the backend?
+                await self.dataset_manager.initialize((step_window // windows_per_shard) + 1 )
 
             data_loading_time = tplr.T() - data_start
             tplr.logger.info(
                 f"{tplr.P(step_window, data_loading_time)} Loaded training data"
             )
+            
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             tplr.logger.info("Start accumulating...")

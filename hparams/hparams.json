@@ -45,7 +45,7 @@
     "openskill_tau": 0.1,
     "checkpoint_init_version": null,
     "num_evaluation_bins": 5,
-    "quantization_bins": 256,
+    "quantization_bins": 16,
     "quantization_range": 6,
     "burn_rate": 0.8,
     "idx_overlap_threshold": 0.5

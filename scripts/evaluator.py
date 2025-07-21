@@ -50,6 +50,7 @@ import typing
 
 import bittensor as bt
 import torch
+from torch.utils.data import DataLoader
 from transformers.models.llama import LlamaForCausalLM
 
 import tplr
@@ -116,6 +117,12 @@ def config() -> bt.Config:
         type=bool,
         default=False,
         help="Skip gaps in the evaluation process",
+    )
+    parser.add_argument(
+        "--custom_eval_path",
+        type=str,
+        default=None,
+        help="Path to the custom evaluation dataset bins for perplexity calculation.",
     )
 
     bt.subtensor.add_args(parser)
@@ -490,6 +497,14 @@ class Evaluator:
         tplr.logger.info(
             f"Starting benchmark run at global step {global_step} (checkpoint window: {checkpoint_window})"
         )
+
+        # Run custom perplexity evaluation first. It manages its own model device placement.
+        await self._evaluate_custom(
+            global_step=global_step,
+            checkpoint_window=checkpoint_window,
+            block_number=block_number,
+        )
+
         os.makedirs(MODEL_PATH, exist_ok=True)
         self.model.save_pretrained(MODEL_PATH)
         self.hparams.tokenizer.save_pretrained(MODEL_PATH)
@@ -567,6 +582,101 @@ class Evaluator:
             f"global_step: {global_step}, block: {block_number})"
         )
         return global_step
+
+    async def _evaluate_custom(
+        self, global_step: int, checkpoint_window: int, block_number: int
+    ) -> None:
+        """Run evaluation on a custom dataset and log perplexity."""
+        if not self.config.custom_eval_path:
+            tplr.logger.info("Custom evaluation path not provided, skipping.")
+            return
+
+        tplr.logger.info(
+            f"Starting custom evaluation on dataset: {self.config.custom_eval_path}"
+        )
+        os.environ["DATASET_BINS_PATH"] = self.config.custom_eval_path
+
+        try:
+            # 1. Setup dataset and dataloader
+            custom_dataset = tplr.SharedShardedDataset(
+                sequence_length=self.hparams.sequence_length,
+                rank=0,  # Evaluator is single-process
+                world_size=1,
+            )
+            # Limit evaluation to 1024 samples as requested
+            sampler = torch.utils.data.SubsetRandomSampler(
+                range(min(1024, len(custom_dataset)))
+            )
+            dataloader = DataLoader(
+                dataset=custom_dataset,
+                batch_size=self.config.actual_batch_size,
+                sampler=sampler,
+                num_workers=2,
+                pin_memory=True,
+            )
+
+            # 2. Prepare model for evaluation
+            self.model.to(self.config.device)  # type: ignore
+            self.model.eval()
+
+            total_loss = 0.0
+            total_tokens = 0
+            start_time = time.time()
+
+            # 3. Evaluation loop
+            with torch.inference_mode():
+                for batch in dataloader:
+                    input_ids = batch.to(
+                        self.config.device, dtype=torch.long, non_blocking=True
+                    )
+                    labels = input_ids.clone()
+                    with torch.autocast(
+                        device_type=self.model.device.type, dtype=torch.bfloat16
+                    ):
+                        outputs = self.model(input_ids=input_ids, labels=labels)
+                    loss = outputs.loss
+
+                    # Accumulate loss, weighted by the number of tokens
+                    num_tokens = (labels != -100).sum().item()
+                    if num_tokens > 0:
+                        total_loss += loss.item() * num_tokens
+                        total_tokens += num_tokens
+
+            # 4. Calculate final metrics
+            eval_runtime = time.time() - start_time
+            average_loss = total_loss / total_tokens if total_tokens > 0 else 0
+            perplexity = (
+                torch.exp(torch.tensor(average_loss)).item()
+                if average_loss > 0
+                else float("inf")
+            )
+
+            tplr.logger.info(
+                f"Custom evaluation finished. Perplexity: {perplexity:.4f}, Avg Loss: {average_loss:.4f}, Runtime: {eval_runtime:.2f}s"
+            )
+
+            # 5. Log metrics
+            self.metrics_logger.log(
+                "custom_evaluation",
+                tags={
+                    "global_step": global_step,
+                    "window": checkpoint_window,
+                    "block": block_number,
+                },
+                fields={
+                    "perplexity": perplexity,
+                    "average_loss": average_loss,
+                    "runtime_s": eval_runtime,
+                },
+            )
+        except Exception as e:
+            tplr.logger.error(f"Custom evaluation failed: {e}", exc_info=True)
+        finally:
+            # 6. Cleanup
+            self.model.to("cpu")  # type: ignore
+            torch.cuda.empty_cache()
+            if "DATASET_BINS_PATH" in os.environ:
+                del os.environ["DATASET_BINS_PATH"]
 
     async def run(self) -> None:
         """Main evaluation loop.

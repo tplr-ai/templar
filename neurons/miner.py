@@ -344,6 +344,7 @@ class Miner(BaseNode):
         self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window
         self.step_counter = 0
+        # self.windows_per_shard = 500
 
         # Track additional metrics
         self.total_tokens_processed = 0
@@ -445,11 +446,7 @@ class Miner(BaseNode):
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
 
-        bare_model = (
-            self.model.module
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
+        bare_model = getattr(self.model, 'module', self.model)
 
         ckpt_ok = False
         ckpt_sync_win = self.start_window
@@ -550,7 +547,6 @@ class Miner(BaseNode):
             tplr.logger.info(
                 f"{tplr.P(step_window, data_loading_time)} Loaded training data"
             )
-
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             tplr.logger.info("Start accumulating...")

@@ -36,7 +36,7 @@
     "power_normalisation": 2.0,
     "validator_sample_micro_bs": 4,
     "gather_peers_slash_threshold": 0.4,
-    "uids_per_window": 20,
+    "uids_per_window": 25,
     "time_window_delta_seconds": 30,
     "reset_inactivity_windows": 10,
     "sync_max_steps_behind": 3,

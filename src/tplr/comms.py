@@ -106,6 +106,8 @@ class Comms(ChainManager):
         self.recent_windows = (
             self.hparams.recent_windows
         )  # Number of recent windows to check
+        self.peers: list[int] = []
+        self.reserve_peers: list[int] = []
 
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
         self.gather_semaphore = asyncio.Semaphore(15)
@@ -1597,10 +1599,11 @@ class Comms(ChainManager):
 
     async def post_peer_list(
         self,
+        *,
         peers: list[int],
+        reserve_peers: list[int] | None = None,
         first_effective_window: int,
         sync_window: int,
-        weights: torch.Tensor,
         initial_selection: bool,
     ):
         """Upload peer list and debug data as JSON to the node's R2 bucket.
@@ -1618,6 +1621,7 @@ class Comms(ChainManager):
         key = f"{PEERS_FILE_PREFIX}{first_effective_window}_v{__version__}.json"
         peers_and_weights = {
             "peers": peers,
+            "reserve_peers": reserve_peers or [],
             "initial_selection": initial_selection,
             "sync_window": sync_window,
             "first_effective_window": first_effective_window,
@@ -1656,7 +1660,7 @@ class Comms(ChainManager):
 
     async def get_peer_list(
         self, fetch_previous: bool = False
-    ) -> tuple[list[int], int] | None:
+    ) -> tuple[list[int], list[int], int] | None:
         tplr.logger.info(
             f"Looking for a {'previous' if fetch_previous else 'current'} peer list on a validator bucket"
         )
@@ -1751,7 +1755,12 @@ class Comms(ChainManager):
                 else:
                     peers_dict = json.loads(peers_data.decode("utf-8"))
 
-                return peers_dict["peers"], peers_dict["first_effective_window"]
+                reserves = peers_dict.get("reserve_peers", [])
+                return (
+                    peers_dict["peers"],
+                    reserves,
+                    peers_dict["first_effective_window"],
+                )
 
             except (ConnectionClosedError, ClientError):
                 await self._purge_s3_client(validator_bucket)

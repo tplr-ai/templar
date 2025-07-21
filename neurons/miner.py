@@ -371,6 +371,7 @@ class Miner(BaseNode):
 
         # Initialize peer related attributes
         self.next_peers: list[int] | None = None
+        self.next_reserve_peers: list[int] | None = None
         self.peers_update_window = -1
 
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(

@@ -677,9 +677,10 @@ class Miner(BaseNode):
             if self.is_master:
                 gather_start = tplr.T()
                 tplr.logger.info("Waiting on gather task...")
-                gather_result = await self.comms.gather(
+                gather_result = await self.comms.gather_with_reserve(
                     my_uid=self.uid,
-                    uids=self.comms.peers,
+                    gather_uids=self.comms.peers,
+                    reserve_uids=self.comms.reserve_peers,
                     window=step_window,
                     key="gradient",
                     timeout=60,

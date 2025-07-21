@@ -1030,9 +1030,10 @@ class Validator(BaseNode):
             skipped_uids: list[int] = []
             success_rate = 0.0
             gather_result = None
-            gather_result = await self.comms.gather(
+            gather_result = await self.comms.gather_with_reserve(
                 my_uid=self.uid,
-                uids=self.comms.peers,
+                gather_uids=self.comms.peers,
+                reserve_uids=self.comms.reserve_peers,
                 window=self.sync_window,
                 key="gradient",
                 timeout=60,

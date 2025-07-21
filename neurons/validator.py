@@ -567,79 +567,85 @@ class Validator(BaseNode):
 
     def update_weights(self) -> None:
         """
-        Update the weights for all evaluated peers using min power normalization.
-        This method:
-        1. Creates a mask for peers that have been evaluated
-        2. Creates a mask for evaluated peers with positive scores
-        3. Applies power normalization to only the positive scores
-        4. Verifies that weights sum to approximately 1.0
-        This approach only assigns weights to peers with positive scores.
+        Piece‑wise emissions schedule:
+
+        ┌ Gather peers (top N)      ── 75 % of non‑burned weight
+        │   linear ramp: w₁ = 2·wₙ
+        ├ Reserve peers (next R)    ── 25 % of non‑burned weight
+        │   linear decay: 1 → 0.1
+        └ Everyone else             ── 0
         """
-        self.weights = torch.zeros_like(self.final_scores)
-        evaluated_mask = torch.zeros_like(self.final_scores, dtype=torch.bool)
-        evaluated_mask[list(self.evaluated_uids)] = True
+        self.weights.zero_()
 
-        # Create a mask for positive scores among evaluated peers
-        positive_mask = evaluated_mask.clone()
-        positive_mask[evaluated_mask] = self.final_scores[evaluated_mask] > 0
+        # --- configurable knobs (with sane defaults) -------------------
+        burn_rate = max(0.0, min(1.0, self.hparams.burn_rate))
+        gather_share = getattr(self.hparams, "gather_share", 0.75)
+        gather_count = getattr(self.hparams, "gather_peer_count", 15)
+        reserve_count = getattr(self.hparams, "reserve_peer_count", 10)
+        top_ratio = getattr(self.hparams, "gather_top_ratio", 2.0)  # w₁ / wₙ
+        decay_ratio = getattr(self.hparams, "reserve_decay_ratio", 0.75)
 
-        # Only consider peers with positive scores
-        positive_scores = self.final_scores[positive_mask]
+        # --- pick peers -------------------------------------------------
+        positive_uids = [
+            uid for uid in self.evaluated_uids if self.final_scores[uid] > 0
+        ]
+        ranked = sorted(
+            positive_uids, key=lambda u: self.final_scores[u].item(), reverse=True
+        )
 
-        if len(positive_scores) > 0:
-            # Apply power normalization to only the positive scores
-            normalized_weights = min_power_normalization(
-                positive_scores,
-                power=self.hparams.power_normalisation,
+        gather_uids = ranked[:gather_count]
+        reserve_uids = ranked[gather_count : gather_count + reserve_count]
+
+        # --- distribute to gather peers ---------------------------------
+        if gather_uids:
+            num_gather = len(gather_uids)
+            gather_profile = torch.linspace(
+                top_ratio,
+                1.0,
+                num_gather,
+                device=self.weights.device,
+                dtype=torch.float32,
             )
+            gather_profile_sum = gather_profile.sum()
+            gather_total = (1.0 - burn_rate) * gather_share
+            for uid, num_reserve in zip(gather_uids, gather_profile):
+                self.weights[uid] = gather_total * (num_reserve / gather_profile_sum)
 
-            # Assign weights only to peers with positive scores
-            self.weights[positive_mask] = normalized_weights
-
-            weight_sum = self.weights.sum().item()
-            tplr.log_with_context(
-                level="debug",
-                message=f"Weight sum: {weight_sum}",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
+        # --- distribute to reserve peers (decaying schedule) ------------
+        if reserve_uids:
+            num_reserve = len(reserve_uids)
+            # geometric sequence: 1, k, k², …, k^{r‑1}
+            reserve_profile = torch.tensor(
+                [decay_ratio**i for i in range(num_reserve)],
+                device=self.weights.device,
+                dtype=torch.float32,
             )
+            reserve_profile_sum = reserve_profile.sum()
+            reserve_total = (1.0 - burn_rate) * (1.0 - gather_share)
+            for uid, rv in zip(reserve_uids, reserve_profile):
+                self.weights[uid] = reserve_total * (rv / reserve_profile_sum)
 
-            if abs(weight_sum - 1.0) > 1e-6:
-                tplr.log_with_context(
-                    level="warning",
-                    message=f"Weights sum to {weight_sum}, expected close to 1.0",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
+        # ── guard: cap reserve so it never exceeds min‑gather ──────────
+        if gather_uids and reserve_uids:
+            min_gather = self.weights[gather_uids].min().item()
+            max_reserve = self.weights[reserve_uids].max().item()
+            if max_reserve > min_gather:  # need down‑scaling
+                factor = min_gather / max_reserve * decay_ratio
+                self.weights[reserve_uids] *= factor
+
+        # --- burn weight -------------------------------------------------
+        self.weights[self.burn_uid] = burn_rate
+
+        # sum of the non‑burn weights currently assigned
+        non_burn_sum = self.weights.sum() - burn_rate
+
+        if non_burn_sum > 0:
+            scale = (1.0 - burn_rate) / non_burn_sum
+            self.weights *= scale  # rescale gather+reserve only
+            self.weights[self.burn_uid] = burn_rate  # restore exact burn
         else:
-            tplr.log_with_context(
-                level="warning",
-                message="No positive scores found among evaluated peers. All weights set to zero.",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
-
-        # clip to [0,1] and renormalise the remainder so everything sums to 1
-        br = max(0.0, min(1.0, self.hparams.burn_rate))
-        remaining = 1.0 - br
-        if remaining < 0:
-            tplr.logger.warning(
-                f"burn_rate={self.hparams.burn_rate} is larger than 1. Using 1.0."
-            )
-            br, remaining = 1.0, 0.0
-
-        # distribute the *remaining* proportionally among the other peers
-        others_mask = torch.ones_like(self.weights, dtype=torch.bool)
-        others_mask[self.burn_uid] = False
-        others_sum = self.weights[others_mask].sum().item()
-
-        if others_sum > 0:
-            self.weights[others_mask] = (
-                self.weights[others_mask] / others_sum * remaining
-            )
-        else:
-            self.weights[others_mask] = 0.0
-        self.weights[self.burn_uid] = br
+            # fall‑back: allocate all non‑burn weight to burn_uid
+            self.weights[self.burn_uid] = 1.0
 
     async def evaluate_model(
         self,

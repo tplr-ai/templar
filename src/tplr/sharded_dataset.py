@@ -40,7 +40,7 @@ class SharedShardedDataset(Dataset):
 
     def __init__(
         self,
-        dataset_path,
+        local_shard_path: Path | str,
         sequence_length: int,
         rank: int,
         world_size: int,
@@ -57,18 +57,12 @@ class SharedShardedDataset(Dataset):
         if self.world > 1:
             dist.barrier(device_ids=[self.rank])
 
-        shards_path = os.getenv("DATASET_BINS_PATH")
-        if shards_path is None:
-            raise ValueError("Dataset path not configured. Set $DATASET_BINS_PATH.")
-
-        # needs to be a glob
-        shards_dir = Path(shards_path)
-        tokens_file = dataset_path
-        ids_file = dataset_path.replace('.npy', '.ids')
+        tokens_file = Path(local_shard_path)
+        ids_file = tokens_file.replace('.npy', '.ids')
 
         if not tokens_file.exists() or not ids_file.exists():
             raise FileNotFoundError(
-                f"Pre-processed files not found in {shards_dir}. "
+                f"Pre-processed files not found in {'/'.join(tokens_file.split('/')[:-1])}. "
                 "Run the preprocessing script first."
             )
 
@@ -144,7 +138,7 @@ class ShardedDatasetManager:
             )
             
         dataset = SharedShardedDataset(
-            shard_path=shard_path,
+            local_dataset_path=shard_path,
             sequence_length=self.sequence_length,
             rank=self.rank,
             world_size=self.world_size,

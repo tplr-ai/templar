@@ -135,6 +135,7 @@ class ShardedDatasetManager:
         self.rank = rank
         self.world_size = world_size
         self.token_dtype = token_dtype
+        self.shard_index = 0
         
         # can we do awaits in regular fn def / inits?
         self.active_dataset: SharedShardedDataset | None = None
@@ -148,14 +149,20 @@ class ShardedDatasetManager:
     async def prepare_shard(self, shard_index: int):
         download_completed = True
         tokens_file, ids_file = SharedShardedDataset.locate_shards(shard_index)
-        tplr.logger.info(f"Preparing shard {shard_index} at {shard_path}")
+        tplr.logger.info(f"Preparing shard {shard_index} at {tokens_file}")
         
-        if not os.path.exists(shard_path):
+        if not os.path.exists(tokens_file):
             bucket = self.comms.get_own_bucket("shared_dataset", "read")
             # don't have this be await 
             download_completed = asyncio.create_task(
                 self.comms.s3_get_object(
-                    filename,
+                    tokens_file,
+                    bucket,
+                ),
+            )
+            _ = asyncio.create_task(
+                self.comms.s3_get_object(
+                    ids_file,
                     bucket,
                 ),
             )
@@ -163,7 +170,7 @@ class ShardedDatasetManager:
     
     async def create_dataset(self, shard_index):
         # this await may be sometimes redundant?
-        downloaded = await prepare_shard(shard_index)
+        downloaded = await self.prepare_shard(shard_index)
         dataset = SharedShardedDataset(
             shard_index=shard_index,
             sequence_length=self.sequence_length,

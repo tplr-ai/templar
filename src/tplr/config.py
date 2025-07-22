@@ -86,6 +86,16 @@ def load_bucket_secrets():
                 },
             },
         },
+        "shared_dataset": {
+            "account_id": os.environ.get("SHARED_SHARDED_DATASET_ACCOUNT_ID"),
+            "name": os.environ.get("SHARED_SHARDED_DATASET_BUCKET_NAME"),
+            "credentials": {
+                "read": {
+                    "access_key_id": os.environ.get("SHARED_SHARDED_DATASET_READ_ACCESS_KEY_ID"),
+                    "secret_access_key": os.environ.get("SHARED_SHARDED_DATASET_READ_SECRET_ACCESS_KEY")
+                },
+            },
+        },
     }
 
     # Override with multiple endpoints if provided by environment variable.

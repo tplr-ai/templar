@@ -153,7 +153,7 @@ class ShardedDatasetManager:
         
         # where should we have a miner download to?
         if not os.path.exists(shard_path):
-            bucket = self.comms.get_own_bucket("dataset", "read")
+            bucket = self.comms.get_own_bucket("shared_dataset", "read")
             # use separate comms
             download_completed = await self.comms.s3_get_object(
                 filename,

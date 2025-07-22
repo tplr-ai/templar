@@ -25,14 +25,17 @@ def test_format_bucket_secrets_with_valid_inputs():
     Tests that format_bucket_secrets returns a correctly structured dictionary
     when all environment variables are present.
     """
-    with patch.dict(os.environ, {
-        "TEST_SECRET_ACCOUNT_ID": "test_account_id",
-        "TEST_SECRET_BUCKET_NAME": "test_bucket_name",
-        "TEST_SECRET_READ_ACCESS_KEY_ID": "test_read_access_key",
-        "TEST_SECRET_READ_SECRET_ACCESS_KEY": "test_read_secret_key",
-        "TEST_SECRET_WRITE_ACCESS_KEY_ID": "test_write_access_key",
-        "TEST_SECRET_WRITE_SECRET_ACCESS_KEY": "test_write_secret_key",
-    }):
+    with patch.dict(
+        os.environ,
+        {
+            "TEST_SECRET_ACCOUNT_ID": "test_account_id",
+            "TEST_SECRET_BUCKET_NAME": "test_bucket_name",
+            "TEST_SECRET_READ_ACCESS_KEY_ID": "test_read_access_key",
+            "TEST_SECRET_READ_SECRET_ACCESS_KEY": "test_read_secret_key",
+            "TEST_SECRET_WRITE_ACCESS_KEY_ID": "test_write_access_key",
+            "TEST_SECRET_WRITE_SECRET_ACCESS_KEY": "test_write_secret_key",
+        },
+    ):
         expected_output = {
             "account_id": "test_account_id",
             "name": "test_bucket_name",

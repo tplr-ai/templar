@@ -37,8 +37,8 @@ def format_bucket_secrets(base_secret_name: str) -> dict[str, str]:
 
     Returns:
         the formatted dict for comms ingestion
-    """   
-    
+    """
+
     return {
         "account_id": os.getenv(f"{base_secret_name}_ACCOUNT_ID"),
         "name": os.getenv(f"{base_secret_name}_BUCKET_NAME"),

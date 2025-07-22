@@ -598,28 +598,32 @@ class Validator(BaseNode):
 
         # --- distribute to gather peers ---------------------------------
         if gather_uids:
-            g = len(gather_uids)
-            rel = torch.linspace(
-                top_ratio, 1.0, g, device=self.weights.device, dtype=torch.float32
-            )
-            rel_sum = rel.sum()
-            gather_total = (1.0 - burn_rate) * gather_share
-            for uid, r in zip(gather_uids, rel):
-                self.weights[uid] = gather_total * (r / rel_sum)
-
-        # --- distribute to reserve peers (decaying schedule) ------------
-        if reserve_uids:
-            r = len(reserve_uids)
-            # geometric sequence: 1, k, k², …, k^{r‑1}
-            rel = torch.tensor(
-                [decay_ratio**i for i in range(r)],
+            num_gather = len(gather_uids)
+            gather_profile = torch.linspace(
+                top_ratio,
+                1.0,
+                num_gather,
                 device=self.weights.device,
                 dtype=torch.float32,
             )
-            rel_sum = rel.sum()
+            gather_profile_sum = gather_profile.sum()
+            gather_total = (1.0 - burn_rate) * gather_share
+            for uid, num_reserve in zip(gather_uids, gather_profile):
+                self.weights[uid] = gather_total * (num_reserve / gather_profile_sum)
+
+        # --- distribute to reserve peers (decaying schedule) ------------
+        if reserve_uids:
+            num_reserve = len(reserve_uids)
+            # geometric sequence: 1, k, k², …, k^{r‑1}
+            reserve_profile = torch.tensor(
+                [decay_ratio**i for i in range(num_reserve)],
+                device=self.weights.device,
+                dtype=torch.float32,
+            )
+            reserve_profile_sum = reserve_profile.sum()
             reserve_total = (1.0 - burn_rate) * (1.0 - gather_share)
-            for uid, rv in zip(reserve_uids, rel):
-                self.weights[uid] = reserve_total * (rv / rel_sum)
+            for uid, rv in zip(reserve_uids, reserve_profile):
+                self.weights[uid] = reserve_total * (rv / reserve_profile_sum)
 
         # ── guard: cap reserve so it never exceeds min‑gather ──────────
         if gather_uids and reserve_uids:

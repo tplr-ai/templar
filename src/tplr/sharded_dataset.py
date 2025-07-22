@@ -56,7 +56,25 @@ class SharedShardedDataset(Dataset):
         self.world = world_size
         if self.world > 1:
             dist.barrier(device_ids=[self.rank])
+            
+        tokens_file, ids_file = self.locate_shards(shard_index)
+        _ = self.mmap_tokens_and_ids(tokens_file, ids_file)
+        
+        ''' could theoretically also represent this with piped inputs
+        c.thread_first(
+            shard_index,
+            self.locate_shards,
+            c.curry(self.mmap_tokens_and_ids, token_dtype),
+        )
+        '''        
 
+        # should wrap in a timer
+        tplr.logger.info(
+            f"[Dataset] rank {self.rank}: init done in {time.perf_counter() - t0:.1f}s "
+            f"({self.total_samples} samples)"
+        )
+    
+    def locate_shards(self, shard_index: int) -> list[Path]:
         shards_path = os.getenv("DATASET_BINS_PATH")
         if shards_path is None:
             raise ValueError("dataset path not configured. Set $DATASET_BINS_PATH") # DATASET_BINS_PATH is local path?
@@ -69,7 +87,10 @@ class SharedShardedDataset(Dataset):
                 f"Pre-processed files not found in {'/'.join(tokens_file.split('/')[:-1])}. "
                 "Run the preprocessing script first."
             )
-
+        
+        return tokens_file, ids_file
+    
+    def mmap_tokens_and_ids(self, token_dtype, tokens_file, ids_file):
         # ────────────────────────── mmap tokens & ids ───────────────────────────
         # Normalise once for safety; still type-checks
         tokens_mem = np.memmap(tokens_file, dtype=np.dtype(token_dtype), mode="r+")
@@ -83,11 +104,7 @@ class SharedShardedDataset(Dataset):
         ids_mem.flags.writeable = False
 
         self.total_samples = len(self.sample_ids)
-
-        tplr.logger.info(
-            f"[Dataset] rank {self.rank}: init done in {time.perf_counter() - t0:.1f}s "
-            f"({self.total_samples} samples)"
-        )
+        return    
 
     def __len__(self):
         return self.total_samples

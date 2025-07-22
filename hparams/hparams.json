@@ -43,5 +43,6 @@
     "num_evaluation_bins": 5,
     "quantization_bins": 256,
     "quantization_range": 6,
-    "burn_rate": 0.8
+    "burn_rate": 0.8,
+    "idx_overlap_threshold": 0.5
 }

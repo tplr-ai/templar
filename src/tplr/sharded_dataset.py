@@ -57,16 +57,14 @@ class SharedShardedDataset(Dataset):
         if self.world > 1:
             dist.barrier(device_ids=[self.rank])
             
-        tokens_file, ids_file = self.locate_shards(shard_index)
-        _ = self.mmap_tokens_and_ids(tokens_file, ids_file)
+        self.tokens_file, self.ids_file = self.locate_shards(shard_index)
+        _ = self.mmap_tokens_and_ids(self.tokens_file, self.ids_file)      
         
-        ''' could theoretically also represent this with piped inputs
-        c.thread_first(
-            shard_index,
-            self.locate_shards,
-            c.curry(self.mmap_tokens_and_ids, token_dtype),
-        )
-        '''        
+        if not self.tokens_file.exists() or not self.ids_file.exists():
+            raise FileNotFoundError(
+                f"Pre-processed files not found in {'/'.join(tokens_file.split('/')[:-1])}. "
+                "Run the preprocessing script first."
+            )
 
         # should wrap in a timer
         tplr.logger.info(
@@ -74,19 +72,22 @@ class SharedShardedDataset(Dataset):
             f"({self.total_samples} samples)"
         )
     
-    def locate_shards(self, shard_index: int) -> list[Path]:
-        shards_path = os.getenv("DATASET_BINS_PATH")
-        if shards_path is None:
+    @staticmethod
+    def locate_shards(
+        self, 
+        shard_index: int,
+        custom_path: os.PathLike | None = None, # extend the use of this static method
+    ) -> list[Path]:
+        # where should we have a miner download to? # NEEDS_DOCS
+        default_path = os.getenv("DATASET_BINS_PATH")
+        if default_path is None:
+            # this is redundant because of config anyway
             raise ValueError("dataset path not configured. Set $DATASET_BINS_PATH") # DATASET_BINS_PATH is local path?
         
-        tokens_file = os.path.join(shards_path, f'shard_{shard_index}.npy')
-        ids_file = tokens_file.replace('.npy', '.ids')
+        shards_path = custom_path or default_path
         
-        if not tokens_file.exists() or not ids_file.exists():
-            raise FileNotFoundError(
-                f"Pre-processed files not found in {'/'.join(tokens_file.split('/')[:-1])}. "
-                "Run the preprocessing script first."
-            )
+        tokens_file = os.path.join(shards_path, f'shard_{shard_index:06d}.npy')
+        ids_file = tokens_file.replace('.npy', '.ids')
         
         return tokens_file, ids_file
     
@@ -117,9 +118,10 @@ class SharedShardedDataset(Dataset):
         return self.tokens[start:end]
 
     def sample_id(self, idx: int) -> int:
-        return int(self.sample_ids[idx].item())
+        return int(self.sample_ids[idx].item()
+        
 
-
+# should we just inherit? since I use the cheeky locate_shards?
 class ShardedDatasetManager:
     def __init__(
         self,
@@ -136,33 +138,36 @@ class ShardedDatasetManager:
         self.world_size = world_size
         self.token_dtype = token_dtype
         
-        # should we call active_dataset = prepare_shard(0)? I think we'd want that blocking
-        self.active_dataset: SharedShardedDataset | None = self.prepare_shard(shard_index=0)
+        # can we do awaits in regular fn def / inits?
+        self.active_dataset: SharedShardedDataset | None = None
         self.upcoming_dataset: SharedShardedDataset | None = None
-        self.prepare_task: asyncio.Task | None = None
         
-        # should this manager glob to know all file paths?
         self.comms = comms
+        
+        # should comms glob to know all file paths?
+        # self.max_dataset_idx = bucket_glob_files_idx
     
     async def prepare_shard(self, shard_index: int):
-        # this needs the 6 digit formatting
-        filename = f"shard_{shard_index}.npy"
-        # have a bucket configuration?
-        shard_path = f"{self.local_dataset_path}/{filename}"
+        download_completed = True
+        tokens_file, ids_file = SharedShardedDataset.locate_shards(shard_index)
         tplr.logger.info(f"Preparing shard {shard_index} at {shard_path}")
         
-        # where should we have a miner download to?
         if not os.path.exists(shard_path):
             bucket = self.comms.get_own_bucket("shared_dataset", "read")
-            # use separate comms
-            download_completed = await self.comms.s3_get_object(
-                filename,
-                bucket,
+            # don't have this be await 
+            download_completed = asyncio.create_task(
+                self.comms.s3_get_object(
+                    filename,
+                    bucket,
+                ),
             )
-            # don't have this be await
-            
+        return download_completed
+    
+    async def create_dataloader(self, shard_index):
+        # this await may be sometimes redundant?
+        downloaded = await prepare_shard(shard_index)
         dataset = SharedShardedDataset(
-            local_dataset_path=shard_path,
+            shard_index=shard_index,
             sequence_length=self.sequence_length,
             rank=self.rank,
             world_size=self.world_size,
@@ -170,32 +175,34 @@ class ShardedDatasetManager:
         )
         return dataset
     
-    async def initialize(self, current_shard_index: int):
-        self.active_dataset = await self.prepare_shard(current_shard_index)
-        self.upcoming_dataset = await self.prepare_shard(current_shard_index + 1)
+    async def initialize_datasets(self, current_shard_index: int):
+        # await this one so dataset does exist, the check if the files not found
+        # would raise an error
+        self.active_dataset = await self.set_current_dataloader(current_shard_index)
+        # it's possible to create_task like this?
+        self.upcoming_dataset = asyncio.create_task(self.prepare_shard(current_shard_index + 1))
     
     async def swap_datasets(self):
         # How would we create async task to track this?
-        if self.prepare_task:
-            await self.prepare_task
+        if self.upcoming_dataset and not self.upcoming_dataset.done():
+            await self.upcoming_dataset
         
         if self.upcoming_dataset is None:
             # end of training shards, restart?
+            # more like pass incremented shards and see
+            # if > max_dataset_idx
             pass
         
+        self.shard_index += 1
         old_dataset = self.active_dataset
-        self.active_dataset = self.upcoming_dataset
+        self.active_dataset = create_dataloader(self.shard_index)
         self.upcoming_dataset = None
         
         tplr.logger.info("successfully swapped datasets.")
         
         if old_dataset:
-            # should we destroy here or leave it?
-            # YES DESTROY
+            # os.remove(old_dataset.tokens_file)
+            # os.remove(old_dataset.ids_file)
+            # YES DESTROY, need to think that through more
             old_dataset.destroy()
             
-        
-    
-        
-    
-    

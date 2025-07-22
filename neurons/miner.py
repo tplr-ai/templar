@@ -377,21 +377,16 @@ class Miner(BaseNode):
         self.next_peers: list[int] | None = None
         self.peers_update_window = -1
         
-        self.dataset_manager = tplr.ShardedDatasetManager(
-            # I think I should revert this to base_path=os.getenv(DATASET_BINS_PATH)
-            local_dataset_path="./",
+        self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
             rank=self.rank,
             world_size=self.world_size,
             comms=self.comms,
         )
-        
+        # can you call this here or does it need to be in the upper section of run?
+        _ = await self.dataset_manager.initialize_datasets(0)     
         self.dataset = self.dataset_manager.active_dataset
-        # tplr.SharedShardedDataset(
-        #     sequence_length=self.hparams.sequence_length,
-        #     rank=self.rank,
-        #     world_size=self.world_size,
-        # )
+       
         self.sampler = tplr.MinerSampler(
             dataset=self.dataset,
             uid=self.uid,
@@ -403,13 +398,14 @@ class Miner(BaseNode):
             rank=self.rank,
             world_size=self.world_size,
         )
+        
         self.loader = torch.utils.data.DataLoader(
             dataset=self.dataset,
             sampler=self.sampler,
             batch_size=self.hparams.micro_batch_size,
-            num_workers=2,
+            num_workers=10,
             pin_memory=True,
-            prefetch_factor=10,
+            prefetch_factor=2,
         )
 
         tplr.logger.info("[Init] dataset + sampler ready")
@@ -547,25 +543,13 @@ class Miner(BaseNode):
             # Update sampler for current window
             self.sampler.set_window_uid(self.uid, step_window % windows_per_shard)
             
-            # +1 or check for > 0?
-            if step_window + 1 % windows_per_shard == 0:
+            if (
+                step_window > 0 
+                and 
+                step_window % windows_per_shard == 0
+            ):
                 tplr.logger.info(f"Swapping dataset at wondow {step_window}")
                 await self.dataset_manager.swap_datasets()
-                self.dataset = self.dataset_manager.active_dataset
-                self.sampler.dataset = self.dataset
-                self.loader = torch.utils.data.DataLoader(
-                    dataset=self.dataset,
-                    sampler=self.sampler,
-                    batch_size=self.hparams.micro_batch_size,
-                    num_workers=2,
-                    pin_memory=True,
-                    prefetch_factor=10,
-                )
-                
-                # first shard exists, fetch next shard. Do we call await?
-                # here the current behavior is basically a check that the current dataset exists via await and then awaits the next one
-                # does this need to be in an `asyncio.create_task`` style in the backend?
-                await self.dataset_manager.initialize((step_window // windows_per_shard) + 1 )
 
             data_loading_time = tplr.T() - data_start
             tplr.logger.info(

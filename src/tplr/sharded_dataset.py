@@ -118,21 +118,19 @@ class SharedShardedDataset(Dataset):
         return self.tokens[start:end]
 
     def sample_id(self, idx: int) -> int:
-        return int(self.sample_ids[idx].item()
+        return int(self.sample_ids[idx].item())
         
 
 # should we just inherit? since I use the cheeky locate_shards?
 class ShardedDatasetManager:
     def __init__(
         self,
-        local_dataset_path: str,
         sequence_length: int,
         rank: int,
         world_size: int,
         comms: tplr.comms.Comms,
         token_dtype: npt.DTypeLike = np.uint16,
     ):
-        self.local_dataset_path = Path(local_dataset_path)
         self.sequence_length = sequence_length
         self.rank = rank
         self.world_size = world_size
@@ -163,7 +161,7 @@ class ShardedDatasetManager:
             )
         return download_completed
     
-    async def create_dataloader(self, shard_index):
+    async def create_dataset(self, shard_index):
         # this await may be sometimes redundant?
         downloaded = await prepare_shard(shard_index)
         dataset = SharedShardedDataset(
@@ -178,12 +176,15 @@ class ShardedDatasetManager:
     async def initialize_datasets(self, current_shard_index: int):
         # await this one so dataset does exist, the check if the files not found
         # would raise an error
-        self.active_dataset = await self.set_current_dataloader(current_shard_index)
+        self.active_dataset = await self.create_dataset(current_shard_index)
         # it's possible to create_task like this?
+        # now less of dataset than data download
         self.upcoming_dataset = asyncio.create_task(self.prepare_shard(current_shard_index + 1))
     
     async def swap_datasets(self):
-        # How would we create async task to track this?
+        self.shard_index += 1
+
+        # Would we create async task to track this?
         if self.upcoming_dataset and not self.upcoming_dataset.done():
             await self.upcoming_dataset
         
@@ -193,11 +194,8 @@ class ShardedDatasetManager:
             # if > max_dataset_idx
             pass
         
-        self.shard_index += 1
-        old_dataset = self.active_dataset
-        self.active_dataset = create_dataloader(self.shard_index)
-        self.upcoming_dataset = None
-        
+        old_dataset = getattr(self, "active_dataset")
+        _ = self.initialize_datasets(self.shard_index)
         tplr.logger.info("successfully swapped datasets.")
         
         if old_dataset:

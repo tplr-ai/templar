@@ -374,7 +374,6 @@ class Miner(BaseNode):
         self.next_peers: list[int] | None = None
         self.next_reserve_peers: list[int] | None = None
         self.peers_update_window = -1
-
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
             rank=self.local_rank,

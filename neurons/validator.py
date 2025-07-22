@@ -294,12 +294,18 @@ class Validator(BaseNode):
         self.param_avg_change: dict[str, torch.Tensor] = {}
         self.prev_param_state: dict[str, torch.Tensor] = {}
         self.param_change_alpha = 0.2
+        
+        # put in stub
+        # self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
+        #     sequence_length=self.hparams.sequence_length,
+        #     rank=self.rank,
+        #     world_size=self.world_size,
+        #     comms=self.comms,
+        # )
+        # # can you call this here or does it need to be in the upper section of run?
+        # _ = await self.dataset_manager.initialize_datasets(0)     
+        # self.dataset = self.dataset_manager.active_dataset
 
-        self.dataset = tplr.SharedShardedDataset(
-            sequence_length=self.hparams.sequence_length,
-            rank=0,
-            world_size=1,
-        )
         self.sampler = tplr.EvalSampler(
             dataset=self.dataset,
             uid=self.uid,

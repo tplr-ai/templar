@@ -259,12 +259,14 @@ async def update_peers(instance: NeuronT, window: int, peer_start: float) -> Non
         )
         result = await instance.comms.get_peer_list(fetch_previous=True)
         if result is not None:
-            prev_peers, prev_update_window = result
+            prev_peers, prev_reserve, prev_update_window = result
             tplr.logger.info(
                 f"Got previous peer list with {len(prev_peers)} peers "
                 f"and update window {prev_update_window}"
             )
             instance.comms.peers = prev_peers
+            instance.comms.reserve_peers = prev_reserve
+
             # Don't set next_peers here, as we want the normal update process to continue
         else:
             tplr.logger.warning(
@@ -283,7 +285,7 @@ async def update_peers(instance: NeuronT, window: int, peer_start: float) -> Non
         if result is None:
             tplr.logger.info("Unable to get peer list from bucket")
         else:
-            next_peers, peers_update_window = result
+            next_peers, reserve_peers, peers_update_window = result
             tplr.logger.info(
                 f"Got peer list {next_peers} and update window "
                 f"{peers_update_window} from bucket"
@@ -293,12 +295,19 @@ async def update_peers(instance: NeuronT, window: int, peer_start: float) -> Non
                 or peers_update_window > instance.peers_update_window
             ):
                 instance.next_peers = next_peers
+                instance.next_reserve_peers = reserve_peers
                 instance.peers_update_window = peers_update_window
                 tplr.logger.info("This list is new, updating next_peers")
 
     # Update peers, if it's time
     if instance.next_peers is not None and window >= instance.peers_update_window:
+        # ── atomic switch ─────────────────────────────────────────────
         instance.comms.peers = instance.next_peers
+        instance.comms.reserve_peers = (
+            instance.next_reserve_peers
+            if instance.next_reserve_peers is not None
+            else []
+        )
         late_text = (
             f"{window - instance.peers_update_window} windows late"
             if window - instance.peers_update_window > 0
@@ -306,7 +315,8 @@ async def update_peers(instance: NeuronT, window: int, peer_start: float) -> Non
         )
         tplr.logger.info(
             f"{tplr.P(window, tplr.T() - peer_start)} Updated peers "
-            f"{late_text} - gather:{len(instance.comms.peers)}. Next update "
+            f"{late_text} - gather:{len(instance.comms.peers)}, "
+            f"reserve:{len(instance.comms.reserve_peers)}. Next update "
             f"expected on step window "
             f"{instance.peers_update_window + instance.hparams.peer_list_window_margin}"
         )

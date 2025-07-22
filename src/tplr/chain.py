@@ -109,8 +109,8 @@ class ChainManager:
                     logger.debug(f"Updated commitments: {self.commitments}")
             except Exception as e:
                 logger.error(f"Error fetching commitments: {e}")
-                self.subtensor_sync.close()
-                self.subtensor_sync = bt.subtensor(config=self.config)
+                self.subtensor_sync.substrate.close()
+                self.subtensor_sync.substrate.initialize()
             await asyncio.sleep(self.fetch_interval)
 
     def get_bucket(self, uid: int) -> Optional[Bucket]:
@@ -189,8 +189,8 @@ class ChainManager:
                 f"Error while verifying commitment: {str(e)}\n"
                 "Committing the bucket details from the environment."
             )
-            self.subtensor_sync.close()
-            self.subtensor_sync = bt.subtensor(config=self.config)
+            self.subtensor_sync.substrate.close()
+            self.subtensor_sync.substrate.initialize()
             self.commit(wallet, bucket)
 
     def get_commitment(self, uid: int) -> Bucket:
@@ -318,8 +318,8 @@ class ChainManager:
 
             return commitments
         except Exception:
-            self.subtensor_sync.close()
-            self.subtensor_sync = bt.subtensor(config=self.config)
+            self.subtensor_sync.substrate.close()
+            self.subtensor_sync.substrate.initialize()
             return
 
     async def get_bucket_for_neuron(self, wallet: "bt.wallet") -> Optional[Bucket]:

@@ -191,8 +191,9 @@ class ShardedDatasetManager:
     async def swap_datasets(self):
         self.shard_index += 1
 
-        # Would we create async task to track this?
-        if self.upcoming_dataset and not self.upcoming_dataset.done():
+        if self.upcoming_dataset: 
+            # I think this is fine as a simplification since we're generally
+            # handling the existence of this ahead of time
             await self.upcoming_dataset
         
         if self.upcoming_dataset is None:

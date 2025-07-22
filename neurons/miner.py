@@ -231,6 +231,7 @@ class Miner(BaseNode):
                 gradient_as_bucket_view=True,
             )
             tplr.logger.info("[Init] wrapped model with DistributedDataParallel")
+        self.bare_model = getattr(self.model, "module", self.model)
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
@@ -247,14 +248,6 @@ class Miner(BaseNode):
         # Init optimizer and momentum
         self.error_feedback = {}
         self.owned_params = set()
-
-        self.xshapes = {}
-        self.totalks = {}
-        model_iterator = (
-            self.model.module.named_parameters()
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model.named_parameters()
-        )
 
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
@@ -294,6 +287,10 @@ class Miner(BaseNode):
             milestones=[inner_steps_before_outer_step, self.hparams.warmup_steps],
         )
         tplr.logger.info("[Init] optimizers & schedulers constructed")
+        
+        self.xshapes = {}
+        self.totalks = {}
+        model_iterator = self.bare_model.named_parameters()
 
         for idx, (n, p) in enumerate(model_iterator):
             if idx % self.world_size == self.rank:
@@ -454,18 +451,12 @@ class Miner(BaseNode):
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
 
-        bare_model = (
-            self.model.module
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
-
         if self.world_size == 1 or self.is_master:
             (
                 ckpt_ok,
                 ckpt_sync_win,
             ) = await self.comms.load_checkpoint(
-                model=bare_model,
+                model=self.bare_model,
                 current_window=self.current_window,
                 device=str(self.device),
                 init_version=tplr.__version__
@@ -498,7 +489,7 @@ class Miner(BaseNode):
             bcast_start = tplr.T()
 
             # 1) parameters & buffers
-            for tensor in bare_model.state_dict().values():
+            for tensor in self.bare_model.state_dict().values():
                 if torch.is_tensor(tensor):
                     dist.broadcast(tensor.data, src=0)
 
@@ -738,11 +729,7 @@ class Miner(BaseNode):
                 debug_dict = {}
 
                 # Add model parameters debug info
-                if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-                    model_iterator = self.model.module.named_parameters()
-                else:
-                    model_iterator = self.model.named_parameters()
-                for name, param in model_iterator:
+                for name, param in self.bare_model.named_parameters():
                     if (
                         param is not None and param.numel() >= 2
                     ):  # Check if tensor has at least 2 elements
@@ -1059,13 +1046,8 @@ class Miner(BaseNode):
         # ------------------------------------------------------------------ #
         # 6. parameter offloading logic
         # ------------------------------------------------------------------ #
-        bare_model = (
-            self.model.module
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
         with torch.no_grad():
-            for saved_param, p in zip(params_offloaded, bare_model.parameters()):
+            for saved_param, p in zip(params_offloaded, self.bare_model.parameters()):
                 saved_param = saved_param.to(p.device, non_blocking=True)
 
                 # (a) pseudo-gradient for outer step
@@ -1087,13 +1069,8 @@ class Miner(BaseNode):
 
     def _get_offloaded_param(self):
         """Get a copy of current parameters and offload them to CPU"""
-        bare_model = (
-            self.model
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
         return [
-            param.data.detach().clone().to("cpu") for param in bare_model.parameters()
+            param.data.detach().clone().to("cpu") for param in self.bare_model.parameters()
         ]
 
     async def cleanup_window(self):

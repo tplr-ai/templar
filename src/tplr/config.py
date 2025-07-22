@@ -18,7 +18,7 @@
 
 # Global imports
 import os
-
+import json
 import botocore.config
 
 # Local imports
@@ -72,7 +72,7 @@ def load_bucket_secrets():
         bucket_list_str = bucket_list.strip()
         logger.debug(f"Raw R2_DATASET_BUCKET_LIST: {bucket_list_str}")
         try:
-            dataset_configs = __import__("json").loads(bucket_list_str)
+            dataset_configs = json.loads(bucket_list_str)
             if isinstance(dataset_configs, list) and len(dataset_configs) > 0:
                 logger.debug(
                     "R2_DATASET_BUCKET_LIST found, using multiple dataset endpoints"

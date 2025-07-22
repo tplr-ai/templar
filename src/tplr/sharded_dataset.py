@@ -40,7 +40,7 @@ class SharedShardedDataset(Dataset):
 
     def __init__(
         self,
-        local_shard_path: Path | str,
+        shard_index,
         sequence_length: int,
         rank: int,
         world_size: int,
@@ -57,9 +57,13 @@ class SharedShardedDataset(Dataset):
         if self.world > 1:
             dist.barrier(device_ids=[self.rank])
 
-        tokens_file = Path(local_shard_path)
+        shards_path = os.getenv("DATASET_BINS_PATH")
+        if shards_path is None:
+            raise ValueError("dataset path not configured. Set $DATASET_BINS_PATH") # DATASET_BINS_PATH is local path?
+        
+        tokens_file = os.path.join(shards_path, f'shard_{shard_index}.npy')
         ids_file = tokens_file.replace('.npy', '.ids')
-
+        
         if not tokens_file.exists() or not ids_file.exists():
             raise FileNotFoundError(
                 f"Pre-processed files not found in {'/'.join(tokens_file.split('/')[:-1])}. "
@@ -126,16 +130,19 @@ class ShardedDatasetManager:
     async def prepare_shard(self, shard_index: int):
         # this needs the 6 digit formatting
         filename = f"shard_{shard_index}.npy"
+        # have a bucket configuration?
         shard_path = f"{self.local_dataset_path}/{filename}"
         tplr.logger.info(f"Preparing shard {shard_index} at {shard_path}")
         
         # where should we have a miner download to?
         if not os.path.exists(shard_path):
             bucket = self.comms.get_own_bucket("dataset", "read")
+            # use separate comms
             download_completed = await self.comms.s3_get_object(
                 filename,
                 bucket,
             )
+            # don't have this be await
             
         dataset = SharedShardedDataset(
             local_dataset_path=shard_path,
@@ -167,7 +174,10 @@ class ShardedDatasetManager:
         
         if old_dataset:
             # should we destroy here or leave it?
+            # YES DESTROY
             old_dataset.destroy()
+            
+        
     
         
     

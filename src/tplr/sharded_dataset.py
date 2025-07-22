@@ -41,11 +41,7 @@ class SharedShardedDataset(Dataset):
 
     def __init__(
         self,
-<<<<<<< HEAD
         shard_index: int,
-=======
-        dataset_path,
->>>>>>> be5ae5e (upload for draft pr)
         sequence_length: int,
         rank: int,
         world_size: int,
@@ -62,40 +58,9 @@ class SharedShardedDataset(Dataset):
         if self.world > 1:
             dist.barrier(device_ids=[self.rank])
 
-<<<<<<< HEAD
         self.tokens_file, self.ids_file = self.locate_shards(shard_index)
         _ = self.check_paths([self.tokens_file, self.ids_file])
         _ = self.mmap_tokens_and_ids(token_dtype)
-=======
-        shards_path = os.getenv("DATASET_BINS_PATH")
-        if shards_path is None:
-            raise ValueError("Dataset path not configured. Set $DATASET_BINS_PATH.")
-
-        # needs to be a glob
-        shards_dir = Path(shards_path)
-        tokens_file = dataset_path
-        ids_file = dataset_path.replace('.npy', '.ids')
-
-        if not tokens_file.exists() or not ids_file.exists():
-            raise FileNotFoundError(
-                f"Pre-processed files not found in {shards_dir}. "
-                "Run the preprocessing script first."
-            )
-
-        # ────────────────────────── mmap tokens & ids ───────────────────────────
-        # Normalise once for safety; still type-checks
-        tokens_mem = np.memmap(tokens_file, dtype=np.dtype(token_dtype), mode="r+")
-        tokens_mem.flags.writeable = True
-        self.tokens = torch.from_numpy(tokens_mem)
-        tokens_mem.flags.writeable = False
-
-        ids_mem = np.memmap(ids_file, dtype=np.uint64, mode="r+")
-        ids_mem.flags.writeable = True
-        self.sample_ids = torch.from_numpy(ids_mem).to(torch.uint64)
-        ids_mem.flags.writeable = False
-
-        self.total_samples = len(self.sample_ids)
->>>>>>> be5ae5e (upload for draft pr)
 
         # should wrap in a timer
         tplr.logger.info(

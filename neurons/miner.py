@@ -287,7 +287,7 @@ class Miner(BaseNode):
             milestones=[inner_steps_before_outer_step, self.hparams.warmup_steps],
         )
         tplr.logger.info("[Init] optimizers & schedulers constructed")
-        
+
         self.xshapes = {}
         self.totalks = {}
         model_iterator = self.bare_model.named_parameters()
@@ -1070,7 +1070,8 @@ class Miner(BaseNode):
     def _get_offloaded_param(self):
         """Get a copy of current parameters and offload them to CPU"""
         return [
-            param.data.detach().clone().to("cpu") for param in self.bare_model.parameters()
+            param.data.detach().clone().to("cpu")
+            for param in self.bare_model.parameters()
         ]
 
     async def cleanup_window(self):

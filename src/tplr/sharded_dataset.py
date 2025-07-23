@@ -40,7 +40,7 @@ class SharedShardedDataset(Dataset):
 
     def __init__(
         self,
-        shard_index,
+        shard_index: int,
         sequence_length: int,
         rank: int,
         world_size: int,
@@ -58,14 +58,14 @@ class SharedShardedDataset(Dataset):
             dist.barrier(device_ids=[self.rank])
             
         self.tokens_file, self.ids_file = self.locate_shards(shard_index)
-        _ = self.mmap_tokens_and_ids(self.tokens_file, self.ids_file)      
-        
         if not self.tokens_file.exists() or not self.ids_file.exists():
             raise FileNotFoundError(
-                f"Pre-processed files not found in {'/'.join(tokens_file.split('/')[:-1])}. "
+                f"Pre-processed files not found in {'/'.join(self.tokens_file.split('/')[:-1])}. "
                 "Run the preprocessing script first."
             )
-
+            
+        _ = self.mmap_tokens_and_ids(token_dtype)
+        
         # should wrap in a timer
         tplr.logger.info(
             f"[Dataset] rank {self.rank}: init done in {time.perf_counter() - t0:.1f}s "
@@ -76,30 +76,27 @@ class SharedShardedDataset(Dataset):
     def locate_shards(
         self, 
         shard_index: int,
-        custom_path: os.PathLike | None = None, # extend the use of this static method
+        custom_path: os.PathLike | None = None, 
     ) -> list[Path]:
-        # where should we have a miner download to? # NEEDS_DOCS
-        default_path = os.getenv("DATASET_BINS_PATH")
-        if default_path is None:
-            # this is redundant because of config anyway
-            raise ValueError("dataset path not configured. Set $DATASET_BINS_PATH") # DATASET_BINS_PATH is local path?
-        
-        shards_path = custom_path or default_path
+        # Docs to suggest where miner saves?
+        shards_path = os.getenv("DATASET_BINS_PATH") or custom_path
+        if shards_path is None:
+            raise ValueError("Dataset path not configured. Set $DATASET_BINS_PATH or provide custom_path")
         
         tokens_file = os.path.join(shards_path, f'shard_{shard_index:06d}.npy')
         ids_file = tokens_file.replace('.npy', '.ids')
         
         return tokens_file, ids_file
     
-    def mmap_tokens_and_ids(self, token_dtype, tokens_file, ids_file):
+    def mmap_tokens_and_ids(self, token_dtype: npt.DTypeLike):
         # ────────────────────────── mmap tokens & ids ───────────────────────────
         # Normalise once for safety; still type-checks
-        tokens_mem = np.memmap(tokens_file, dtype=np.dtype(token_dtype), mode="r+")
+        tokens_mem = np.memmap(self.tokens_file, dtype=np.dtype(token_dtype), mode="r+")
         tokens_mem.flags.writeable = True
         self.tokens = torch.from_numpy(tokens_mem)
         tokens_mem.flags.writeable = False
 
-        ids_mem = np.memmap(ids_file, dtype=np.uint64, mode="r+")
+        ids_mem = np.memmap(self.ids_file, dtype=np.uint64, mode="r+")
         ids_mem.flags.writeable = True
         self.sample_ids = torch.from_numpy(ids_mem).to(torch.uint64)
         ids_mem.flags.writeable = False
@@ -110,7 +107,7 @@ class SharedShardedDataset(Dataset):
     def __len__(self):
         return self.total_samples
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int):
         if idx >= self.total_samples:
             raise IndexError
         start = idx * self.seqlen
@@ -121,7 +118,6 @@ class SharedShardedDataset(Dataset):
         return int(self.sample_ids[idx].item())
         
 
-# should we just inherit? since I use the cheeky locate_shards?
 class ShardedDatasetManager:
     def __init__(
         self,
@@ -137,7 +133,6 @@ class ShardedDatasetManager:
         self.token_dtype = token_dtype
         self.shard_index = 0
         
-        # can we do awaits in regular fn def / inits?
         self.active_dataset: SharedShardedDataset | None = None
         self.upcoming_dataset: SharedShardedDataset | None = None
         
@@ -153,23 +148,23 @@ class ShardedDatasetManager:
         
         if not os.path.exists(tokens_file):
             bucket = self.comms.get_own_bucket("shared_dataset", "read")
-            # don't have this be await 
             download_completed = asyncio.create_task(
                 self.comms.s3_get_object(
                     tokens_file,
                     bucket,
+                    load_file=False,
                 ),
             )
             _ = asyncio.create_task(
                 self.comms.s3_get_object(
                     ids_file,
                     bucket,
+                    load_file=False,
                 ),
             )
         return download_completed
     
-    async def create_dataset(self, shard_index):
-        # this await may be sometimes redundant?
+    async def create_dataset(self, shard_index: int):
         downloaded = await self.prepare_shard(shard_index)
         dataset = SharedShardedDataset(
             shard_index=shard_index,
@@ -181,19 +176,14 @@ class ShardedDatasetManager:
         return dataset
     
     async def initialize_datasets(self, current_shard_index: int):
-        # await this one so dataset does exist, the check if the files not found
-        # would raise an error
         self.active_dataset = await self.create_dataset(current_shard_index)
-        # it's possible to create_task like this?
-        # now less of dataset than data download
         self.upcoming_dataset = asyncio.create_task(self.prepare_shard(current_shard_index + 1))
+        return 
     
     async def swap_datasets(self):
         self.shard_index += 1
 
         if self.upcoming_dataset: 
-            # I think this is fine as a simplification since we're generally
-            # handling the existence of this ahead of time
             await self.upcoming_dataset
         
         if self.upcoming_dataset is None:
@@ -207,8 +197,8 @@ class ShardedDatasetManager:
         tplr.logger.info("successfully swapped datasets.")
         
         if old_dataset:
-            # os.remove(old_dataset.tokens_file)
-            # os.remove(old_dataset.ids_file)
-            # YES DESTROY, need to think that through more
-            old_dataset.destroy()
+            os.remove(old_dataset.tokens_file)
+            os.remove(old_dataset.ids_file)
+            del old_dataset
             
+        return

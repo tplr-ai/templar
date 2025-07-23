@@ -120,6 +120,7 @@ def main(args):
 
     else:
         # Check existing shards locally
+        print(f"Running Locally")
         if os.path.isdir(args.output_dir):
             existing = glob.glob(os.path.join(args.output_dir, "train_*.npy"))
             existing_count = sum(

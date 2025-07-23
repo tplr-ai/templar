@@ -50,6 +50,14 @@ from torch.optim.lr_scheduler import (
 )
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.config_manager import (
+    ActivationCheckpoint,
+    Float8,
+    JobConfig,
+    Model,
+    Parallelism,
+    Training,
+)
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.llama3 import (
     Transformer as TitanLlama,
@@ -305,10 +313,8 @@ class Miner(BaseNode):
 
         world_mesh = pdims.build_mesh()
 
-        from types import SimpleNamespace
-
-        job_config_for_titan = SimpleNamespace(
-            training=SimpleNamespace(
+        job_config_for_titan = JobConfig(
+            training=Training(
                 seq_len=self.hparams.sequence_length,
                 compile=getattr(self.hparams, "compile", False),
                 enable_cpu_offload=getattr(self.hparams, "enable_cpu_offload", False),
@@ -319,7 +325,7 @@ class Miner(BaseNode):
                     self.hparams, "mixed_precision_reduce", "float32"
                 ),
             ),
-            parallelism=SimpleNamespace(
+            parallelism=Parallelism(
                 enable_async_tensor_parallel=getattr(
                     self.hparams, "enable_async_tensor_parallel", False
                 ),
@@ -333,13 +339,13 @@ class Miner(BaseNode):
                     self.hparams, "enable_compiled_autograd", False
                 ),
             ),
-            model=SimpleNamespace(
-                converters=getattr(self.hparams, "converters", {}),
+            model=Model(
+                converters=getattr(self.hparams, "converters", []),
             ),
-            float8=SimpleNamespace(
-                recipe_name=getattr(self.hparams, "recipe_name", ""),
+            float8=Float8(
+                recipe_name=getattr(self.hparams, "recipe_name", None),
             ),
-            activation_checkpoint=SimpleNamespace(
+            activation_checkpoint=ActivationCheckpoint(
                 mode="selective", selective_ac_option="op"
             ),
         )

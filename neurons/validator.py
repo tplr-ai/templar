@@ -126,6 +126,19 @@ class Validator(BaseNode):
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        parser.add_argument(
+            "--profile-iters",
+            type=int,
+            default=0,
+            help="Active iterations per Torch‑Profiler trace (0 = disable)",
+        )
+        parser.add_argument(
+            "--profile-dir",
+            type=str,
+            default="./log/profiler",
+            help="Directory to save profiler traces",
+        )
+
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -2249,6 +2262,9 @@ class Validator(BaseNode):
                 current_window=self.current_window,
             )
 
+            # ── profiler step (only master – validators are single‑rank) ─
+            if self._prof is not None:
+                self._prof.step()
             # 17. Create checkpoints periodically
             if (
                 self.global_step % self.hparams.checkpoint_frequency == 0

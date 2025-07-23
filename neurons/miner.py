@@ -132,6 +132,18 @@ class Miner(BaseNode):
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        parser.add_argument(
+            "--profile-iters",
+            type=int,
+            default=0,
+            help="Active iterations per Torch‑Profiler trace (0 = disable)",
+        )
+        parser.add_argument(
+            "--profile-dir",
+            type=str,
+            default="./log/profiler",
+            help="Directory to save profiler traces",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -1007,6 +1019,11 @@ class Miner(BaseNode):
                 del processed_state_dict, gradient
 
             await self.cleanup_window()
+
+            # ── profiler step (only master) ─────────────────────────────
+            if self.is_master and self._prof is not None:
+                self._prof.step()
+
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
             await self.wait_until_window(step_window + 1)

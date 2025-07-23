@@ -237,19 +237,22 @@ class Validator(BaseNode):
             world_size=self.world_size,
         )
 
+        tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
+
         job_config = JobConfig(
             training=Training(
                 seq_len=self.hparams.sequence_length,
-                compile=getattr(self.hparams, "compile", False),
+                compile=getattr(tt, "compile", False),
             ),
             parallelism=Parallelism(
-                enable_async_tensor_parallel=False,
-                disable_loss_parallel=True,
+                enable_async_tensor_parallel=tt.enable_async_tensor_parallel,
+                disable_loss_parallel=tt.disable_loss_parallel,
             ),
-            model=Model(converters=[]),
-            float8=Float8(recipe_name=None),
+            model=Model(converters=getattr(tt, "converters", [])),
+            float8=Float8(recipe_name=tt.float8_recipe_name),
             activation_checkpoint=ActivationCheckpoint(
-                mode="selective", selective_ac_option="op"
+                mode=tt.activation_checkpoint.get("mode", "selective"),
+                selective_ac_option=tt.activation_checkpoint.get("option", "op"),
             ),
         )
         self.model = parallelize_llama(

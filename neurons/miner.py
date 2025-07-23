@@ -28,6 +28,7 @@ import sys
 import time
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import cast
 
 import bittensor as bt
@@ -113,12 +114,6 @@ class Miner(BaseNode):
             choices=["bf16", "fp16"],
             default="bf16",
             help="Mixed-precision data type. Use «fp16» to enable GradScaler.",
-        )
-        parser.add_argument(
-            "--tp-degree",
-            type=int,
-            default=1,
-            help="Tensor-parallel degree for TorchTitan (defaults to 1 – no TP)",
         )
         parser.add_argument(
             "--local_rank", type=int, default=int(os.getenv("LOCAL_RANK", 0))
@@ -224,7 +219,6 @@ class Miner(BaseNode):
             torch.cuda.set_device(self.local_rank)
             tplr.logger.info("[Init] NCCL process-group ready and GPU selected")
             self.config.device = f"cuda:{self.local_rank}"
-            self.config.tp_degree = int(getattr(self.config, "tp_degree", 1))
         else:
             self.config.device = self.config.device or "cuda"
         self.device = torch.device(self.config.device)
@@ -281,22 +275,28 @@ class Miner(BaseNode):
         with torch.device("meta"):
             self.model = TitanLlama(titan_args)
 
-        tp_degree = max(1, self.config.tp_degree)
+        # ──────────────────────────────────────────────────────────────
+        # TorchTitan parallelism parameters come from hparams.torchtitan
+        # ──────────────────────────────────────────────────────────────
+        tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
+
+        tp_degree = max(1, int(getattr(tt, "tp_degree", 1)))
         if self.world_size % tp_degree != 0:
             raise ValueError(
                 f"World size ({self.world_size}) must be divisible by tensor-parallel degree ({tp_degree})"
             )
-        dp_degree = self.world_size // tp_degree
+        dp_replicate = int(getattr(tt, "dp_replicate", self.world_size))
+        dp_degree = dp_replicate // tp_degree if dp_replicate >= tp_degree else 1
 
         self.tp_degree = tp_degree
         self.dp_degree = dp_degree
 
         pdims = ParallelDims(
-            dp_replicate=self.world_size,
+            dp_replicate=dp_replicate,
             dp_shard=1,
             tp=tp_degree,
-            pp=1,
-            cp=1,
+            pp=int(getattr(tt, "pp_degree", 1)),
+            cp=int(getattr(tt, "cp_degree", 1)),
             ep=1,
             world_size=self.world_size,
         )
@@ -316,37 +316,22 @@ class Miner(BaseNode):
         job_config_for_titan = JobConfig(
             training=Training(
                 seq_len=self.hparams.sequence_length,
-                compile=getattr(self.hparams, "compile", False),
-                enable_cpu_offload=getattr(self.hparams, "enable_cpu_offload", False),
-                mixed_precision_param=getattr(
-                    self.hparams, "mixed_precision_param", "float32"
-                ),
-                mixed_precision_reduce=getattr(
-                    self.hparams, "mixed_precision_reduce", "float32"
-                ),
+                compile=tt.compile,
+                enable_cpu_offload=tt.enable_cpu_offload,
+                mixed_precision_param=tt.mixed_precision_param,
+                mixed_precision_reduce=tt.mixed_precision_reduce,
             ),
             parallelism=Parallelism(
-                enable_async_tensor_parallel=getattr(
-                    self.hparams, "enable_async_tensor_parallel", False
-                ),
-                disable_loss_parallel=getattr(
-                    self.hparams, "disable_loss_parallel", True
-                ),
-                fsdp_reshard_after_forward=getattr(
-                    self.hparams, "fsdp_reshard_after_forward", "default"
-                ),
-                enable_compiled_autograd=getattr(
-                    self.hparams, "enable_compiled_autograd", False
-                ),
+                enable_async_tensor_parallel=tt.enable_async_tensor_parallel,
+                disable_loss_parallel=tt.disable_loss_parallel,
+                fsdp_reshard_after_forward=tt.fsdp_reshard_after_forward,
+                enable_compiled_autograd=tt.enable_compiled_autograd,
             ),
-            model=Model(
-                converters=getattr(self.hparams, "converters", []),
-            ),
-            float8=Float8(
-                recipe_name=getattr(self.hparams, "recipe_name", None),
-            ),
+            model=Model(converters=getattr(tt, "converters", [])),
+            float8=Float8(recipe_name=tt.float8_recipe_name),
             activation_checkpoint=ActivationCheckpoint(
-                mode="selective", selective_ac_option="op"
+                mode=tt.activation_checkpoint.get("mode", "selective"),
+                selective_ac_option=tt.activation_checkpoint.get("option", "op"),
             ),
         )
 

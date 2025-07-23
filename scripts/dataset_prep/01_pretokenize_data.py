@@ -147,7 +147,7 @@ def main(args):
     )
     dataset = dataset.shuffle(seed=args.seed, buffer_size=args.buffer_size)
 
-    num_proc = args.num_proc if args.num_proc > 0 else max(1, os.cpu_count() * 3 // 4)
+    num_proc = args.num_proc if args.num_proc > 0 else min(os.cpu_count() - 1, os.cpu_count() * 9 // 10)
     print(f"Using {num_proc} processes")
 
     # Initialize processing variables

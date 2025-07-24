@@ -370,6 +370,7 @@ class Comms(ChainManager):
         timeout: int = 20,
         time_min: datetime = None,
         time_max: datetime = None,
+        load_data: bool = True
     ):
         """Download object from S3 using asynchronous streaming."""
         import uuid
@@ -442,17 +443,23 @@ class Comms(ChainManager):
                 )
                 if not success:
                     return None
-
-            # Now load the data
-            if key.endswith(".json") or "start_window" in key:
-                async with aiofiles.open(temp_file_path, "r") as f:
-                    data = await f.read()
-                    loaded_data = json.loads(data)
+            
+            if load_data:
+                # Now load the data
+                if key.endswith(".json") or "start_window" in key:
+                    async with aiofiles.open(temp_file_path, "r") as f:
+                        data = await f.read()
+                        loaded_data = json.loads(data)
+                else:
+                    loaded_data = torch.load(
+                        temp_file_path,
+                        map_location=self.config.device,
+                        weights_only=True,
+                    )
             else:
-                loaded_data = torch.load(
-                    temp_file_path,
-                    map_location=self.config.device,
-                    weights_only=True,
+                loaded_data = os.rename(
+                    temp_file_path, 
+                    key,
                 )
 
             return loaded_data

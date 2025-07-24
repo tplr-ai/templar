@@ -3,6 +3,7 @@ List instances command implementation.
 """
 
 from typing import List
+
 from rentcompute.config import Config
 from rentcompute.providers.base import Pod
 

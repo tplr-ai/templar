@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # Test script for miner metrics with proper types
 
-import os
 import argparse
-import tplr
 import json
 import logging
+import os
+
+import tplr
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

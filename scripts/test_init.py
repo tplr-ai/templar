@@ -2,12 +2,12 @@
 
 # Script to verify model initialization is deterministic
 
-import torch
-import numpy as np
-import random
-from transformers import LlamaForCausalLM
-from transformers import LlamaConfig
 import hashlib
+import random
+
+import numpy as np
+import torch
+from transformers import LlamaConfig, LlamaForCausalLM
 
 
 def get_model_hash(model):

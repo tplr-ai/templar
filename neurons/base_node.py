@@ -1,17 +1,17 @@
 import abc
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import functools
 import signal
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, cast
 
 import bittensor as bt
-from bittensor.core.subtensor import ScaleObj
 import torch.distributed as dist
 import websockets.exceptions  # ensure import before threads start
+from bittensor.core.subtensor import ScaleObj
 
 import tplr
 

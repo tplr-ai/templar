@@ -19,8 +19,9 @@ ENABLE_SHARD_PROFILER = (
 )
 
 # Import profilers after defining flags to avoid circular imports
+from .shard_profiler import ShardProfiler  # noqa: E402
+from .shard_profiler import get_profiler as get_shard_profiler
 from .timer_profiler import TimerProfiler, get_timer_profiler  # noqa: E402
-from .shard_profiler import ShardProfiler, get_profiler as get_shard_profiler  # noqa: E402
 
 __all__ = [
     "TimerProfiler",

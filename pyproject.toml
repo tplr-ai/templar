@@ -98,3 +98,6 @@ exclude = [
     ".eggs",
     "influxdb_data"
 ]
+
+[tool.ruff.lint]
+select = ["I"]

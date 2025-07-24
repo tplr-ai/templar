@@ -5,11 +5,11 @@ This module contains the ProviderFactory class that manages provider
 instantiation and retrieval.
 """
 
-from typing import Dict, Type, List
+from typing import Dict, List, Type
 
 from rentcompute.providers.base import BaseProvider
-from rentcompute.providers.mock import MockProvider
 from rentcompute.providers.celium import CeliumProvider
+from rentcompute.providers.mock import MockProvider
 
 
 class ProviderFactory:

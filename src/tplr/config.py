@@ -17,13 +17,14 @@
 
 
 # Global imports
-import os
 import json
+import os
+
 import botocore.config
+from dotenv import load_dotenv
 
 # Local imports
 from .logging import logger
-from dotenv import load_dotenv
 
 load_dotenv()
 

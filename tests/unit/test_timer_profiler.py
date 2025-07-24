@@ -218,6 +218,7 @@ class TestTimerProfilerEnableDisable:
 
             # Reload the module to pick up environment changes
             import importlib
+
             import tplr.profilers
 
             importlib.reload(tplr.profilers)

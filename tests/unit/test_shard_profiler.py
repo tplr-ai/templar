@@ -6,7 +6,6 @@ import os
 import tempfile
 from unittest import mock
 
-
 from tplr.profilers import (
     ENABLE_PROFILERS,
     ENABLE_SHARD_PROFILER,
@@ -248,6 +247,7 @@ class TestShardProfilerEnableDisable:
 
             # Reload the module to pick up environment changes
             import importlib
+
             import tplr.profilers
 
             importlib.reload(tplr.profilers)

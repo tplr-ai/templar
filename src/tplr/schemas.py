@@ -16,8 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Global imports
-from pydantic import BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 # Pydantic v2: ConfigDict replaces inner `class Config`
 try:  # v2

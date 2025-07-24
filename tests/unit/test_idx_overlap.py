@@ -1,10 +1,11 @@
 from types import SimpleNamespace
 
-import torch
 import pytest
+import torch
 
 # ---- import the function under test -----------------------------------------
 from tplr.neurons import check_uid_index_overlap  # <-- fix this path
+
 # -----------------------------------------------------------------------------
 
 

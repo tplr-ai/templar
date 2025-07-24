@@ -45,8 +45,8 @@ import json
 import os
 import shutil
 import time
-from typing import Optional, Tuple
 import typing
+from typing import Optional, Tuple
 
 import bittensor as bt
 import torch

@@ -1,12 +1,13 @@
-import os
 import argparse
+import glob
+import math
 import multiprocessing as mp
+import os
+
 import numpy as np
-from transformers import AutoTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
-import math
-import glob
+from transformers import AutoTokenizer
 
 # Global tokenizer for multiprocessing
 _tokenizer = None

@@ -17,12 +17,12 @@
 
 
 import asyncio
-from collections import defaultdict
 import math
+import typing
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeVar
-import typing
 
 import torch
 import torch.distributed as dist

@@ -3,21 +3,21 @@
 CLI interface for rentcompute
 """
 
-import sys
-import logging
 import argparse
+import logging
+import sys
 from typing import List, Optional
 
 from rentcompute import __version__
 from rentcompute.commands import (
-    login,
-    start,
     list_instances,
-    stop,
-    search,
+    login,
     provision,
-    rsync,
     reload,
+    rsync,
+    search,
+    start,
+    stop,
 )
 from rentcompute.config import Config
 

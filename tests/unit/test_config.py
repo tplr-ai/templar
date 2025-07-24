@@ -17,6 +17,7 @@
 
 import os
 from unittest.mock import patch
+
 from src.tplr.config import format_bucket_secrets
 
 

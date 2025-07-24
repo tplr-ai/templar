@@ -28,6 +28,7 @@ import sys
 import time
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import cast
 
 import bittensor as bt
@@ -36,10 +37,12 @@ import torch
 import torch.distributed as dist
 
 # Third party
-import torch.nn.parallel
 import uvloop
 from torch import autocast
+from torch.amp.grad_scaler import GradScaler
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.optim import ZeroRedundancyOptimizer
+from torch.distributed.tensor import DTensor
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
@@ -47,7 +50,23 @@ from torch.optim.lr_scheduler import (
     SequentialLR,
 )
 from torch.utils.data import DataLoader
-from transformers.models.llama import LlamaForCausalLM
+from torchtitan.components.loss import cross_entropy_loss
+from torchtitan.config_manager import (
+    ActivationCheckpoint,
+    Float8,
+    JobConfig,
+    Model,
+    Parallelism,
+    Training,
+)
+from torchtitan.distributed import ParallelDims
+from torchtitan.models.llama3 import (
+    Transformer as TitanLlama,
+)
+from torchtitan.models.llama3 import (
+    TransformerModelArgs,
+)
+from torchtitan.models.llama3.infra.parallelize import parallelize_llama
 
 import tplr
 
@@ -91,6 +110,12 @@ class Miner(BaseNode):
             "--device", type=str, default="cuda", help="Device to use for training"
         )
         parser.add_argument(
+            "--amp-dtype",
+            choices=["bf16", "fp16"],
+            default="bf16",
+            help="Mixed-precision data type. Use «fp16» to enable GradScaler.",
+        )
+        parser.add_argument(
             "--local_rank", type=int, default=int(os.getenv("LOCAL_RANK", 0))
         )
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -109,6 +134,18 @@ class Miner(BaseNode):
             "--local",
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
+        )
+        parser.add_argument(
+            "--profile-iters",
+            type=int,
+            default=0,
+            help="Active iterations per Torch‑Profiler trace (0 = disable)",
+        )
+        parser.add_argument(
+            "--profile-dir",
+            type=str,
+            default="./log/profiler",
+            help="Directory to save profiler traces",
         )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
@@ -187,6 +224,17 @@ class Miner(BaseNode):
         self.device = torch.device(self.config.device)
         tplr.logger.info(f"[Init] device set → {self.device}")
 
+        # Mixed precision setup
+        self.amp_dtype = (
+            torch.bfloat16 if self.config.amp_dtype == "bf16" else torch.float16
+        )
+        self.scaler = GradScaler(
+            enabled=(self.amp_dtype is torch.float16 and self.device.type == "cuda")
+        )
+        tplr.logger.info(
+            f"[Init] Using {self.config.amp_dtype}. GradScaler enabled: {self.scaler.is_enabled()}"
+        )
+
         # Convenience flags
         self.is_master = self.rank == 0
         self.config.local = cast(bool, self.config.local)
@@ -212,25 +260,94 @@ class Miner(BaseNode):
         super().__init__()
 
         # Init model with hparams config
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.device)  # type: ignore[reportArgumentType]
-        if self.world_size < 4:
-            self.model.gradient_checkpointing_enable()
-        tplr.logger.info("[Init] Llama model instantiated & on device")
+        hf_cfg = self.hparams.model_config  # a transformers.LlamaConfig
+        titan_args = TransformerModelArgs(
+            dim=hf_cfg.hidden_size,
+            n_layers=hf_cfg.num_hidden_layers,
+            n_heads=hf_cfg.num_attention_heads,
+            n_kv_heads=getattr(hf_cfg, "num_key_value_heads", None),
+            vocab_size=hf_cfg.vocab_size,
+            multiple_of=256,
+            max_seq_len=self.hparams.sequence_length,
+            rope_theta=getattr(hf_cfg, "rope_theta", 1e4),
+            depth_init=True,
+        )
+        with torch.device("meta"):
+            self.model = TitanLlama(titan_args)
 
-        compile_mode = "default"
-        self.model = cast(
-            LlamaForCausalLM, torch.compile(self.model, mode=compile_mode)
+        # ──────────────────────────────────────────────────────────────
+        # TorchTitan parallelism parameters come from hparams.torchtitan
+        # ──────────────────────────────────────────────────────────────
+        tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
+
+        tp_degree = max(1, int(getattr(tt, "tp_degree", 1)))
+        if self.world_size % tp_degree != 0:
+            raise ValueError(
+                f"World size ({self.world_size}) must be divisible by tensor-parallel degree ({tp_degree})"
+            )
+        dp_replicate = int(getattr(tt, "dp_replicate", self.world_size))
+        dp_degree = dp_replicate // tp_degree if dp_replicate >= tp_degree else 1
+
+        self.tp_degree = tp_degree
+        self.dp_degree = dp_degree
+
+        pdims = ParallelDims(
+            dp_replicate=dp_replicate,
+            dp_shard=1,
+            tp=tp_degree,
+            pp=int(getattr(tt, "pp_degree", 1)),
+            cp=int(getattr(tt, "cp_degree", 1)),
+            ep=1,
+            world_size=self.world_size,
         )
 
-        if self.world_size > 1:
-            self.model = torch.nn.parallel.DistributedDataParallel(
-                self.model,
-                device_ids=[self.local_rank],
-                output_device=self.local_rank,
-                gradient_as_bucket_view=True,
-            )
-            tplr.logger.info("[Init] wrapped model with DistributedDataParallel")
+        self.tensor_parallel_degree = getattr(
+            self.hparams, "tensor_parallel_degree", self.world_size
+        )
+        self.pipeline_parallel_degree = getattr(
+            self.hparams, "pipeline_parallel_degree", 1
+        )
+        self.context_parallel_degree = getattr(
+            self.hparams, "context_parallel_degree", 1
+        )
+
+        world_mesh = pdims.build_mesh()
+
+        job_config_for_titan = JobConfig(
+            training=Training(
+                seq_len=self.hparams.sequence_length,
+                compile=tt.compile,
+                enable_cpu_offload=tt.enable_cpu_offload,
+                mixed_precision_param=tt.mixed_precision_param,
+                mixed_precision_reduce=tt.mixed_precision_reduce,
+            ),
+            parallelism=Parallelism(
+                enable_async_tensor_parallel=tt.enable_async_tensor_parallel,
+                disable_loss_parallel=tt.disable_loss_parallel,
+                fsdp_reshard_after_forward=tt.fsdp_reshard_after_forward,
+                enable_compiled_autograd=tt.enable_compiled_autograd,
+            ),
+            model=Model(converters=getattr(tt, "converters", [])),
+            float8=Float8(recipe_name=tt.float8_recipe_name),
+            activation_checkpoint=ActivationCheckpoint(
+                mode=tt.activation_checkpoint.get("mode", "selective"),
+                selective_ac_option=tt.activation_checkpoint.get("option", "op"),
+            ),
+        )
+
+        self.model = parallelize_llama(
+            self.model,
+            parallel_dims=pdims,
+            job_config=job_config_for_titan,
+        )
+
+        self.model.to_empty(device=self.device)  # type: ignore[reportArgumentType]
+        self.model.init_weights()
+
+        tplr.logger.info(
+            f"[Init] Llama model parallelized with TP={tp_degree} and DP={dp_degree}, and on device"
+        )
+
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
@@ -250,11 +367,15 @@ class Miner(BaseNode):
 
         self.xshapes = {}
         self.totalks = {}
-        model_iterator = (
-            self.model.module.named_parameters()
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model.named_parameters()
-        )
+        model_to_iterate = getattr(self.model, "module", self.model)
+        model_iterator = model_to_iterate.named_parameters()
+
+        # dp_group = None
+        if dp_degree > 1:
+            # dp_group = world_mesh.get_group("dp_shard")
+            tplr.logger.info(
+                f"[Init] Using data-parallel group for optimizer sharding (size={dp_degree})."
+            )
 
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
@@ -454,11 +575,7 @@ class Miner(BaseNode):
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
 
-        bare_model = (
-            self.model.module
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
+        bare_model = getattr(self.model, "module", self.model)
 
         if self.world_size == 1 or self.is_master:
             (
@@ -499,7 +616,7 @@ class Miner(BaseNode):
 
             # 1) parameters & buffers
             for tensor in bare_model.state_dict().values():
-                if torch.is_tensor(tensor):
+                if torch.is_tensor(tensor) and not isinstance(tensor, DTensor):
                     dist.broadcast(tensor.data, src=0)
 
             bcast_time = tplr.T() - bcast_start
@@ -738,10 +855,8 @@ class Miner(BaseNode):
                 debug_dict = {}
 
                 # Add model parameters debug info
-                if isinstance(self.model, torch.nn.parallel.DistributedDataParallel):
-                    model_iterator = self.model.module.named_parameters()
-                else:
-                    model_iterator = self.model.named_parameters()
+                model_to_iterate = getattr(self.model, "module", self.model)
+                model_iterator = model_to_iterate.named_parameters()
                 for name, param in model_iterator:
                     if (
                         param is not None and param.numel() >= 2
@@ -888,6 +1003,11 @@ class Miner(BaseNode):
                 del processed_state_dict, gradient
 
             await self.cleanup_window()
+
+            # ── profiler step (only master) ─────────────────────────────
+            if self.is_master and self._prof is not None:
+                self._prof.step()
+
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
             await self.wait_until_window(step_window + 1)
@@ -906,6 +1026,14 @@ class Miner(BaseNode):
         dict
             Keys: total_loss (float), batch_count (int), batch_tokens (int)
         """
+
+        # Ensure the event loop and executor are initialized, which is normally
+        # done in the `run()` method. This makes the method safe for isolated testing.
+        if not hasattr(self, "loop"):
+            self.loop = asyncio.get_running_loop()
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
+            self.loop.set_default_executor(self.executor)
+
         self.inner_optimizer.zero_grad()
 
         total_loss: float = 0.0
@@ -962,29 +1090,36 @@ class Miner(BaseNode):
             local_tokens_sum += tokens_this_batch
 
             labels = input_ids.clone()
+            labels[:, :-1] = input_ids[:, 1:]  # ✓ shift by +1
+            labels[:, -1] = self.tokenizer.pad_token_id
             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
 
             # ------------------------------------------------------------------ #
             # 3. Forward + backward
             # ------------------------------------------------------------------ #
-            with autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                outputs = self.model(input_ids=input_ids, labels=labels)
+            with autocast(device_type=self.device.type, dtype=self.amp_dtype):
+                outputs = self.model(input_ids, labels)
 
-            loss = outputs.loss / self.sampler.grad_accum_steps
-            loss_item = outputs.loss.detach().item()
+            calculated_loss = cross_entropy_loss(outputs, labels)
+
+            loss = calculated_loss / self.sampler.grad_accum_steps
+            loss_item = calculated_loss.detach().item()
 
             # -------------------------------------------------------------- #
             # 3-a.  Back-prop with no_sync() on non-final micro-batches
             # -------------------------------------------------------------- #
             final_micro_batch = (batch_count + 1) % self.sampler.grad_accum_steps == 0
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) and (
-                self.world_size > 1 and not final_micro_batch
+            if (
+                hasattr(self.model, "no_sync")
+                and self.world_size > 1
+                and not final_micro_batch
             ):
                 sync_ctx = self.model.no_sync()
             else:
                 sync_ctx = nullcontext()
             with sync_ctx:
-                loss.backward()
+                self.scaler.scale(loss).backward()
+
             total_loss += loss_item
             local_loss_sum += loss_item  # defer collective
 
@@ -1011,7 +1146,11 @@ class Miner(BaseNode):
                 log_loss = self._ddp_reduce(loss_item, op=dist.ReduceOp.AVG)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
-                self.inner_optimizer.step()
+                # Unscale, clip, then step via GradScaler if using fp16
+                self.scaler.unscale_(self.inner_optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                self.scaler.step(self.inner_optimizer)
+                self.scaler.update()
                 self.inner_scheduler.step()
                 self.inner_optimizer.zero_grad(set_to_none=True)
 
@@ -1059,11 +1198,7 @@ class Miner(BaseNode):
         # ------------------------------------------------------------------ #
         # 6. parameter offloading logic
         # ------------------------------------------------------------------ #
-        bare_model = (
-            self.model.module
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
+        bare_model = getattr(self.model, "module", self.model)
         with torch.no_grad():
             for saved_param, p in zip(params_offloaded, bare_model.parameters()):
                 saved_param = saved_param.to(p.device, non_blocking=True)
@@ -1087,11 +1222,7 @@ class Miner(BaseNode):
 
     def _get_offloaded_param(self):
         """Get a copy of current parameters and offload them to CPU"""
-        bare_model = (
-            self.model
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
+        bare_model = getattr(self.model, "module", self.model)
         return [
             param.data.detach().clone().to("cpu") for param in bare_model.parameters()
         ]

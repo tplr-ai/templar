@@ -1,0 +1,4 @@
+[submodule "external/torchtitan"]
+	path = external/torchtitan
+	url = https://github.com/tplr-ai/torchtitan
+	branch = templar-main

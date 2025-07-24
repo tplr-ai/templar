@@ -66,7 +66,7 @@ def save_shard(shard_buffer, shard_idx, tokens_in_shard, args):
         if _s3_client is None:
             _s3_client = boto3.client(
                 "s3",
-                endpoint_url=f"https://{args.r2_endpoint_url}.r2.cloudflarestorage.com",
+                endpoint_url=args.r2_endpoint_url,
                 aws_access_key_id=args.r2_access_key_id,
                 aws_secret_access_key=args.r2_secret_access_key,
             )
@@ -93,13 +93,15 @@ def main(args):
     shard_size = args.shard_size
     expected_shards = math.ceil(target_tokens / shard_size)
 
+    args.r2_endpoint_url = f"https://{args.r2_endpoint_url}.r2.cloudflarestorage.com"
+
     s3_client = None
     existing_count = 0
     if args.r2_bucket:
         print("R2 mode enabled. Will upload to R2 bucket.")
         s3_client = boto3.client(
             "s3",
-            endpoint_url=f"https://{args.r2_endpoint_url}.r2.cloudflarestorage.com",
+            endpoint_url=args.r2_endpoint_url,
             aws_access_key_id=args.r2_access_key_id,
             aws_secret_access_key=args.r2_secret_access_key,
             region_name="auto",

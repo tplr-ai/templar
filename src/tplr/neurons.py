@@ -16,11 +16,13 @@
 # DEALINGS IN THE SOFTWARE.
 
 
+import asyncio
 import math
+import typing
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeVar
-import typing
 
 import torch
 import torch.distributed as dist
@@ -614,3 +616,128 @@ async def compare_model_with_debug_dict(
         "param_count": param_count,
         "learning_rate": learning_rate,
     }
+
+
+@torch.no_grad()
+async def check_uid_index_overlap(
+    neuron: NeuronT,
+    gather_result: SimpleNamespace,
+    window: int,
+    *,
+    overlap_threshold: float = 0.90,
+) -> dict:
+    """
+    For every peer-pair compute the per-chunk *set* overlap of their top-k index
+    lists on each parameter.  A pair is flagged **only if the size-weighted
+    average across *all* checked parameters** is ≥ `overlap_threshold`.
+    """
+
+    # ── 0. basic sanity ───────────────────────────────────────────────────
+    uids: list[int] = list(getattr(gather_result, "uids", []))
+    Ptot = len(uids)
+    if Ptot < 2:
+        tplr.logger.info("[overlap] <2 peers – skip")
+        return dict(
+            pairs_checked=0,
+            pairs_high_ovlap=0,
+            ratio_high_ovlap=0.0,
+            mean_overlap=0.0,
+            pairs_over_thresh=[],
+            uids_over_thresh=set(),
+        )
+
+    ts_map = dict(
+        zip(
+            uids,
+            await asyncio.gather(
+                *[neuron.comms.gradient_timestamp(uid, window - 1) for uid in uids]
+            ),
+        )
+    )
+
+    # ── 1. bookkeeping ────────────────────────────────────────────────────
+    pair_acc: dict[tuple[int, int], list[float]] = defaultdict(lambda: [0.0, 0.0])
+    total_weighted_sum = 0.0
+    total_weight = 0.0
+
+    # ── 2. iterate over parameters that have compressed indices ───────────
+    bare_model = getattr(neuron.model, "module", neuron.model)
+    for pname, _ in bare_model.named_parameters():
+        idx_key = pname + "idxs"
+        idxs_all = getattr(gather_result.state_dict, idx_key, None)
+        if idxs_all is None:
+            continue
+
+        idxs_tensor = torch.stack([idxs_all[i] for i in range(Ptot)], dim=0)
+        P, *chunk_dims, k = idxs_tensor.shape
+        C = int(torch.prod(torch.tensor(chunk_dims)))  # num chunks
+        idxs_flat = idxs_tensor.reshape(P, C, k)
+
+        param_weight = C * k  # size weight
+
+        for i in range(P):
+            for j in range(i + 1, P):
+                a = idxs_flat[i].unsqueeze(-1)  # (C,k,1)
+                b = idxs_flat[j].unsqueeze(-2)  # (C,1,k)
+                inter = (a == b).any(-1).sum(-1)  # (C,)
+                mean_frac = (inter.float() / k).mean().item()
+
+                total_weighted_sum += mean_frac * param_weight
+                total_weight += param_weight
+
+                acc = pair_acc[(i, j)]
+                acc[0] += mean_frac * param_weight
+                acc[1] += param_weight
+
+    # ── 3. second pass – decide offenders & track min/max ─────────────────
+    pairs_high, pairs_over, uids_over = 0, [], set()
+    min_pair, min_val = None, 1.0
+    max_pair, max_val = None, 0.0
+
+    for (i, j), (w_sum, w_tot) in pair_acc.items():
+        avg_overlap = w_sum / w_tot
+
+        # --- track global min / max --------------------------------------
+        if avg_overlap < min_val:
+            min_val, min_pair = avg_overlap, (uids[i], uids[j])
+        if avg_overlap > max_val:
+            max_val, max_pair = avg_overlap, (uids[i], uids[j])
+        # ------------------------------------------------------------------
+
+        if avg_overlap >= overlap_threshold:
+            pairs_high += 1
+            uid_i, uid_j = uids[i], uids[j]
+            offender = uid_i if ts_map[uid_i] >= ts_map[uid_j] else uid_j
+            uids_over.add(offender)
+            pairs_over.append((uid_i, uid_j, avg_overlap))
+            tplr.logger.debug(
+                f"[overlap] peers {uid_i}/{uid_j} share "
+                f"{avg_overlap * 100:.1f}% of indices (size-weighted avg)"
+            )
+
+    mean_overlap = total_weighted_sum / total_weight if total_weight else 0.0
+    ratio_high = pairs_high / len(pair_acc) if pair_acc else 0.0
+
+    # ── 4. summary log with min / max -------------------------------------
+    tplr.logger.info(
+        f"[overlap] {len(pair_acc)} pairs, {pairs_high} ≥{overlap_threshold * 100:.0f}% "
+        f"({ratio_high * 100:.2f}%), size-weighted mean {mean_overlap * 100:.1f}%"
+    )
+    if min_pair is not None and max_pair is not None:
+        tplr.logger.info(
+            f"[overlap]   min {min_val * 100:.1f}%  (peers {min_pair[0]}/{min_pair[1]}) ; "
+            f"max {max_val * 100:.1f}%  (peers {max_pair[0]}/{max_pair[1]})"
+        )
+    if uids_over:
+        tplr.logger.warning(f"[overlap] offenders: {sorted(uids_over)}")
+
+    return dict(
+        pairs_checked=len(pair_acc),
+        pairs_high_ovlap=pairs_high,
+        ratio_high_ovlap=ratio_high,
+        mean_overlap=mean_overlap,
+        min_overlap=min_val,
+        max_overlap=max_val,
+        pairs_over_thresh=pairs_over,
+        uids_over_thresh=uids_over,
+    )

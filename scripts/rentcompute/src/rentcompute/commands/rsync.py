@@ -2,11 +2,12 @@
 Rsync command implementation.
 """
 
+import logging
 import os
 import subprocess
-import yaml
-import logging
 from typing import Dict, List, Optional, Tuple
+
+import yaml
 
 from rentcompute.config import Config
 

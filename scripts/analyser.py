@@ -1,27 +1,26 @@
 # type: ignore
 
 # Standard library imports
-import os
-import time
-import random
-import asyncio
 import argparse
-import numpy as np
+import asyncio
 import json
+import os
+import random
+import time
 from pathlib import Path
+from typing import Set
 
 # Third-party imports
 import boto3
-from typing import Set
-from botocore.config import Config
+import numpy as np
 import torch
 import torch.nn.functional as F
+from botocore.config import Config
 from transformers import LlamaForCausalLM
 
 # Local imports
 import tplr
 from tplr.config import BUCKET_SECRETS
-
 
 # GPU optimizations.
 torch.manual_seed(42)

@@ -1052,6 +1052,38 @@ class Validator(BaseNode):
             self._bg_tasks.add(t)
             t.add_done_callback(self._bg_tasks.discard)
 
+            idx_overlap = await tplr.neurons.check_uid_index_overlap(
+                self,
+                gather_result,
+                self.sync_window,
+                overlap_threshold=self.hparams.idx_overlap_threshold,
+            )
+            idx_overlap_peers = idx_overlap.get("uids_over_thresh", [])
+            for uid in idx_overlap_peers:
+                old_score = self.final_scores[uid].item()
+
+                # Only reduce positive scores
+                if self.final_scores[uid] > 0:
+                    self.final_scores[uid] *= self.idx_similarity_slashing_rate
+                    self.binary_moving_averages[uid] *= (
+                        self.idx_similarity_slashing_rate
+                    )
+
+                    new_score = self.final_scores[uid].item()
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to similarity in idxs.",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+                else:
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Skipped score of UID {uid} (current score: {old_score:.4f}) due to negative or zero value.",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+
             skipped_uids = gather_result.skipped_uids
             success_rate = gather_result.success_rate
             gather_time = tplr.T() - gather_start
@@ -1952,6 +1984,7 @@ class Validator(BaseNode):
                 self.previous_avg_loss_after_random = avg_loss_after_per_batch_random
 
             # 16. Log evaluation metrics once all evaluations are done
+            threshold_pct = int(round(self.hparams.idx_overlap_threshold * 100))
             window_total_time = tplr.T() - window_start
             evaluation_metrics = {
                 "validator/loss/own/before": avg_loss_before_per_batch_own,
@@ -1972,6 +2005,16 @@ class Validator(BaseNode):
                 "validator/timing/gather": gather_time,
                 "validator/timing/evaluation": evaluation_time,
                 "validator/timing/model_update": model_update_time,
+                "validator/overlap/pairs_checked": idx_overlap["pairs_checked"],
+                f"validator/overlap/pairs_over_{threshold_pct}": idx_overlap[
+                    "pairs_high_ovlap"
+                ],
+                f"validator/overlap/ratio_over_{threshold_pct}": idx_overlap[
+                    "ratio_high_ovlap"
+                ],
+                "validator/overlap/mean": idx_overlap["mean_overlap"],
+                "validator/overlap/min": idx_overlap["min_overlap"],
+                "validator/overlap/max": idx_overlap["max_overlap"],
             }
             self.wandb.log(evaluation_metrics, step=self.global_step)
 

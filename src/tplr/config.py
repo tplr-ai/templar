@@ -17,85 +17,55 @@
 
 
 # Global imports
+import json
 import os
 
 import botocore.config
+from dotenv import load_dotenv
 
 # Local imports
 from .logging import logger
-from dotenv import load_dotenv
 
 load_dotenv()
 
 
+def format_bucket_secrets(base_secret_name: str) -> dict[str, str]:
+    """
+    Given the typical patterns for our os vars, retrieve per key
+
+    Args:
+        base_secret_name: the root of all other keys
+
+    Returns:
+        the formatted dict for comms ingestion
+    """
+
+    return {
+        "account_id": os.getenv(f"{base_secret_name}_ACCOUNT_ID"),
+        "name": os.getenv(f"{base_secret_name}_BUCKET_NAME"),
+        "credentials": {
+            "read": {
+                "access_key_id": os.getenv(f"{base_secret_name}_READ_ACCESS_KEY_ID"),
+                "secret_access_key": os.getenv(
+                    f"{base_secret_name}_READ_SECRET_ACCESS_KEY"
+                ),
+            },
+            "write": {
+                "access_key_id": os.getenv(f"{base_secret_name}_WRITE_ACCESS_KEY_ID"),
+                "secret_access_key": os.getenv(
+                    f"{base_secret_name}_WRITE_SECRET_ACCESS_KEY"
+                ),
+            },
+        },
+    }
+
+
 def load_bucket_secrets():
     secrets = {
-        "gradients": {
-            "account_id": os.environ.get("R2_GRADIENTS_ACCOUNT_ID"),
-            "name": os.environ.get("R2_GRADIENTS_BUCKET_NAME"),
-            "credentials": {
-                "read": {
-                    "access_key_id": os.environ.get("R2_GRADIENTS_READ_ACCESS_KEY_ID"),
-                    "secret_access_key": os.environ.get(
-                        "R2_GRADIENTS_READ_SECRET_ACCESS_KEY"
-                    ),
-                },
-                "write": {
-                    "access_key_id": os.environ.get("R2_GRADIENTS_WRITE_ACCESS_KEY_ID"),
-                    "secret_access_key": os.environ.get(
-                        "R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"
-                    ),
-                },
-            },
-        },
-        "aggregator": {
-            "account_id": os.environ.get("R2_AGGREGATOR_ACCOUNT_ID"),
-            "name": os.environ.get("R2_AGGREGATOR_BUCKET_NAME"),
-            "credentials": {
-                "read": {
-                    "access_key_id": os.environ.get("R2_AGGREGATOR_READ_ACCESS_KEY_ID"),
-                    "secret_access_key": os.environ.get(
-                        "R2_AGGREGATOR_READ_SECRET_ACCESS_KEY"
-                    ),
-                },
-                "write": {
-                    "access_key_id": os.environ.get(
-                        "R2_AGGREGATOR_WRITE_ACCESS_KEY_ID"
-                    ),
-                    "secret_access_key": os.environ.get(
-                        "R2_AGGREGATOR_WRITE_SECRET_ACCESS_KEY"
-                    ),
-                },
-            },
-        },
-        "dataset": {
-            "account_id": os.environ.get("R2_DATASET_ACCOUNT_ID"),
-            "name": os.environ.get("R2_DATASET_BUCKET_NAME"),
-            "credentials": {
-                "read": {
-                    "access_key_id": os.environ.get("R2_DATASET_READ_ACCESS_KEY_ID"),
-                    "secret_access_key": os.environ.get(
-                        "R2_DATASET_READ_SECRET_ACCESS_KEY"
-                    ),
-                },
-                "write": {
-                    "access_key_id": os.environ.get("R2_DATASET_WRITE_ACCESS_KEY_ID"),
-                    "secret_access_key": os.environ.get(
-                        "R2_DATASET_WRITE_SECRET_ACCESS_KEY"
-                    ),
-                },
-            },
-        },
-        "shared_dataset": {
-            "account_id": os.environ.get("SHARED_SHARDED_DATASET_ACCOUNT_ID"),
-            "name": os.environ.get("SHARED_SHARDED_DATASET_BUCKET_NAME"),
-            "credentials": {
-                "read": {
-                    "access_key_id": os.environ.get("SHARED_SHARDED_DATASET_READ_ACCESS_KEY_ID"),
-                    "secret_access_key": os.environ.get("SHARED_SHARDED_DATASET_READ_SECRET_ACCESS_KEY")
-                },
-            },
-        },
+        "gradients": format_bucket_secrets("R2_GRADIENTS"),
+        "aggregator": format_bucket_secrets("R2_AGGREGATOR"),
+        "dataset": format_bucket_secrets("R2_DATASET"),      
+        "shared_dataset": format_bucket_secrets("SHARED_SHARDED_DATASET"),
     }
 
     # Override with multiple endpoints if provided by environment variable.
@@ -104,7 +74,7 @@ def load_bucket_secrets():
         bucket_list_str = bucket_list.strip()
         logger.debug(f"Raw R2_DATASET_BUCKET_LIST: {bucket_list_str}")
         try:
-            dataset_configs = __import__("json").loads(bucket_list_str)
+            dataset_configs = json.loads(bucket_list_str)
             if isinstance(dataset_configs, list) and len(dataset_configs) > 0:
                 logger.debug(
                     "R2_DATASET_BUCKET_LIST found, using multiple dataset endpoints"

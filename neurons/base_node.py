@@ -1,17 +1,17 @@
 import abc
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import functools
 import signal
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any, cast
 
 import bittensor as bt
-from bittensor.core.subtensor import ScaleObj
 import torch.distributed as dist
 import websockets.exceptions  # ensure import before threads start
+from bittensor.core.subtensor import ScaleObj
 
 import tplr
 
@@ -208,15 +208,19 @@ class BaseNode:
 
                 # reconnect once before the next retry
                 try:
-                    self.subtensor_client.close()
+                    self.subtensor_client.substrate.close()
                 except Exception:
                     pass
-                self.subtensor_client = bt.subtensor(config=self.config)
+                self.subtensor_client.substrate.initialize()
                 time.sleep(delay)
                 delay = min(delay * 2, max_delay)
 
     def block_listener(self):
         backoff, max_backoff = 1, 60
+
+        # create it once
+        if self.subtensor_rpc is None:
+            self.subtensor_rpc = bt.subtensor(config=self.config)
 
         def handler(event):
             try:
@@ -235,14 +239,13 @@ class BaseNode:
                 tplr.logger.error(f"block-handler err: {e}")
 
         while not self.stop_event.is_set():
-            st = bt.subtensor(config=self.config)
-            self.subtensor_rpc = st
-
             try:
-                st.substrate.subscribe_block_headers(handler)
-                backoff = 1  # normal exit ⇒ reset back-off
+                # re‑open the socket instead of instantiating a new client
+                self.subtensor_rpc.substrate.initialize()
+                self.subtensor_rpc.substrate.subscribe_block_headers(handler)
+                backoff = 1  # reset back‑off on success
             except websockets.exceptions.ConnectionClosedError as e:
-                if self.stop_event.is_set():  # shutting down → leave loop
+                if self.stop_event.is_set():
                     break
                 tplr.logger.warning(f"ws closed: {e} – retrying in {backoff}s")
             except Exception as e:
@@ -252,9 +255,9 @@ class BaseNode:
                     f"block subscription err: {e} – retrying in {backoff}s"
                 )
             finally:
-                # always kill helper thread for this client
+                # make sure the helper thread inside Substrate is stopped cleanly
                 try:
-                    st.close()
+                    self.subtensor_rpc.substrate.close()
                 except Exception:
                     pass
 

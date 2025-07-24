@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Test script for validator metrics with proper types
 
-import os
 import argparse
-import tplr
 import logging
+import os
+
+import tplr
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

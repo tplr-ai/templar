@@ -1,5 +1,6 @@
-import torch
 import pytest
+import torch
+
 from tplr.neurons import prepare_gradient_dict
 
 

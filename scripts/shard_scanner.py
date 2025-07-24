@@ -13,12 +13,13 @@ async def precompute_shard_counts(
 
     import asyncio
     import json
-    import s3fs
-    import pyarrow.parquet as pq
-    from pathlib import Path
-    from tqdm import tqdm
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from pathlib import Path
+
+    import pyarrow.parquet as pq
+    import s3fs
     import yaml
+    from tqdm import tqdm
 
     # 1. Initialize S3 connection
     fs = s3fs.S3FileSystem(

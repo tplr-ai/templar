@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # Setup subnet and fund wallets for local Subtensor chain
 
-import time
 import argparse
 import sys
+import time
+
 import bittensor as bt
 import substrateinterface
 

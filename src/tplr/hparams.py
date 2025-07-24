@@ -19,6 +19,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+
 from transformers.models.auto.tokenization_auto import AutoTokenizer
 from transformers.models.llama import LlamaConfig
 

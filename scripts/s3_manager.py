@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 
-import re
 import argparse
 import os
+import re
 import sys
-import boto3
 from datetime import datetime, timedelta
-from botocore.exceptions import ClientError
-from botocore.config import Config as BotoConfig
 from urllib.parse import urlparse
+
+import boto3
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
+
 from tplr.logging import logger
 
 

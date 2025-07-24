@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # Test script for InfluxDB integration
 
-import os
 import argparse
+import os
+
 import tplr
 
 

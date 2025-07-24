@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 
-import os
 import asyncio
+import os
+
+import botocore.config
 from aiobotocore.session import get_session
 from dotenv import load_dotenv
-import botocore.config
 
 # Load environment variables from .env file
 load_dotenv()

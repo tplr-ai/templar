@@ -1,14 +1,19 @@
-import os
 import argparse
-import multiprocessing as mp
-import numpy as np
-from transformers import AutoTokenizer
-from datasets import load_dataset
-from tqdm import tqdm
-import math
 import glob
-import boto3
 import io
+import math
+import multiprocessing as mp
+import os
+
+import boto3
+import dotenv
+import numpy as np
+from tqdm import tqdm
+from transformers import AutoTokenizer
+
+from datasets import load_dataset
+
+dotenv.load_dotenv()
 
 # Global tokenizer for multiprocessing
 _tokenizer = None
@@ -61,7 +66,7 @@ def save_shard(shard_buffer, shard_idx, tokens_in_shard, args):
         if _s3_client is None:
             _s3_client = boto3.client(
                 "s3",
-                endpoint_url=args.r2_endpoint_url,
+                endpoint_url=f"https://{args.r2_endpoint_url}.r2.cloudflarestorage.com",
                 aws_access_key_id=args.r2_access_key_id,
                 aws_secret_access_key=args.r2_secret_access_key,
             )
@@ -120,7 +125,7 @@ def main(args):
 
     else:
         # Check existing shards locally
-        print(f"Running Locally")
+        print("Running Locally")
         if os.path.isdir(args.output_dir):
             existing = glob.glob(os.path.join(args.output_dir, "train_*.npy"))
             existing_count = sum(
@@ -148,7 +153,11 @@ def main(args):
     )
     dataset = dataset.shuffle(seed=args.seed, buffer_size=args.buffer_size)
 
-    num_proc = args.num_proc if args.num_proc > 0 else min(os.cpu_count() - 1, os.cpu_count() * 9 // 10)
+    num_proc = (
+        args.num_proc
+        if args.num_proc > 0
+        else min(os.cpu_count() - 1, os.cpu_count() * 9 // 10)
+    )
     print(f"Using {num_proc} processes")
 
     # Initialize processing variables
@@ -163,7 +172,7 @@ def main(args):
         "access_key_id": args.r2_access_key_id,
         "secret_access_key": args.r2_secret_access_key,
     }
-
+    print(r2_init_args)
     r2_init_args = {k: v for k, v in r2_init_args.items() if v} or None
 
     with mp.Pool(

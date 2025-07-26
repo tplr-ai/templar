@@ -8,6 +8,7 @@ import os
 import boto3
 import dotenv
 import numpy as np
+from botocore import config
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -29,11 +30,20 @@ def init_worker(tokenizer_name, r2_args=None):
         raise ValueError(f"Tokenizer {tokenizer_name} must have an EOS token.")
 
     if r2_args and r2_args["bucket"]:
+        client_config = config.Config(
+            max_pool_connections=256,
+            tcp_keepalive=True,
+            retries={
+                "max_attempts": 10,
+                "mode": "adaptive",
+            },
+        )
         _s3_client = boto3.client(
             "s3",
             endpoint_url=r2_args["endpoint_url"],
             aws_access_key_id=r2_args["access_key_id"],
             aws_secret_access_key=r2_args["secret_access_key"],
+            config=client_config,
         )
 
 
@@ -174,7 +184,6 @@ def main(args):
         "access_key_id": args.r2_access_key_id,
         "secret_access_key": args.r2_secret_access_key,
     }
-    print(r2_init_args)
     r2_init_args = {k: v for k, v in r2_init_args.items() if v} or None
 
     with mp.Pool(

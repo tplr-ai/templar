@@ -97,10 +97,10 @@ class SharedShardedDataset(Dataset):
         return tokens_file, ids_file
 
     @staticmethod
-    def check_paths(self, paths: list[os.PathLike]) -> None:
+    def check_paths(paths: list[os.PathLike]) -> None:
         for path in paths:
             if not os.path.exists(path):
-                *dir_path, file = self.tokens_file.split("/")
+                *dir_path, file = path.split("/")
                 dir_path = "/".join(dir_path)
                 raise FileNotFoundError(
                     f"Pre-processed file {file} not found in {dir_path}. "
@@ -223,16 +223,20 @@ class ShardedDatasetManager:
             tokens_file: The path to the tokens file in bucket
             ids_file: The path to the tokens file's indices in bucket
         """
-        return asyncio.gather(
-            self.comms.s3_get_object(
-                tokens_file,
-                bucket,
-                load_data=False,
+        return await asyncio.gather(
+            asyncio.create_task(
+                self.comms.s3_get_object(
+                    tokens_file,
+                    bucket,
+                    load_data=False,
+                )
             ),
-            self.comms.s3_get_object(
-                ids_file,
-                bucket,
-                load_data=False,
+            asyncio.create_task(
+                self.comms.s3_get_object(
+                    ids_file,
+                    bucket,
+                    load_data=False,
+                )
             ),
         )
 
@@ -293,6 +297,3 @@ class ShardedDatasetManager:
             del old_dataset
 
         return self.shard_index
-
-
-

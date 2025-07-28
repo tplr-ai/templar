@@ -1043,7 +1043,7 @@ class MockHParams:
         self.topk_compression = 0.1
         self.active_check_interval = 60
         self.recent_windows = 5
-        self.max_topk_peers = 50
+        self.gather_peer_count = 50
 
 
 def create_mock_gather_result(model, device, wrong_shape=False):

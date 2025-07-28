@@ -371,6 +371,7 @@ class Miner(BaseNode):
 
         # Initialize peer related attributes
         self.next_peers: list[int] | None = None
+        self.next_reserve_peers: list[int] | None = None
         self.peers_update_window = -1
         self.dataset = tplr.SharedShardedDataset(
             sequence_length=self.hparams.sequence_length,
@@ -671,9 +672,10 @@ class Miner(BaseNode):
             if self.is_master:
                 gather_start = tplr.T()
                 tplr.logger.info("Waiting on gather task...")
-                gather_result = await self.comms.gather(
+                gather_result = await self.comms.gather_with_reserve(
                     my_uid=self.uid,
-                    uids=self.comms.peers,
+                    gather_uids=self.comms.peers,
+                    reserve_uids=self.comms.reserve_peers,
                     window=step_window,
                     key="gradient",
                     timeout=60,

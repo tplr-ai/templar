@@ -24,6 +24,7 @@ import random
 import re
 import time
 from datetime import datetime, timezone
+from functools import partial
 
 # from .hparams import HParams
 from types import SimpleNamespace
@@ -106,6 +107,8 @@ class Comms(ChainManager):
         self.recent_windows = (
             self.hparams.recent_windows
         )  # Number of recent windows to check
+        self.peers: list[int] = []
+        self.reserve_peers: list[int] = []
 
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
         self.gather_semaphore = asyncio.Semaphore(15)
@@ -990,7 +993,7 @@ class Comms(ChainManager):
         stale_retention: int = 10,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
-    ) -> Optional[SimpleNamespace]:
+    ) -> SimpleNamespace | None:
         """Gather operation with individual gradient normalization and connection management."""
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
@@ -1241,6 +1244,98 @@ class Comms(ChainManager):
             skipped_uids=skipped_uids,
         )
         return result
+
+    # ------------------------------------------------------------------
+    # gather_with_reserve –– retry skipped gather peers with reserve tier
+    # ------------------------------------------------------------------
+    async def gather_with_reserve(
+        self,
+        *,
+        my_uid: int | None,
+        gather_uids: list[int],
+        reserve_uids: list[int],
+        **kwargs,
+    ) -> SimpleNamespace | None:
+        """
+        1. Call `gather()` on the main `gather_uids`.
+        2. Any UID that fails (or is missing) is replaced *once* with the next
+           UID(s) from `reserve_uids`, then gathered again.
+        3. Results are *merged* so the caller receives a single object that
+           looks exactly like the old `gather()` return value.
+        """
+        if len(gather_uids + reserve_uids) == 0:
+            return None
+        window = kwargs.get("window", None)  # for contextual logs
+        context_log = partial(tplr.log_with_context, level="info", window=window)
+
+        context_log(
+            message=f"[gather_with_reserve] ⏩ start | "
+            f"gather={gather_uids} reserve={reserve_uids}"
+        )
+
+        primary = await self.gather(my_uid=my_uid, uids=gather_uids, **kwargs)
+
+        # Normalise to an empty shell if absolutely nothing came back
+        if primary is None:
+            primary = SimpleNamespace(
+                time=0.0,
+                upload_bytes=0,
+                download_bytes=0,
+                success_rate=0.0,
+                state_dict=SimpleNamespace(),
+                uids=[],
+                global_steps=[],
+                skipped_uids=gather_uids.copy(),
+            )
+
+        context_log(
+            message=f"[gather_with_reserve] ✅ primary gather "
+            f"{len(primary.uids)}/{len(gather_uids)} succeeded | "
+            f"skipped={primary.skipped_uids}"
+        )
+
+        # ── 2. Retry the misses with reserve peers ─────────────────────
+        missing = set(gather_uids) - set(primary.uids)
+        if missing and reserve_uids:
+            # take as many reserve peers as slots we missed
+            replacements = [uid for uid in reserve_uids if uid not in primary.uids][
+                : len(missing)
+            ]
+
+            if replacements:
+                context_log(
+                    message=f"[gather_with_reserve] 🔄 retrying with reserve "
+                    f"uids={replacements}"
+                )
+                fallback = await self.gather(my_uid=my_uid, uids=replacements, **kwargs)
+                if fallback:
+                    # merge tensor‑lists inside the nested state_dict
+                    for k, v in vars(fallback.state_dict).items():
+                        merged = getattr(primary.state_dict, k, []) + v
+                        setattr(primary.state_dict, k, merged)
+
+                    primary.uids.extend(fallback.uids)
+                    primary.global_steps.extend(fallback.global_steps)
+                    primary.skipped_uids.extend(fallback.skipped_uids)
+                    primary.upload_bytes += fallback.upload_bytes
+                    primary.download_bytes += fallback.download_bytes
+
+                    context_log(
+                        message=f"[gather_with_reserve] ✅ reserve gather "
+                        f"{len(fallback.uids)}/{len(replacements)} "
+                        f"succeeded | skipped={fallback.skipped_uids}"
+                    )
+
+        # recompute success‑rate with respect to the *original* gather tier
+        target = len(gather_uids)
+        primary.success_rate = len(primary.uids) / target if target else 0.0
+
+        context_log(
+            message=f"[gather_with_reserve] 🏁 done | "
+            f"final_success={len(primary.uids)}/{target} "
+            f"({primary.success_rate:.1%}) | total_skipped={primary.skipped_uids}"
+        )
+        return primary
 
     async def cleanup_old_checkpoints(self, keep_last: int = 3):
         """
@@ -1573,10 +1668,11 @@ class Comms(ChainManager):
 
     async def post_peer_list(
         self,
+        *,
         peers: list[int],
+        reserve_peers: list[int] | None = None,
         first_effective_window: int,
         sync_window: int,
-        weights: torch.Tensor,
         initial_selection: bool,
     ):
         """Upload peer list and debug data as JSON to the node's R2 bucket.
@@ -1594,6 +1690,7 @@ class Comms(ChainManager):
         key = f"{PEERS_FILE_PREFIX}{first_effective_window}_v{__version__}.json"
         peers_and_weights = {
             "peers": peers,
+            "reserve_peers": reserve_peers or [],
             "initial_selection": initial_selection,
             "sync_window": sync_window,
             "first_effective_window": first_effective_window,
@@ -1632,7 +1729,7 @@ class Comms(ChainManager):
 
     async def get_peer_list(
         self, fetch_previous: bool = False
-    ) -> tuple[list[int], int] | None:
+    ) -> tuple[list[int], list[int], int] | None:
         tplr.logger.info(
             f"Looking for a {'previous' if fetch_previous else 'current'} peer list on a validator bucket"
         )
@@ -1727,7 +1824,12 @@ class Comms(ChainManager):
                 else:
                     peers_dict = json.loads(peers_data.decode("utf-8"))
 
-                return peers_dict["peers"], peers_dict["first_effective_window"]
+                reserves = peers_dict.get("reserve_peers", [])
+                return (
+                    peers_dict["peers"],
+                    reserves,
+                    peers_dict["first_effective_window"],
+                )
 
             except (ConnectionClosedError, ClientError):
                 await self._purge_s3_client(validator_bucket)

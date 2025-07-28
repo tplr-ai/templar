@@ -186,7 +186,7 @@ class ShardedDatasetManager:
         self.comms = comms
 
         # should comms glob to know all file paths?
-        # self.max_dataset_idx = bucket_glob_files_idx
+        self.max_dataset_idx = 10 # bucket_glob_files_idx
 
     def prepare_shard(self, shard_index: int) -> asyncio.Task:
         """Prepares a shard for use, downloading it if necessary.
@@ -257,7 +257,7 @@ class ShardedDatasetManager:
         )
         return dataset
 
-    async def initialize_datasets(self, current_shard_index: int):
+    async def initialize_datasets(self, current_shard_index: int) -> None:
         """Initializes the active and upcoming datasets.
 
         This method creates the dataset for the current shard index and starts
@@ -267,10 +267,11 @@ class ShardedDatasetManager:
             current_shard_index: The index of the shard to make active.
         """
         self.active_dataset = await self.create_dataset(current_shard_index)
-        self.upcoming_dataset = self.prepare_shard(current_shard_index + 1)
+        next_shard = (current_shard_index + 1) % self.max_dataset_idx
+        self.upcoming_dataset = self.prepare_shard(next_shard)
         return
 
-    async def swap_datasets(self):
+    async def swap_datasets(self) -> int:
         """Swaps the active dataset with the upcoming one.
 
         This method waits for the upcoming dataset to be ready, makes it the
@@ -282,12 +283,6 @@ class ShardedDatasetManager:
         if self.upcoming_dataset:
             await self.upcoming_dataset
 
-        if self.upcoming_dataset is None:
-            # end of training shards, restart?
-            # more like pass incremented shards and see
-            # if > max_dataset_idx
-            pass
-
         old_dataset = self.active_dataset
         await self.initialize_datasets(self.shard_index)
         tplr.logger.info("successfully swapped datasets.")
@@ -297,4 +292,7 @@ class ShardedDatasetManager:
             os.remove(old_dataset.ids_file)
             del old_dataset
 
-        return
+        return self.shard_index
+
+
+

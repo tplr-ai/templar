@@ -378,7 +378,6 @@ class Comms(ChainManager):
         temp_file_path = os.path.join(
             self.temp_dir, f"temp_{key}_{uuid.uuid4().hex}.pt"
         )
-
         s3_client = await self._get_s3_client(bucket)
         try:
             # Normalize timezone info
@@ -420,6 +419,9 @@ class Comms(ChainManager):
                 if "404" in str(e):
                     tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
                     return None
+            except Exception as e:
+                tplr.logger.debug(f"Some other exception occurred: {e=}")
+                raise e
 
             file_size = response["ContentLength"]  # type: ignore
 
@@ -433,6 +435,7 @@ class Comms(ChainManager):
                     async with response["Body"] as stream:
                         data = await asyncio.wait_for(stream.read(), timeout=timeout)
                         await f.write(data)
+                success = True
             else:
                 success = await self.download_large_file(
                     s3_client=s3_client,
@@ -444,6 +447,7 @@ class Comms(ChainManager):
                 if not success:
                     return None
             
+            loaded_data = None
             if load_data:
                 # Now load the data
                 if key.endswith(".json") or "start_window" in key:
@@ -457,10 +461,17 @@ class Comms(ChainManager):
                         weights_only=True,
                     )
             else:
-                loaded_data = os.rename(
-                    temp_file_path, 
-                    key,
-                )
+                if success:
+                    target_directory = os.path.dirname(key)
+                    if target_directory:
+                        os.makedirs(target_directory, exist_ok=True)
+                        
+                    loaded_data = os.rename(
+                        temp_file_path, 
+                        key,
+                    )
+                else:
+                    raise FileNotFoundError(f"Download not successful for file at: {temp_file_path}")
 
             return loaded_data
 
@@ -615,6 +626,10 @@ class Comms(ChainManager):
             semaphore = asyncio.Semaphore(max_workers)
 
             # Create the file with the correct size
+            target_directory = os.path.dirname(temp_file_path)
+            if target_directory:
+                os.makedirs(target_directory, exist_ok=True)
+                        
             async with aiofiles.open(temp_file_path, "wb") as f:
                 await f.truncate(file_size)
 

@@ -15,10 +15,10 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+import asyncio
 import os
 import time
 from pathlib import Path
-import asyncio
 
 import numpy as np
 import numpy.typing as npt
@@ -56,17 +56,17 @@ class SharedShardedDataset(Dataset):
         self.world = world_size
         if self.world > 1:
             dist.barrier(device_ids=[self.rank])
-            
-        self.tokens_file, self.ids_file = self.locate_shards(shard_index)#, custom_path='./dataset/tokenized')
+
+        self.tokens_file, self.ids_file = self.locate_shards(shard_index)
         _ = self.check_paths([self.tokens_file, self.ids_file])
         _ = self.mmap_tokens_and_ids(token_dtype)
-        
+
         # should wrap in a timer
         tplr.logger.info(
             f"[Dataset] rank {self.rank}: init done in {time.perf_counter() - t0:.1f}s "
             f"({self.total_samples} samples)"
         )
-    
+
     @staticmethod
     def locate_shards(
         shard_index: int,
@@ -87,25 +87,26 @@ class SharedShardedDataset(Dataset):
         """
         shards_path = custom_path or os.getenv("DATASET_BINS_PATH")
         if shards_path is None:
-            raise ValueError("Dataset path not configured. Set $DATASET_BINS_PATH or provide custom_path")
+            raise ValueError(
+                "Dataset path not configured. Set $DATASET_BINS_PATH or provide custom_path"
+            )
 
-        tokens_file = os.path.join(shards_path, f'train_{shard_index:06d}.npy')
-        ids_file = os.path.join(shards_path, f'sample_ids_{shard_index:06d}.bin')
-        # ids_file = tokens_file.replace('.npy', '.ids')
+        tokens_file = os.path.join(shards_path, f"train_{shard_index:06d}.npy")
+        ids_file = os.path.join(shards_path, f"sample_ids_{shard_index:06d}.bin")
 
         return tokens_file, ids_file
-    
+
     @staticmethod
     def check_paths(self, paths: list[os.PathLike]) -> None:
         for path in paths:
             if not os.path.exists(path):
-                *dir_path, file = self.tokens_file.split('/')
-                dir_path = '/'.join(dir_path)
+                *dir_path, file = self.tokens_file.split("/")
+                dir_path = "/".join(dir_path)
                 raise FileNotFoundError(
                     f"Pre-processed file {file} not found in {dir_path}. "
                     "Run the preprocessing script first."
                 )
-        return 
+        return
 
     def mmap_tokens_and_ids(self, token_dtype: npt.DTypeLike):
         """Memory-maps the tokens and sample IDs from their respective files.
@@ -155,6 +156,7 @@ class SharedShardedDataset(Dataset):
 
 class ShardedDatasetManager:
     """Manages the lifecycle of sharded datasets, including downloading and swapping."""
+
     def __init__(
         self,
         sequence_length: int,
@@ -201,14 +203,18 @@ class ShardedDatasetManager:
         if os.path.exists(tokens_file) and os.path.exists(ids_file):
             # if exist, return completed task
             task = asyncio.create_task(asyncio.sleep(0))
-        
+
         else:
             bucket = self.comms.get_own_bucket("dataset", "read")
-            task = asyncio.create_task(self.download_files(bucket, tokens_file, ids_file))
-            
+            task = asyncio.create_task(
+                self.download_files(bucket, tokens_file, ids_file)
+            )
+
         return task
-        
-    async def download_files(self, bucket: str, tokens_file: os.PathLike, ids_file: os.PathLike) -> None:
+
+    async def download_files(
+        self, bucket: str, tokens_file: os.PathLike, ids_file: os.PathLike
+    ) -> asyncio.TaskGroup:
         """
         Downloads the shard and its indices
 
@@ -217,19 +223,18 @@ class ShardedDatasetManager:
             tokens_file: The path to the tokens file in bucket
             ids_file: The path to the tokens file's indices in bucket
         """
-            await asyncio.gather(
-                asyncio.create_task(self.comms.s3_get_object(
-                    tokens_file,
-                    bucket,
-                    load_data=False,
-                )),
-                asyncio.create_task(self.comms.s3_get_object(
-                    ids_file,
-                    bucket,
-                    load_data=False,
-                )),
-            )
-            return 
+        return asyncio.gather(
+            self.comms.s3_get_object(
+                tokens_file,
+                bucket,
+                load_data=False,
+            ),
+            self.comms.s3_get_object(
+                ids_file,
+                bucket,
+                load_data=False,
+            ),
+        )
 
     async def create_dataset(self, shard_index: int) -> SharedShardedDataset:
         """Creates a `SharedShardedDataset` instance for a given shard index.
@@ -242,7 +247,7 @@ class ShardedDatasetManager:
         """
         download_task = self.prepare_shard(shard_index)
         await download_task
-            
+
         dataset = SharedShardedDataset(
             shard_index=shard_index,
             sequence_length=self.sequence_length,
@@ -293,4 +298,3 @@ class ShardedDatasetManager:
             del old_dataset
 
         return
-    

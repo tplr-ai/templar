@@ -172,7 +172,7 @@ class Miner(BaseNode):
             f"[Init] rank={self.rank}, world_size={self.world_size}, local_rank={self.local_rank}"
         )
 
-        if self.world_size > 1:
+        if self.world_size >= 1:
             dist.init_process_group(
                 backend="nccl",
                 init_method="env://",
@@ -383,31 +383,7 @@ class Miner(BaseNode):
             world_size=self.world_size,
             comms=self.comms,
         )
-        # can you call this here or does it need to be in the upper section of run?
-        self.dataset = self.dataset_manager.active_dataset
-       
-        self.sampler = tplr.MinerSampler(
-            dataset=self.dataset,
-            uid=self.uid,
-            window=self.current_window,
-            steps_per_window=self.hparams.inner_steps,
-            micro_bs=self.hparams.micro_batch_size,
-            batch_size=self.hparams.batch_size,
-            target_batch_size=self.hparams.target_batch_size,
-            rank=self.rank,
-            world_size=self.world_size,
-        )
         
-        self.loader = torch.utils.data.DataLoader(
-            dataset=self.dataset,
-            sampler=self.sampler,
-            batch_size=self.hparams.micro_batch_size,
-            num_workers=10,
-            pin_memory=True,
-            prefetch_factor=2,
-        )
-
-        tplr.logger.info("[Init] dataset + sampler ready")
         tplr.logger.info("[Init] ✔ fully done – entering run()")
 
     # Main training loop.
@@ -450,7 +426,33 @@ class Miner(BaseNode):
         
         # Other workers need to pick up dataset
         await self.dataset_manager.initialize_datasets(0)
+        # can you call this here or does it need to be in the upper section of run?
+        self.dataset = self.dataset_manager.active_dataset
+        if self.dataset is None:
+            raise ValueError("Failed because dataset not available")
+        self.sampler = tplr.MinerSampler(
+            dataset=self.dataset,
+            uid=self.uid,
+            window=self.current_window,
+            steps_per_window=self.hparams.inner_steps,
+            micro_bs=self.hparams.micro_batch_size,
+            batch_size=self.hparams.batch_size,
+            target_batch_size=self.hparams.target_batch_size,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
         _ = self.sampler.set_dataset_len()
+
+        self.loader = torch.utils.data.DataLoader(
+            dataset=self.dataset,
+            sampler=self.sampler,
+            batch_size=self.hparams.micro_batch_size,
+            num_workers=10,
+            pin_memory=True,
+            prefetch_factor=2,
+        ) 
+        tplr.logger.info("[Init] dataset + sampler ready")
+        
 
         tplr.logger.info(f"Using start_window: {self.start_window}")
 
@@ -546,10 +548,10 @@ class Miner(BaseNode):
             # Update sampler for current window
             self.sampler.set_window_uid(self.uid, step_window % windows_per_shard)
             
-            if (
-                step_window > 0 
+            if ( 
+                self.global_step > 0 
                 and 
-                step_window % windows_per_shard == 0
+                self.global_step % windows_per_shard == 0
             ):
                 tplr.logger.info(f"Swapping dataset at wondow {step_window}")
                 await self.dataset_manager.swap_datasets()

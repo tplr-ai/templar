@@ -106,7 +106,7 @@ class _BaseWindowSampler(Sampler, ABC):
 
     def set_dataset_len(self):
         self.dataset_len = len(self._dataset_ref)
-        self.set_window_uid(uid, window)
+        self.set_window_uid(self.uid, self.window)
 
 
 # ────────────────────────────────────────────────────────────────────────────

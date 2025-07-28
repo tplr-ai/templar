@@ -550,8 +550,6 @@ class Miner(BaseNode):
                 step_window > 0 
                 and 
                 step_window % windows_per_shard == 0
-                # and
-                # self.is_master
             ):
                 tplr.logger.info(f"Swapping dataset at wondow {step_window}")
                 await self.dataset_manager.swap_datasets()

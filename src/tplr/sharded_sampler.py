@@ -56,7 +56,7 @@ class _BaseWindowSampler(Sampler, ABC):
         world_size: int = 1,
     ):
         self._dataset_ref = dataset
-        self.dataset_len = len(dataset)
+        # self.dataset_len = len(dataset)
         self.steps_per_window = steps_per_window
         self.micro_bs = micro_bs
         self.batch_size = batch_size
@@ -66,7 +66,9 @@ class _BaseWindowSampler(Sampler, ABC):
         # grad-accumulation factor (also serves as a symmetry check)
         denom = micro_bs * world_size
         self.grad_accum_steps = batch_size // denom
-        self.set_window_uid(uid, window)
+
+        self.uid = uid
+        self.window = window
 
     # --------------------------------------------------------------------- #
     # public API
@@ -101,6 +103,10 @@ class _BaseWindowSampler(Sampler, ABC):
         Must be deterministic w.r.t. `(uid, window)`.
         """
         raise NotImplementedError
+
+    def set_dataset_len(self):
+        self.dataset_len = len(self._dataset_ref)
+        self.set_window_uid(uid, window)
 
 
 # ────────────────────────────────────────────────────────────────────────────

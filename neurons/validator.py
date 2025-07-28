@@ -306,25 +306,8 @@ class Validator(BaseNode):
         # can you call this here or does it need to be in the upper section of run?
         self.dataset = self.dataset_manager.active_dataset
 
-        self.sampler = tplr.EvalSampler(
-            dataset=self.dataset,
-            uid=self.uid,
-            window=self.current_window,
-            steps_per_window=self.hparams.inner_steps,
-            micro_bs=self.hparams.micro_batch_size,
-            batch_size=self.hparams.target_batch_size,
-            validation_bs=self.hparams.validator_sample_micro_bs
-            * self.hparams.micro_batch_size,
-            rank=0,
-            world_size=1,
-        )
-        self.loader = torch.utils.data.DataLoader(
-            dataset=self.dataset,
-            sampler=self.sampler,
-            batch_size=self.hparams.micro_batch_size,
-            num_workers=2,
-            pin_memory=True,
-        )
+        self.rank = 0
+        self.world_size = 1
 
         self.burn_uid = 1
 
@@ -739,9 +722,29 @@ class Validator(BaseNode):
         )
 
         windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
-        _ = await self.dataset_manager.initialize_datasets(self.global_step % windows_per_shard)     
+        _ = await self.dataset_manager.initialize_datasets(self.global_step // windows_per_shard)     
         self.dataset = self.dataset_manager.active_dataset
+        self.sampler = tplr.EvalSampler(
+            dataset=self.dataset,
+            uid=self.uid,
+            window=self.current_window,
+            steps_per_window=self.hparams.inner_steps,
+            micro_bs=self.hparams.micro_batch_size,
+            batch_size=self.hparams.target_batch_size,
+            validation_bs=self.hparams.validator_sample_micro_bs
+            * self.hparams.micro_batch_size,
+            rank=0,
+            world_size=1,
+        )
         _ = self.sampler.set_dataset_len()
+
+        self.loader = torch.utils.data.DataLoader(
+            dataset=self.dataset,
+            sampler=self.sampler,
+            batch_size=self.hparams.micro_batch_size,
+            num_workers=2,
+            pin_memory=True,
+        )
 
 
         checkpoint_window_buffer = 5

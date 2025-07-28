@@ -107,6 +107,7 @@ class Validator(BaseNode):
         parser.add_argument(
             "--local",
             action="store_true",
+            default=True,
             help="Local run - use toy model, small enough for a laptop.",
         )
         bt.subtensor.add_args(parser)
@@ -296,15 +297,14 @@ class Validator(BaseNode):
         self.param_change_alpha = 0.2
         
         # put in stub
-        # self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
-        #     sequence_length=self.hparams.sequence_length,
-        #     rank=self.rank,
-        #     world_size=self.world_size,
-        #     comms=self.comms,
-        # )
-        # # can you call this here or does it need to be in the upper section of run?
-        # _ = await self.dataset_manager.initialize_datasets(0)     
-        # self.dataset = self.dataset_manager.active_dataset
+        self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
+            sequence_length=self.hparams.sequence_length,
+            rank=0, 
+            world_size=1, 
+            comms=self.comms,
+        )
+        # can you call this here or does it need to be in the upper section of run?
+        self.dataset = self.dataset_manager.active_dataset
 
         self.sampler = tplr.EvalSampler(
             dataset=self.dataset,
@@ -737,6 +737,12 @@ class Validator(BaseNode):
         tplr.logger.info(
             f"Using start_window: {self.start_window}, global_step: {self.global_step}"
         )
+
+        windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
+        _ = await self.dataset_manager.initialize_datasets(self.global_step % windows_per_shard)     
+        self.dataset = self.dataset_manager.active_dataset
+        _ = self.sampler.set_dataset_len()
+
 
         checkpoint_window_buffer = 5
         has_new_checkpoint = (

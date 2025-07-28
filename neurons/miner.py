@@ -108,6 +108,7 @@ class Miner(BaseNode):
         parser.add_argument(
             "--local",
             action="store_true",
+            default=True,
             help="Local run - use toy model, small enough for a laptop.",
         )
         bt.subtensor.add_args(parser)
@@ -171,7 +172,7 @@ class Miner(BaseNode):
             f"[Init] rank={self.rank}, world_size={self.world_size}, local_rank={self.local_rank}"
         )
 
-        if self.world_size >= 1:
+        if self.world_size > 1:
             dist.init_process_group(
                 backend="nccl",
                 init_method="env://",
@@ -252,14 +253,17 @@ class Miner(BaseNode):
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
         )
-        self.inner_optimizer = ZeroRedundancyOptimizer(
-            self.model.parameters(),
-            optimizer_class=torch.optim.AdamW,
-            lr=self.hparams.inner_learning_rate,
-            weight_decay=self.hparams.weight_decay,
-            betas=(0.9, 0.95),
-            parameters_as_bucket_view=True,
-            overlap_with_ddp=False,
+        self.inner_optimizer = (
+            torch.optim.AdamW(self.model.parameters(), lr=self.hparams.inner_learning_rate)
+            # ZeroRedundancyOptimizer(
+            #     self.model.parameters(),
+            #     optimizer_class=torch.optim.AdamW,
+            #     lr=self.hparams.inner_learning_rate,
+            #     weight_decay=self.hparams.weight_decay,
+            #     betas=(0.9, 0.95),
+            #     parameters_as_bucket_view=True,
+            #     overlap_with_ddp=False,
+            # )
         )
         inner_steps_before_outer_step = self.hparams.inner_steps * (
             self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
@@ -341,7 +345,6 @@ class Miner(BaseNode):
         self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window
         self.step_counter = 0
-        # self.windows_per_shard = 500
 
         # Add step tracking
         self.window_step = 0
@@ -381,7 +384,6 @@ class Miner(BaseNode):
             comms=self.comms,
         )
         # can you call this here or does it need to be in the upper section of run?
-        _ = await self.dataset_manager.initialize_datasets(0)     
         self.dataset = self.dataset_manager.active_dataset
        
         self.sampler = tplr.MinerSampler(
@@ -430,6 +432,8 @@ class Miner(BaseNode):
 
         # Fetch start_window from highest stake validator
         if self.is_master:
+            _ = await self.dataset_manager.initialize_datasets(0)     
+
             self.start_window = await self.comms.get_start_window()
             val = -1 if self.start_window is None else self.start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
@@ -443,6 +447,10 @@ class Miner(BaseNode):
             raise RuntimeError(
                 "Could not find a valid start window. This should not be possible."
             )
+        
+        # Other workers need to pick up dataset
+        await self.dataset_manager.initialize_datasets(0)
+        _ = self.sampler.set_dataset_len()
 
         tplr.logger.info(f"Using start_window: {self.start_window}")
 
@@ -542,6 +550,8 @@ class Miner(BaseNode):
                 step_window > 0 
                 and 
                 step_window % windows_per_shard == 0
+                # and
+                # self.is_master
             ):
                 tplr.logger.info(f"Swapping dataset at wondow {step_window}")
                 await self.dataset_manager.swap_datasets()

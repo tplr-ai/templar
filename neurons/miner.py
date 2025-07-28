@@ -254,16 +254,15 @@ class Miner(BaseNode):
             self.model.parameters(), lr=self.hparams.outer_learning_rate
         )
         self.inner_optimizer = (
-            torch.optim.AdamW(self.model.parameters(), lr=self.hparams.inner_learning_rate)
-            # ZeroRedundancyOptimizer(
-            #     self.model.parameters(),
-            #     optimizer_class=torch.optim.AdamW,
-            #     lr=self.hparams.inner_learning_rate,
-            #     weight_decay=self.hparams.weight_decay,
-            #     betas=(0.9, 0.95),
-            #     parameters_as_bucket_view=True,
-            #     overlap_with_ddp=False,
-            # )
+            ZeroRedundancyOptimizer(
+                self.model.parameters(),
+                optimizer_class=torch.optim.AdamW,
+                lr=self.hparams.inner_learning_rate,
+                weight_decay=self.hparams.weight_decay,
+                betas=(0.9, 0.95),
+                parameters_as_bucket_view=True,
+                overlap_with_ddp=False,
+            )
         )
         inner_steps_before_outer_step = self.hparams.inner_steps * (
             self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1

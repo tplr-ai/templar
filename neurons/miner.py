@@ -400,40 +400,36 @@ class Miner(BaseNode):
         tplr.logger.info("Loaded commitments")
 
         peer_start = tplr.T()
-        if self.is_master:
+        # Fetch peers and get start_window from highest stake validator
+        if self.is_master:      
             await tplr.neurons.update_peers(
                 instance=self, window=self.current_window, peer_start=peer_start
-            )
-
-        # Fetch start_window from highest stake validator
-        if self.is_master:            
+            )   
+                              
             self.start_window = await self.comms.get_start_window()
+            tplr.logger.info(f"Using start_window: {self.start_window}")
+            
             val = -1 if self.start_window is None else self.start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)
             
-            print('getting dataset')
             _ = await self.dataset_manager.initialize_datasets(0)     
-            print('dataset complete')
+            dist.barrier(device_ids=[self.local_rank])
 
         else:
             tensor = torch.zeros(1, dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)
             val = tensor.item()
             self.start_window = None if val == -1 else int(val)
-        if self.start_window is None:
-            raise RuntimeError(
-                "Could not find a valid start window. This should not be possible."
-            )
+            
+            dist.barrier(device_ids=[self.local_rank])
+            print(f'getting dataset on rank {self.local_rank}')
+            await self.dataset_manager.initialize_datasets(0)
+            print(f'done getting rankwise dataset on {self.local_rank}')
+
         
         # Other workers need to pick up dataset
-        dist.barrier(device_ids=[self.local_rank])
-        print(f'getting dataset on rank {self.local_rank}')
-        await self.dataset_manager.initialize_datasets(0)
         self.dataset = self.dataset_manager.active_dataset
-        print(f'done getting rankwise dataset on {self.local_rank}')
-        if self.dataset is None:
-            raise ValueError("Failed because dataset not available")
         self.sampler = tplr.MinerSampler(
             dataset=self.dataset,
             uid=self.uid,
@@ -454,11 +450,8 @@ class Miner(BaseNode):
             pin_memory=True,
             prefetch_factor=2,
         ) 
-        tplr.logger.info("[Init] dataset + sampler ready")
+        tplr.logger.info("[Run] dataset + sampler ready")
         
-
-        tplr.logger.info(f"Using start_window: {self.start_window}")
-
         self.global_step = self.current_window - self.start_window
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
 
@@ -520,11 +513,10 @@ class Miner(BaseNode):
                 f"{tplr.P(self.current_window, bcast_time)} "
                 f"Broadcast checkpoint to {self.world_size - 1} ranks"
             )
+        
             dist.barrier(device_ids=[self.local_rank])
 
-        print(f'getting commitments, {self.rank=}')
         self.comms.start_commitment_fetcher()
-        print(f'got commitments, {self.rank=}')
 
         while not self.stop_event.is_set():
             await asyncio.sleep(0)

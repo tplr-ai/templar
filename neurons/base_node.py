@@ -16,7 +16,7 @@ from bittensor.core.subtensor import ScaleObj
 import tplr
 
 
-class BaseNode(Trainer):
+class BaseNode(abc.ABC):
     # ――― attributes that subclasses will overwrite ―――
     executor: ThreadPoolExecutor
     world_size: int = 1

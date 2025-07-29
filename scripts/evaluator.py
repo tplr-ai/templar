@@ -46,14 +46,16 @@ import os
 import shutil
 import time
 import typing
-from typing import Optional, Tuple
+from typing import Optional
 
 import bittensor as bt
 import torch
 from torch.utils.data import DataLoader
-from transformers.models.llama import LlamaForCausalLM
+from transformers import LlamaForCausalLM
 
 import tplr
+from tplr import sharded_dataset, hparams, comms, metrics
+from tplr.logging import logger
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"
@@ -177,8 +179,8 @@ class Evaluator:
         self.netuid = self.config.netuid
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
-        self.hparams = tplr.load_hparams()
-        tplr.logger.info(
+        self.hparams = hparams.load_hparams()
+        logger.info(
             f"Loaded hparams: hidden_size={self.hparams.hidden_size}, num_hidden_layers={self.hparams.num_hidden_layers}, num_key_value_heads={self.hparams.num_key_value_heads}"
         )
         self.wallet = bt.wallet(config=self.config)
@@ -195,7 +197,7 @@ class Evaluator:
         self.model.to("cpu")
 
         self.tokenizer = self.hparams.tokenizer
-        self.comms = tplr.comms.Comms(
+        self.comms = comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",
             key_prefix="model",
@@ -213,7 +215,7 @@ class Evaluator:
         self.eval_counter = 0
 
         # Initialize metrics logger with consistent patterns
-        self.metrics_logger = tplr.metrics.MetricsLogger(
+        self.metrics_logger = metrics.MetricsLogger(
             prefix="E",
             uid=str(self.uid),
             config=self.config,
@@ -229,7 +231,7 @@ class Evaluator:
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
         self.buckets = self.comms.get_all_buckets()
 
-    async def load_latest_model(self) -> Tuple[bool, dict, int, int]:
+    async def load_latest_model(self) -> tuple[bool, dict, int, int]:
         """Load and prepare the latest model checkpoint for evaluation.
 
         This method:
@@ -246,32 +248,32 @@ class Evaluator:
         """
         result = await self.comms.get_latest_checkpoint(version=self.version)
         if not result:
-            tplr.logger.error(
+            logger.error(
                 f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket_name', 'unknown')}, "
                 f"key_prefix: {self.comms.key_prefix}"
             )
             return (False, {}, 0, 0)
 
-        tplr.logger.info(f"[DEBUG] get_latest_checkpoint() result: {result}")
+        logger.info(f"[DEBUG] get_latest_checkpoint() result: {result}")
 
         checkpoint_data, _ = result
-        tplr.logger.info(f"[DEBUG] Checkpoint data: {checkpoint_data}")
+        logger.info(f"[DEBUG] Checkpoint data: {checkpoint_data}")
 
         checkpoint_start_window = checkpoint_data.get("start_window")
         checkpoint_current_window = checkpoint_data.get("current_window", None)
 
         if checkpoint_start_window is None or checkpoint_current_window is None:
-            tplr.logger.error("Checkpoint missing start_window or current_window info")
+            logger.error("Checkpoint missing start_window or current_window info")
             return (False, checkpoint_data, 0, 0)
 
         if int(checkpoint_current_window) <= self.last_eval_window:
-            tplr.logger.info(
+            logger.info(
                 f"Checkpoint already evaluated (checkpoint window: {checkpoint_current_window}, "
                 f"last evaluated: {self.last_eval_window})."
             )
             return (False, checkpoint_data, int(checkpoint_current_window), 0)
 
-        tplr.logger.info(
+        logger.info(
             f"Loading model from checkpoint (window: {checkpoint_current_window})"
         )
 
@@ -280,8 +282,8 @@ class Evaluator:
             k_proj_key = "_orig_mod.model.layers.0.self_attn.k_proj.weight"
             if k_proj_key in checkpoint_data["model_state_dict"]:
                 k_proj_shape = checkpoint_data["model_state_dict"][k_proj_key].shape
-                tplr.logger.info(f"[DEBUG] Checkpoint k_proj shape: {k_proj_shape}")
-                tplr.logger.info(
+                logger.info(f"[DEBUG] Checkpoint k_proj shape: {k_proj_shape}")
+                logger.info(
                     f"[DEBUG] Expected k_proj shape: {self.model.model.layers[0].self_attn.k_proj.weight.shape}"
                 )
 
@@ -295,7 +297,7 @@ class Evaluator:
 
         global_step = int(checkpoint_current_window) - int(checkpoint_start_window)
 
-        tplr.logger.info(
+        logger.info(
             f"Loaded checkpoint (start_window={checkpoint_start_window}, "
             f"current_window={checkpoint_current_window}, global_step={global_step})"
         )
@@ -347,7 +349,7 @@ class Evaluator:
         command = " ".join(cmd_parts)
 
         start_time = time.time()
-        tplr.logger.info(f"Running benchmark command: {command}")
+        logger.info(f"Running benchmark command: {command}")
         exit_code = os.system(command)
         benchmark_runtime = time.time() - start_time
 
@@ -375,12 +377,12 @@ class Evaluator:
             exit_code: Exit code of the benchmark command
         """
         if exit_code != 0:
-            tplr.logger.error("Benchmarking command failed")
+            logger.error("Benchmarking command failed")
             return
 
         eval_results_dir = os.path.join(results_dir, "models__eval")
         if not os.path.exists(eval_results_dir):
-            tplr.logger.error(f"Results directory not found: {eval_results_dir}")
+            logger.error(f"Results directory not found: {eval_results_dir}")
             return
 
         self.metrics_logger.log(
@@ -396,7 +398,7 @@ class Evaluator:
                 "benchmark_runtime_s": float(benchmark_runtime),
             },
         )
-        tplr.logger.info(
+        logger.info(
             f"Reported metrics for global step {global_step} (block: {block_number}, window: {checkpoint_window})"
         )
 
@@ -411,7 +413,7 @@ class Evaluator:
             with open(latest_file, "r") as f:
                 results = json.load(f)
         except (ValueError, FileNotFoundError) as e:
-            tplr.logger.error(f"Error processing results: {e}")
+            logger.error(f"Error processing results: {e}")
             return
 
         for task_name, task_results in results["results"].items():
@@ -429,7 +431,7 @@ class Evaluator:
                     break
 
             if metric_value is not None:
-                tplr.logger.info(
+                logger.info(
                     f"Benchmark for {task_name} ({used_metric}): {metric_value}"
                 )
                 self.metrics_logger.log(
@@ -457,7 +459,7 @@ class Evaluator:
                 "block_number": block_number,
             },
         )
-        tplr.logger.info(
+        logger.info(
             f"Reported summary for global step {global_step} (block: {block_number}, window: {checkpoint_window})"
         )
 
@@ -479,7 +481,7 @@ class Evaluator:
 
         block_number = self.subtensor.get_current_block() - 1
 
-        tplr.logger.info(f"Looking for new checkpoint (block: {block_number})")
+        logger.info(f"Looking for new checkpoint (block: {block_number})")
 
         (
             success,
@@ -489,12 +491,12 @@ class Evaluator:
         ) = await self.load_latest_model()
 
         if not success:
-            tplr.logger.info(
+            logger.info(
                 f"No new checkpoint to evaluate (last evaluated window: {self.last_eval_window})"
             )
             return global_step
 
-        tplr.logger.info(
+        logger.info(
             f"Starting benchmark run at global step {global_step} (checkpoint window: {checkpoint_window})"
         )
 
@@ -540,10 +542,10 @@ class Evaluator:
             if os.path.exists(results_dir):
                 shutil.rmtree(results_dir)
         else:
-            tplr.logger.info("No regular tasks to run")
+            logger.info("No regular tasks to run")
 
         if should_run_mmlu_n_shot:
-            tplr.logger.info(f"Run #{self.eval_counter}: Running mmlu")
+            logger.info(f"Run #{self.eval_counter}: Running mmlu")
 
             exit_code, benchmark_runtime = self._run_lm_eval(
                 tasks="mmlu",
@@ -566,7 +568,7 @@ class Evaluator:
             if os.path.exists(results_dir):
                 shutil.rmtree(results_dir)
         elif has_mmlu_task:
-            tplr.logger.info(
+            logger.info(
                 f"Skipping mmlu (run #{self.eval_counter}, next at run #{(self.eval_counter // 4 + 1) * 4})"
             )
 
@@ -577,7 +579,7 @@ class Evaluator:
         self.last_eval_window = checkpoint_window
         self.last_block_number = block_number
 
-        tplr.logger.info(
+        logger.info(
             f"Successfully evaluated checkpoint (window: {checkpoint_window}, "
             f"global_step: {global_step}, block: {block_number})"
         )
@@ -588,17 +590,17 @@ class Evaluator:
     ) -> None:
         """Run evaluation on a custom dataset and log perplexity."""
         if not self.config.custom_eval_path:
-            tplr.logger.info("Custom evaluation path not provided, skipping.")
+            logger.info("Custom evaluation path not provided, skipping.")
             return
 
-        tplr.logger.info(
+        logger.info(
             f"Starting custom evaluation on dataset: {self.config.custom_eval_path}"
         )
         os.environ["DATASET_BINS_PATH"] = self.config.custom_eval_path
 
         try:
             # 1. Setup dataset and dataloader
-            custom_dataset = tplr.SharedShardedDataset(
+            custom_dataset = sharded_dataset.SharedShardedDataset(
                 sequence_length=self.hparams.sequence_length,
                 rank=0,  # Evaluator is single-process
                 world_size=1,
@@ -651,7 +653,7 @@ class Evaluator:
                 else float("inf")
             )
 
-            tplr.logger.info(
+            logger.info(
                 f"Custom evaluation finished. Perplexity: {perplexity:.4f}, Avg Loss: {average_loss:.4f}, Runtime: {eval_runtime:.2f}s"
             )
 
@@ -670,7 +672,7 @@ class Evaluator:
                 },
             )
         except Exception as e:
-            tplr.logger.error(f"Custom evaluation failed: {e}", exc_info=True)
+            logger.error(f"Custom evaluation failed: {e}", exc_info=True)
         finally:
             # 6. Cleanup
             self.model.to("cpu")  # type: ignore
@@ -701,21 +703,21 @@ class Evaluator:
                     latest_block > self.last_block_number
                     or start_window > self.last_eval_window
                 ):
-                    tplr.logger.info(
+                    logger.info(
                         f"New checkpoint detected (block: {latest_block}, window: {start_window}), executing benchmark..."
                     )
                     await self._evaluate()
                 else:
-                    tplr.logger.info(
+                    logger.info(
                         f"No new checkpoint available (block: {latest_block}/{self.last_block_number}, "
                         f"window: {start_window}/{self.last_eval_window})"
                     )
                 await asyncio.sleep(self.config.eval_interval)  # type: ignore
         except KeyboardInterrupt:
-            tplr.logger.info("Benchmark run interrupted by user")
+            logger.info("Benchmark run interrupted by user")
             self.stop_event.set()
         except Exception as e:
-            tplr.logger.error(f"Benchmark run failed: {e}")
+            logger.error(f"Benchmark run failed: {e}")
 
     def cleanup(self) -> None:
         """
@@ -732,7 +734,7 @@ def main() -> None:
     try:
         asyncio.run(evaluator.run())
     except Exception as e:
-        tplr.logger.error(f"Evaluator terminated with error: {e}")
+        logger.error(f"Evaluator terminated with error: {e}")
     finally:
         evaluator.cleanup()
 

@@ -6,7 +6,7 @@ This provider is used for development and testing.
 
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from rentcompute.providers.base import BaseProvider, Machine, Pod
 
@@ -17,7 +17,7 @@ class MockProvider(BaseProvider):
     def __init__(self) -> None:
         """Initialize the mock provider."""
         self._authenticated = False
-        self._running_pods: Dict[str, Pod] = {}
+        self._running_pods: dict[str, Pod] = {}
 
     @property
     def name(self) -> str:
@@ -43,9 +43,9 @@ class MockProvider(BaseProvider):
 
     def search_machines(
         self,
-        filters: Dict[str, Any],
+        filters: dict[str, Any],
         name_pattern: Optional[str] = None,
-    ) -> List[Machine]:
+    ) -> list[Machine]:
         """Search for available machines with given filters.
 
         Args:
@@ -205,7 +205,7 @@ class MockProvider(BaseProvider):
 
         return pod
 
-    def list_pods(self) -> List[Pod]:
+    def list_pods(self) -> list[Pod]:
         """List all running pods for this provider.
 
         Returns:

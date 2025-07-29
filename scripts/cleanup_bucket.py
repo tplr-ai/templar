@@ -5,28 +5,23 @@
 # ruff: noqa
 # type: ignore
 import os
-from pathlib import Path
-from dotenv import load_dotenv
-
+# from pathlib import Path
+from dotenv import find_dotenv, load_dotenv
+import sys
+import asyncio
 
 # Find and load the correct .env file
-env_path = Path(__file__).parent.parent / ".env"
+env_path = find_dotenv()
+# env_path = Path(__file__).parent.parent / ".env"
 if not env_path.exists():
     raise FileNotFoundError(f"Required .env file not found at {env_path}")
 
 # Load environment variables before any other imports
 load_dotenv(env_path, override=True)
 
-
-import sys
-import asyncio
-from dotenv import load_dotenv
-from aiobotocore.session import get_session
-from tplr import logger
-
 # Add parent directory to path to import tplr
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import tplr
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tplr import logger, config
 
 
 async def cleanup_bucket():
@@ -54,14 +49,14 @@ async def cleanup_bucket():
     secret_access_key = os.environ["R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"]
 
     # Initialize S3 client
-    session = get_session()
+    session = session.get_session()
     async with session.create_client(
         "s3",
         endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
         region_name="enam",
         aws_access_key_id=access_key_id,
         aws_secret_access_key=secret_access_key,
-        config=tplr.config.client_config,
+        config=config.client_config,
     ) as client:
         logger.info("Listing objects in bucket...")
 

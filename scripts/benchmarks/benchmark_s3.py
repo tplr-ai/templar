@@ -4,12 +4,11 @@ import os
 import time
 import logging
 import asyncio
-from aiobotocore.session import get_session
+from aiobotocore import session
 from pathlib import Path
 from botocore.config import Config
 from dotenv import load_dotenv
 import boto3
-from botocore.exceptions import ClientError
 
 # Load environment variables
 env_path = Path(__file__).parent / ".env"
@@ -71,7 +70,7 @@ class R2Client:
         self.secret_access_key = secret_access_key
         self.region_name = region_name
         self.bucket_name = bucket_name
-        self.session = get_session()
+        self.session = session.get_session()
 
     def get_base_url(self):
         return f"https://{self.account_id}.r2.cloudflarestorage.com"

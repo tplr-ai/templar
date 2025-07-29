@@ -3,7 +3,6 @@ Stop command implementation.
 """
 
 import sys
-from typing import List, Tuple
 
 from rentcompute.config import Config
 from rentcompute.providers.base import Pod
@@ -117,7 +116,7 @@ def stop_all(config: Config, skip_confirmation: bool = False) -> None:
     # Stop all instances
     print(f"\nStopping {len(active_pods)} instances...")
 
-    results: List[Tuple[Pod, bool, str]] = []  # (pod, success, error_message)
+    results: list[tuple[Pod, bool, str]] = []  # (pod, success, error_message)
 
     for pod in active_pods:
         print(f"Stopping {pod.name} (ID: {pod.id})...")

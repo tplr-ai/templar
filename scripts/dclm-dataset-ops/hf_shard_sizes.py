@@ -33,7 +33,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Optional
 
 import aiofiles
 import aiohttp
@@ -82,7 +82,7 @@ class HFFile:
     skip_downloading: bool = False
     filter_skip: bool = False
     download_link: str = ""
-    lfs: Optional[Dict[str, Any]] = None
+    lfs: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -110,7 +110,7 @@ class ProcessedFileTracker:
         """
         self.csv_path = Path(csv_path)
         self._lock = asyncio.Lock()
-        self._processed_hashes: Set[str] = set()
+        self._processed_hashes: set[str] = set()
         self._initialize()
 
     def _initialize(self):
@@ -257,7 +257,7 @@ async def create_http_client() -> aiohttp.ClientSession:
 
 async def fetch_file_list(
     session: aiohttp.ClientSession, url: str, auth_token: Optional[str] = None
-) -> List[HFFile]:
+) -> list[HFFile]:
     """
     Fetch the file list from Hugging Face API and parse into structured objects.
 
@@ -484,7 +484,7 @@ async def download_and_analyze_file(
     temp_dir: Path,
     auth_token: Optional[str] = None,
     progress_callback=None,
-) -> Tuple[Optional[AnalysisResult], Optional[Exception]]:
+) -> tuple[Optional[AnalysisResult], Optional[Exception]]:
     """
     Download a file to a temporary location, analyze it, and clean up.
 
@@ -561,7 +561,7 @@ async def worker(
     file_tracker: ProcessedFileTracker,
     auth_token: Optional[str] = None,
     silent_mode: bool = False,
-) -> List[Exception]:
+) -> list[Exception]:
     """
     Worker for processing files from the queue. Downloads files from Hugging Face,
     analyzes them, and updates the tracker.

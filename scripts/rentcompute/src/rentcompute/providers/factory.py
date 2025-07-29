@@ -5,7 +5,7 @@ This module contains the ProviderFactory class that manages provider
 instantiation and retrieval.
 """
 
-from typing import Dict, List, Type
+from typing import Type
 
 from rentcompute.providers.base import BaseProvider
 from rentcompute.providers.celium import CeliumProvider
@@ -15,8 +15,8 @@ from rentcompute.providers.mock import MockProvider
 class ProviderFactory:
     """Factory for creating and retrieving provider instances."""
 
-    _providers: Dict[str, Type[BaseProvider]] = {}
-    _instances: Dict[str, BaseProvider] = {}
+    _providers: dict[str, Type[BaseProvider]] = {}
+    _instances: dict[str, BaseProvider] = {}
 
     @classmethod
     def register_provider(cls, provider_class: Type[BaseProvider]) -> None:
@@ -56,7 +56,7 @@ class ProviderFactory:
         raise ValueError(f"Provider '{name}' is not registered")
 
     @classmethod
-    def get_available_providers(cls) -> List[str]:
+    def get_available_providers(cls) -> list[str]:
         """Get names of all registered providers.
 
         Returns:

@@ -25,10 +25,10 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import uvloop
-from aiobotocore.session import get_session
+from aiobotocore import session
 from botocore.config import Config
 from tqdm import tqdm
 
@@ -146,7 +146,7 @@ class UnifiedStorageClient:
         self.bucket_name = bucket_name
         self.region = region
         self.account_id = account_id
-        self.session = get_session()
+        self.session = session.get_session()
         self.multipart_threshold = 100 * 1024 * 1024
 
         # Enhanced connection configuration for stability
@@ -169,7 +169,7 @@ class UnifiedStorageClient:
 
     async def put_object_from_file(
         self, key: str, file_path: str, use_multipart: Optional[bool] = None
-    ) -> Tuple[bool, str]:
+    ) -> tuple[bool, str]:
         """Upload object from file with optional multipart upload."""
         file_size = os.path.getsize(file_path)
         should_use_multipart = (
@@ -312,9 +312,9 @@ class UnifiedStorageClient:
 class BenchmarkRunner:
     """Main benchmark runner class."""
 
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
-        self.results: List[BenchmarkResult] = []
+        self.results: list[BenchmarkResult] = []
         self.setup_logging()
         self.main_progress: Optional[tqdm] = None
         # Limit concurrent operations to prevent connection pool exhaustion
@@ -419,7 +419,7 @@ class BenchmarkRunner:
         file_size_gb: float,
         test_multipart: bool = True,
         progress_desc: str = "",
-    ) -> List[BenchmarkResult]:
+    ) -> list[BenchmarkResult]:
         """Run multiple concurrent operations to test throughput."""
         temp_file = GradientFileGenerator.create_temp_file(file_size_gb)
 
@@ -582,7 +582,7 @@ class BenchmarkRunner:
         print(f"\nBenchmark completed! Total operations: {len(self.results)}")
         print("=" * 70)
 
-    def generate_summary_statistics(self) -> List[BenchmarkSummary]:
+    def generate_summary_statistics(self) -> list[BenchmarkSummary]:
         """Generate summary statistics from all results."""
         summaries = []
         groups = {}

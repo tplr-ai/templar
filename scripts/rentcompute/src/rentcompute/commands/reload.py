@@ -6,7 +6,7 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import yaml
 
@@ -142,7 +142,7 @@ def reload_instance(
     return reload_pod(found_pod, reload_config)
 
 
-def reload_pod(pod: Pod, reload_config: Dict[str, Any]) -> bool:
+def reload_pod(pod: Pod, reload_config: dict[str, Any]) -> bool:
     """Reload a pod using the specified configuration.
 
     Args:
@@ -165,7 +165,7 @@ def reload_pod(pod: Pod, reload_config: Dict[str, Any]) -> bool:
         return False
 
 
-def _reload_with_ansible(pod: Pod, config: Dict[str, Any]) -> bool:
+def _reload_with_ansible(pod: Pod, config: dict[str, Any]) -> bool:
     """Reload instance using Ansible.
 
     Args:
@@ -329,7 +329,7 @@ def _reload_with_ansible(pod: Pod, config: Dict[str, Any]) -> bool:
             inventory_path.unlink()
 
 
-def load_reload_config(config_path: str) -> Dict[str, Any]:
+def load_reload_config(config_path: str) -> dict[str, Any]:
     """Load reload configuration from the specified file.
 
     Args:

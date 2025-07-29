@@ -8,22 +8,24 @@ import os
 import sys
 import asyncio
 from pathlib import Path
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
+from aiobotocore.session import get_session
+
 
 # Find and load the correct .env file
-env_path = Path(__file__).parent.parent / ".env"
+env_path = find_dotenv()
+# env_path = Path(__file__).parent.parent / ".env"
 if not env_path.exists():
     raise FileNotFoundError(f"Required .env file not found at {env_path}")
 
 # Load environment variables before any other imports
 load_dotenv(env_path, override=True)
 
-from aiobotocore.session import get_session
+# Add parent directory to path to import tplr
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import tplr
 from tplr import logger, __version__
 
-# Add parent directory to path to import tplr
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import tplr
 
 
 async def cleanup_version():

@@ -9,9 +9,9 @@ from urllib.parse import urlparse
 
 import boto3
 from botocore.config import Config as BotoConfig
-from botocore.exceptions import ClientError
+from botocore import exceptions
 
-from tplr.logging import logger
+from tplr.tplr_logging import logger
 
 
 def create_r2_client(aws_access_key_id, aws_secret_access_key, endpoint_url):
@@ -26,7 +26,7 @@ def create_r2_client(aws_access_key_id, aws_secret_access_key, endpoint_url):
         logger.info("Successfully created R2 client")
         return s3_client
 
-    except ClientError as e:
+    except exceptions.ClientError as e:
         logger.error(f"Failed to create R2 client: {str(e)}")
         sys.exit(1)
 
@@ -101,7 +101,7 @@ def delete_chunk(s3_client, bucket_name, chunk):
             },
         )
         print(f"Successfully deleted {len(chunk)} objects.")
-    except ClientError as e:
+    except exceptions.ClientError as e:
         print(f"Error deleting chunk: {e}")
         raise
 
@@ -161,7 +161,7 @@ def delete_older_objects(s3_client, bucket_name, hours):
             print(f"Deleting remaining {len(keys_to_delete)} objects...")
             delete_chunk(s3_client, bucket_name, keys_to_delete)
 
-    except ClientError as e:
+    except exceptions.ClientError as e:
         print(f"Error listing or deleting objects: {e}")
         raise
 
@@ -216,7 +216,7 @@ def delete_objects_with_prefix(s3_client, bucket_name, prefix):
 
             print(f"Deleting remaining {len(keys_to_delete)} objects...")
             delete_chunk(s3_client, bucket_name, keys_to_delete)
-    except ClientError as e:
+    except exceptions.ClientError as e:
         logger.error(f"Failed to delete objects with prefix: {e}")
 
 
@@ -277,7 +277,7 @@ def delete_objects_with_suffix(s3_client, bucket_name, suffix):
 
             print(f"Deleting remaining {len(keys_to_delete)} objects...")
             delete_chunk(s3_client, bucket_name, keys_to_delete)
-    except ClientError as e:
+    except exceptions.ClientError as e:
         logger.error(f"Failed to delete objects with suffix: {e}")
 
 
@@ -323,7 +323,7 @@ def wipe_bucket(s3_client, bucket_name):
                 total_deleted += len(chunk)
 
         logger.info(f"Deleted {total_deleted} objects in bucket '{bucket_name}'.")
-    except ClientError as e:
+    except exceptions.ClientError as e:
         logger.error(f"Failed to wipe bucket: {e}")
 
 

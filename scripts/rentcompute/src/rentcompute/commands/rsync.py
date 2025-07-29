@@ -5,7 +5,7 @@ Rsync command implementation.
 import logging
 import os
 import subprocess
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import yaml
 
@@ -169,7 +169,7 @@ def run(
         )
 
 
-def load_sync_config(config_path: str) -> List[Dict[str, str]]:
+def load_sync_config(config_path: str) -> list[dict[str, str]]:
     """Load sync configuration from the specified file.
 
     Args:
@@ -202,7 +202,7 @@ def rsync_directories(
     user: str,
     port: int,
     private_key_path: str,
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """Sync directories using rsync.
 
     Args:

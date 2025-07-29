@@ -22,7 +22,7 @@ import json
 import os
 import sys
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any
 
 # Path to your input CSV
 INPUT_CSV = "mlfoundations-dclm-baseline-1.0-parquet.csv"
@@ -34,7 +34,7 @@ OUTPUT_JSON = "_shard_sizes.json"
 DATASET_ROOT = "dataset/mlfoundations-dclm-baseline-1.0-parquet"
 
 
-def build_manifest(csv_path: str) -> Dict[str, Any]:
+def build_manifest(csv_path: str) -> dict[str, Any]:
     """
     Read the CSV and produce a dict like:
     {
@@ -47,7 +47,7 @@ def build_manifest(csv_path: str) -> Dict[str, Any]:
       ...
     }
     """
-    groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -66,7 +66,7 @@ def build_manifest(csv_path: str) -> Dict[str, Any]:
                 }
             )
 
-    manifest: Dict[str, Any] = {
+    manifest: dict[str, Any] = {
         "default": {"split": None, "shards": [], "total_rows": 0}
     }
 

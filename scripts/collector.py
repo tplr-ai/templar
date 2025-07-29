@@ -29,11 +29,12 @@ from typing import cast
 import bittensor as bt
 import torch
 import uvloop
-from aiobotocore.session import get_session
-from botocore.exceptions import ClientError, ConnectionClosedError
+from aiobotocore import session
+from botocore import exceptions 
 
 import tplr
-from tplr.config import client_config
+from tplr import config, comms
+from tplr.logging import logger
 
 CPU_COUNT = os.cpu_count() or 4
 
@@ -63,14 +64,14 @@ class GradientCollector:
         self.bucket_access_key = os.getenv("R2_COLLECTOR_WRITE_ACCESS_KEY_ID")
         self.bucket_secret_key = os.getenv("R2_COLLECTOR_WRITE_SECRET_ACCESS_KEY")
         if not all([self.bucket_access_key, self.bucket_secret_key]):
-            tplr.logger.warning("R2 credentials not fully specified in env vars")
+            logger.warning("R2 credentials not fully specified in env vars")
 
         # 3) bittensor objects ---------------------------------------------------
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
 
         # 4) comms (already async / aiobotocore) ---------------------------------
-        self.comms = tplr.comms.Comms(
+        self.comms = comms.Comms(
             wallet=None,
             key_prefix="collector",
             config=self.config,
@@ -86,7 +87,7 @@ class GradientCollector:
         self.current_block = self.subtensor.block
         self.current_window = self.current_block // self.hparams.blocks_per_window
         self.iteration_counter = 0
-        self.next_peers: tplr.comms.PeerArray | None = None
+        self.next_peers: comms.PeerArray | None = None
         self.peers_update_window = -1
 
     # ───────────────────────── bucket init (async) ─────────────────────────
@@ -103,20 +104,20 @@ class GradientCollector:
             raise RuntimeError("R2_COLLECTOR_ACCOUNT_ID env var is required")
 
         endpoint = self.comms.get_base_url(account_id)
-        session = get_session()
+        session = session.get_session()
         self.bucket = await session.create_client(
             "s3",
             endpoint_url=endpoint,
             region_name=self.bucket_region,
-            config=client_config,
+            config=config.client_config,
             aws_access_key_id=self.bucket_access_key,
             aws_secret_access_key=self.bucket_secret_key,
         ).__aenter__()
 
         try:
             await self.bucket.head_bucket(Bucket=self.bucket_name)  # type: ignore [reportGeneralTypeIssues]
-        except ClientError:
-            tplr.logger.info(f"Creating bucket '{self.bucket_name}' in R2")
+        except exceptions.ClientError:
+            logger.info(f"Creating bucket '{self.bucket_name}' in R2")
             await self.bucket.create_bucket(Bucket=self.bucket_name)  # type: ignore [reportGeneralTypeIssues]
 
         return self.bucket
@@ -127,7 +128,7 @@ class GradientCollector:
         target_window = self.sync_window - 2
         start_time = time.time()
 
-        tplr.logger.info(
+        logger.info(
             f"Collecting window {target_window} – iteration {self.iteration_counter}"
         )
 
@@ -138,7 +139,7 @@ class GradientCollector:
             peer_start=tplr.T(),
         )
         selected_uids: list[int] = [int(u) for u in self.comms.peers]
-        tplr.logger.info(f"Selected {len(selected_uids)} peers: {selected_uids}")
+        logger.info(f"Selected {len(selected_uids)} peers: {selected_uids}")
 
         bucket = await self._open_bucket()  # aiobotocore client
         semaphore = asyncio.Semaphore(15)  # limit concurrent S3 ops
@@ -164,10 +165,10 @@ class GradientCollector:
                 download_time = time.time() - download_start
 
                 if gradient is None:
-                    tplr.logger.debug(f"UID {uid}: No gradient received")
+                    logger.debug(f"UID {uid}: No gradient received")
                     return uid, False
 
-                tplr.logger.debug(
+                logger.debug(
                     f"UID {uid}: Downloaded gradient in {download_time:.2f}s"
                 )
 
@@ -200,21 +201,21 @@ class GradientCollector:
                 upload_time = time.time() - upload_start
 
                 total_time = time.time() - process_start
-                tplr.logger.debug(
+                logger.debug(
                     f"UID {uid}: Uploaded gradient ({data_size / 1024:.1f} KB) in {upload_time:.2f}s"
                 )
-                tplr.logger.info(
+                logger.info(
                     f"UID {uid}: Processed successfully in {total_time:.2f}s"
                 )
 
                 successful_count += 1
                 return uid, True
 
-            except (ConnectionClosedError, ClientError) as e:
-                tplr.logger.debug(f"S3 error for UID {uid}: {e}")
+            except (exceptions.ConnectionClosedError, exceptions.ClientError) as e:
+                logger.debug(f"S3 error for UID {uid}: {e}")
                 return uid, False
             except Exception as e:
-                tplr.logger.warning(f"UID {uid}: {e}")
+                logger.warning(f"UID {uid}: {e}")
                 return uid, False
 
         # run all in parallel -----------------------------------------------------
@@ -247,22 +248,22 @@ class GradientCollector:
         total_time = time.time() - start_time
 
         # Log comprehensive summary
-        tplr.logger.info(
+        logger.info(
             f"Window {target_window}: success {len(ok_uids)}/{len(selected_uids)} "
             f"({summary['success_rate'] * 100:.1f}%)"
         )
-        tplr.logger.info(f"Total gather time: {gather_time:.2f}s")
-        tplr.logger.info(f"Total execution time: {total_time:.2f}s")
-        tplr.logger.info(f"Total data collected: {total_bytes / 1024 / 1024:.2f} MB")
+        logger.info(f"Total gather time: {gather_time:.2f}s")
+        logger.info(f"Total execution time: {total_time:.2f}s")
+        logger.info(f"Total data collected: {total_bytes / 1024 / 1024:.2f} MB")
 
         if bad_uids:
-            tplr.logger.debug(f"Failed UIDs: {bad_uids}")
+            logger.debug(f"Failed UIDs: {bad_uids}")
 
         return True
 
     # ───────────────────────── main run-loop ───────────────────────────────
     async def run(self):
-        tplr.logger.info("Gradient collector starting…")
+        logger.info("Gradient collector starting…")
         await self._open_bucket()
 
         # thread for block-headers updates ----------------------------------------
@@ -300,12 +301,12 @@ class GradientCollector:
                 self.stop_event.set()
                 break
             except Exception as e:
-                tplr.logger.exception(f"Main loop error: {e}")
+                logger.exception(f"Main loop error: {e}")
                 await asyncio.sleep(30)
 
     # ───────────────────────── block listener  ─────────────────────────
     def block_listener(self, loop):
-        import websockets.exceptions
+        from websockets import exceptions
 
         def handler(event):
             try:
@@ -314,9 +315,9 @@ class GradientCollector:
                 if window != self.current_window:
                     self.current_window = window
                     self.comms.current_window = window
-                    tplr.logger.info(f"→ new window {window}")
+                    logger.info(f"→ new window {window}")
             except Exception as e:
-                tplr.logger.error(f"block_listener: {e}")
+                logger.error(f"block_listener: {e}")
 
         backoff, max_backoff = 1, 60
         while not self.stop_event.is_set():
@@ -325,11 +326,11 @@ class GradientCollector:
                     handler
                 )
                 backoff = 1
-            except websockets.exceptions.ConnectionClosedError:
+            except exceptions.ConnectionClosedError:
                 time.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
             except Exception as e:
-                tplr.logger.warning(f"block_listener: {e}")
+                logger.warning(f"block_listener: {e}")
                 time.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
 

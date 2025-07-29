@@ -32,15 +32,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Optional
 
 import boto3
 import dns.resolver
 import pyarrow.parquet as pq
 import requests
-from botocore.client import BaseClient
+from botocore import client 
 from botocore.config import Config
-from requests.adapters import HTTPAdapter, Retry
+from requests import adapters
 from tqdm import tqdm
 
 BUFFER_SIZE = 64 * 1024 * 1024  # 64MB buffer
@@ -133,20 +133,20 @@ class DownloadState:
     model_name: str
     branch: str
     total_files: int = 0
-    file_progress: Dict[str, FileProgress] = field(default_factory=dict)
+    file_progress: dict[str, FileProgress] = field(default_factory=dict)
     last_update: datetime = field(default_factory=datetime.now)
     start_time: datetime = field(default_factory=datetime.now)
-    corrupted_files: List[str] = field(default_factory=list)
-    processing_files: Dict[str, int] = field(default_factory=dict)  # file -> worker_id
+    corrupted_files: list[str] = field(default_factory=list)
+    processing_files: dict[str, int] = field(default_factory=dict)  # file -> worker_id
 
 
 class R2FileCache:
     """Thread-safe cache with atomic operations."""
 
     def __init__(self):
-        self.files: Dict[str, int] = {}
+        self.files: dict[str, int] = {}
         self._lock = threading.RLock()
-        self._processing_files: Set[str] = set()
+        self._processing_files: set[str] = set()
 
     def try_claim_file(self, key: str, worker_id: int) -> bool:
         """Atomically claim a file for processing."""
@@ -163,7 +163,7 @@ class R2FileCache:
 
     def exists_with_size_atomic(
         self, key: str, expected_size: int
-    ) -> Tuple[bool, bool]:
+    ) -> tuple[bool, bool]:
         """Check existence and claim in one atomic operation, ignoring size.
         Returns: (exists, successfully_claimed)
         """
@@ -194,7 +194,7 @@ class R2FileCache:
         with self._lock:
             return key in self.files
 
-    def get_size(self, key: str) -> Tuple[int, bool]:
+    def get_size(self, key: str) -> tuple[int, bool]:
         """Get the file size and existence boolean."""
         with self._lock:
             size = self.files.get(key)
@@ -240,7 +240,7 @@ class CorruptionRecoveryManager:
     def __init__(self, max_retries: int = 3):
         self.retry_queue = queue.Queue()
         self.max_retries = max_retries
-        self.retry_counts: Dict[str, int] = {}
+        self.retry_counts: dict[str, int] = {}
         self._lock = threading.Lock()
         self.shutdown_event = threading.Event()
 
@@ -256,7 +256,7 @@ class CorruptionRecoveryManager:
             self.retry_queue.put((file_path, file_info))
             return True
 
-    def get_retry_file(self, timeout: float = 1.0) -> Optional[Tuple[str, HFModel]]:
+    def get_retry_file(self, timeout: float = 1.0) -> Optional[tuple[str, HFModel]]:
         """Get a file to retry from the queue."""
         try:
             return self.retry_queue.get(timeout=timeout)
@@ -275,7 +275,7 @@ class WorkerManager:
         self.max_workers = max_workers
         self.task_timeout = task_timeout
         self.executor = None
-        self.active_tasks: Dict[str, Tuple[concurrent.futures.Future, float]] = {}
+        self.active_tasks: dict[str, tuple[concurrent.futures.Future, float]] = {}
         self._lock = threading.Lock()
         self.monitor_thread = None
         self.shutdown_event = threading.Event()
@@ -347,9 +347,9 @@ class WorkerManager:
 
     def wait_all_with_timeout(
         self,
-        futures: List[concurrent.futures.Future],
-        timeout: int = None,  # type: ignore
-    ) -> Tuple[List[Any], int]:
+        futures: list[concurrent.futures.Future],
+        timeout: int | None = None, 
+    ) -> tuple[list[Any], int]:
         """Wait for all futures with proper concurrent timeout handling.
 
         Returns:
@@ -437,10 +437,10 @@ def create_optimized_session() -> requests.Session:
     dns.resolver.default_resolver.nameservers = ["1.1.1.1", "1.0.0.1"]
 
     # Configure the connection pooling and retry strategy
-    adapter = HTTPAdapter(
+    adapter = adapters.HTTPAdapter(
         pool_connections=NUM_CONNECTIONS,
         pool_maxsize=NUM_CONNECTIONS,
-        max_retries=Retry(
+        max_retries=adapters.Retry(
             total=MAX_RETRIES,
             backoff_factor=RETRY_DELAY,
             status_forcelist=[429, 500, 502, 503, 504],
@@ -460,7 +460,7 @@ def create_optimized_session() -> requests.Session:
     return session
 
 
-def create_r2_client(r2cfg: R2Config) -> BaseClient:
+def create_r2_client(r2cfg: R2Config) -> client.BaseClient:
     """Create an optimized R2 client.
 
     Args:
@@ -711,7 +711,7 @@ def load_download_state(model_name: str) -> Optional[DownloadState]:
         return None
 
 
-def fetch_file_list(url: str, session: requests.Session) -> List[HFModel]:
+def fetch_file_list(url: str, session: requests.Session) -> list[HFModel]:
     """Fetch and parse file list from Hugging Face API.
 
     Args:
@@ -753,7 +753,7 @@ def fetch_file_list(url: str, session: requests.Session) -> List[HFModel]:
 
 
 def verify_parquet_file(
-    client: BaseClient, bucket: str, key: str, expected_size: int = None
+    client: client.BaseClient, bucket: str, key: str, expected_size: int = None
 ) -> bool:
     """Verify a parquet file in R2 by checking magic numbers only, ignoring size.
 
@@ -961,7 +961,7 @@ def process_hf_folder_tree(
     folder_name: str,
     silent_mode: bool,
     r2cfg: R2Config,
-    process_files: Callable[[List[HFModel]], None],
+    process_files: Callable[[list[HFModel]], None],
     hf_prefix: str,
     session: requests.Session,
 ) -> None:
@@ -1331,7 +1331,7 @@ def download_model(
                 except:  # noqa: E722
                     pass
 
-    def process_files_callback(files: List[HFModel]) -> None:
+    def process_files_callback(files: list[HFModel]) -> None:
         """Process a batch of files."""
         pending_files = []
         total_size = 0

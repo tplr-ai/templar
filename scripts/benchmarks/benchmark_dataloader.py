@@ -15,12 +15,11 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import seaborn as sns
 import psutil
-import tplr
-
+from tplr import hparams, dataset
 
 class PageBenchmark:
     def __init__(self):
-        self.hparams = tplr.load_hparams()
+        self.hparams = hparams.load_hparams()
         self.tokenizer = self.hparams.tokenizer
         self.results = []
 
@@ -34,14 +33,14 @@ class PageBenchmark:
             try:
                 # Get pages
                 pages_start = time.time()
-                pages = await tplr.dataset.DatasetLoader.next_pages(
+                pages = await dataset.DatasetLoader.next_pages(
                     offset=i, n_pages=n_pages, seed="benchmark_test"
                 )
                 pages_duration = time.time() - pages_start
 
                 # Create loader
                 loader_start = time.time()
-                loader = await tplr.dataset.DatasetLoader.create(
+                loader = await dataset.DatasetLoader.create(
                     batch_size=self.hparams.batch_size,
                     sequence_length=self.hparams.sequence_length,
                     pages_info=pages,

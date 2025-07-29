@@ -2,8 +2,6 @@
 List instances command implementation.
 """
 
-from typing import List
-
 from rentcompute.config import Config
 from rentcompute.providers.base import Pod
 
@@ -30,7 +28,7 @@ def run(config: Config) -> None:
         print("No active instances found.")
 
 
-def _print_pods_table(pods: List[Pod]) -> None:
+def _print_pods_table(pods: list[Pod]) -> None:
     """Print a formatted table of pods.
 
     Args:

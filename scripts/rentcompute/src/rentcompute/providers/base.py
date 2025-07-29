@@ -6,7 +6,7 @@ implementations must subclass.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 
 class Machine:
@@ -38,7 +38,7 @@ class Machine:
         self.gpu_count = gpu_count
         self.hourly_rate = hourly_rate
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert machine to dictionary representation.
 
         Returns:
@@ -98,7 +98,7 @@ class Pod:
         self.gpu_count = gpu_count
         self.provider_name = provider_name
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert pod to dictionary representation.
 
         Returns:
@@ -153,9 +153,9 @@ class BaseProvider(ABC):
     @abstractmethod
     def search_machines(
         self,
-        filters: Dict[str, Any],
+        filters: dict[str, Any],
         name_pattern: Optional[str] = None,
-    ) -> List[Machine]:
+    ) -> list[Machine]:
         """Search for available machines with given filters.
 
         Args:
@@ -187,7 +187,7 @@ class BaseProvider(ABC):
         pass
 
     @abstractmethod
-    def list_pods(self) -> List[Pod]:
+    def list_pods(self) -> list[Pod]:
         """List all running pods for this provider.
 
         Returns:

@@ -8,7 +8,7 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import yaml
 
@@ -28,7 +28,7 @@ class ProvisioningConfig:
             config_path: Path to the provisioning config file
         """
         self.config_path = config_path
-        self.config: Dict[str, Any] = {}
+        self.config: dict[str, Any] = {}
         self.valid = False
 
     def load(self) -> bool:
@@ -154,7 +154,7 @@ def provision_instance(pod: Pod) -> bool:
         return False
 
 
-def _provision_with_script(pod: Pod, config: Dict[str, Any]) -> bool:
+def _provision_with_script(pod: Pod, config: dict[str, Any]) -> bool:
     """Provision instance using a script.
 
     Args:
@@ -211,7 +211,7 @@ def _provision_with_script(pod: Pod, config: Dict[str, Any]) -> bool:
         return False
 
 
-def _provision_with_ansible(pod: Pod, config: Dict[str, Any]) -> bool:
+def _provision_with_ansible(pod: Pod, config: dict[str, Any]) -> bool:
     """Provision instance using Ansible.
 
     Args:
@@ -365,7 +365,7 @@ def _provision_with_ansible(pod: Pod, config: Dict[str, Any]) -> bool:
             inventory_path.unlink()
 
 
-def _provision_with_docker(pod: Pod, config: Dict[str, Any]) -> bool:
+def _provision_with_docker(pod: Pod, config: dict[str, Any]) -> bool:
     """Provision instance using Docker.
 
     Args:

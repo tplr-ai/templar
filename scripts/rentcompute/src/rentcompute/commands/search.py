@@ -2,12 +2,12 @@
 Search command implementation.
 """
 
-from typing import Any, Dict
+from typing import Any
 
 from rentcompute.config import Config
 
 
-def run(config: Config, instance_config: Dict[str, Any], name: str = None) -> None:
+def run(config: Config, instance_config: dict[str, Any], name: str = None) -> None:
     """Run the search command to find available instances without starting them.
 
     Args:

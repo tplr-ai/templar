@@ -5,26 +5,27 @@
 # ruff: noqa
 # type: ignore
 import os
-from pathlib import Path
+import sys
+import asyncio
+# from pathlib import Path
 from dotenv import load_dotenv
 import argparse
+from aiobotocore.session import get_session
+
+from tplr.logging import logger
+from tplr import config
 
 # Find and load the correct .env file
-env_path = Path(__file__).parent.parent / ".env"
+env_path = find_dotenv()
+# env_path = Path(__file__).parent.parent / ".env"
 if not env_path.exists():
     raise FileNotFoundError(f"Required .env file not found at {env_path}")
 
 # Load environment variables before any other imports
 load_dotenv(env_path, override=True)
 
-import sys
-import asyncio
-from dotenv import load_dotenv
-from aiobotocore.session import get_session
-from tplr import logger
-
 # Add parent directory to path to import tplr
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import tplr
 
 
@@ -60,7 +61,7 @@ async def cleanup_bucket(version: str):
         region_name="enam",
         aws_access_key_id=access_key_id,
         aws_secret_access_key=secret_access_key,
-        config=tplr.config.client_config,
+        config=config.client_config,
     ) as client:
         prefix = f"gathers/{version}/"
         logger.info(f"Listing objects in {prefix} directory...")

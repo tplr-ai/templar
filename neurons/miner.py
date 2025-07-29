@@ -52,7 +52,7 @@ from transformers.models.llama import LlamaForCausalLM
 import tplr
 
 # Local
-from neurons import BaseNode
+from neurons import BaseNode, Trainer
 
 # Local
 
@@ -70,7 +70,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 
-class Miner(BaseNode):
+class Miner(BaseNode, Trainer):
     # Command line config items.
     @staticmethod
     def miner_config():
@@ -495,29 +495,8 @@ class Miner(BaseNode):
         # sync before the fw passes
         dist.barrier(device_ids=[self.local_rank])
         
-        # Other workers need to pick up dataset
-        self.dataset = self.dataset_manager.active_dataset
-        self.sampler = tplr.MinerSampler(
-            dataset=self.dataset,
-            uid=self.uid,
-            window=self.current_window,
-            steps_per_window=self.hparams.inner_steps,
-            micro_bs=self.hparams.micro_batch_size,
-            batch_size=self.hparams.batch_size,
-            target_batch_size=self.hparams.target_batch_size,
-            rank=self.rank,
-            world_size=self.world_size,
-        )
-
-        self.loader = torch.utils.data.DataLoader(
-            dataset=self.dataset,
-            sampler=self.sampler,
-            batch_size=self.hparams.micro_batch_size,
-            num_workers=10,
-            pin_memory=True,
-            prefetch_factor=2,
-        ) 
-        tplr.logger.info("[Run] dataset + sampler ready")
+        # Finalize the dataloader
+        self.set_dataloader() # send to Trainer...
 
         self.comms.start_commitment_fetcher()
 

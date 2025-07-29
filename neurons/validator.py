@@ -49,7 +49,7 @@ from transformers.models.llama import LlamaForCausalLM
 import tplr
 
 # Local
-from neurons import BaseNode
+from neurons import BaseNode, Trainer
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -79,7 +79,7 @@ def timer(name: str, wandb_obj=None, step=None, metrics_logger=None):
         )
 
 
-class Validator(BaseNode):
+class Validator(BaseNode, Trainer):
     @staticmethod
     def validator_config():
         parser = argparse.ArgumentParser(description="Validator script")
@@ -723,27 +723,7 @@ class Validator(BaseNode):
 
         windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
         _ = await self.dataset_manager.initialize_datasets(self.global_step // windows_per_shard)     
-        self.dataset = self.dataset_manager.active_dataset
-        self.sampler = tplr.EvalSampler(
-            dataset=self.dataset,
-            uid=self.uid,
-            window=self.current_window,
-            steps_per_window=self.hparams.inner_steps,
-            micro_bs=self.hparams.micro_batch_size,
-            batch_size=self.hparams.target_batch_size,
-            validation_bs=self.hparams.validator_sample_micro_bs
-            * self.hparams.micro_batch_size,
-            rank=self.rank,
-            world_size=self.world_size,
-        )
-
-        self.loader = torch.utils.data.DataLoader(
-            dataset=self.dataset,
-            sampler=self.sampler,
-            batch_size=self.hparams.micro_batch_size,
-            num_workers=2,
-            pin_memory=True,
-        )
+        self.set_dataloader(validator=True)
 
 
         checkpoint_window_buffer = 5

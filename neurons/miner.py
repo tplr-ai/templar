@@ -414,7 +414,6 @@ class Miner(BaseNode):
             val = -1 if self.start_window is None else self.start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)
-
         else:
             tensor = torch.zeros(1, dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)

@@ -165,11 +165,8 @@ def outer_step(
     """
     Synchronize gradients (if DDP) and apply optimizer step
     """
-    bare_model = (
-        model.module
-        if isinstance(model, torch.nn.parallel.DistributedDataParallel)
-        else model
-    )
+    bare_model = getattr(model, 'module', model)
+    
     if is_master:
         min_median_norm = float("inf")
         max_median_norm = float("-inf")
@@ -516,7 +513,7 @@ async def catchup_with_aggregation_server(
         # ------------------------------------------------------------------
         # 2) Apply those gradients through the shared helper.
         # ------------------------------------------------------------------
-        tplr.neurons.outer_step(
+        outer_step(
             instance.model,
             instance.outer_optimizer,
             gather_result=gather_ns,
@@ -552,14 +549,8 @@ async def catchup_with_aggregation_server(
             if debug_fetch is not None and isinstance(debug_fetch[0], dict):
                 debug_dict = debug_fetch[0]  # validator's payload
 
-                # --- update EMA of parameter-slice changes ------------------
-                bare_model = (
-                    instance.model.module
-                    if isinstance(
-                        instance.model, torch.nn.parallel.DistributedDataParallel
-                    )
-                    else instance.model
-                )
+                # --- update EMA of parameter‑slice changes ------------------
+                bare_model = getattr(instance.model, 'module', instance.model)
                 for name, p in bare_model.named_parameters():
                     if p.numel() < 2:
                         continue
@@ -580,7 +571,7 @@ async def catchup_with_aggregation_server(
 
                 # --- call shared comparison helper --------------------------
                 lr = instance.outer_optimizer.param_groups[0]["lr"]
-                cmp = await tplr.neurons.compare_model_with_debug_dict(
+                cmp = await compare_model_with_debug_dict(
                     model=instance.model,
                     debug_dict=debug_dict,
                     learning_rate=lr,

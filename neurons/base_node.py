@@ -19,7 +19,11 @@ from bittensor.core.subtensor import ScaleObj
 import tplr
 
 
+<<<<<<< HEAD
 class BaseNode:
+=======
+class BaseNode(abc.ABC):
+>>>>>>> 121e7cf (Centralize Torch functionality in Trainer)
     # ――― attributes that subclasses will overwrite ―――
     executor: ThreadPoolExecutor
     world_size: int = 1

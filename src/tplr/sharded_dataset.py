@@ -294,9 +294,9 @@ class ShardedDatasetManager:
         await self.initialize_datasets(self.shard_index)
         tplr.logger.info("successfully swapped datasets.")
 
-        if old_dataset:
+        if old_dataset and self.rank == 0:
             os.remove(old_dataset.tokens_file)
             os.remove(old_dataset.ids_file)
-            del old_dataset
+        del old_dataset
 
         return self.shard_index

@@ -378,7 +378,7 @@ class Miner(BaseNode):
         
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
-            rank=self.rank,
+            rank=self.local_rank,
             world_size=self.world_size,
             comms=self.comms,
         )
@@ -557,6 +557,8 @@ class Miner(BaseNode):
                     setattr(self, attr, self.dataset_manager.active_dataset)
                 self.loader.sampler = self.sampler
                 tplr.logger.info("[Run] dataset + sampler ready")
+                if self.world_size > 1:
+                    dist.barrier(device_ids=[self.local_rank])
 
             data_loading_time = tplr.T() - data_start
             tplr.logger.info(

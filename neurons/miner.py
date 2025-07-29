@@ -552,27 +552,10 @@ class Miner(BaseNode):
             ):
                 tplr.logger.info(f"Swapping dataset at window {step_window}")
                 await self.dataset_manager.swap_datasets()
-                self.dataset = self.dataset_manager.active_dataset
-                self.sampler = tplr.MinerSampler(
-                    dataset=self.dataset,
-                    uid=self.uid,
-                    window=self.current_window,
-                    steps_per_window=self.hparams.inner_steps,
-                    micro_bs=self.hparams.micro_batch_size,
-                    batch_size=self.hparams.batch_size,
-                    target_batch_size=self.hparams.target_batch_size,
-                    rank=self.rank,
-                    world_size=self.world_size,
-                )
-
-                self.loader = torch.utils.data.DataLoader(
-                    dataset=self.dataset,
-                    sampler=self.sampler,
-                    batch_size=self.hparams.micro_batch_size,
-                    num_workers=10,
-                    pin_memory=True,
-                    prefetch_factor=2,
-                ) 
+                for attr in ["dataset", "sampler", "loader", "dataset"]:
+                    attr = getattr(attr, 'dataset', attr)
+                    setattr(self, attr, self.dataset_manager.active_dataset)
+                self.loader.sampler = self.sampler
                 tplr.logger.info("[Run] dataset + sampler ready")
 
             data_loading_time = tplr.T() - data_start

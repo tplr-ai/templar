@@ -28,24 +28,23 @@ from functools import partial
 
 # from .hparams import HParams
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal, Optional
 
 import aiofiles
 import bittensor as bt
-import botocore
 import torch
-from aiobotocore.client import AioBaseClient
-from aiobotocore.session import get_session
-from botocore.exceptions import ClientError, ConnectionClosedError
+from aiobotocore import client, session 
+from botocore import exceptions
 from tqdm import tqdm as std_tqdm
 
-import tplr as tplr
-from tplr.compress import CompressDCT
+import tplr
 
-from . import __version__
-from .chain import ChainManager
-from .config import BUCKET_SECRETS, client_config
-from .schemas import Bucket
+from tplr.compress import CompressDCT
+from tplr.chain import ChainManager
+from tplr.config import BUCKET_SECRETS, client_config
+from tplr.schemas import Bucket
+
+__version__ = tplr.__version__
 
 # Constants
 CF_REGION_NAME: str = "enam"
@@ -94,9 +93,9 @@ class Comms(ChainManager):
         self.key_prefix = key_prefix
 
         ## a single aiobotocore session and a dictionary of clients
-        self.session = get_session()
+        self.session = session.get_session()
         self._s3_clients: dict[
-            tuple[str, str, str], AioBaseClient
+            tuple[str, str, str], client.AioBaseClient
         ] = {}  # (acc_key, sec_key, account_id) -> s3_client
 
         self.lock = asyncio.Lock()
@@ -312,7 +311,7 @@ class Comms(ChainManager):
                     continuation_token = response.get("NextContinuationToken")
                 else:
                     break
-        except (ConnectionClosedError, ClientError):
+        except (exceptions.ConnectionClosedError, exceptions.ClientError):
             await self._purge_s3_client(self.bucket)
 
     async def s3_put_object(
@@ -360,7 +359,7 @@ class Comms(ChainManager):
                 # Multipart upload for large files
                 await self.upload_large_file(file_path, key, s3_client, bucket)
 
-        except (ConnectionClosedError, ClientError):
+        except (exceptions.ConnectionClosedError, exceptions.ClientError):
             await self._purge_s3_client(bucket)
         except Exception as e:
             tplr.logger.error(f"Error uploading {key} to S3: {e}")
@@ -417,7 +416,7 @@ class Comms(ChainManager):
             except asyncio.TimeoutError:
                 tplr.logger.debug(f"Timeout checking for {key}")
                 return None
-            except (ConnectionClosedError, ClientError) as e:
+            except (exceptions.ConnectionClosedError, exceptions.ClientError) as e:
                 await self._purge_s3_client(bucket)
                 if "404" in str(e):
                     tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
@@ -565,7 +564,7 @@ class Comms(ChainManager):
                             raise
                         await asyncio.sleep(2**attempt)
 
-        except (ConnectionClosedError, ClientError):
+        except (exceptions.ConnectionClosedError, exceptions.ClientError):
             await self._purge_s3_client(bucket)
         except Exception as e:
             tplr.logger.error(f"Error during multipart upload of {key}: {e}")
@@ -697,7 +696,7 @@ class Comms(ChainManager):
             finally:
                 pbar.close()
 
-        except (ConnectionClosedError, ClientError):
+        except (exceptions.ConnectionClosedError, exceptions.ClientError):
             await self._purge_s3_client(bucket)
         except Exception as e:
             tplr.logger.error(f"Error in download_large_file for {key}: {e}")
@@ -982,7 +981,7 @@ class Comms(ChainManager):
     async def gather(
         self,
         my_uid: int | None,
-        uids: List[int],
+        uids: list[int],
         window: int,
         key: str,
         timeout: int,
@@ -1364,7 +1363,7 @@ class Comms(ChainManager):
                 )
                 tplr.logger.info(f"Deleted {len(to_delete)} old checkpoints")
 
-        except (ConnectionClosedError, ClientError):
+        except (exceptions.ConnectionClosedError, exceptions.ClientError):
             await self._purge_s3_client(self.bucket)
         except Exception as e:
             tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
@@ -1402,13 +1401,13 @@ class Comms(ChainManager):
                     await s3_client.head_object(Bucket=peer_bucket.name, Key=filename)
                     tplr.logger.debug(f"Found {filename} for UID {uid}")
                     return True
-                except botocore.exceptions.ClientError as e:
+                except exceptions.ClientError as e:
                     if e.response["Error"]["Code"] not in ["404", "403", "401"]:
                         tplr.logger.error(f"Error checking activity for {uid}: {e}")
                         return False
                     tplr.logger.debug(f"{filename} not found for UID {uid}")
 
-        except (ConnectionClosedError, ClientError):
+        except (exceptions.ConnectionClosedError, exceptions.ClientError):
             await self._purge_s3_client(peer_bucket)
         except Exception as e:
             tplr.logger.error(f"Error accessing bucket for UID {uid}: {e}")
@@ -1608,7 +1607,7 @@ class Comms(ChainManager):
 
             return None
 
-        except (ConnectionClosedError, ClientError):
+        except (exceptions.ConnectionClosedError, exceptions.ClientError):
             await self._purge_s3_client(bucket)
             return None
 
@@ -1831,7 +1830,7 @@ class Comms(ChainManager):
                     peers_dict["first_effective_window"],
                 )
 
-            except (ConnectionClosedError, ClientError):
+            except (exceptions.ConnectionClosedError, exceptions.ClientError):
                 await self._purge_s3_client(validator_bucket)
             except Exception as e:
                 tplr.logger.error(f"Error fetching peer list: {e}")
@@ -1936,13 +1935,13 @@ class Comms(ChainManager):
 
     async def _gather_window_batch(
         self,
-        batch_windows: List[int],
+        batch_windows: list[int],
         uid: str,
-        peers: List[int],
+        peers: list[int],
         device: str,
         totalks: dict,
         global_step: int,
-    ) -> Dict[int, SimpleNamespace]:
+    ) -> dict[int, SimpleNamespace]:
         """Gather gradients for multiple windows in parallel."""
         try:
             gather_tasks = [
@@ -2062,7 +2061,7 @@ class Comms(ChainManager):
             tplr.logger.debug(f"Object {key} size: {file_size} bytes")
             return file_size
 
-        except (ConnectionClosedError, ClientError) as e:
+        except (exceptions.ConnectionClosedError, exceptions.ClientError) as e:
             await self._purge_s3_client(bucket)
             if "404" in str(e):
                 tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
@@ -2103,7 +2102,7 @@ class Comms(ChainManager):
         except asyncio.TimeoutError:
             tplr.logger.error(f"Timeout downloading range {start}-{end} for {key}")
             return None
-        except (ConnectionClosedError, ClientError) as e:
+        except (exceptions.ConnectionClosedError, exceptions.ClientError) as e:
             await self._purge_s3_client(bucket)
             tplr.logger.error(
                 f"Client error downloading range {start}-{end} for {key}: {e}"

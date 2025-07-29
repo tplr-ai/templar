@@ -1,11 +1,10 @@
 from functools import lru_cache
-from typing import List, Tuple
 
 import numpy as np
 
-from tplr.profilers import get_timer_profiler
+from tplr import profilers
 
-_timer_profiler = get_timer_profiler("ShardIndex")
+_timer_profiler = profilers.get_timer_profiler("ShardIndex")
 
 
 class ShardIndex:
@@ -67,7 +66,7 @@ class ShardIndex:
 
     @lru_cache(maxsize=2048)
     @_timer_profiler.profile("find_shard")
-    def find_shard(self, config_name: str, page_number: int) -> Tuple[dict, int, int]:
+    def find_shard(self, config_name: str, page_number: int) -> tuple[dict, int, int]:
         """
         Find shard
         """
@@ -93,8 +92,8 @@ class ShardIndex:
         return shard, int(shard_offset), int(shard_idx)
 
     def find_shard_batch(
-        self, config_name: str, page_numbers: List[int]
-    ) -> List[Tuple[dict, int, int]]:
+        self, config_name: str, page_numbers: list[int]
+    ) -> list[tuple[dict, int, int]]:
         """
         Batch find operation for multiple pages
         """
@@ -120,7 +119,7 @@ class ShardIndex:
 
         return results
 
-    def get_shard_range(self, config_name: str, shard_idx: int) -> Tuple[int, int]:
+    def get_shard_range(self, config_name: str, shard_idx: int) -> tuple[int, int]:
         """
         Get the row range for a specific shard - useful for prefetching.
         """
@@ -138,7 +137,7 @@ class ShardIndex:
         """Clear the LRU cache if needed."""
         self.find_shard.cache_clear()
 
-    def warm_cache(self, config_name: str, page_numbers: List[int]):
+    def warm_cache(self, config_name: str, page_numbers: list[int]):
         """Pre-warm the cache with expected page lookups."""
         for page_num in page_numbers:
             try:

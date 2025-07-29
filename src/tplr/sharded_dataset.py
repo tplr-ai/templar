@@ -25,7 +25,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data import Dataset
 
-import tplr
+from tplr.logging import logger
 
 
 class SharedShardedDataset(Dataset):
@@ -83,7 +83,7 @@ class SharedShardedDataset(Dataset):
 
         self.total_samples = len(self.sample_ids)
 
-        tplr.logger.info(
+        logger.info(
             f"[Dataset] rank {self.rank}: init done in {time.perf_counter() - t0:.1f}s "
             f"({self.total_samples} samples)"
         )

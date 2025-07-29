@@ -20,11 +20,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from transformers.models.auto.tokenization_auto import AutoTokenizer
-from transformers.models.llama import LlamaConfig
+from transformers import AutoTokenizer, LlamaConfig
 
 # Local imports
-from .logging import logger
+from tplr.logging import logger
 
 DEFAULT_HPARAMS = {
     # Run configuration

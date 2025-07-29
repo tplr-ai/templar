@@ -4,7 +4,7 @@ Shard performance profiler for tracking parquet file read performance.
 
 import json
 import time
-from typing import Dict, Optional
+from typing import Optional
 
 from tplr import logger
 
@@ -14,8 +14,8 @@ class ShardProfiler:
 
     def __init__(self, name: str = "ShardProfiler"):
         self.name = name
-        self.shard_performance: Dict[str, Dict] = {}
-        self._active_timers: Dict[str, float] = {}
+        self.shard_performance: dict[str, dict] = {}
+        self._active_timers: dict[str, float] = {}
 
     def start_read(
         self,
@@ -151,7 +151,7 @@ class ShardProfiler:
             f"max: {perf_data['max_time']:.4f}s, reads: {perf_data['reads']})"
         )
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict:
         """Get all shard performance statistics"""
         return self.shard_performance
 
@@ -300,7 +300,7 @@ class DummyShardProfiler:
     def log_read_complete(self, *args, **kwargs) -> None:
         pass
 
-    def get_stats(self) -> Dict:
+    def get_stats(self) -> dict:
         return {}
 
     def log_analysis(self) -> None:

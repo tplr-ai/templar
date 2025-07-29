@@ -16,7 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Global imports
-from pydantic import BaseModel, Field, ConfigDIct
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class Bucket(BaseModel):

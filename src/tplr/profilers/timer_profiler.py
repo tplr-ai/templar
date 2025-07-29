@@ -2,7 +2,7 @@ import asyncio
 import time
 from collections import defaultdict
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 from tplr import logger
 
@@ -12,9 +12,9 @@ class TimerProfiler:
 
     def __init__(self, name: str = "TimerProfiler"):
         self.name = name
-        self.timings: Dict[str, List[float]] = defaultdict(list)
-        self.active_timers: Dict[str, float] = {}
-        self.counts: Dict[str, int] = defaultdict(int)
+        self.timings: dict[str, list[float]] = defaultdict(list)
+        self.active_timers: dict[str, float] = {}
+        self.counts: dict[str, int] = defaultdict(int)
 
     def profile(self, func_name: str = "") -> Callable[..., Any]:
         """Decorator to profile function execution time"""
@@ -91,7 +91,7 @@ class TimerProfiler:
         if error:
             self.counts[f"{name}_errors"] += 1
 
-    def get_stats(self, func_name: Optional[str] = None) -> Dict:
+    def get_stats(self, func_name: Optional[str] = None) -> dict:
         """Get timing statistics for a specific function or all functions"""
         if func_name:
             timings = self.timings.get(func_name, [])
@@ -160,7 +160,7 @@ class DummyTimerProfiler:
     def _record_timing(self, *args, **kwargs) -> None:
         pass
 
-    def get_stats(self, *args, **kwargs) -> Dict:
+    def get_stats(self, *args, **kwargs) -> dict:
         return {}
 
     def reset(self, *args, **kwargs) -> None:

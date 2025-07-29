@@ -29,8 +29,7 @@ from typing import Final
 
 import bittensor as bt
 import logging_loki
-from rich.highlighter import NullHighlighter
-from rich.logging import RichHandler
+from rich import highlighter, logging as richlogging
 
 LOKI_URL: Final[str] = os.environ.get(
     "LOKI_URL", "https://logs.tplr.ai/loki/api/v1/push"
@@ -69,10 +68,10 @@ logging.basicConfig(
     format=FORMAT,
     datefmt="[%X]",
     handlers=[
-        RichHandler(
+        richlogging.RichHandler(
             markup=True,  # Enable markup parsing to allow color rendering
             rich_tracebacks=True,
-            highlighter=NullHighlighter(),
+            highlighter=highlighter.NullHighlighter(),
             show_level=False,
             show_time=True,
             show_path=False,
@@ -135,10 +134,10 @@ logger.setLevel(logging.INFO)
 logger.propagate = True
 logger.handlers.clear()
 logger.addHandler(
-    RichHandler(
+    richlogging.RichHandler(
         markup=True,
         rich_tracebacks=True,
-        highlighter=NullHighlighter(),
+        highlighter=highlighter.NullHighlighter(),
         show_level=False,
         show_time=True,
         show_path=False,
@@ -239,10 +238,10 @@ def setup_loki_logger(
 
         listener.handlers = [loki_handler]  # type: ignore
 
-        console_handler = RichHandler(
+        console_handler = richlogging.RichHandler(
             markup=True,
             rich_tracebacks=True,
-            highlighter=NullHighlighter(),
+            highlighter=highlighter.NullHighlighter(),
             show_level=False,
             show_time=True,
             show_path=False,
@@ -274,10 +273,10 @@ def setup_loki_logger(
 
         if not logger.handlers:
             logger.addHandler(
-                RichHandler(
+                richlogging.RichHandler(
                     markup=True,
                     rich_tracebacks=True,
-                    highlighter=NullHighlighter(),
+                    highlighter=highlighter.NullHighlighter(),
                     show_level=False,
                     show_time=True,
                     show_path=False,

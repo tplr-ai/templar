@@ -19,18 +19,18 @@
 # Global imports
 import asyncio
 from collections import defaultdict
-from typing import Dict, Optional
+from typing import Optional
 
 import bittensor as bt
 import numpy as np
 import torch
 from bittensor import Wallet
-from bittensor.core.chain_data import decode_account_id
+from bittensor.core import chain_data 
 from pydantic import ValidationError
 
 # Local imports
-from .logging import logger
-from .schemas import Bucket
+from tplr.logging import logger
+from tplr.schemas import Bucket
 
 
 class ChainManager:
@@ -43,7 +43,7 @@ class ChainManager:
         metagraph=None,
         hparams=None,
         fetch_interval: int = 600,  # Fetch interval in seconds
-        wallet: Optional["bt.wallet"] = None,
+        wallet: Optional[bt.Wallet] = None,
         bucket: Optional[Bucket] = None,
     ):
         """
@@ -55,7 +55,7 @@ class ChainManager:
             metagraph: Metagraph instance containing network state
             hparams: Hyperparameters namespace containing model configuration
             fetch_interval (int): Interval in seconds between fetching commitments
-            wallet (bt.wallet, optional): Wallet to sign commitments
+            wallet (bt.Wallet, optional): Wallet to sign commitments
             bucket (Bucket, optional): Bucket configuration to commit
         """
         self.config = config
@@ -124,7 +124,7 @@ class ChainManager:
         """
         return self.commitments.get(uid)
 
-    def get_all_buckets(self) -> Dict[int, Optional[Bucket]]:
+    def get_all_buckets(self) -> dict[int, Optional[Bucket]]:
         """Helper function to get all buckets for all UIDs in the metagraph.
 
         Returns:
@@ -132,11 +132,11 @@ class ChainManager:
         """
         return {uid: self.get_bucket(uid) for uid in self.metagraph.uids}
 
-    def commit(self, wallet: "bt.wallet", bucket: Bucket) -> None:
+    def commit(self, wallet: bt.Wallet, bucket: Bucket) -> None:
         """Commits bucket configuration to the chain.
 
         Args:
-            wallet (bt.wallet): Wallet to sign the commitment
+            wallet (bt.Wallet): Wallet to sign the commitment
             bucket (Bucket): Bucket configuration to commit
         """
         concatenated = (
@@ -147,11 +147,11 @@ class ChainManager:
             f"Committed bucket configuration to chain for hotkey {wallet.hotkey.ss58_address}"
         )
 
-    def try_commit(self, wallet: Wallet, bucket: Bucket) -> None:
+    def try_commit(self, wallet: bt.Wallet, bucket: Bucket) -> None:
         """Attempts to verify existing commitment matches current bucket config and commits if not.
 
         Args:
-            wallet (bt.wallet): Wallet to sign the commitment
+            wallet (bt.Wallet): Wallet to sign the commitment
             bucket (Bucket): Current bucket configuration to verify/commit
         """
         try:
@@ -256,13 +256,13 @@ class ChainManager:
 
     def decode_metadata(self, encoded_ss58: tuple, metadata: dict) -> tuple[str, str]:
         # Decode the key into an SS58 address.
-        decoded_key = decode_account_id(encoded_ss58[0])
+        decoded_key = chain_data.decode_account_id(encoded_ss58[0])
         # Get the commitment from the metadata.
         commitment = metadata["info"]["fields"][0][0]
         bytes_tuple = commitment[next(iter(commitment.keys()))][0]
         return decoded_key, bytes(bytes_tuple).decode()
 
-    async def get_commitments(self, block: Optional[int] = None) -> Dict[int, Bucket]:
+    async def get_commitments(self, block: Optional[int] = None) -> dict[int, Bucket]:
         """Retrieves all bucket commitments from the chain.
 
         Args:
@@ -322,11 +322,11 @@ class ChainManager:
             self.subtensor_sync.substrate.initialize()
             return
 
-    async def get_bucket_for_neuron(self, wallet: "bt.wallet") -> Optional[Bucket]:
+    async def get_bucket_for_neuron(self, wallet: bt.Wallet) -> Optional[Bucket]:
         """Get bucket configuration for a specific neuron's wallet
 
         Args:
-            wallet (bt.wallet): The wallet to get bucket for
+            wallet (bt.Wallet): The wallet to get bucket for
 
         Returns:
             Optional[Bucket]: The bucket assigned to this neuron, or None if not found

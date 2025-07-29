@@ -522,7 +522,9 @@ class Miner(BaseNode):
             )
             dist.barrier(device_ids=[self.local_rank])
 
+        print(f'getting commitments, {self.rank=}')
         self.comms.start_commitment_fetcher()
+        print(f'got commitments, {self.rank=}')
 
         while not self.stop_event.is_set():
             await asyncio.sleep(0)
@@ -556,7 +558,7 @@ class Miner(BaseNode):
                 and 
                 self.global_step % windows_per_shard == 0
             ):
-                tplr.logger.info(f"Swapping dataset at wondow {step_window}")
+                tplr.logger.info(f"Swapping dataset at window {step_window}")
                 await self.dataset_manager.swap_datasets()
 
             data_loading_time = tplr.T() - data_start

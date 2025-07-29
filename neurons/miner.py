@@ -413,7 +413,6 @@ class Miner(BaseNode):
             val = -1 if self.start_window is None else self.start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)
-            dist.barrier(device_ids=[self.local_rank])
 
         else:
             tensor = torch.zeros(1, dtype=torch.long, device=self.device)
@@ -426,6 +425,7 @@ class Miner(BaseNode):
             )
         
         # Other workers need to pick up dataset
+        dist.barrier(device_ids=[self.local_rank])
         await self.dataset_manager.initialize_datasets(0)
         self.dataset = self.dataset_manager.active_dataset
         if self.dataset is None:
@@ -441,7 +441,6 @@ class Miner(BaseNode):
             rank=self.rank,
             world_size=self.world_size,
         )
-        _ = self.sampler.set_dataset_len()
 
         self.loader = torch.utils.data.DataLoader(
             dataset=self.dataset,

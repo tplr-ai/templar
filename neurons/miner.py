@@ -427,6 +427,9 @@ class Miner(BaseNode):
         if self.is_master:
             _ = await self.dataset_manager.initialize_datasets(current_shard)
             dist.barrier(device_ids=[self.local_rank])
+            print(f'getting dataset on rank {self.local_rank}')
+            await self.dataset_manager.initialize_datasets(0)
+            print(f'done getting rankwise dataset on {self.local_rank}')
 
         else:
             # barrier to start so that master finalized the dataset download

@@ -202,6 +202,7 @@ class ShardedDatasetManager:
 
         if os.path.exists(tokens_file) and os.path.exists(ids_file):
             # if exist, return completed task
+            print(f"Shard {shard_index} already exists on disk. Loading...")
             task = asyncio.create_task(asyncio.sleep(0))
 
         else:
@@ -250,8 +251,10 @@ class ShardedDatasetManager:
             An instance of `SharedShardedDataset`.
         """
         download_task = self.prepare_shard(shard_index)
+        print(f'awaiting task on {self.rank=}')
         await download_task
 
+        print(f'Task complete, loading dataset on {self.rank=}')
         dataset = SharedShardedDataset(
             shard_index=shard_index,
             sequence_length=self.sequence_length,

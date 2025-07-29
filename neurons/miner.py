@@ -406,13 +406,15 @@ class Miner(BaseNode):
             )
 
         # Fetch start_window from highest stake validator
-        if self.is_master:
-            _ = await self.dataset_manager.initialize_datasets(0)     
-            
+        if self.is_master:            
             self.start_window = await self.comms.get_start_window()
             val = -1 if self.start_window is None else self.start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)
+            
+            print('getting dataset')
+            _ = await self.dataset_manager.initialize_datasets(0)     
+            print('dataset complete')
 
         else:
             tensor = torch.zeros(1, dtype=torch.long, device=self.device)
@@ -426,8 +428,10 @@ class Miner(BaseNode):
         
         # Other workers need to pick up dataset
         dist.barrier(device_ids=[self.local_rank])
+        print(f'getting dataset on rank {self.local_rank}')
         await self.dataset_manager.initialize_datasets(0)
         self.dataset = self.dataset_manager.active_dataset
+        print(f'done getting rankwise dataset on {self.local_rank}')
         if self.dataset is None:
             raise ValueError("Failed because dataset not available")
         self.sampler = tplr.MinerSampler(

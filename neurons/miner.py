@@ -42,7 +42,7 @@ from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch import autocast, optim 
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
-from transformers.models.llama import LlamaForCausalLM
+from transformers import LlamaForCausalLM
 
 import tplr
 from tplr import compress, hparams, comms, metrics, wandb, sharded_dataset, sharded_sampler

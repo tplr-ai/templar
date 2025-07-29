@@ -36,20 +36,17 @@ import torch
 import torch.distributed as dist
 
 # Third party
-import torch.nn.parallel
+from torch.nn import parallel
 import uvloop
-from torch import autocast
 from torch.distributed.optim import ZeroRedundancyOptimizer
-from torch.optim import SGD
-from torch.optim.lr_scheduler import (
-    CosineAnnealingLR,
-    LinearLR,
-    SequentialLR,
-)
+from torch import autocast, optim 
+from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from transformers.models.llama import LlamaForCausalLM
 
 import tplr
+from tplr import compress, hparams, comms, metrics, wandb, sharded_dataset, sharded_sampler
+from tplr.logging import logger
 
 # Local
 from neurons import BaseNode
@@ -157,7 +154,7 @@ class Miner(BaseNode):
         return float(tensor.item())
 
     def __init__(self):
-        tplr.logger.debug("Starting initialization...")
+        logger.debug("Starting initialization...")
 
         # Init config and load hparams
         self.config = Miner.miner_config()
@@ -167,7 +164,7 @@ class Miner(BaseNode):
         self.rank = int(os.getenv("RANK", 0))
         self.world_size = int(os.getenv("WORLD_SIZE", 1))
         self.local_rank = int(os.getenv("LOCAL_RANK", 0))
-        tplr.logger.info(
+        logger.info(
             f"[Init] rank={self.rank}, world_size={self.world_size}, local_rank={self.local_rank}"
         )
 
@@ -180,20 +177,20 @@ class Miner(BaseNode):
                 world_size=self.world_size,
             )
             torch.cuda.set_device(self.local_rank)
-            tplr.logger.info("[Init] NCCL process-group ready and GPU selected")
+            logger.info("[Init] NCCL process-group ready and GPU selected")
             self.config.device = f"cuda:{self.local_rank}"
         else:
             self.config.device = self.config.device or "cuda"
         self.device = torch.device(self.config.device)
-        tplr.logger.info(f"[Init] device set → {self.device}")
+        logger.info(f"[Init] device set → {self.device}")
 
         # Convenience flags
         self.is_master = self.rank == 0
         self.config.local = cast(bool, self.config.local)
-        self.hparams = tplr.load_hparams(use_local_run_hparams=self.config.local)
+        self.hparams = hparams.load_hparams(use_local_run_hparams=self.config.local)
 
         if self.config.actual_batch_size is not None:
-            tplr.logger.info(
+            logger.info(
                 f"Overriding hparams batch size: {self.hparams.batch_size} -> {self.config.actual_batch_size}"
             )
             self.hparams.batch_size = self.config.actual_batch_size
@@ -202,9 +199,9 @@ class Miner(BaseNode):
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
-        tplr.logger.info("[Init] Bittensor wallet/metagraph loaded")
+        logger.info("[Init] Bittensor wallet/metagraph loaded")
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
-            tplr.logger.error(
+            logger.error(
                 f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
             )
             sys.exit()
@@ -216,7 +213,7 @@ class Miner(BaseNode):
         self.model.to(self.device)  # type: ignore[reportArgumentType]
         if self.world_size < 4:
             self.model.gradient_checkpointing_enable()
-        tplr.logger.info("[Init] Llama model instantiated & on device")
+        logger.info("[Init] Llama model instantiated & on device")
 
         compile_mode = "default"
         self.model = cast(
@@ -224,32 +221,32 @@ class Miner(BaseNode):
         )
 
         if self.world_size > 1:
-            self.model = torch.nn.parallel.DistributedDataParallel(
+            self.model = parallel.DistributedDataParallel(
                 self.model,
                 device_ids=[self.local_rank],
                 output_device=self.local_rank,
                 gradient_as_bucket_view=True,
             )
-            tplr.logger.info("[Init] wrapped model with DistributedDataParallel")
+            logger.info("[Init] wrapped model with DistributedDataParallel")
         self.bare_model = getattr(self.model, "module", self.model)
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
-        self.transformer = tplr.compress.TransformDCT(
+        self.transformer = compress.TransformDCT(
             self.model, target_chunk=self.hparams.target_chunk
         )
-        self.compressor = tplr.compress.CompressDCT(
+        self.compressor = compress.CompressDCT(
             use_quantization=True,
             quantization_bins=self.hparams.quantization_bins,
             quantization_range=self.hparams.quantization_range,
         )
-        tplr.logger.info("[Init] compression pipeline ready")
+        logger.info("[Init] compression pipeline ready")
 
         # Init optimizer and momentum
         self.error_feedback = {}
         self.owned_params = set()
 
-        self.outer_optimizer = SGD(
+        self.outer_optimizer = optim.SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
         )
         self.inner_optimizer = ZeroRedundancyOptimizer(
@@ -264,24 +261,24 @@ class Miner(BaseNode):
         inner_steps_before_outer_step = self.hparams.inner_steps * (
             self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
         )
-        init_scheduler = LinearLR(
+        init_scheduler = lr_scheduler.LinearLR(
             self.inner_optimizer,
             start_factor=0.1,
             end_factor=0.1,
             total_iters=inner_steps_before_outer_step,
         )
-        warmup_scheduler = LinearLR(
+        warmup_scheduler = lr_scheduler.LinearLR(
             self.inner_optimizer,
             start_factor=0.1,
             end_factor=1.0,
             total_iters=self.hparams.warmup_steps,
         )
-        cosine_scheduler = CosineAnnealingLR(
+        cosine_scheduler = lr_scheduler.CosineAnnealingLR(
             self.inner_optimizer,
             T_max=self.hparams.t_max,
             eta_min=self.hparams.inner_learning_rate * 0.1,
         )
-        self.inner_scheduler = SequentialLR(
+        self.inner_scheduler = lr_scheduler.SequentialLR(
             self.inner_optimizer,
             schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
             milestones=[
@@ -289,7 +286,7 @@ class Miner(BaseNode):
                 inner_steps_before_outer_step + self.hparams.warmup_steps,
             ],
         )
-        tplr.logger.info("[Init] optimizers & schedulers constructed")
+        logger.info("[Init] optimizers & schedulers constructed")
 
         self.xshapes = {}
         self.totalks = {}
@@ -310,13 +307,13 @@ class Miner(BaseNode):
             self.totalks[n] = totalk
 
         self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
-        tplr.logger.info(
+        logger.info(
             f"[Miner] code_version={tplr.__version__} "
             f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
         )
 
         # Init comms
-        self.comms = tplr.comms.Comms(
+        self.comms = comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",
             key_prefix="model",
@@ -336,7 +333,7 @@ class Miner(BaseNode):
         # Init state params
         self.current_block = self.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
-        tplr.logger.info(
+        logger.info(
             f"[Init] chain at block {self.current_block}, window {self.current_window}"
         )
 
@@ -350,17 +347,17 @@ class Miner(BaseNode):
 
         if self.is_master:
             # Initialize WandB
-            self.wandb = tplr.initialize_wandb(
+            self.wandb = wandb.initialize_wandb(
                 run_prefix="M",
                 uid=self.uid,
                 config=self.config,
                 group="miner",
                 job_type="mining",
             )
-            tplr.logger.info("[Init] WandB session started")
+            logger.info("[Init] WandB session started")
 
             # Initialize metrics logger for InfluxDB
-            self.metrics_logger = tplr.metrics.MetricsLogger(
+            self.metrics_logger = metrics.MetricsLogger(
                 prefix="M",
                 uid=self.uid,
                 config=self.config,
@@ -373,12 +370,12 @@ class Miner(BaseNode):
         self.next_peers: list[int] | None = None
         self.next_reserve_peers: list[int] | None = None
         self.peers_update_window = -1
-        self.dataset = tplr.SharedShardedDataset(
+        self.dataset = sharded_dataset.SharedShardedDataset(
             sequence_length=self.hparams.sequence_length,
             rank=self.rank,
             world_size=self.world_size,
         )
-        self.sampler = tplr.MinerSampler(
+        self.sampler = sharded_sampler.MinerSampler(
             dataset=self.dataset,
             uid=self.uid,
             window=self.current_window,
@@ -397,8 +394,8 @@ class Miner(BaseNode):
             pin_memory=True,
         )
 
-        tplr.logger.info("[Init] dataset + sampler ready")
-        tplr.logger.info("[Init] ✔ fully done – entering run()")
+        logger.info("[Init] dataset + sampler ready")
+        logger.info("[Init] ✔ fully done – entering run()")
 
     # Main training loop.
     async def run(self):
@@ -412,7 +409,7 @@ class Miner(BaseNode):
             self.comms.peers = self.config.peers
 
         self.comms.commitments = await self.comms.get_commitments()
-        tplr.logger.info("Loaded commitments")
+        logger.info("Loaded commitments")
 
         peer_start = tplr.T()
         if self.is_master:
@@ -436,10 +433,10 @@ class Miner(BaseNode):
                 "Could not find a valid start window. This should not be possible."
             )
 
-        tplr.logger.info(f"Using start_window: {self.start_window}")
+        logger.info(f"Using start_window: {self.start_window}")
 
         self.global_step = self.current_window - self.start_window
-        tplr.logger.info(f"starting at Global Step : {self.global_step}")
+        logger.info(f"starting at Global Step : {self.global_step}")
 
         checkpoint_window_buffer = 5
         has_new_checkpoint = (
@@ -451,13 +448,7 @@ class Miner(BaseNode):
         #   • rank-0 (or single-GPU run) downloads & catches-up
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
-
-        bare_model = (
-            self.model.module
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel)
-            else self.model
-        )
-
+    
         ckpt_ok = False
         ckpt_sync_win = self.start_window
         if self.world_size == 1 or self.is_master:
@@ -474,7 +465,7 @@ class Miner(BaseNode):
             )
 
             if ckpt_ok:
-                tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
+                logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
                 # catch-up only if the checkpoint lags behind
                 if (
                     ckpt_sync_win < self.current_window
@@ -485,7 +476,7 @@ class Miner(BaseNode):
                     )
 
             else:
-                tplr.logger.info("No checkpoint found – starting from scratch")
+                logger.info("No checkpoint found – starting from scratch")
 
                 # still perform the full catch-up from the very first window
                 await tplr.neurons.catchup_with_aggregation_server(
@@ -509,7 +500,7 @@ class Miner(BaseNode):
                     dist.broadcast(tensor.data, src=0)
 
             bcast_time = tplr.T() - bcast_start
-            tplr.logger.info(
+            logger.info(
                 f"{tplr.P(self.current_window, bcast_time)} "
                 f"Broadcast checkpoint to {self.world_size - 1} ranks"
             )
@@ -526,7 +517,7 @@ class Miner(BaseNode):
             self.global_step = (
                 self.current_window - self.start_window
             )  # Update global_step
-            tplr.logger.info(
+            logger.info(
                 f"\n{'-' * 40} Window: {step_window} (Global Step: {self.global_step}) {'-' * 40}"
             )
 
@@ -543,12 +534,12 @@ class Miner(BaseNode):
             self.sampler.set_window_uid(self.uid, step_window)
 
             data_loading_time = tplr.T() - data_start
-            tplr.logger.info(
+            logger.info(
                 f"{tplr.P(step_window, data_loading_time)} Loaded training data"
             )
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
-            tplr.logger.info("Start accumulating...")
+            logger.info("Start accumulating...")
             res = await self.inner_steps(loader=self.loader, step_window=step_window)
             training_time = tplr.T() - train_start
             window_entry_loss = res["window_entry_loss"]
@@ -557,11 +548,11 @@ class Miner(BaseNode):
 
             # If training finishes early, wait until the *next* chain-window starts.
             if self.current_window == step_window:
-                tplr.logger.info(
+                logger.info(
                     "Training complete; waiting for window to be exhausted..."
                 )
                 await self.wait_until_window(step_window + 1)
-            tplr.logger.info(
+            logger.info(
                 f"{tplr.P(step_window, tplr.T() - train_start)} Completed training"
             )
 
@@ -571,9 +562,9 @@ class Miner(BaseNode):
 
             # 1️⃣ every rank builds its momentum shard
             compress_start = tplr.T()
-            shard_gradient, _, _ = tplr.prepare_gradient_dict(self, step_window)
+            shard_gradient, _, _ = tplr.neurons.prepare_gradient_dict(self, step_window)
             compression_time = tplr.T() - compress_start
-            tplr.logger.info(
+            logger.info(
                 f"{tplr.P(step_window, compression_time)} "
                 f"Compressed local shard with {len(shard_gradient) - 1} tensors"
             )
@@ -613,11 +604,11 @@ class Miner(BaseNode):
                     "sample_digest": sample_digest,
                     "sample_count": sample_count,
                 }
-                tplr.logger.info(
+                logger.info(
                     f"Attached metadata to gradient: {gradient['metadata']}"
                 )
 
-                tplr.logger.info(
+                logger.info(
                     f"Merged {len(gathered)} shards → {len(gradient) - 1} tensors"
                 )
 
@@ -644,7 +635,7 @@ class Miner(BaseNode):
                     if isinstance(t, torch.Tensor)
                 )
                 put_time = tplr.T() - put_start  # ⏱ done
-                tplr.logger.info(
+                logger.info(
                     f"Uploaded {upload_size / 1e6:.1f} MB shard-merged gradient"
                 )
 
@@ -652,7 +643,7 @@ class Miner(BaseNode):
                 # non-master ranks simply wait; they don't upload
                 put_time = 0.0
 
-            tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
+            logger.info(f"Stopped accumulating: {n_batches} batches")
             if self.world_size > 1:
                 dist.barrier(device_ids=[self.local_rank])
 
@@ -661,7 +652,7 @@ class Miner(BaseNode):
                 None, self.query_block_timestamp, sync_block
             )
             if ts_value is None:
-                tplr.logger.warning(
+                logger.warning(
                     f"Could not get timestamp for sync block {sync_block}. Using current time as fall back.",
                 )
                 ts_value = time.time()
@@ -671,21 +662,21 @@ class Miner(BaseNode):
             )
 
             # Log the time window we're using
-            tplr.logger.info(f"Using time window for gather: {time_min} to {time_max}")
+            logger.info(f"Using time window for gather: {time_min} to {time_max}")
 
             if self.config.test:
                 # In test mode, use all UIDs from metagraph except self
-                tplr.logger.info("Test mode active: Using all peers from metagraph.")
+                logger.info("Test mode active: Using all peers from metagraph.")
                 all_uids = list(range(len(self.metagraph.S)))
                 self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
-            tplr.logger.info(f"Final peers for gather: {self.comms.peers}")
+            logger.info(f"Final peers for gather: {self.comms.peers}")
 
             gather_result = None
             gather_time = 0.0
             if self.is_master:
                 gather_start = tplr.T()
-                tplr.logger.info("Waiting on gather task...")
+                logger.info("Waiting on gather task...")
                 gather_result = await self.comms.gather_with_reserve(
                     my_uid=self.uid,
                     gather_uids=self.comms.peers,
@@ -701,7 +692,7 @@ class Miner(BaseNode):
                     time_min=time_min,
                     time_max=time_max,
                 )
-                tplr.logger.info("Gather task completed!")
+                logger.info("Gather task completed!")
                 gather_time = tplr.T() - gather_start
             if self.world_size > 1:
                 dist.barrier(device_ids=[self.local_rank])
@@ -738,7 +729,7 @@ class Miner(BaseNode):
                 use_dct=self.hparams.use_dct,
             )
             model_update_time = tplr.T() - update_start
-            tplr.logger.info(f"{tplr.P(step_window, model_update_time)} Updated model")
+            logger.info(f"{tplr.P(step_window, model_update_time)} Updated model")
 
             if self.is_master:
                 # Add debug data including successfully gathered peers
@@ -775,11 +766,11 @@ class Miner(BaseNode):
                 self._bg_tasks.add(t)
                 t.add_done_callback(self._bg_tasks.discard)
 
-                tplr.logger.info(
+                logger.info(
                     f"Stored debug values for window {self.current_window}"
                 )
             # Log total window time and metrics
-            tplr.logger.info(
+            logger.info(
                 f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"
             )
 
@@ -876,10 +867,10 @@ class Miner(BaseNode):
                         "tokens_per_sec": tokens_per_sec,
                     },
                 )
-                tplr.logger.info("Finished metrics logging call for miner")
+                logger.info("Finished metrics logging call for miner")
 
             self.global_step += 1
-            tplr.logger.info(f"Total optimization steps: {self.global_step}")
+            logger.info(f"Total optimization steps: {self.global_step}")
 
             if self.world_size > 1:
                 dist.barrier(device_ids=[self.local_rank])
@@ -891,7 +882,7 @@ class Miner(BaseNode):
 
             await self.cleanup_window()
             # 4. Wait for next window
-            tplr.logger.info("Wait for next window...")
+            logger.info("Wait for next window...")
             await self.wait_until_window(step_window + 1)
 
     async def inner_steps(
@@ -941,7 +932,7 @@ class Miner(BaseNode):
                 cont = self.should_continue(local_has_batch, self.device)
                 if not cont:
                     if self.is_master:
-                        tplr.logger.info(
+                        logger.info(
                             "Stopping batch loop: at least one rank exhausted."
                         )
                     break
@@ -979,7 +970,7 @@ class Miner(BaseNode):
             # 3-a.  Back-prop with no_sync() on non-final micro-batches
             # -------------------------------------------------------------- #
             final_micro_batch = (batch_count + 1) % self.sampler.grad_accum_steps == 0
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) and (
+            if isinstance(self.model, parallel.DistributedDataParallel) and (
                 self.world_size > 1 and not final_micro_batch
             ):
                 sync_ctx = self.model.no_sync()
@@ -1025,7 +1016,7 @@ class Miner(BaseNode):
 
                 accum_batch_size = int(self._ddp_reduce(accum_batch_size))
                 if self.is_master:
-                    tplr.logger.info(
+                    logger.info(
                         f"Inner Step {inner_step_count}, "
                         f"Batch {batch_count}, loss: {log_loss:.4f}, "
                         f"accum: {accum_batch_size}/{self.hparams.batch_size}"
@@ -1051,7 +1042,7 @@ class Miner(BaseNode):
 
             if global_done:
                 if self.is_master:
-                    tplr.logger.info("<Exhausted window: exiting synchronously>")
+                    logger.info("<Exhausted window: exiting synchronously>")
                 for _ in range(inner_step_count, self.hparams.inner_steps):
                     self.inner_scheduler.step()
                 break
@@ -1100,10 +1091,10 @@ class Miner(BaseNode):
         torch.clear_autocast_cache()
 
         # Log memory status
-        tplr.logger.info(
+        logger.info(
             f"After cleanup - GPU allocated: {torch.cuda.memory_allocated(self.device) / 1024**3:.2f} GB"
         )
-        tplr.logger.info(
+        logger.info(
             f"After cleanup - GPU reserved: {torch.cuda.memory_reserved(self.device) / 1024**3:.2f} GB"
         )
 

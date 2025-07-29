@@ -11,7 +11,7 @@ from typing import Any, cast
 import bittensor as bt
 import torch.distributed as dist
 import websockets.exceptions  # ensure import before threads start
-from bittensor.core.subtensor import ScaleObj
+from bittensor.core import subtensor
 
 import tplr
 
@@ -193,7 +193,7 @@ class BaseNode:
                 resp = self.subtensor_client.query_module(
                     "Timestamp", "Now", block=block
                 )
-                if resp is None or not isinstance(resp, ScaleObj):
+                if resp is None or not isinstance(resp, subtensor.ScaleObj):
                     raise ValueError(f"Could not query timestamp for {block}")
                 ts_value = (
                     cast(int, resp.value) / 1000

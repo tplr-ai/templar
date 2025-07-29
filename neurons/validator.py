@@ -21,6 +21,7 @@ import asyncio
 import concurrent.futures
 import copy
 import hashlib
+import io
 import os
 import random
 import sys
@@ -28,7 +29,6 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from io import StringIO
 from time import perf_counter
 from types import SimpleNamespace
 from typing import Iterable, cast
@@ -40,10 +40,9 @@ import numpy as np
 import torch
 import uvloop
 from openskill.models import PlackettLuce
-from rich.console import Console
-from rich.table import Table
-from torch import autocast
-from torch.optim import SGD
+from rich import console, table 
+from torch import optim, autocast
+from torch.optim import lr_scheduler
 from transformers.models.llama import LlamaForCausalLM
 
 import tplr
@@ -171,13 +170,13 @@ class Validator(BaseNode):
 
         # Init optimizer
         self.lr = float(self.hparams.outer_learning_rate)
-        self.outer_optimizer = SGD(self.model.parameters(), lr=self.lr)
+        self.outer_optimizer = optim.SGD(self.model.parameters(), lr=self.lr)
 
         # inner scheduler and dummy optimizer for logging purposes
 
         _dummy_param = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
         # Any optimiser will do; SGD is the simplest and has no extra state.
-        self.inner_optimizer = torch.optim.SGD(
+        self.inner_optimizer = optim.SGD(
             [_dummy_param],
             lr=self.hparams.inner_learning_rate,
         )
@@ -185,24 +184,24 @@ class Validator(BaseNode):
             self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
         )
 
-        init_scheduler = torch.optim.lr_scheduler.LinearLR(
+        init_scheduler = lr_scheduler.LinearLR(
             self.inner_optimizer,
             start_factor=0.1,
             end_factor=0.1,
             total_iters=inner_steps_before_outer_step,
         )
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+        warmup_scheduler = lr_scheduler.LinearLR(
             self.inner_optimizer,
             start_factor=0.1,
             end_factor=1.0,
             total_iters=self.hparams.warmup_steps,
         )
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        cosine_scheduler = lr_scheduler.CosineAnnealingLR(
             self.inner_optimizer,
             T_max=self.hparams.t_max,
             eta_min=self.hparams.inner_learning_rate * 0.1,
         )
-        self.inner_scheduler = torch.optim.lr_scheduler.SequentialLR(
+        self.inner_scheduler = lr_scheduler.SequentialLR(
             self.inner_optimizer,
             schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
             milestones=[
@@ -543,7 +542,7 @@ class Validator(BaseNode):
                     width = 0
                 os.environ["COLUMNS"] = str(max(200, width))
 
-                rich_table = Table(
+                rich_table = table.Table(
                     title=f"Current Match Rankings (Window {self.sync_window})"
                 )
                 rich_table.add_column("Match Rank")
@@ -575,8 +574,8 @@ class Validator(BaseNode):
                     )
 
                 # Render table to string
-                sio = StringIO()
-                console = Console(file=sio, width=int(os.environ["COLUMNS"]))
+                sio = io.StringIO()
+                console = console.Console(file=sio, width=int(os.environ["COLUMNS"]))
                 console.print(rich_table)
                 table_str = sio.getvalue()
 
@@ -1737,13 +1736,13 @@ class Validator(BaseNode):
                     width = 0
                 os.environ["COLUMNS"] = str(max(200, width))
 
-                rich_table = Table(title="Updated scores for evaluated UIDs")
+                rich_table = table.Table(title="Updated scores for evaluated UIDs")
                 for header in headers:
                     rich_table.add_column(header)
                 for row in table[1:]:
                     rich_table.add_row(*row)
-                sio = StringIO()
-                console = Console(file=sio, width=int(os.environ["COLUMNS"]))
+                sio = io.StringIO()
+                console = console.Console(file=sio, width=int(os.environ["COLUMNS"]))
                 console.print(rich_table)
                 table_str = sio.getvalue()
             except ImportError:

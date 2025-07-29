@@ -408,11 +408,13 @@ class Miner(BaseNode):
         # Fetch start_window from highest stake validator
         if self.is_master:
             _ = await self.dataset_manager.initialize_datasets(0)     
-
+            
             self.start_window = await self.comms.get_start_window()
             val = -1 if self.start_window is None else self.start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)
+            dist.barrier(device_ids=[self.local_rank])
+
         else:
             tensor = torch.zeros(1, dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)
@@ -425,7 +427,6 @@ class Miner(BaseNode):
         
         # Other workers need to pick up dataset
         await self.dataset_manager.initialize_datasets(0)
-        # can you call this here or does it need to be in the upper section of run?
         self.dataset = self.dataset_manager.active_dataset
         if self.dataset is None:
             raise ValueError("Failed because dataset not available")

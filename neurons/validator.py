@@ -733,10 +733,9 @@ class Validator(BaseNode):
             batch_size=self.hparams.target_batch_size,
             validation_bs=self.hparams.validator_sample_micro_bs
             * self.hparams.micro_batch_size,
-            rank=0,
-            world_size=1,
+            rank=self.rank,
+            world_size=self.world_size,
         )
-        _ = self.sampler.set_dataset_len()
 
         self.loader = torch.utils.data.DataLoader(
             dataset=self.dataset,

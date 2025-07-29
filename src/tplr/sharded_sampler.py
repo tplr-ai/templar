@@ -69,6 +69,8 @@ class _BaseWindowSampler(Sampler, ABC):
 
         self.uid = uid
         self.window = window
+        
+        self.set_dataset_len()
 
     # --------------------------------------------------------------------- #
     # public API

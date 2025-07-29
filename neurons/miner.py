@@ -400,7 +400,7 @@ class Miner(BaseNode):
         tplr.logger.info("Loaded commitments")
 
         peer_start = tplr.T()
-        # Fetch peers and get start_window from highest stake validator
+        # Fetch peers, start_window from highest stake validator, and dataset
         if self.is_master:      
             await tplr.neurons.update_peers(
                 instance=self, window=self.current_window, peer_start=peer_start
@@ -413,20 +413,87 @@ class Miner(BaseNode):
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)
             
-            _ = await self.dataset_manager.initialize_datasets(0)     
-            dist.barrier(device_ids=[self.local_rank])
-
         else:
             tensor = torch.zeros(1, dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)
             val = tensor.item()
             self.start_window = None if val == -1 else int(val)
-            
-            dist.barrier(device_ids=[self.local_rank])
-            print(f'getting dataset on rank {self.local_rank}')
-            await self.dataset_manager.initialize_datasets(0)
-            print(f'done getting rankwise dataset on {self.local_rank}')
 
+        self.global_step = self.current_window - self.start_window
+        current_shard = self.global_step // self.windows_per_shard
+        tplr.logger.info(f"starting at Global Step : {self.global_step}")
+
+        checkpoint_window_buffer = 5
+        has_new_checkpoint = (
+            self.global_step
+            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
+        )
+
+        if self.is_master or self.world_size == 1:
+            _ = await self.dataset_manager.initialize_datasets(current_shard)     
+            
+            # ------------------------------------------------------------------
+            # Proceed to load checkpoint
+            #   • rank-0 (or single-GPU run) downloads & catches-up
+            #   • remaining ranks receive state via NCCL broadcast
+            # ------------------------------------------------------------------
+            
+            (
+                ckpt_ok,
+                ckpt_sync_win,
+            ) = await self.comms.load_checkpoint(
+                model=self.bare_model,
+                current_window=self.current_window,
+                device=str(self.device),
+                init_version=tplr.__version__
+                if has_new_checkpoint
+                else self.bootstrap_version,
+            )
+            dist.barrier(device_ids=[self.local_rank])
+
+
+            if ckpt_ok:
+                tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
+
+                # catch-up only if the checkpoint lags behind
+                if (
+                    ckpt_sync_win < self.current_window
+                    and self.global_step > checkpoint_window_buffer
+                ):
+                    await tplr.neurons.catchup_with_aggregation_server(
+                        self, max(ckpt_sync_win, self.start_window)
+                    )
+
+            else:
+                tplr.logger.info("No checkpoint found – starting from scratch")
+
+                # still perform the full catch-up from the very first window
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, self.start_window
+                )
+                
+        else:
+            # wait for the dataset and checkpoint to be downloaded
+            dist.barrier(device_ids=[self.local_rank])
+            await self.dataset_manager.initialize_datasets(current_shard)
+            
+            # ---- broadcast to other ranks (if any) --------------------------------
+            # if self.world_size > 1:
+            bcast_start = tplr.T()
+
+            # 1) parameters & buffers
+            for tensor in self.bare_model.state_dict().values():
+                if torch.is_tensor(tensor):
+                    dist.broadcast(tensor.data, src=0)
+
+            bcast_time = tplr.T() - bcast_start
+            tplr.logger.info(
+                f"{tplr.P(self.current_window, bcast_time)} "
+                f"Broadcast checkpoint to {self.world_size - 1} ranks"
+            )
+        
+        # sync before the fw passes
+        dist.barrier(device_ids=[self.local_rank])
         
         # Other workers need to pick up dataset
         self.dataset = self.dataset_manager.active_dataset
@@ -451,70 +518,6 @@ class Miner(BaseNode):
             prefetch_factor=2,
         ) 
         tplr.logger.info("[Run] dataset + sampler ready")
-        
-        self.global_step = self.current_window - self.start_window
-        tplr.logger.info(f"starting at Global Step : {self.global_step}")
-
-        checkpoint_window_buffer = 5
-        has_new_checkpoint = (
-            self.global_step
-            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
-        )
-        # ------------------------------------------------------------------
-        # Proceed to load checkpoint
-        #   • rank-0 (or single-GPU run) downloads & catches-up
-        #   • remaining ranks receive state via NCCL broadcast
-        # ------------------------------------------------------------------
-
-        if self.world_size == 1 or self.is_master:
-            (
-                ckpt_ok,
-                ckpt_sync_win,
-            ) = await self.comms.load_checkpoint(
-                model=self.bare_model,
-                current_window=self.current_window,
-                device=str(self.device),
-                init_version=tplr.__version__
-                if has_new_checkpoint
-                else self.bootstrap_version,
-            )
-
-            if ckpt_ok:
-                tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
-
-                # catch-up only if the checkpoint lags behind
-                if (
-                    ckpt_sync_win < self.current_window
-                    and self.global_step > checkpoint_window_buffer
-                ):
-                    await tplr.neurons.catchup_with_aggregation_server(
-                        self, max(ckpt_sync_win, self.start_window)
-                    )
-
-            else:
-                tplr.logger.info("No checkpoint found – starting from scratch")
-
-                # still perform the full catch-up from the very first window
-                await tplr.neurons.catchup_with_aggregation_server(
-                    self, self.start_window
-                )
-
-        # ---- broadcast to other ranks (if any) --------------------------------
-        if self.world_size > 1:
-            bcast_start = tplr.T()
-
-            # 1) parameters & buffers
-            for tensor in self.bare_model.state_dict().values():
-                if torch.is_tensor(tensor):
-                    dist.broadcast(tensor.data, src=0)
-
-            bcast_time = tplr.T() - bcast_start
-            tplr.logger.info(
-                f"{tplr.P(self.current_window, bcast_time)} "
-                f"Broadcast checkpoint to {self.world_size - 1} ranks"
-            )
-        
-            dist.barrier(device_ids=[self.local_rank])
 
         self.comms.start_commitment_fetcher()
 
@@ -541,14 +544,13 @@ class Miner(BaseNode):
             # 2. Load data
             data_start = tplr.T()
             
-            windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
             # Update sampler for current window
-            self.sampler.set_window_uid(self.uid, step_window % windows_per_shard)
+            self.sampler.set_window_uid(self.uid, step_window % self.windows_per_shard)
             
             if ( 
                 self.global_step > 0 
                 and 
-                self.global_step % windows_per_shard == 0
+                self.global_step % self.windows_per_shard == 0
             ):
                 tplr.logger.info(f"Swapping dataset at window {step_window}")
                 await self.dataset_manager.swap_datasets()

@@ -14,22 +14,22 @@ import argparse
 import os
 import subprocess
 import sys
-import tempfile
 import time
-import urllib.request
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
-from transformers.models.llama import LlamaForCausalLM
+from transformers import LlamaForCausalLM
 
 import tplr
 
-try:
-    from huggingface_hub import HfApi, create_repo
-
-    HF_AVAILABLE = True
-except ImportError:
-    HF_AVAILABLE = False
+from .model_converter import ( 
+    upload_to_huggingface, 
+    ensure_gguf_script_exists, 
+    ensure_gguf_dependencies,
+    generate_repo_id,
+    upload_to_ollama,
+    HF_AVAILABLE,
+)
 
 MODEL_PATH: str = "models/upload"
 GGUF_SCRIPT_PATH: str = "scripts/convert_hf_to_gguf.py"
@@ -115,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_checkpoint(checkpoint_path: str, device: str) -> Tuple[LlamaForCausalLM, dict]:
+def load_checkpoint(checkpoint_path: str, device: str) -> tuple[LlamaForCausalLM, dict]:
     """Load model from checkpoint file.
 
     Args:
@@ -202,67 +202,6 @@ def save_versioned_model(
     return model_dir
 
 
-def ensure_gguf_dependencies() -> None:
-    """Ensure that the gguf Python package is installed."""
-    tplr.logger.info("Checking for gguf Python package...")
-
-    try:
-        __import__("gguf")
-        tplr.logger.info("gguf package is already installed")
-        return
-    except ImportError:
-        tplr.logger.info("gguf package not found, installing...")
-
-    try:
-        result = subprocess.run(
-            ["pip3", "install", "gguf"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=True,
-        )
-        tplr.logger.info(f"Successfully installed gguf package: {result.stdout}")
-    except subprocess.CalledProcessError as e:
-        error_msg = f"Failed to install gguf package: {e.stdout}"
-        tplr.logger.error(error_msg)
-        raise RuntimeError(error_msg)
-
-    try:
-        __import__("gguf")
-        tplr.logger.info("Verified gguf package is now installed")
-    except ImportError:
-        error_msg = "Failed to import gguf package after installation"
-        tplr.logger.error(error_msg)
-        raise RuntimeError(error_msg)
-
-
-def ensure_gguf_script_exists() -> None:
-    """Check if the GGUF conversion script exists, and download it if not."""
-    if os.path.exists(GGUF_SCRIPT_PATH):
-        tplr.logger.info(f"GGUF conversion script found at {GGUF_SCRIPT_PATH}")
-        return
-
-    tplr.logger.info(
-        f"GGUF conversion script not found, downloading from {GGUF_SCRIPT_URL}"
-    )
-
-    try:
-        os.makedirs(os.path.dirname(GGUF_SCRIPT_PATH), exist_ok=True)
-        urllib.request.urlretrieve(GGUF_SCRIPT_URL, GGUF_SCRIPT_PATH)
-        tplr.logger.info(
-            f"Successfully downloaded GGUF conversion script to {GGUF_SCRIPT_PATH}"
-        )
-    except Exception as e:
-        error_msg = f"Failed to download GGUF conversion script: {e}"
-        tplr.logger.error(error_msg)
-        raise RuntimeError(error_msg)
-
-    if not os.path.exists(GGUF_SCRIPT_PATH) or os.path.getsize(GGUF_SCRIPT_PATH) == 0:
-        error_msg = f"Downloaded GGUF script at {GGUF_SCRIPT_PATH} is missing or empty"
-        tplr.logger.error(error_msg)
-        raise RuntimeError(error_msg)
-
-
 def convert_hf_to_gguf(model_dir: str) -> str:
     """Convert a HuggingFace model to GGUF format.
 
@@ -316,218 +255,32 @@ def convert_hf_to_gguf(model_dir: str) -> str:
     return gguf_output
 
 
-def generate_repo_id(version: str, custom_repo_id: Optional[str] = None) -> str:
-    """Generate HuggingFace repository ID.
-
-    Args:
-        version: Version string
-        custom_repo_id: Custom repo ID if provided
-
-    Returns:
-        Repository ID string
-    """
-    if custom_repo_id:
-        return custom_repo_id
-    safe_version = version.replace("+", "-").replace(".", "-")
-    return f"templar-model-{safe_version}"
 
 
-def check_huggingface_auth(hf_token: Optional[str] = None) -> bool:
-    """Check if HuggingFace authentication is available.
 
-    Args:
-        hf_token: Optional HF token to use instead of environment variable
+# def check_huggingface_auth(hf_token: Optional[str] = None) -> bool:
+#     """Check if HuggingFace authentication is available.
 
-    Returns:
-        True if authentication is successful
-    """
-    if not HF_AVAILABLE:
-        return False
-    token = hf_token or os.getenv("HF_TOKEN")
-    if not token:
-        return False
+#     Args:
+#         hf_token: Optional HF token to use instead of environment variable
 
-    try:
-        api = HfApi(token=token)
-        api.whoami()
-        return True
-    except Exception:
-        return False
+#     Returns:
+#         True if authentication is successful
+#     """
+#     if not HF_AVAILABLE:
+#         return False
+#     token = hf_token or os.getenv("HF_TOKEN")
+#     if not token:
+#         return False
 
-
-def upload_to_huggingface(
-    model_path: str,
-    repo_id: str,
-    version: str,
-    private: bool = False,
-    commit_message: Optional[str] = None,
-    dry_run: bool = False,
-    hf_token: Optional[str] = None,
-) -> bool:
-    """Upload model to HuggingFace Hub.
-
-    Args:
-        model_path: Path to the model directory
-        repo_id: HuggingFace repository ID
-        version: Version tag
-        private: Whether to create private repository
-        commit_message: Custom commit message
-        dry_run: Whether to perform dry run
-        hf_token: Optional HF token for authentication
-
-    Returns:
-        Success status
-    """
-    if not HF_AVAILABLE:
-        tplr.logger.error(
-            "HuggingFace Hub library not available. Install with: pip install huggingface_hub"
-        )
-        return False
-
-    if not check_huggingface_auth(hf_token):
-        token = hf_token or os.getenv("HF_TOKEN")
-        if not token:
-            tplr.logger.error(
-                "HuggingFace token not found. Provide via --hf_token or set HF_TOKEN environment variable"
-            )
-        else:
-            tplr.logger.error(
-                "HuggingFace authentication failed. Verify your token or run: huggingface-cli login"
-            )
-        return False
-
-    if dry_run:
-        tplr.logger.info(
-            f"[DRY RUN] Would upload {model_path} to HuggingFace repo: {repo_id}"
-        )
-        return True
-
-    try:
-        token = hf_token or os.getenv("HF_TOKEN")
-        api = HfApi(token=token)
-        try:
-            create_repo(repo_id, private=private, exist_ok=True, token=token)
-            tplr.logger.info(f"Repository ready: {repo_id}")
-        except Exception as e:
-            tplr.logger.error(f"Failed to create repository: {e}")
-            return False
-        if not commit_message:
-            commit_message = f"Upload model version {version}"
-
-        tplr.logger.info(f"Uploading model to HuggingFace: {repo_id}")
-        api.upload_folder(
-            folder_path=model_path,
-            repo_id=repo_id,
-            commit_message=commit_message,
-            commit_description=f"Model version {version}",
-            ignore_patterns=["*.gguf"],
-            token=token,
-        )
-
-        tplr.logger.info(
-            f"Successfully uploaded to HuggingFace: https://huggingface.co/{repo_id}"
-        )
-        return True
-
-    except Exception as e:
-        tplr.logger.error(f"HuggingFace upload failed: {e}")
-        return False
+#     try:
+#         api = HfApi(token=token)
+#         api.whoami()
+#         return True
+#     except Exception:
+#         return False
 
 
-def check_ollama_available() -> bool:
-    """Check if Ollama is available."""
-    try:
-        subprocess.run(
-            ["ollama", "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=True,
-        )
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
-
-
-def create_ollama_modelfile(gguf_path: str, model_name: str, temp_dir: str) -> str:
-    """Create Ollama Modelfile for GGUF model.
-
-    Args:
-        gguf_path: Path to GGUF file
-        model_name: Name for the Ollama model
-        temp_dir: Temporary directory for Modelfile
-
-    Returns:
-        Path to created Modelfile
-    """
-    modelfile_path = os.path.join(temp_dir, "Modelfile")
-
-    modelfile_content = f"""FROM {gguf_path}
-
-PARAMETER temperature 0.8
-PARAMETER top_p 0.9
-PARAMETER top_k 40
-
-SYSTEM \"\"\"You are a helpful AI assistant based on the Templar model.\"\"\"
-"""
-
-    with open(modelfile_path, "w") as f:
-        f.write(modelfile_content)
-
-    return modelfile_path
-
-
-def upload_to_ollama(
-    model_path: str,
-    model_name: str,
-    dry_run: bool = False,
-) -> bool:
-    """Upload GGUF model to Ollama.
-
-    Args:
-        model_path: Path to the model directory
-        model_name: Name for the Ollama model
-        dry_run: Whether to perform dry run
-
-    Returns:
-        Success status
-    """
-    if not check_ollama_available():
-        tplr.logger.error("Ollama not found. Install from: https://ollama.ai")
-        return False
-
-    gguf_path = os.path.join(model_path, "model.gguf")
-    if not os.path.exists(gguf_path):
-        tplr.logger.error(f"GGUF file not found: {gguf_path}")
-        return False
-
-    if dry_run:
-        tplr.logger.info(
-            f"[DRY RUN] Would upload {gguf_path} to Ollama as: {model_name}"
-        )
-        return True
-
-    try:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            modelfile_path = create_ollama_modelfile(gguf_path, model_name, temp_dir)
-            tplr.logger.info(f"Creating Ollama model: {model_name}")
-            subprocess.run(
-                ["ollama", "create", model_name, "-f", modelfile_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True,
-            )
-
-            tplr.logger.info(f"Successfully created Ollama model: {model_name}")
-            tplr.logger.info(f"Test with: ollama run {model_name}")
-            return True
-
-    except subprocess.CalledProcessError as e:
-        tplr.logger.error(f"Ollama upload failed: {e.stderr}")
-        return False
-    except Exception as e:
-        tplr.logger.error(f"Ollama upload failed: {e}")
-        return False
 
 
 def print_results(

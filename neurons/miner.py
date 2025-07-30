@@ -376,14 +376,11 @@ class Miner(BaseNode):
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
         )
-        self.inner_optimizer = ZeroRedundancyOptimizer(
+        self.inner_optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            optimizer_class=torch.optim.AdamW,
             lr=self.hparams.inner_learning_rate,
             weight_decay=self.hparams.weight_decay,
             betas=(0.9, 0.95),
-            parameters_as_bucket_view=True,
-            overlap_with_ddp=False,
         )
         inner_steps_before_outer_step = self.hparams.inner_steps * (
             self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
@@ -424,10 +421,22 @@ class Miner(BaseNode):
                 # this rank “owns” the parameter
                 self.owned_params.add(n)
                 self.error_feedback[n] = torch.zeros_like(p, device=self.device)
+            dummy = (
+                torch.zeros_like(p.to_local() if isinstance(p, DTensor) else p)
+            )
+
+            # ── Try DCT; fall back to identity if the size is unknown ──
+            try:
+                enc = self.transformer.encode(dummy, use_dct=self.hparams.use_dct)
+            except KeyError:
+                tplr.logger.warning(
+                    f"[Init] DCT shape {dummy.shape[0]} not registered; "
+                    "using identity transform for parameter %s", n
+                )
+                enc = dummy
+
             _, _, xshape, totalk, _ = self.compressor.compress(
-                self.transformer.encode(
-                    torch.zeros_like(p), use_dct=self.hparams.use_dct
-                ),
+                enc,
                 self.hparams.topk_compression,
             )
             self.xshapes[n] = xshape
@@ -1089,6 +1098,14 @@ class Miner(BaseNode):
             else:
                 input_ids = torch.tensor(batch, dtype=torch.long, device=self.device)
 
+
+            # temporary
+            #vocab_size = self.model.vocab_size
+            #invalid = input_ids >= vocab_size
+            #if invalid.any():
+            #    input_ids[invalid] = self.tokenizer.pad_token_id
+            
+
             local_bs = len(batch)  # type: ignore
             accum_batch_size += local_bs
 
@@ -1100,6 +1117,7 @@ class Miner(BaseNode):
             labels[:, :-1] = input_ids[:, 1:]  # ✓ shift by +1
             labels[:, -1] = self.tokenizer.pad_token_id
             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
+            #labels = torch.where(labels >= vocab_size, -100, labels) FOR SOME TESTING, DO NOT MERGE
 
             # ------------------------------------------------------------------ #
             # 3. Forward + backward

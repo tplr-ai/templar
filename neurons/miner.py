@@ -1136,7 +1136,7 @@ class Miner(BaseNode):
             )
 
         self.dataset = self.dataset_manager.active_dataset
-        self.sampler = SamplerClass(**kwargs)
+        self.sampler = SamplerClass(self.dataset, **kwargs)
 
         self.loader = torch.utils.data.DataLoader(
             dataset=self.dataset,

@@ -295,19 +295,17 @@ class Validator(BaseNode):
         self.param_avg_change: dict[str, torch.Tensor] = {}
         self.prev_param_state: dict[str, torch.Tensor] = {}
         self.param_change_alpha = 0.2
+
+        self.rank = 0
+        self.world_size = 1
         
         self.windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
-            rank=0, 
-            world_size=1, 
+            rank=self.rank,
+            world_size=self.world_size,
             comms=self.comms,
         )
-        # can you call this here or does it need to be in the upper section of run?
-        self.dataset = self.dataset_manager.active_dataset
-
-        self.rank = 0
-        self.world_size = 1
 
         self.burn_uid = 1
 
@@ -720,9 +718,9 @@ class Validator(BaseNode):
         tplr.logger.info(
             f"Using start_window: {self.start_window}, global_step: {self.global_step}"
         )
-        
-        current_shard = self.global_step // step.windows_per_shard
-        _ = await self.dataset_manager.initialize_datasets(current_shard)     
+
+        current_shard = self.global_step // self.windows_per_shard
+        _ = await self.dataset_manager.initialize_datasets(current_shard)
         self.dataset = self.dataset_manager.active_dataset
         self.sampler = tplr.EvalSampler(
             dataset=self.dataset,
@@ -744,7 +742,6 @@ class Validator(BaseNode):
             num_workers=2,
             pin_memory=True,
         )
-
 
         checkpoint_window_buffer = 5
         has_new_checkpoint = (

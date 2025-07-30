@@ -186,7 +186,7 @@ class ShardedDatasetManager:
         self.comms = comms
 
         # should comms glob to know all file paths?
-        self.max_dataset_idx = 10 # bucket_glob_files_idx
+        self.max_dataset_idx = 10  # bucket_glob_files_idx
 
     def prepare_shard(self, shard_index: int) -> asyncio.Task:
         """Prepares a shard for use, downloading it if necessary.
@@ -251,10 +251,8 @@ class ShardedDatasetManager:
             An instance of `SharedShardedDataset`.
         """
         download_task = self.prepare_shard(shard_index)
-        print(f'awaiting task on {self.rank=}')
         await download_task
 
-        print(f'Task complete, loading dataset on {self.rank=}')
         dataset = SharedShardedDataset(
             shard_index=shard_index,
             sequence_length=self.sequence_length,

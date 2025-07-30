@@ -64,7 +64,7 @@ def load_bucket_secrets():
     secrets = {
         "gradients": format_bucket_secrets("R2_GRADIENTS"),
         "aggregator": format_bucket_secrets("R2_AGGREGATOR"),
-        "dataset": format_bucket_secrets("R2_DATASET"),      
+        "dataset": format_bucket_secrets("R2_DATASET"),
         "shared_dataset": format_bucket_secrets("SHARED_SHARDED_DATASET"),
     }
 

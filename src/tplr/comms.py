@@ -370,7 +370,7 @@ class Comms(ChainManager):
         timeout: int = 20,
         time_min: datetime = None,
         time_max: datetime = None,
-        load_data: bool = True
+        load_data: bool = True,
     ):
         """Download object from S3 using asynchronous streaming."""
         import uuid
@@ -446,7 +446,7 @@ class Comms(ChainManager):
                 )
                 if not success:
                     return None
-            
+
             loaded_data = None
             if load_data:
                 # Now load the data
@@ -465,13 +465,15 @@ class Comms(ChainManager):
                     target_directory = os.path.dirname(key)
                     if target_directory:
                         os.makedirs(target_directory, exist_ok=True)
-                        
+
                     loaded_data = os.rename(
-                        temp_file_path, 
+                        temp_file_path,
                         key,
                     )
                 else:
-                    raise FileNotFoundError(f"Download not successful for file at: {temp_file_path}")
+                    raise FileNotFoundError(
+                        f"Download not successful for file at: {temp_file_path}"
+                    )
 
             return loaded_data
 
@@ -629,7 +631,7 @@ class Comms(ChainManager):
             target_directory = os.path.dirname(temp_file_path)
             if target_directory:
                 os.makedirs(target_directory, exist_ok=True)
-                        
+
             async with aiofiles.open(temp_file_path, "wb") as f:
                 await f.truncate(file_size)
 

@@ -253,16 +253,14 @@ class Miner(BaseNode):
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
         )
-        self.inner_optimizer = (
-            ZeroRedundancyOptimizer(
-                self.model.parameters(),
-                optimizer_class=torch.optim.AdamW,
-                lr=self.hparams.inner_learning_rate,
-                weight_decay=self.hparams.weight_decay,
-                betas=(0.9, 0.95),
-                parameters_as_bucket_view=True,
-                overlap_with_ddp=False,
-            )
+        self.inner_optimizer = ZeroRedundancyOptimizer(
+            self.model.parameters(),
+            optimizer_class=torch.optim.AdamW,
+            lr=self.hparams.inner_learning_rate,
+            weight_decay=self.hparams.weight_decay,
+            betas=(0.9, 0.95),
+            parameters_as_bucket_view=True,
+            overlap_with_ddp=False,
         )
         inner_steps_before_outer_step = self.hparams.inner_steps * (
             self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
@@ -375,7 +373,7 @@ class Miner(BaseNode):
         # Initialize peer related attributes
         self.next_peers: list[int] | None = None
         self.peers_update_window = -1
-        
+
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
             rank=self.local_rank,
@@ -384,7 +382,6 @@ class Miner(BaseNode):
         )
         self.windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
 
-        
         tplr.logger.info("[Init] ✔ fully done – entering run()")
 
     # Main training loop.
@@ -403,14 +400,14 @@ class Miner(BaseNode):
 
         peer_start = tplr.T()
         # Fetch peers and get start_window from highest stake validator
-        if self.is_master:      
+        if self.is_master:
             await tplr.neurons.update_peers(
                 instance=self, window=self.current_window, peer_start=peer_start
-            )   
-                              
+            )
+
             self.start_window = await self.comms.get_start_window()
             tplr.logger.info(f"Using start_window: {self.start_window}")
-            
+
             val = -1 if self.start_window is None else self.start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)
@@ -420,44 +417,23 @@ class Miner(BaseNode):
             dist.broadcast(tensor, src=0)
             val = tensor.item()
             self.start_window = None if val == -1 else int(val)
-            
+
         self.global_step = self.current_window - self.start_window
         current_shard = self.global_step // self.windows_per_shard
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
-            
+
         if self.is_master:
-            _ = await self.dataset_manager.initialize_datasets(current_shard)     
+            _ = await self.dataset_manager.initialize_datasets(current_shard)
             dist.barrier(device_ids=[self.local_rank])
-            
+
         else:
             # barrier to start so that master finalized the dataset download
             dist.barrier(device_ids=[self.local_rank])
             await self.dataset_manager.initialize_datasets(current_shard)
-        
-        # Other workers need to pick up dataset
-        self.dataset = self.dataset_manager.active_dataset
-        self.sampler = tplr.MinerSampler(
-            dataset=self.dataset,
-            uid=self.uid,
-            window=self.current_window,
-            steps_per_window=self.hparams.inner_steps,
-            micro_bs=self.hparams.micro_batch_size,
-            batch_size=self.hparams.batch_size,
-            target_batch_size=self.hparams.target_batch_size,
-            rank=self.rank,
-            world_size=self.world_size,
-        )
 
-        self.loader = torch.utils.data.DataLoader(
-            dataset=self.dataset,
-            sampler=self.sampler,
-            batch_size=self.hparams.micro_batch_size,
-            num_workers=10,
-            pin_memory=True,
-            prefetch_factor=2,
-        ) 
-        tplr.logger.info("[Run] dataset + sampler ready")
-    
+        # All workers need to instantiate dataloader
+        self.set_dataloader()
+
         checkpoint_window_buffer = 5
         has_new_checkpoint = (
             self.global_step
@@ -516,7 +492,7 @@ class Miner(BaseNode):
                 f"{tplr.P(self.current_window, bcast_time)} "
                 f"Broadcast checkpoint to {self.world_size - 1} ranks"
             )
-        
+
             dist.barrier(device_ids=[self.local_rank])
 
         self.comms.start_commitment_fetcher()
@@ -543,39 +519,16 @@ class Miner(BaseNode):
 
             # 2. Load data
             data_start = tplr.T()
-            
+
             # Update sampler for current window
-            self.sampler.set_window_uid(self.uid, step_window % self.windows_per_shard) # step_window or global_step?
-            
-            if ( 
-                self.global_step > 0 
-                and 
-                self.global_step % self.windows_per_shard == 0
-            ):
+            self.sampler.set_window_uid(
+                self.uid, step_window % self.windows_per_shard
+            )  # step_window or global_step?
+
+            if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
                 tplr.logger.info(f"Swapping dataset at window {step_window}")
                 await self.dataset_manager.swap_datasets()
-                self.dataset = self.dataset_manager.active_dataset
-                self.sampler = tplr.MinerSampler(
-                    dataset=self.dataset,
-                    uid=self.uid,
-                    window=self.current_window,
-                    steps_per_window=self.hparams.inner_steps,
-                    micro_bs=self.hparams.micro_batch_size,
-                    batch_size=self.hparams.batch_size,
-                    target_batch_size=self.hparams.target_batch_size,
-                    rank=self.rank,
-                    world_size=self.world_size,
-                )
-
-                self.loader = torch.utils.data.DataLoader(
-                    dataset=self.dataset,
-                    sampler=self.sampler,
-                    batch_size=self.hparams.micro_batch_size,
-                    num_workers=10,
-                    pin_memory=True,
-                    prefetch_factor=2,
-                ) 
-                tplr.logger.info("[Run] dataset + sampler ready")
+                self.set_dataloader()
                 if self.world_size > 1:
                     dist.barrier(device_ids=[self.local_rank])
 
@@ -583,7 +536,7 @@ class Miner(BaseNode):
             tplr.logger.info(
                 f"{tplr.P(step_window, data_loading_time)} Loaded training data"
             )
-            
+
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             tplr.logger.info("Start accumulating...")
@@ -1144,6 +1097,47 @@ class Miner(BaseNode):
         tplr.logger.info(
             f"After cleanup - GPU reserved: {torch.cuda.memory_reserved(self.device) / 1024**3:.2f} GB"
         )
+
+    def set_dataloader(self, validator=False):
+        # put here for now...
+        shared_args = dict(
+            dataset=self.dataset,
+            uid=self.uid,
+            window=self.current_window,
+            steps_per_window=self.hparams.inner_steps,
+            micro_bs=self.hparams.micro_batch_size,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+
+        if validator:
+            SamplerClass = tplr.EvalSampler
+            kwargs = shared_args | dict(
+                micro_bs=self.hparams.micro_batch_size,
+                batch_size=self.hparams.batch_size,
+                target_batch_size=self.hparams.target_batch_size,
+            )
+        else:
+            SamplerClass = tplr.MinerSampler
+            kwargs = shared_args | dict(
+                batch_size=self.hparams.target_batch_size,
+                validation_bs=self.hparams.validator_sample_micro_bs
+                * self.hparams.micro_batch_size,
+            )
+
+        self.dataset = self.dataset_manager.active_dataset
+        self.sampler = SamplerClass(**kwargs)
+
+        self.loader = torch.utils.data.DataLoader(
+            dataset=self.dataset,
+            sampler=self.sampler,
+            batch_size=self.hparams.micro_batch_size,
+            num_workers=10,
+            pin_memory=True,
+            prefetch_factor=2,
+        )
+        tplr.logger.info("[Run] dataset + sampler ready")
+        return
 
 
 # Start miner.

@@ -1105,7 +1105,7 @@ class Miner(BaseNode):
             f"After cleanup - GPU reserved: {torch.cuda.memory_reserved(self.device) / 1024**3:.2f} GB"
         )
 
-    def set_dataloader(self, validator=False):
+    def set_dataloader(self, validator: bool = False) -> None:
         # put here for now...
         self.dataset = self.dataset_manager.active_dataset
 

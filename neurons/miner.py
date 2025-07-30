@@ -108,7 +108,6 @@ class Miner(BaseNode):
         parser.add_argument(
             "--local",
             action="store_true",
-            default=True,
             help="Local run - use toy model, small enough for a laptop.",
         )
         bt.subtensor.add_args(parser)
@@ -172,7 +171,7 @@ class Miner(BaseNode):
             f"[Init] rank={self.rank}, world_size={self.world_size}, local_rank={self.local_rank}"
         )
 
-        if self.world_size > 1:
+        if self.world_size >= 1:
             dist.init_process_group(
                 backend="nccl",
                 init_method="env://",

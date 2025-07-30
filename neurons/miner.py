@@ -253,17 +253,14 @@ class Miner(BaseNode):
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
         )
-        self.inner_optimizer = (
-            torch.optim.AdamW(self.model.parameters(), lr=self.hparams.inner_learning_rate)
-            # ZeroRedundancyOptimizer(
-            #     self.model.parameters(),
-            #     optimizer_class=torch.optim.AdamW,
-            #     lr=self.hparams.inner_learning_rate,
-            #     weight_decay=self.hparams.weight_decay,
-            #     betas=(0.9, 0.95),
-            #     parameters_as_bucket_view=True,
-            #     overlap_with_ddp=False,
-            # )
+        self.inner_optimizer = ZeroRedundancyOptimizer(
+            self.model.parameters(),
+            optimizer_class=torch.optim.AdamW,
+            lr=self.hparams.inner_learning_rate,
+            weight_decay=self.hparams.weight_decay,
+            betas=(0.9, 0.95),
+            parameters_as_bucket_view=True,
+            overlap_with_ddp=False,
         )
         inner_steps_before_outer_step = self.hparams.inner_steps * (
             self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
@@ -377,6 +374,7 @@ class Miner(BaseNode):
         self.next_peers: list[int] | None = None
         self.next_reserve_peers: list[int] | None = None
         self.peers_update_window = -1
+        
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
             rank=self.local_rank,
@@ -427,9 +425,6 @@ class Miner(BaseNode):
         if self.is_master:
             _ = await self.dataset_manager.initialize_datasets(current_shard)
             dist.barrier(device_ids=[self.local_rank])
-            print(f'getting dataset on rank {self.local_rank}')
-            await self.dataset_manager.initialize_datasets(0)
-            print(f'done getting rankwise dataset on {self.local_rank}')
 
         else:
             # barrier to start so that master finalized the dataset download
@@ -551,6 +546,7 @@ class Miner(BaseNode):
             tplr.logger.info(
                 f"{tplr.P(step_window, data_loading_time)} Loaded training data"
             )
+
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             tplr.logger.info("Start accumulating...")

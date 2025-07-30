@@ -50,10 +50,12 @@
     "burn_rate": 0.8,
     "idx_overlap_threshold": 0.5,
   "torchtitan": {
-    "tp_degree": 4,
-    "dp_replicate": 8,
+    "tp_degree": 1,
     "pp_degree": 1,
     "cp_degree": 1,
+
+    "dp_replicate": 1,
+    "dp_shard": 1,
 
     "compile": false,
     "enable_cpu_offload": false,

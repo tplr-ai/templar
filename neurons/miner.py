@@ -280,35 +280,50 @@ class Miner(BaseNode):
         # ──────────────────────────────────────────────────────────────
         tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
 
-        tp_degree = max(1, int(getattr(tt, "tp_degree", 1)))
+        self.tp_degree = int(getattr(tt, "tp_degree", 1))
+        self.pp_degree = int(getattr(tt, "pp_degree", 1))
+        self.cp_degree = int(getattr(tt, "cp_degree", 1))
+
+        self.dp_replicate = getattr(tt, "dp_replicate", None)
+        self.dp_shard     = getattr(tt, "dp_shard",     None)
+
+        if (self.dp_replicate is not None) and (self.dp_shard is not None):
+            raise ValueError(
+                "Specify either torchtitan.dp_replicate or torchtitan.dp_shard, "
+                "but not both."
+            )
+
+        if self.dp_replicate is None and self.dp_shard is None:
+            # sharded DP by default
+            self.dp_shard = self.world_size
+
+        if self.dp_replicate is not None and (tp_degree > 1 or pp_degree > 1 or cp_degree > 1):
+            raise ValueError(
+                "dp_replicate may only be used when tp_degree = pp_degree = cp_degree = 1 "
+            )
+        
+        self.dp_replicate = int(self.dp_replicate or 1)
+        self.dp_shard     = int(self.dp_shard or 1)
+
+        if self.world_size % (self.dp_replicate * self.dp_shard) != 0:
+            raise ValueError(
+                f"world_size ({self.world_size}) must be divisible by "
+                f"dp_replicate × dp_shard ({self.dp_replicate}×{self.dp_shard})."
+            )
+
         if self.world_size % tp_degree != 0:
             raise ValueError(
                 f"World size ({self.world_size}) must be divisible by tensor-parallel degree ({tp_degree})"
             )
-        dp_replicate = int(getattr(tt, "dp_replicate", self.world_size))
-        dp_degree = dp_replicate // tp_degree if dp_replicate >= tp_degree else 1
-
-        self.tp_degree = tp_degree
-        self.dp_degree = dp_degree
 
         pdims = ParallelDims(
-            dp_replicate=dp_replicate,
-            dp_shard=1,
+            dp_replicate=self.dp_replicate,
+            dp_shard=self.dp_shard,
             tp=tp_degree,
-            pp=int(getattr(tt, "pp_degree", 1)),
-            cp=int(getattr(tt, "cp_degree", 1)),
+            pp=pp_degree,
+            cp=cp_degree,
             ep=1,
             world_size=self.world_size,
-        )
-
-        self.tensor_parallel_degree = getattr(
-            self.hparams, "tensor_parallel_degree", self.world_size
-        )
-        self.pipeline_parallel_degree = getattr(
-            self.hparams, "pipeline_parallel_degree", 1
-        )
-        self.context_parallel_degree = getattr(
-            self.hparams, "context_parallel_degree", 1
         )
 
         world_mesh = pdims.build_mesh()

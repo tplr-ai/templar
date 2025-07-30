@@ -1122,16 +1122,16 @@ class Miner(BaseNode):
         if validator:
             SamplerClass = tplr.EvalSampler
             kwargs = shared_args | dict(
-                micro_bs=self.hparams.micro_batch_size,
-                batch_size=self.hparams.batch_size,
-                target_batch_size=self.hparams.target_batch_size,
+                batch_size=self.hparams.target_batch_size,
+                validation_bs=self.hparams.validator_sample_micro_bs
+                * self.hparams.micro_batch_size,
             )
         else:
             SamplerClass = tplr.MinerSampler
             kwargs = shared_args | dict(
-                batch_size=self.hparams.target_batch_size,
-                validation_bs=self.hparams.validator_sample_micro_bs
-                * self.hparams.micro_batch_size,
+                micro_bs=self.hparams.micro_batch_size,
+                batch_size=self.hparams.batch_size,
+                target_batch_size=self.hparams.target_batch_size,
             )
 
         self.sampler = SamplerClass(**kwargs)

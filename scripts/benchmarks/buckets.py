@@ -22,7 +22,7 @@ import numpy as np
 import torch
 from dotenv import load_dotenv
 from loguru import logger
-from templar import get_indices_for_window, load_hparams # templar directory exists?
+from templar import get_indices_for_window, load_hparams  # templar directory exists?
 from tqdm.auto import trange
 from transformers import LlamaForCausalLM
 

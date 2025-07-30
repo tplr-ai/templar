@@ -27,7 +27,6 @@ import tplr
 from tplr import logger, __version__
 
 
-
 async def cleanup_version():
     """Delete objects in R2 bucket that match the current version pattern"""
     # Load environment variables

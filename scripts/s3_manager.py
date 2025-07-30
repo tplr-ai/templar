@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 import boto3
-from botocore.config import Config as BotoConfig
 from botocore import exceptions
+from botocore.config import Config as BotoConfig
 
 from tplr.tplr_logging import logger
 

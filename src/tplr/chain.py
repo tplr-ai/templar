@@ -25,7 +25,7 @@ import bittensor as bt
 import numpy as np
 import torch
 from bittensor import Wallet
-from bittensor.core import chain_data 
+from bittensor.core import chain_data
 from pydantic import ValidationError
 
 # Local imports

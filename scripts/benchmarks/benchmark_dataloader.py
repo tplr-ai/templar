@@ -17,6 +17,7 @@ import seaborn as sns
 import psutil
 from tplr import hparams, dataset
 
+
 class PageBenchmark:
     def __init__(self):
         self.hparams = hparams.load_hparams()

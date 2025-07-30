@@ -40,8 +40,8 @@ import numpy as np
 import torch
 import uvloop
 from openskill.models import PlackettLuce
-from rich import console, table 
-from torch import optim, autocast
+from rich import console, table
+from torch import autocast, optim
 from torch.optim import lr_scheduler
 from transformers.models.llama import LlamaForCausalLM
 

@@ -34,24 +34,26 @@ import bittensor as bt
 import numpy as np
 import torch
 import torch.distributed as dist
-
-# Third party
-from torch.nn import parallel
 import uvloop
+from torch import autocast, optim
 from torch.distributed.optim import ZeroRedundancyOptimizer
-from torch import autocast, optim 
+from torch.nn import parallel
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 from transformers import LlamaForCausalLM
 
 import tplr
-from tplr import compress, hparams, comms, metrics, wandb, sharded_dataset, sharded_sampler
-from tplr.logging import logger
-
-# Local
 from neurons import BaseNode
-
-# Local
+from tplr import (
+    comms,
+    compress,
+    hparams,
+    metrics,
+    sharded_dataset,
+    sharded_sampler,
+    wandb,
+)
+from tplr.logging import logger
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -448,7 +450,7 @@ class Miner(BaseNode):
         #   • rank-0 (or single-GPU run) downloads & catches-up
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
-    
+
         ckpt_ok = False
         ckpt_sync_win = self.start_window
         if self.world_size == 1 or self.is_master:

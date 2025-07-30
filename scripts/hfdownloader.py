@@ -38,7 +38,7 @@ import boto3
 import dns.resolver
 import pyarrow.parquet as pq
 import requests
-from botocore import client 
+from botocore import client
 from botocore.config import Config
 from requests import adapters
 from tqdm import tqdm
@@ -348,7 +348,7 @@ class WorkerManager:
     def wait_all_with_timeout(
         self,
         futures: list[concurrent.futures.Future],
-        timeout: int | None = None, 
+        timeout: int | None = None,
     ) -> tuple[list[Any], int]:
         """Wait for all futures with proper concurrent timeout handling.
 

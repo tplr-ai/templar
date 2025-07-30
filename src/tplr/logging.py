@@ -29,7 +29,8 @@ from typing import Final
 
 import bittensor as bt
 import logging_loki
-from rich import highlighter, logging as richlogging
+from rich import highlighter
+from rich import logging as richlogging
 
 LOKI_URL: Final[str] = os.environ.get(
     "LOKI_URL", "https://logs.tplr.ai/loki/api/v1/push"

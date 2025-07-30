@@ -54,7 +54,7 @@ from torch.utils.data import DataLoader
 from transformers import LlamaForCausalLM
 
 import tplr
-from tplr import sharded_dataset, hparams, comms, metrics
+from tplr import comms, hparams, metrics, sharded_dataset
 from tplr.logging import logger
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"

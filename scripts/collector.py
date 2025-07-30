@@ -30,10 +30,10 @@ import bittensor as bt
 import torch
 import uvloop
 from aiobotocore import session
-from botocore import exceptions 
+from botocore import exceptions
 
 import tplr
-from tplr import config, comms
+from tplr import comms, config
 from tplr.logging import logger
 
 CPU_COUNT = os.cpu_count() or 4
@@ -168,9 +168,7 @@ class GradientCollector:
                     logger.debug(f"UID {uid}: No gradient received")
                     return uid, False
 
-                logger.debug(
-                    f"UID {uid}: Downloaded gradient in {download_time:.2f}s"
-                )
+                logger.debug(f"UID {uid}: Downloaded gradient in {download_time:.2f}s")
 
                 # 3. wrap + upload ----------------------------------------------
                 payload = {
@@ -204,9 +202,7 @@ class GradientCollector:
                 logger.debug(
                     f"UID {uid}: Uploaded gradient ({data_size / 1024:.1f} KB) in {upload_time:.2f}s"
                 )
-                logger.info(
-                    f"UID {uid}: Processed successfully in {total_time:.2f}s"
-                )
+                logger.info(f"UID {uid}: Processed successfully in {total_time:.2f}s")
 
                 successful_count += 1
                 return uid, True

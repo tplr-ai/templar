@@ -33,14 +33,13 @@ from typing import Any, Literal, Optional
 import aiofiles
 import bittensor as bt
 import torch
-from aiobotocore import client, session 
+from aiobotocore import client, session
 from botocore import exceptions
 from tqdm import tqdm as std_tqdm
 
 import tplr
-
-from tplr.compress import CompressDCT
 from tplr.chain import ChainManager
+from tplr.compress import CompressDCT
 from tplr.config import BUCKET_SECRETS, client_config
 from tplr.schemas import Bucket
 

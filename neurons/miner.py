@@ -1107,6 +1107,8 @@ class Miner(BaseNode):
 
     def set_dataloader(self, validator=False):
         # put here for now...
+        self.dataset = self.dataset_manager.active_dataset
+
         shared_args = dict(
             dataset=self.dataset,
             uid=self.uid,
@@ -1132,8 +1134,7 @@ class Miner(BaseNode):
                 * self.hparams.micro_batch_size,
             )
 
-        self.dataset = self.dataset_manager.active_dataset
-        self.sampler = SamplerClass(self.dataset, **kwargs)
+        self.sampler = SamplerClass(**kwargs)
 
         self.loader = torch.utils.data.DataLoader(
             dataset=self.dataset,

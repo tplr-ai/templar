@@ -101,11 +101,7 @@ class _BaseWindowSampler(Sampler, ABC):
         Must be deterministic w.r.t. `(uid, window)`.
         """
         raise NotImplementedError
-
-    def set_dataset_len(self):
-        self.dataset_len = len(self._dataset_ref)
-        self.set_window_uid(self.uid, self.window)
-
+    
 
 # ────────────────────────────────────────────────────────────────────────────
 # MinerSampler

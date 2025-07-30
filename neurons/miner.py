@@ -108,7 +108,6 @@ class Miner(BaseNode):
         parser.add_argument(
             "--local",
             action="store_true",
-            default=True,
             help="Local run - use toy model, small enough for a laptop.",
         )
         bt.subtensor.add_args(parser)

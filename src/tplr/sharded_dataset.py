@@ -19,7 +19,6 @@ import asyncio
 import os
 import time
 from pathlib import Path
-import asyncio
 
 import numpy as np
 import numpy.typing as npt
@@ -285,7 +284,7 @@ class ShardedDatasetManager:
         the files of the old dataset.
         """
         self.shard_index += 1
-        self.shard_index = self.shard_index % self.max_dataset_idx # allow replay
+        self.shard_index = self.shard_index % self.max_dataset_idx  # allow replay
 
         if self.upcoming_dataset:
             await self.upcoming_dataset

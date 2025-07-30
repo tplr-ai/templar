@@ -374,7 +374,7 @@ class Miner(BaseNode):
         self.next_peers: list[int] | None = None
         self.next_reserve_peers: list[int] | None = None
         self.peers_update_window = -1
-        
+
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
             rank=self.local_rank,
@@ -444,8 +444,6 @@ class Miner(BaseNode):
         #   • rank-0 (or single-GPU run) downloads & catches-up
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
-
-        bare_model = getattr(self.model, 'module', self.model)
 
         ckpt_ok = False
         ckpt_sync_win = self.start_window

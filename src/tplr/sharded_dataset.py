@@ -294,8 +294,14 @@ class ShardedDatasetManager:
         tplr.logger.info("successfully swapped datasets.")
 
         if old_dataset and self.rank == 0:
-            os.remove(old_dataset.tokens_file)
-            os.remove(old_dataset.ids_file)
+            filenames = ["tokens_file", "ids_file"]
+            files_to_delete = [old_dataset.tokens_file, old_dataset.ids_file]
+            for name, filepath in zip(filenames, files_to_delete):
+                try:
+                    os.remove(filepath)
+                except FileNotFoundError:
+                    tplr.logger.error(f"{name} file not available for deletion")
+                    
         del old_dataset
 
         return self.shard_index

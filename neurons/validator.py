@@ -296,7 +296,7 @@ class Validator(BaseNode):
         self.prev_param_state: dict[str, torch.Tensor] = {}
         self.param_change_alpha = 0.2
         
-        # put in stub
+        self.windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
             rank=0, 
@@ -720,9 +720,9 @@ class Validator(BaseNode):
         tplr.logger.info(
             f"Using start_window: {self.start_window}, global_step: {self.global_step}"
         )
-
-        windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
-        _ = await self.dataset_manager.initialize_datasets(self.global_step // windows_per_shard)     
+        
+        current_shard = self.global_step // step.windows_per_shard
+        _ = await self.dataset_manager.initialize_datasets(current_shard)     
         self.dataset = self.dataset_manager.active_dataset
         self.sampler = tplr.EvalSampler(
             dataset=self.dataset,

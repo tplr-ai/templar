@@ -382,6 +382,8 @@ class Miner(BaseNode):
             world_size=self.world_size,
             comms=self.comms,
         )
+        self.windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
+
         
         tplr.logger.info("[Init] ✔ fully done – entering run()")
 
@@ -412,9 +414,6 @@ class Miner(BaseNode):
             val = -1 if self.start_window is None else self.start_window
             tensor = torch.tensor([val], dtype=torch.long, device=self.device)
             dist.broadcast(tensor, src=0)
-            
-            _ = await self.dataset_manager.initialize_datasets(0)     
-            dist.barrier(device_ids=[self.local_rank])
 
         else:
             tensor = torch.zeros(1, dtype=torch.long, device=self.device)
@@ -422,11 +421,18 @@ class Miner(BaseNode):
             val = tensor.item()
             self.start_window = None if val == -1 else int(val)
             
+        self.global_step = self.current_window - self.start_window
+        current_shard = self.global_step // self.windows_per_shard
+        tplr.logger.info(f"starting at Global Step : {self.global_step}")
+            
+        if self.is_master:
+            _ = await self.dataset_manager.initialize_datasets(current_shard)     
             dist.barrier(device_ids=[self.local_rank])
-            print(f'getting dataset on rank {self.local_rank}')
-            await self.dataset_manager.initialize_datasets(0)
-            print(f'done getting rankwise dataset on {self.local_rank}')
-
+            
+        else:
+            # barrier to start so that master finalized the dataset download
+            dist.barrier(device_ids=[self.local_rank])
+            await self.dataset_manager.initialize_datasets(current_shard)
         
         # Other workers need to pick up dataset
         self.dataset = self.dataset_manager.active_dataset
@@ -451,10 +457,7 @@ class Miner(BaseNode):
             prefetch_factor=2,
         ) 
         tplr.logger.info("[Run] dataset + sampler ready")
-        
-        self.global_step = self.current_window - self.start_window
-        tplr.logger.info(f"starting at Global Step : {self.global_step}")
-
+    
         checkpoint_window_buffer = 5
         has_new_checkpoint = (
             self.global_step
@@ -541,14 +544,13 @@ class Miner(BaseNode):
             # 2. Load data
             data_start = tplr.T()
             
-            windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
             # Update sampler for current window
-            self.sampler.set_window_uid(self.uid, step_window % windows_per_shard)
+            self.sampler.set_window_uid(self.uid, step_window % self.windows_per_shard) # step_window or global_step?
             
             if ( 
                 self.global_step > 0 
                 and 
-                self.global_step % windows_per_shard == 0
+                self.global_step % self.windows_per_shard == 0
             ):
                 tplr.logger.info(f"Swapping dataset at window {step_window}")
                 await self.dataset_manager.swap_datasets()

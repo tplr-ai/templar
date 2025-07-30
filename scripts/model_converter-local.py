@@ -255,34 +255,6 @@ def convert_hf_to_gguf(model_dir: str) -> str:
     return gguf_output
 
 
-
-
-
-# def check_huggingface_auth(hf_token: Optional[str] = None) -> bool:
-#     """Check if HuggingFace authentication is available.
-
-#     Args:
-#         hf_token: Optional HF token to use instead of environment variable
-
-#     Returns:
-#         True if authentication is successful
-#     """
-#     if not HF_AVAILABLE:
-#         return False
-#     token = hf_token or os.getenv("HF_TOKEN")
-#     if not token:
-#         return False
-
-#     try:
-#         api = HfApi(token=token)
-#         api.whoami()
-#         return True
-#     except Exception:
-#         return False
-
-
-
-
 def print_results(
     version_tag: str,
     model_dir: str,

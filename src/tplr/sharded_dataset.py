@@ -285,6 +285,7 @@ class ShardedDatasetManager:
         the files of the old dataset.
         """
         self.shard_index += 1
+        self.shard_index = self.shard_index % self.max_dataset_idx # allow replay
 
         if self.upcoming_dataset:
             await self.upcoming_dataset

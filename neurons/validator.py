@@ -2855,6 +2855,48 @@ class Validator(BaseNode):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
+                
+    def set_dataloader(self, validator: bool = False) ->  None:
+        # put here for now...
+        self.dataset = self.dataset_manager.active_dataset
+
+        shared_args = dict(
+            dataset=self.dataset,
+            uid=self.uid,
+            window=self.current_window,
+            steps_per_window=self.hparams.inner_steps,
+            micro_bs=self.hparams.micro_batch_size,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+
+        if validator:
+            SamplerClass = tplr.EvalSampler
+            kwargs = shared_args | dict(
+                batch_size=self.hparams.target_batch_size,
+                validation_bs=self.hparams.validator_sample_micro_bs
+                * self.hparams.micro_batch_size,
+            )
+        else:
+            SamplerClass = tplr.MinerSampler
+            kwargs = shared_args | dict(
+                micro_bs=self.hparams.micro_batch_size,
+                batch_size=self.hparams.batch_size,
+                target_batch_size=self.hparams.target_batch_size,
+            )
+
+        self.sampler = SamplerClass(**kwargs)
+
+        self.loader = torch.utils.data.DataLoader(
+            dataset=self.dataset,
+            sampler=self.sampler,
+            batch_size=self.hparams.micro_batch_size,
+            num_workers=10,
+            pin_memory=True,
+            prefetch_factor=2,
+        )
+        tplr.logger.info("[Run] dataset + sampler ready")
+        return
 
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):
@@ -2883,49 +2925,6 @@ def min_power_normalization(logits, power=2.0, epsilon=1e-8):
         probabilities = torch.zeros_like(powered_logits)
 
     return probabilities
-
-
-def set_dataloader(self, validator: bool = False) ->  None:
-    # put here for now...
-    self.dataset = self.dataset_manager.active_dataset
-
-    shared_args = dict(
-        dataset=self.dataset,
-        uid=self.uid,
-        window=self.current_window,
-        steps_per_window=self.hparams.inner_steps,
-        micro_bs=self.hparams.micro_batch_size,
-        rank=self.rank,
-        world_size=self.world_size,
-    )
-
-    if validator:
-        SamplerClass = tplr.EvalSampler
-        kwargs = shared_args | dict(
-            batch_size=self.hparams.target_batch_size,
-            validation_bs=self.hparams.validator_sample_micro_bs
-            * self.hparams.micro_batch_size,
-        )
-    else:
-        SamplerClass = tplr.MinerSampler
-        kwargs = shared_args | dict(
-            micro_bs=self.hparams.micro_batch_size,
-            batch_size=self.hparams.batch_size,
-            target_batch_size=self.hparams.target_batch_size,
-        )
-
-    self.sampler = SamplerClass(**kwargs)
-
-    self.loader = torch.utils.data.DataLoader(
-        dataset=self.dataset,
-        sampler=self.sampler,
-        batch_size=self.hparams.micro_batch_size,
-        num_workers=10,
-        pin_memory=True,
-        prefetch_factor=2,
-    )
-    tplr.logger.info("[Run] dataset + sampler ready")
-    return
 
 
 if __name__ == "__main__":

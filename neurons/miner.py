@@ -419,6 +419,9 @@ class Miner(BaseNode):
         self.xshapes = {}
         self.totalks = {}
         model_iterator = self.bare_model.named_parameters()
+        # collect all padded shapes and pre-register them with DCT
+        padded_shapes_to_register = set()
+        param_info = {}  # Store parameter info for second pass
 
         for idx, (n, p) in enumerate(model_iterator):
             if idx % self.world_size == self.rank:
@@ -431,24 +434,65 @@ class Miner(BaseNode):
             else:
                 dummy = torch.zeros_like(p)
 
+            # Apply padding if needed for tensor parallelism compatibility
             padded_dummy, padding_info = self._pad_tensor_for_tp(dummy, n)
 
-            # Try DCT with padded tensor
-            try:
-                enc = self.transformer.encode(padded_dummy, use_dct=self.hparams.use_dct)
-            except KeyError:
-                tplr.logger.warning(
-                    f"[Init] DCT shape {padded_dummy.shape[0]} not registered; "
-                    "using identity transform for parameter %s", n
+            # Store info for second pass
+            param_info[n] = {
+                "padded_dummy": padded_dummy,
+                "padding_info": padding_info,
+                "idx": idx,
+            }
+
+            # Collect all dimensions that need DCT registration
+            for dim_size in padded_dummy.shape:
+                padded_shapes_to_register.add(dim_size)
+
+        # Pre-register all padded shapes with the DCT transformer
+        tplr.logger.info(
+            f"Pre-registering {len(padded_shapes_to_register)} DCT shapes..."
+        )
+
+        # Import the DCT functions from the transformer module
+        from tplr.compress import _get_smaller_split, _dct, _idct
+
+        for shape_dim in padded_shapes_to_register:
+            # Force registration by updating the transformer's internal dictionaries
+            if shape_dim not in self.transformer.shape_dict:
+                # Use the transformer's own logic to get the split size
+                sc = _get_smaller_split(shape_dim, self.transformer.target_chunk)
+                self.transformer.shape_dict[shape_dim] = sc
+
+                # Pregenerate DCT basis matrices if not already done
+                if sc not in self.transformer.f_dict:
+                    I = torch.eye(sc, device=self.device)
+                    # Use the custom DCT/IDCT functions with 'ortho' normalization
+                    self.transformer.f_dict[sc] = _dct(I, norm="ortho").to(self.device)
+                    self.transformer.b_dict[sc] = _idct(I, norm="ortho").to(self.device)
+
+                tplr.logger.debug(
+                    f"Registered DCT shape: {shape_dim} -> chunk size: {sc}"
                 )
-                enc = padded_dummy
-    
+
+        # Second pass: now encode all tensors (DCT shapes should be registered)
+        for n, info in param_info.items():
+            padded_dummy = info["padded_dummy"]
+
+            enc = self.transformer.encode(padded_dummy, use_dct=self.hparams.use_dct)
+            tplr.logger.debug(
+                f"[Init] Successfully applied DCT to {n} with shape {padded_dummy.shape}"
+            )
+
             _, _, xshape, totalk, _ = self.compressor.compress(
                 enc,
                 self.hparams.topk_compression,
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
+
+        tplr.logger.info(
+            f"[Init] DCT compression initialized for {len(param_info)} parameters"
+        )
 
         self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
         tplr.logger.info(
@@ -525,7 +569,6 @@ class Miner(BaseNode):
 
         tplr.logger.info("[Init] ✔ fully done – entering run()")
 
-
     # Padding for DCT + TP
     def _pad_tensor_for_tp(self, tensor, param_name):
         """Pad tensor to make it divisible by tensor parallelism degree."""
@@ -560,17 +603,21 @@ class Miner(BaseNode):
                     padding_list.extend([0, 0])
 
             # Apply padding with zeros
-            padded_tensor = torch.nn.functional.pad(tensor, padding_list, mode='constant', value=0)
+            padded_tensor = torch.nn.functional.pad(
+                tensor, padding_list, mode="constant", value=0
+            )
             padding_applied = {
                 "padding_list": padding_list,
-                "new_shape": tuple(new_shape)
+                "new_shape": tuple(new_shape),
             }
 
-            tplr.logger.debug(f"[Padding] {param_name}: {original_shape} -> {padded_tensor.shape}")
+            tplr.logger.debug(
+                f"[Padding] {param_name}: {original_shape} -> {padded_tensor.shape}"
+            )
 
         return padded_tensor, {
             "original_shape": original_shape,
-            "padding": padding_applied
+            "padding": padding_applied,
         }
 
     # Unpadding for DCT + TP

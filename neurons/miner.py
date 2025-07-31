@@ -528,9 +528,7 @@ class Miner(BaseNode):
             data_start = tplr.T()
 
             # Update sampler for current window
-            self.sampler.set_window_uid(
-                self.uid, step_window % self.windows_per_shard
-            )  # step_window or global_step?
+            self.sampler.set_window_uid(self.uid, step_window % self.windows_per_shard)
 
             if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
                 tplr.logger.info(f"Swapping dataset at window {step_window}")

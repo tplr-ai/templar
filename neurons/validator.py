@@ -337,7 +337,7 @@ class Validator(BaseNode):
 
         self.rank = 0
         self.world_size = 1
-        
+
         self.windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
@@ -828,14 +828,14 @@ class Validator(BaseNode):
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
-                    
+
             await self.wait_until_window(
                 self.sync_window + self.hparams.validator_offset + 1
             )
 
             # 2. Increment sync window and update peer lists
             window_start = tplr.T()
-            
+
             if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
                 tplr.logger.info(f"Swapping dataset at window {self.current_window}")
                 await self.dataset_manager.swap_datasets()
@@ -2855,8 +2855,8 @@ class Validator(BaseNode):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                
-    def set_dataloader(self, validator: bool = False) ->  None:
+
+    def set_dataloader(self, validator: bool = False) -> None:
         # put here for now...
         self.dataset = self.dataset_manager.active_dataset
 

@@ -65,7 +65,6 @@ def load_bucket_secrets():
         "gradients": format_bucket_secrets("R2_GRADIENTS"),
         "aggregator": format_bucket_secrets("R2_AGGREGATOR"),
         "dataset": format_bucket_secrets("R2_DATASET"),
-        "shared_dataset": format_bucket_secrets("SHARED_SHARDED_DATASET"),
     }
 
     # Override with multiple endpoints if provided by environment variable.

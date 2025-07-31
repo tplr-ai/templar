@@ -201,7 +201,10 @@ class CompressDCT(Generic[Q]):
 
     @torch.no_grad()
     def compress(self, x: torch.Tensor, topk: int, align_to: int = 1):  # type: ignore[override]
+        if isinstance(x, torch.distributed.tensor.DTensor):   # check for dtensors
+            x = x.to_local()
         xshape = x.shape
+
         if len(x.shape) > 2:  # 2D weights
             x = rearrange(x, "y x h w -> y x (h w)")
 

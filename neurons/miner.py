@@ -285,7 +285,7 @@ class Miner(BaseNode):
         self.cp_degree = int(getattr(tt, "cp_degree", 1))
 
         self.dp_replicate = int(getattr(tt, "dp_replicate", 1))
-        self.dp_shard     = int(getattr(tt, "dp_shard",     1))
+        self.dp_shard = int(getattr(tt, "dp_shard", 1))
 
         if self.dp_replicate > 1 and self.dp_shard > 1:
             raise ValueError(
@@ -293,11 +293,13 @@ class Miner(BaseNode):
                 "but not both."
             )
 
-        if self.dp_replicate > 1 and (self.tp_degree > 1 or self.pp_degree > 1 or self.cp_degree > 1):
+        if self.dp_replicate > 1 and (
+            self.tp_degree > 1 or self.pp_degree > 1 or self.cp_degree > 1
+        ):
             raise ValueError("dp_replicate can only be used when tp/pp/cp are all 1.")
-        
+
         self.dp_replicate = int(self.dp_replicate or 1)
-        self.dp_shard     = int(self.dp_shard or 1)
+        self.dp_shard = int(self.dp_shard or 1)
 
         if self.world_size % (self.dp_replicate * self.dp_shard) != 0:
             raise ValueError(
@@ -420,20 +422,31 @@ class Miner(BaseNode):
 
         for idx, (n, p) in enumerate(model_iterator):
             if idx % self.world_size == self.rank:
-                # this rank “owns” the parameter
                 self.owned_params.add(n)
                 self.error_feedback[n] = torch.zeros_like(p, device=self.device)
-            dummy = (
-                torch.zeros_like(p.to_local() if isinstance(p, DTensor) else p)
-            )
 
-            # ── Try DCT; fall back to identity if the size is unknown ──
+            # Handle DTensor for tensor parallelism
+            if isinstance(p, DTensor):
+                dummy = torch.zeros_like(p.to_local())
+            else:
+                dummy = torch.zeros_like(p)
+
+            # Try DCT; fall back to identity if the size is incompatible with TP
             try:
-                enc = self.transformer.encode(dummy, use_dct=self.hparams.use_dct)
-            except KeyError:
+                # Check if tensor dimensions are compatible with tensor parallelism
+                if self.tp_degree > 1 and dummy.numel() % self.tp_degree != 0:
+                    # Skip DCT for tensors that can't be evenly sharded
+                    tplr.logger.warning(
+                        f"[Init] Parameter {n} with shape {dummy.shape} not compatible with "
+                        f"TP degree {self.tp_degree}; using identity transform"
+                    )
+                    enc = dummy
+                else:
+                    enc = self.transformer.encode(dummy, use_dct=self.hparams.use_dct)
+            except (KeyError, RuntimeError) as e:
                 tplr.logger.warning(
-                    f"[Init] DCT shape {dummy.shape[0]} not registered; "
-                    "using identity transform for parameter %s", n
+                    f"[Init] DCT failed for parameter {n} with shape {dummy.shape}: {e}; "
+                    "using identity transform"
                 )
                 enc = dummy
 
@@ -1100,13 +1113,11 @@ class Miner(BaseNode):
             else:
                 input_ids = torch.tensor(batch, dtype=torch.long, device=self.device)
 
-
             # temporary
-            #vocab_size = self.model.vocab_size
-            #invalid = input_ids >= vocab_size
-            #if invalid.any():
+            # vocab_size = self.model.vocab_size
+            # invalid = input_ids >= vocab_size
+            # if invalid.any():
             #    input_ids[invalid] = self.tokenizer.pad_token_id
-            
 
             local_bs = len(batch)  # type: ignore
             accum_batch_size += local_bs
@@ -1119,7 +1130,7 @@ class Miner(BaseNode):
             labels[:, :-1] = input_ids[:, 1:]  # ✓ shift by +1
             labels[:, -1] = self.tokenizer.pad_token_id
             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-            #labels = torch.where(labels >= vocab_size, -100, labels) FOR SOME TESTING, DO NOT MERGE
+            # labels = torch.where(labels >= vocab_size, -100, labels) FOR SOME TESTING, DO NOT MERGE
 
             # ------------------------------------------------------------------ #
             # 3. Forward + backward
@@ -1248,10 +1259,18 @@ class Miner(BaseNode):
 
     def _get_offloaded_param(self):
         """Get a copy of current parameters and offload them to CPU"""
-        return [
-            param.data.detach().clone().to("cpu")
-            for param in self.bare_model.parameters()
-        ]
+        params_offloaded = []
+
+        for param in self.bare_model.parameters():
+            if isinstance(param, DTensor):
+                # Get the local TP shard
+                local_param = param.to_local()
+                params_offloaded.append(local_param.detach().clone().to("cpu"))
+            else:
+                # For non-TP tensors
+                params_offloaded.append(param.data.detach().clone().to("cpu"))
+
+        return params_offloaded
 
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""

@@ -334,17 +334,22 @@ def outer_step(
         optimizer.step()
         torch.cuda.empty_cache()
 
-        # broadcast updated weights to other ranks
         if world_size > 1:
-            for t in bare_model.state_dict().values():
-                if torch.is_tensor(t):
-                    dist.broadcast(t.data, src=0)
+            for name, tensor in bare_model.state_dict().items():
+                if torch.is_tensor(tensor):
+                    if isinstance(tensor, DT):
+                        continue
+                    else:
+                        dist.broadcast(tensor.data, src=0)
 
-    else:  # non-master ranks just receive the broadcast
+    else:
         if world_size > 1:
-            for t in bare_model.state_dict().values():
-                if torch.is_tensor(t):
-                    dist.broadcast(t.data, src=0)
+            for name, tensor in bare_model.state_dict().items():
+                if torch.is_tensor(tensor):
+                    if isinstance(tensor, DT):
+                        continue
+                    else:
+                        dist.broadcast(tensor.data, src=0)
 
 
 async def update_peers(instance: NeuronT, window: int, peer_start: float) -> None:

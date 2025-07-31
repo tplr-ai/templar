@@ -431,25 +431,18 @@ class Miner(BaseNode):
             else:
                 dummy = torch.zeros_like(p)
 
-            # Try DCT; fall back to identity if the size is incompatible with TP
-            try:
-                # Check if tensor dimensions are compatible with tensor parallelism
-                if self.tp_degree > 1 and dummy.numel() % self.tp_degree != 0:
-                    # Skip DCT for tensors that can't be evenly sharded
-                    tplr.logger.warning(
-                        f"[Init] Parameter {n} with shape {dummy.shape} not compatible with "
-                        f"TP degree {self.tp_degree}; using identity transform"
-                    )
-                    enc = dummy
-                else:
-                    enc = self.transformer.encode(dummy, use_dct=self.hparams.use_dct)
-            except (KeyError, RuntimeError) as e:
-                tplr.logger.warning(
-                    f"[Init] DCT failed for parameter {n} with shape {dummy.shape}: {e}; "
-                    "using identity transform"
-                )
-                enc = dummy
+            padded_dummy, padding_info = self._pad_tensor_for_tp(dummy, n)
 
+            # Try DCT with padded tensor
+            try:
+                enc = self.transformer.encode(padded_dummy, use_dct=self.hparams.use_dct)
+            except KeyError:
+                tplr.logger.warning(
+                    f"[Init] DCT shape {padded_dummy.shape[0]} not registered; "
+                    "using identity transform for parameter %s", n
+                )
+                enc = padded_dummy
+    
             _, _, xshape, totalk, _ = self.compressor.compress(
                 enc,
                 self.hparams.topk_compression,
@@ -531,6 +524,69 @@ class Miner(BaseNode):
         self.windows_per_shard = getattr(self.hparams, "windows_per_shard")
 
         tplr.logger.info("[Init] ✔ fully done – entering run()")
+
+
+    # Padding for DCT + TP
+    def _pad_tensor_for_tp(self, tensor, param_name):
+        """Pad tensor to make it divisible by tensor parallelism degree."""
+        if self.tp_degree <= 1:
+            return tensor, {"original_shape": tensor.shape, "padding": None}
+
+        original_shape = tensor.shape
+        padded_tensor = tensor
+        padding_applied = None
+
+        # Check if any dimension needs padding
+        needs_padding = False
+        for dim_size in original_shape:
+            if dim_size % self.tp_degree != 0:
+                needs_padding = True
+                break
+
+        if needs_padding:
+            # Calculate padding for each dimension (PyTorch padding is applied from last to first dimension)
+            padding_list = []
+            new_shape = list(original_shape)
+
+            for dim_idx in reversed(range(len(original_shape))):
+                dim_size = original_shape[dim_idx]
+                remainder = dim_size % self.tp_degree
+
+                if remainder != 0:
+                    pad_amount = self.tp_degree - remainder
+                    new_shape[dim_idx] = dim_size + pad_amount
+                    padding_list.extend([0, pad_amount])  # [left_pad, right_pad]
+                else:
+                    padding_list.extend([0, 0])
+
+            # Apply padding with zeros
+            padded_tensor = torch.nn.functional.pad(tensor, padding_list, mode='constant', value=0)
+            padding_applied = {
+                "padding_list": padding_list,
+                "new_shape": tuple(new_shape)
+            }
+
+            tplr.logger.debug(f"[Padding] {param_name}: {original_shape} -> {padded_tensor.shape}")
+
+        return padded_tensor, {
+            "original_shape": original_shape,
+            "padding": padding_applied
+        }
+
+    # Unpadding for DCT + TP
+    def _unpad_tensor(self, padded_tensor, padding_info):
+        """Remove padding from tensor to restore original shape."""
+        if padding_info["padding"] is None:
+            return padded_tensor
+
+        original_shape = padding_info["original_shape"]
+
+        # Create slicing tuple to remove padding
+        slices = []
+        for dim_idx, orig_size in enumerate(original_shape):
+            slices.append(slice(0, orig_size))
+
+        return padded_tensor[tuple(slices)]
 
     # Main training loop.
     async def run(self):
@@ -713,7 +769,7 @@ class Miner(BaseNode):
             if self.world_size > 1:
                 dist.barrier(device_ids=[self.local_rank])
 
-            # 1️⃣ every rank builds its momentum shard
+            # Every rank builds its momentum shard
             compress_start = tplr.T()
             shard_gradient, _, _ = tplr.prepare_gradient_dict(self, step_window)
             compression_time = tplr.T() - compress_start

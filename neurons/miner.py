@@ -1240,7 +1240,7 @@ class Miner(BaseNode):
             for (saved_param, param_spec), p in zip(
                 zip(params_offloaded, param_specs), self.bare_model.parameters()
             ):
-                # handle TP DTensors
+                # handle TP Dtensors
                 if isinstance(p, DTensor):
                     saved_param = saved_param.to(p.device, non_blocking=True)
 
@@ -1249,6 +1249,7 @@ class Miner(BaseNode):
                     saved_param_dtensor = distribute_tensor(
                         saved_param, device_mesh=p.device_mesh, placements=param_spec
                     )
+
                     p.grad = saved_param_dtensor - p
                     p.data.copy_(saved_param_dtensor.data)
                 else:
@@ -1270,17 +1271,20 @@ class Miner(BaseNode):
     def _get_offloaded_param(self):
         """Get a copy of current parameters and offload them to CPU"""
         params_offloaded = []
+        param_specs = []  # Store DTensor specs for restoration
 
         for param in self.bare_model.parameters():
             if isinstance(param, DTensor):
-                # Get the local TP shard
+                # Get the local TP shard and store the spec
                 local_param = param.to_local()
                 params_offloaded.append(local_param.detach().clone().to("cpu"))
+                param_specs.append(param.placements)  # Store the DTensor placement info
             else:
-                # For non-TP tensors
+                # For regular tensors
                 params_offloaded.append(param.data.detach().clone().to("cpu"))
+                param_specs.append(None)
 
-        return params_offloaded
+        return params_offloaded, param_specs
 
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""

@@ -1077,7 +1077,7 @@ class Miner(BaseNode):
         local_tokens_sum: int = 0  # local running totals
         local_loss_sum: float = 0.0
 
-        params_offloaded = self._get_offloaded_param()
+        params_offloaded, param_specs = self._get_offloaded_param()
 
         inner_step_count: int = 0
         loader_iter = iter(loader)
@@ -1237,14 +1237,24 @@ class Miner(BaseNode):
         # 6. parameter offloading logic
         # ------------------------------------------------------------------ #
         with torch.no_grad():
-            for saved_param, p in zip(params_offloaded, self.bare_model.parameters()):
-                saved_param = saved_param.to(p.device, non_blocking=True)
+            for (saved_param, param_spec), p in zip(
+                zip(params_offloaded, param_specs), self.bare_model.parameters()
+            ):
+                # handle TP DTensors
+                if isinstance(p, DTensor):
+                    saved_param = saved_param.to(p.device, non_blocking=True)
 
-                # (a) pseudo-gradient for outer step
-                p.grad = saved_param - p.data
+                    from torch.distributed.tensor import distribute_tensor
 
-                # (b) ***in-place*** restore original weights
-                p.data.copy_(saved_param)
+                    saved_param_dtensor = distribute_tensor(
+                        saved_param, device_mesh=p.device_mesh, placements=param_spec
+                    )
+                    p.grad = saved_param_dtensor - p
+                    p.data.copy_(saved_param_dtensor.data)
+                else:
+                    saved_param = saved_param.to(p.device, non_blocking=True)
+                    p.grad = saved_param - p.data
+                    p.data.copy_(saved_param)
 
         # ---------------------------------------------------------------------- #
         # 7. Return aggregated metrics

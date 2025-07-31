@@ -58,7 +58,7 @@ DEFAULT_HPARAMS = {
     "warmup_steps": 250,
     "alpha_f": 0.1,  # Final learning rate multiplier
     "t_max": 20000,  # Total steps for cosine decay
-    "windows_per_shard": 455, # 1024**3 * 100 / (2048*192*30*20) 
+    "windows_per_shard": 455,  # 1024**3 * 100 / (2048*192*30*20)
 }
 
 

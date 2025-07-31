@@ -338,7 +338,7 @@ class Validator(BaseNode):
         self.rank = 0
         self.world_size = 1
         
-        self.windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
+        self.windows_per_shard = getattr(self.hparams, "windows_per_shard")
         self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
             rank=self.rank,

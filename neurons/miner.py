@@ -284,23 +284,21 @@ class Miner(BaseNode):
         self.pp_degree = int(getattr(tt, "pp_degree", 1))
         self.cp_degree = int(getattr(tt, "cp_degree", 1))
 
-        self.dp_replicate = getattr(tt, "dp_replicate", None)
-        self.dp_shard     = getattr(tt, "dp_shard",     None)
+        self.dp_replicate = int(getattr(tt, "dp_replicate", 1))
+        self.dp_shard     = int(getattr(tt, "dp_shard",     1))
 
-        if (self.dp_replicate is not None) and (self.dp_shard is not None):
+        if self.dp_replicate > 1 and self.dp_shard > 1:
             raise ValueError(
                 "Specify either torchtitan.dp_replicate or torchtitan.dp_shard, "
                 "but not both."
             )
 
-        if self.dp_replicate is None and self.dp_shard is None:
+        if self.dp_replicate == 1 and self.dp_shard == 1:
             # sharded DP by default
             self.dp_shard = self.world_size
 
-        if self.dp_replicate is not None and (tp_degree > 1 or pp_degree > 1 or cp_degree > 1):
-            raise ValueError(
-                "dp_replicate may only be used when tp_degree = pp_degree = cp_degree = 1 "
-            )
+        if self.dp_replicate > 1 and (self.tp_degree > 1 or self.pp_degree > 1 or self.cp_degree > 1):
+            raise ValueError("dp_replicate can only be used when tp/pp/cp are all 1.")
         
         self.dp_replicate = int(self.dp_replicate or 1)
         self.dp_shard     = int(self.dp_shard or 1)

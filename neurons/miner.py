@@ -42,7 +42,7 @@ from torch import autocast
 from torch.amp.grad_scaler import GradScaler
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.optim import ZeroRedundancyOptimizer
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor as DT
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
@@ -72,6 +72,9 @@ import tplr
 
 # Local
 from neurons import BaseNode
+
+# Import the DCT functions from the transformer module
+from tplr.compress import _dct, _get_smaller_split, _idct
 
 # Local
 
@@ -429,7 +432,7 @@ class Miner(BaseNode):
                 self.error_feedback[n] = torch.zeros_like(p, device=self.device)
 
             # Handle DTensor for tensor parallelism
-            if isinstance(p, DTensor):
+            if isinstance(p, DT):
                 dummy = torch.zeros_like(p.to_local())
             else:
                 dummy = torch.zeros_like(p)
@@ -452,9 +455,6 @@ class Miner(BaseNode):
         tplr.logger.info(
             f"Pre-registering {len(padded_shapes_to_register)} DCT shapes..."
         )
-
-        # Import the DCT functions from the transformer module
-        from tplr.compress import _get_smaller_split, _dct, _idct
 
         for shape_dim in padded_shapes_to_register:
             # Force registration by updating the transformer's internal dictionaries
@@ -484,9 +484,7 @@ class Miner(BaseNode):
             )
 
             _, _, xshape, totalk, _ = self.compressor.compress(
-                enc,
-                self.hparams.topk_compression,
-                align_to=self.tp_degree
+                enc, self.hparams.topk_compression, align_to=self.tp_degree
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
@@ -743,7 +741,7 @@ class Miner(BaseNode):
 
             # 1) parameters & buffers
             for tensor in self.bare_model.state_dict().values():
-                if torch.is_tensor(tensor) and not isinstance(tensor, DTensor):
+                if torch.is_tensor(tensor) and not isinstance(tensor, DT):
                     dist.broadcast(tensor.data, src=0)
 
             bcast_time = tplr.T() - bcast_start
@@ -1344,13 +1342,11 @@ class Miner(BaseNode):
             for (saved_param, param_meta), p in zip(
                 zip(params_offloaded, param_specs), self.bare_model.parameters()
             ):
-                if param_meta["is_dtensor"] and isinstance(p, DTensor):
+                if param_meta["is_dtensor"] and isinstance(p, DT):
                     # Handle TP DTensors
                     saved_param = saved_param.to(p.device, non_blocking=True)
 
                     # Create a DTensor from the local shard directly
-                    from torch.distributed.tensor import DTensor as DT
-
                     saved_param_dtensor = DT.from_local(
                         saved_param,
                         device_mesh=param_meta["device_mesh"],
@@ -1381,7 +1377,7 @@ class Miner(BaseNode):
         param_info = []  # Store DTensor info for restoration
 
         for param in self.bare_model.parameters():
-            if isinstance(param, DTensor):
+            if isinstance(param, DT):
                 # Get the local TP shard and store the spec
                 local_param = param.to_local()
                 params_offloaded.append(local_param.detach().clone().to("cpu"))

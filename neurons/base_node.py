@@ -90,6 +90,9 @@ class BaseNode:
         try:
             with prof_ctx:
                 await self.run()
+        except Exception:
+            # Catch and log the unhandled exception before shutting down.
+            tplr.logger.error("Unhandled exception in run()", exc_info=True)
         finally:
             # ensure we exit cleanly even if run() returns without CTRL-C
             if not self.stop_event.is_set():

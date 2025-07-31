@@ -293,10 +293,6 @@ class Miner(BaseNode):
                 "but not both."
             )
 
-        if self.dp_replicate == 1 and self.dp_shard == 1:
-            # sharded DP by default
-            self.dp_shard = self.world_size
-
         if self.dp_replicate > 1 and (self.tp_degree > 1 or self.pp_degree > 1 or self.cp_degree > 1):
             raise ValueError("dp_replicate can only be used when tp/pp/cp are all 1.")
         
@@ -309,17 +305,17 @@ class Miner(BaseNode):
                 f"dp_replicate × dp_shard ({self.dp_replicate}×{self.dp_shard})."
             )
 
-        if self.world_size % tp_degree != 0:
+        if self.world_size % self.tp_degree != 0:
             raise ValueError(
-                f"World size ({self.world_size}) must be divisible by tensor-parallel degree ({tp_degree})"
+                f"World size ({self.world_size}) must be divisible by tensor-parallel degree ({self.tp_degree})"
             )
 
         pdims = ParallelDims(
             dp_replicate=self.dp_replicate,
             dp_shard=self.dp_shard,
-            tp=tp_degree,
-            pp=pp_degree,
-            cp=cp_degree,
+            tp=self.tp_degree,
+            pp=self.pp_degree,
+            cp=self.cp_degree,
             ep=1,
             world_size=self.world_size,
         )
@@ -358,7 +354,7 @@ class Miner(BaseNode):
         self.model.init_weights()
 
         tplr.logger.info(
-            f"[Init] Llama model parallelized with TP={tp_degree} and DP={dp_degree}, and on device"
+            f"[Init] Llama model parallelized with TP={self.tp_degree} and DP_shard={self.dp_shard}, and on device"
         )
 
         self.bare_model = getattr(self.model, "module", self.model)
@@ -378,13 +374,6 @@ class Miner(BaseNode):
         # Init optimizer and momentum
         self.error_feedback = {}
         self.owned_params = set()
-
-        # dp_group = None
-        if dp_degree > 1:
-            # dp_group = world_mesh.get_group("dp_shard")
-            tplr.logger.info(
-                f"[Init] Using data-parallel group for optimizer sharding (size={dp_degree})."
-            )
 
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate

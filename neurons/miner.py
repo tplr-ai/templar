@@ -1237,19 +1237,22 @@ class Miner(BaseNode):
         # 6. parameter offloading logic
         # ------------------------------------------------------------------ #
         with torch.no_grad():
-            for (saved_param, param_spec), p in zip(
+            for (saved_param, param_meta), p in zip(
                 zip(params_offloaded, param_specs), self.bare_model.parameters()
             ):
-                # handle TP Dtensors
-                if isinstance(p, DTensor):
+                if param_meta["is_dtensor"] and isinstance(p, DTensor):
+                    # Handle TP DTensors
                     saved_param = saved_param.to(p.device, non_blocking=True)
 
-                    from torch.distributed.tensor import distribute_tensor
+                    # Create a DTensor from the local shard directly
+                    from torch.distributed.tensor import DTensor as DT
 
-                    saved_param_dtensor = distribute_tensor(
-                        saved_param, device_mesh=p.device_mesh, placements=param_spec
+                    saved_param_dtensor = DT.from_local(
+                        saved_param,
+                        device_mesh=param_meta["device_mesh"],
+                        placements=param_meta["placements"],
+                        run_check=False,
                     )
-
                     p.grad = saved_param_dtensor - p
                     p.data.copy_(saved_param_dtensor.data)
                 else:
@@ -1271,20 +1274,27 @@ class Miner(BaseNode):
     def _get_offloaded_param(self):
         """Get a copy of current parameters and offload them to CPU"""
         params_offloaded = []
-        param_specs = []  # Store DTensor specs for restoration
+        param_info = []  # Store DTensor info for restoration
 
         for param in self.bare_model.parameters():
             if isinstance(param, DTensor):
                 # Get the local TP shard and store the spec
                 local_param = param.to_local()
                 params_offloaded.append(local_param.detach().clone().to("cpu"))
-                param_specs.append(param.placements)  # Store the DTensor placement info
+                param_info.append(
+                    {  # Store the DTensor placement info
+                        "is_dtensor": True,
+                        "device_mesh": param.device_mesh,
+                        "placements": param.placements,
+                        "local_shape": local_param.shape,
+                    }
+                )
             else:
                 # For regular tensors
                 params_offloaded.append(param.data.detach().clone().to("cpu"))
-                param_specs.append(None)
+                param_info.append({"is_dtensor": False})
 
-        return params_offloaded, param_specs
+        return params_offloaded, param_info
 
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""

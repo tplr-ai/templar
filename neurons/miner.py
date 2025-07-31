@@ -486,6 +486,7 @@ class Miner(BaseNode):
             _, _, xshape, totalk, _ = self.compressor.compress(
                 enc,
                 self.hparams.topk_compression,
+                align_to=self.tp_degree
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk

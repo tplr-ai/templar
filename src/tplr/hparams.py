@@ -78,31 +78,31 @@ def create_namespace(hparams: dict) -> SimpleNamespace:
 
     hparams_ns = SimpleNamespace(**full_hparams)
 
-    # Initialize tokenizer
-    try:
-        hparams_ns.tokenizer = AutoTokenizer.from_pretrained(
-            hparams_ns.tokenizer_name, verbose=False, clean_up_tokenization_spaces=True
-        )
-        hparams_ns.tokenizer.pad_token = hparams_ns.tokenizer.eos_token
-    except Exception as e:
-        logger.error(f"Failed to load tokenizer: {e}")
-        raise
+    # # Initialize tokenizer
+    # try:
+    #     hparams_ns.tokenizer = AutoTokenizer.from_pretrained(
+    #         hparams_ns.tokenizer_name, verbose=False, clean_up_tokenization_spaces=True
+    #     )
+    #     hparams_ns.tokenizer.pad_token = hparams_ns.tokenizer.eos_token
+    # except Exception as e:
+    #     logger.error(f"Failed to load tokenizer: {e}")
+    #     raise
 
-    # Initialize model config
-    try:
-        hparams_ns.model_config = LlamaConfig(
-            vocab_size=hparams_ns.tokenizer.vocab_size,
-            hidden_size=hparams_ns.hidden_size,
-            num_hidden_layers=hparams_ns.num_hidden_layers,
-            num_attention_heads=hparams_ns.num_attention_heads,
-            intermediate_size=hparams_ns.intermediate_size,
-            num_key_value_heads=hparams_ns.num_key_value_heads,
-            activation_function=hparams_ns.activation_function,
-            max_position_embeddings=hparams_ns.max_position_embeddings,
-        )
-    except Exception as e:
-        logger.error(f"Failed to create model config: {e}")
-        raise
+    # # Initialize model config
+    # try:
+    #     hparams_ns.model_config = LlamaConfig(
+    #         vocab_size=hparams_ns.tokenizer.vocab_size,
+    #         hidden_size=hparams_ns.hidden_size,
+    #         num_hidden_layers=hparams_ns.num_hidden_layers,
+    #         num_attention_heads=hparams_ns.num_attention_heads,
+    #         intermediate_size=hparams_ns.intermediate_size,
+    #         num_key_value_heads=hparams_ns.num_key_value_heads,
+    #         activation_function=hparams_ns.activation_function,
+    #         max_position_embeddings=hparams_ns.max_position_embeddings,
+    #     )
+    # except Exception as e:
+    #     logger.error(f"Failed to create model config: {e}")
+    #     raise
 
     return hparams_ns
 

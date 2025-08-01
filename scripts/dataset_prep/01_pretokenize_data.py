@@ -1,10 +1,14 @@
 import argparse
 import glob
+<<<<<<< HEAD
 import io
+=======
+>>>>>>> feature/1tb-dataset-sharder
 import math
 import multiprocessing as mp
 import os
 
+<<<<<<< HEAD
 import boto3
 import dotenv
 import numpy as np
@@ -15,6 +19,12 @@ from transformers import AutoTokenizer
 from datasets import load_dataset
 
 dotenv.load_dotenv()
+=======
+import numpy as np
+from datasets import load_dataset
+from tqdm import tqdm
+from transformers import AutoTokenizer
+>>>>>>> feature/1tb-dataset-sharder
 
 # Global tokenizer for multiprocessing
 _tokenizer = None

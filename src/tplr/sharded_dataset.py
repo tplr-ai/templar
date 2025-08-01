@@ -228,19 +228,15 @@ class ShardedDatasetManager:
             ids_file: The path to the tokens file's indices in bucket
         """
         return await asyncio.gather(
-            asyncio.create_task(
-                self.comms.s3_get_object(
-                    tokens_file,
-                    bucket,
-                    load_data=False,
-                )
+            self.comms.s3_get_object(
+                tokens_file,
+                bucket,
+                load_data=False,
             ),
-            asyncio.create_task(
-                self.comms.s3_get_object(
-                    ids_file,
-                    bucket,
-                    load_data=False,
-                )
+            self.comms.s3_get_object(
+                ids_file,
+                bucket,
+                load_data=False,
             ),
         )
 

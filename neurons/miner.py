@@ -573,9 +573,67 @@ class Miner(BaseNode):
     @staticmethod
     def _gather_last_dim_dtensor(x: DT) -> torch.Tensor:
         local = x.to_local()
-        full  = dist_fn.all_gather(local, dim=-1,
-                                   group=x.device_mesh.get_dim_groups()[-1][0])
-        return full
+        device_mesh = x.device_mesh
+
+        try:
+            tp_dim = len(device_mesh.mesh.shape) - 1
+            tp_group = device_mesh.get_group(mesh_dim=tp_dim)
+            gathered = dist_fn.all_gather(local, dim=-1, group=tp_group)
+            return gathered
+        except AttributeError:
+            pass
+
+        try:
+            coord = device_mesh.get_coordinate()
+            if coord is None:
+                raise RuntimeError("Could not get device mesh coordinate")
+
+            mesh_shape = device_mesh.mesh.shape
+            tp_dim = len(mesh_shape) - 1 
+            tp_size = mesh_shape[tp_dim]
+
+            tp_ranks = []
+            base_coord = list(coord)
+            for tp_idx in range(tp_size):
+                tp_coord = base_coord.copy()
+                tp_coord[tp_dim] = tp_idx
+                rank = device_mesh.mesh[tuple(tp_coord)].item()
+                tp_ranks.append(rank)
+
+            tp_group = torch.distributed.new_group(tp_ranks)
+            gathered = dist_fn.all_gather(local, dim=-1, group=tp_group)
+            return gathered
+
+        except Exception as e:
+            tplr.logger.warning(f"Could not manually create TP group: {e}")
+
+        try:
+            from torch.distributed.tensor import Replicate
+            placements = list(x.placements)
+            placements[-1] = Replicate()
+
+            replicated = x.redistribute(device_mesh=device_mesh, placements=placements)
+            return replicated.to_local()
+
+        except Exception as e:
+            tplr.logger.warning(f"Could not redistribute DTensor: {e}")
+
+        try:
+            gathered_list = [torch.zeros_like(local) for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather(gathered_list, local)
+
+            tp_shards = gathered_list[:self.tp_degree] if hasattr(self, 'tp_degree') else gathered_list
+            return torch.cat(tp_shards, dim=-1)
+
+        except Exception as e:
+            tplr.logger.error(f"All gather methods failed: {e}")
+
+        tplr.logger.error(
+            "Could not gather DTensor across TP dimension. "
+            "Returning local shard - loss calculation will be incorrect!"
+        )
+        return local
+
 
     # Padding for DCT + TP
     def _pad_tensor_for_tp(self, tensor, param_name):

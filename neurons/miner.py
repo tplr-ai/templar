@@ -578,9 +578,14 @@ class Miner(BaseNode):
         try:
             tp_dim = len(device_mesh.mesh.shape) - 1
             tp_group = device_mesh.get_group(mesh_dim=tp_dim)
-            gathered = dist_fn.all_gather(local, dim=-1, group=tp_group)
+            tp_size = device_mesh.mesh.shape[tp_dim]
+            gathered_list = [torch.zeros_like(local) for _ in range(tp_size)]
+            torch.distributed.all_gather(gathered_list, local, group=tp_group)
+            gathered = torch.cat(gathered_list, dim=-1)
             return gathered
-        except AttributeError:
+
+        except (AttributeError, RuntimeError) as e:
+            tplr.logger.warning(f"Method 1 failed: {e}")
             pass
 
         try:
@@ -589,7 +594,7 @@ class Miner(BaseNode):
                 raise RuntimeError("Could not get device mesh coordinate")
 
             mesh_shape = device_mesh.mesh.shape
-            tp_dim = len(mesh_shape) - 1 
+            tp_dim = len(mesh_shape) - 1
             tp_size = mesh_shape[tp_dim]
 
             tp_ranks = []

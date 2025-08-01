@@ -193,10 +193,14 @@ async def run_preprocessing(args, seq_len: int = 2048, token_dtype: np.dtype = n
         #     list,
         # )
 
+        raw_idx = np.arange(0, tok_u32.shape[0]+1, seq_len)
+        starts = raw_idx[:-1]
+        ends = raw_idx[1:]
+
         bits = Parallel(n_jobs=os.cpu_count() * 2, prefer="threads")(
-            delayed(tokens_handler)(np.stack(arr))
-            for arr in tqdm(
-                c.partition_all(seq_len, tok_u32), total=tok_u32.shape[0] // seq_len
+            delayed(tokens_handler)(tok_u32[start:end])
+            for start, end in tqdm(
+                zip(starts, ends), total=len(starts)
             )
         )
         sample_ids = np.stack(bits).view(np.uint64)
@@ -205,7 +209,8 @@ async def run_preprocessing(args, seq_len: int = 2048, token_dtype: np.dtype = n
         np.save(buffer, sample_ids)
         buffer.seek(0)
 
-        key = os.path.join(args.r2_prefix, ids_file)
+        filename = ids_file.split('/')[-1]
+        key = os.path.join(args.r2_prefix, filename)
         s3_client.upload_fileobj(buffer, args.r2_bucket, key)
         tqdm.write(
             f"Uploaded sample_ids {i} to R2: s3://{args.r2_bucket}/{key} "
@@ -230,6 +235,10 @@ async def run_preprocessing(args, seq_len: int = 2048, token_dtype: np.dtype = n
         # print()  # newline after progress bar
         # sample_ids.tofile(ids_file)
         del tokens_view, sample_ids
+        os.remove(tokens_file)
+        tokens_file = new_tokens_file
+        ids_file = new_ids_file
+
     print(f"sample_ids.bin written in {time.perf_counter() - t1:.1f}s")
 
     # ── 4. Integrity summary and validation ─────────────────────────────

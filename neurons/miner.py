@@ -1357,22 +1357,36 @@ class Miner(BaseNode):
             for (saved_param, param_meta), p in zip(
                 zip(params_offloaded, param_specs), self.bare_model.parameters()
             ):
-                if param_meta["is_dtensor"] and isinstance(p, DT):
-                    # Handle TP DTensors
-                    saved_param = saved_param.to(p.device, non_blocking=True)
+                saved_param = saved_param.to(p.device, non_blocking=True)
 
-                    # Create a DTensor from the local shard directly
-                    saved_param_dtensor = DT.from_local(
-                        saved_param,
-                        device_mesh=param_meta["device_mesh"],
-                        placements=param_meta["placements"],
-                        run_check=False,
-                    )
-                    p.grad = saved_param_dtensor - p
-                    p.data.copy_(saved_param_dtensor.data)
+                if param_meta["is_dtensor"] and isinstance(p, DT):
+                    if p.grad is None:
+                        local_grad = saved_param.to_local() - p.to_local()
+                        p.grad = DT.from_local(
+                            local_grad,
+                            device_mesh=param_meta["device_mesh"],
+                            placements=param_meta["placements"],
+                            run_check=False,
+                        )
+                    else:
+                        local_grad = saved_param.to_local() - p.to_local()
+                        new_grad = DT.from_local(
+                            local_grad,
+                            device_mesh=param_meta["device_mesh"],
+                            placements=param_meta["placements"],
+                            run_check=False,
+                        )
+                        p.grad += new_grad
+
+                    local_saved = saved_param.to_local() if saved_param.ndim > 0 else saved_param
+                    local_current = p.to_local()
+                    local_current.copy_(local_saved)
+
                 else:
-                    saved_param = saved_param.to(p.device, non_blocking=True)
-                    p.grad = saved_param - p.data
+                    if p.grad is None:
+                        p.grad = saved_param - p.data
+                    else:
+                        p.grad += (saved_param - p.data)
                     p.data.copy_(saved_param)
 
         # ---------------------------------------------------------------------- #
@@ -1389,23 +1403,20 @@ class Miner(BaseNode):
     def _get_offloaded_param(self):
         """Get a copy of current parameters and offload them to CPU"""
         params_offloaded = []
-        param_info = []  # Store DTensor info for restoration
+        param_info = []
 
         for param in self.bare_model.parameters():
             if isinstance(param, DT):
-                # Get the local TP shard and store the spec
-                local_param = param.to_local()
-                params_offloaded.append(local_param.detach().clone().to("cpu"))
-                param_info.append(
-                    {  # Store the DTensor placement info
-                        "is_dtensor": True,
-                        "device_mesh": param.device_mesh,
-                        "placements": param.placements,
-                        "local_shape": local_param.shape,
-                    }
-                )
+                full_param = param.full_tensor()
+                params_offloaded.append(full_param.detach().clone().to("cpu"))
+                param_info.append({
+                    "is_dtensor": True,
+                    "device_mesh": param.device_mesh,
+                    "placements": param.placements,
+                    "global_shape": param.shape,
+                    "local_shape": param.to_local().shape,
+                })
             else:
-                # For regular tensors
                 params_offloaded.append(param.data.detach().clone().to("cpu"))
                 param_info.append({"is_dtensor": False})
 

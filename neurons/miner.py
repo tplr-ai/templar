@@ -1241,9 +1241,14 @@ class Miner(BaseNode):
             # 3. Forward + backward
             # ------------------------------------------------------------------ #
             with autocast(device_type=self.device.type, dtype=self.amp_dtype):
-                outputs = self.model(input_ids, labels)
+                if getattr(self.hparams.torchtitan, "disable_loss_parallel", True):
+                    logits = self.model(input_ids)
+                    if isinstance(logits, DT):
+                        logits = titan.ops.gather_last_dim(logits)
+                    calculated_loss = cross_entropy_loss(logits, labels)
 
-            calculated_loss = cross_entropy_loss(outputs, labels)
+                else:
+                    calculated_loss = self.model(input_ids, labels)
 
             loss = calculated_loss / self.sampler.grad_accum_steps
             loss_item = calculated_loss.detach().item()

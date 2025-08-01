@@ -42,7 +42,7 @@ from torch import autocast
 from torch.amp.grad_scaler import GradScaler
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.optim import ZeroRedundancyOptimizer
-from torch.distributed.tensor import DTensor as DT
+from torch.distributed.tensor import DTensor as DT, Replicate
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
@@ -567,6 +567,15 @@ class Miner(BaseNode):
         self.windows_per_shard = getattr(self.hparams, "windows_per_shard")
 
         tplr.logger.info("[Init] ✔ fully done – entering run()")
+
+
+    @staticmethod
+    def _gather_last_dim_dtensor(x: DT) -> torch.Tensor:
+        mesh        = x.device_mesh
+        placements  = list(x.placements)
+        placements[-1] = Replicate()
+        full        = x.redistribute(mesh, placements=tuple(placements))
+        return full.to_local()
 
     # Padding for DCT + TP
     def _pad_tensor_for_tp(self, tensor, param_name):
@@ -1241,14 +1250,12 @@ class Miner(BaseNode):
             # 3. Forward + backward
             # ------------------------------------------------------------------ #
             with autocast(device_type=self.device.type, dtype=self.amp_dtype):
-                if getattr(self.hparams.torchtitan, "disable_loss_parallel", True):
-                    logits = self.model(input_ids)
-                    if isinstance(logits, DT):
-                        logits = titan.ops.gather_last_dim(logits)
-                    calculated_loss = cross_entropy_loss(logits, labels)
+                logits = self.model(input_ids)
 
-                else:
-                    calculated_loss = self.model(input_ids, labels)
+                if isinstance(logits, DT):
+                    logits = self._gather_last_dim_dtensor(logits)
+
+                calculated_loss = cross_entropy_loss(logits, labels)
 
             loss = calculated_loss / self.sampler.grad_accum_steps
             loss_item = calculated_loss.detach().item()

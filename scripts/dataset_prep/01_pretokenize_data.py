@@ -109,7 +109,8 @@ def main(args):
     existing_count = 0
     if args.r2_bucket:
         print("R2 mode enabled. Will upload to R2 bucket.")
-        s3_client = boto3.client(
+        session = boto3.session()
+        s3_client = session.client(
             "s3",
             endpoint_url=args.r2_endpoint_url,
             aws_access_key_id=args.r2_access_key_id,

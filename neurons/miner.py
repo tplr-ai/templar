@@ -43,7 +43,6 @@ from torch.amp.grad_scaler import GradScaler
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.distributed.tensor import DTensor as DT
-import torch.distributed.nn.functional as dist_fn
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
@@ -569,77 +568,6 @@ class Miner(BaseNode):
 
         tplr.logger.info("[Init] ✔ fully done – entering run()")
 
-
-    @staticmethod
-    def _gather_last_dim_dtensor(x: DT) -> torch.Tensor:
-        local = x.to_local()
-        device_mesh = x.device_mesh
-
-        try:
-            tp_dim = len(device_mesh.mesh.shape) - 1
-            tp_group = device_mesh.get_group(mesh_dim=tp_dim)
-            tp_size = device_mesh.mesh.shape[tp_dim]
-            gathered_list = [torch.zeros_like(local) for _ in range(tp_size)]
-            torch.distributed.all_gather(gathered_list, local, group=tp_group)
-            gathered = torch.cat(gathered_list, dim=-1)
-            return gathered
-
-        except (AttributeError, RuntimeError) as e:
-            tplr.logger.warning(f"Method 1 failed: {e}")
-            pass
-
-        try:
-            coord = device_mesh.get_coordinate()
-            if coord is None:
-                raise RuntimeError("Could not get device mesh coordinate")
-
-            mesh_shape = device_mesh.mesh.shape
-            tp_dim = len(mesh_shape) - 1
-            tp_size = mesh_shape[tp_dim]
-
-            tp_ranks = []
-            base_coord = list(coord)
-            for tp_idx in range(tp_size):
-                tp_coord = base_coord.copy()
-                tp_coord[tp_dim] = tp_idx
-                rank = device_mesh.mesh[tuple(tp_coord)].item()
-                tp_ranks.append(rank)
-
-            tp_group = torch.distributed.new_group(tp_ranks)
-            gathered = dist_fn.all_gather(local, dim=-1, group=tp_group)
-            return gathered
-
-        except Exception as e:
-            tplr.logger.warning(f"Could not manually create TP group: {e}")
-
-        try:
-            from torch.distributed.tensor import Replicate
-            placements = list(x.placements)
-            placements[-1] = Replicate()
-
-            replicated = x.redistribute(device_mesh=device_mesh, placements=placements)
-            return replicated.to_local()
-
-        except Exception as e:
-            tplr.logger.warning(f"Could not redistribute DTensor: {e}")
-
-        try:
-            gathered_list = [torch.zeros_like(local) for _ in range(torch.distributed.get_world_size())]
-            torch.distributed.all_gather(gathered_list, local)
-
-            tp_shards = gathered_list[:self.tp_degree] if hasattr(self, 'tp_degree') else gathered_list
-            return torch.cat(tp_shards, dim=-1)
-
-        except Exception as e:
-            tplr.logger.error(f"All gather methods failed: {e}")
-
-        tplr.logger.error(
-            "Could not gather DTensor across TP dimension. "
-            "Returning local shard - loss calculation will be incorrect!"
-        )
-        return local
-
-
     # Padding for DCT + TP
     def _pad_tensor_for_tp(self, tensor, param_name):
         """Pad tensor to make it divisible by tensor parallelism degree."""
@@ -1064,15 +992,12 @@ class Miner(BaseNode):
 
                 # Add model parameters debug info
                 for name, param in self.bare_model.named_parameters():
-                    if param is not None and param.numel() >= 2:
-                        if isinstance(param, DT):
-                            slice_tensor = (
-                                param.to_local().flatten()[10:12].detach().cpu()
-                            )
-                        else:
-                            slice_tensor = param.flatten()[10:12].detach().cpu()
-
-                        debug_dict[name + "_debug"] = slice_tensor.tolist()
+                    if (
+                        param is not None and param.numel() >= 2
+                    ):  # Check if tensor has at least 2 elements
+                        debug_dict[name + "_debug"] = (
+                            param.flatten()[10:12].detach().cpu().tolist()
+                        )
 
                 # Add successful peers information
                 if gather_result is not None:
@@ -1313,12 +1238,9 @@ class Miner(BaseNode):
             # 3. Forward + backward
             # ------------------------------------------------------------------ #
             with autocast(device_type=self.device.type, dtype=self.amp_dtype):
-                logits = self.model(input_ids)
+                outputs = self.model(input_ids, labels)
 
-                if isinstance(logits, DT):
-                    logits = self._gather_last_dim_dtensor(logits)
-
-                calculated_loss = cross_entropy_loss(logits, labels)
+            calculated_loss = cross_entropy_loss(outputs, labels)
 
             loss = calculated_loss / self.sampler.grad_accum_steps
             loss_item = calculated_loss.detach().item()
@@ -1420,36 +1342,22 @@ class Miner(BaseNode):
             for (saved_param, param_meta), p in zip(
                 zip(params_offloaded, param_specs), self.bare_model.parameters()
             ):
-                saved_param = saved_param.to(p.device, non_blocking=True)
-
                 if param_meta["is_dtensor"] and isinstance(p, DT):
-                    if p.grad is None:
-                        local_grad = saved_param.to_local() - p.to_local()
-                        p.grad = DT.from_local(
-                            local_grad,
-                            device_mesh=param_meta["device_mesh"],
-                            placements=param_meta["placements"],
-                            run_check=False,
-                        )
-                    else:
-                        local_grad = saved_param.to_local() - p.to_local()
-                        new_grad = DT.from_local(
-                            local_grad,
-                            device_mesh=param_meta["device_mesh"],
-                            placements=param_meta["placements"],
-                            run_check=False,
-                        )
-                        p.grad += new_grad
+                    # Handle TP DTensors
+                    saved_param = saved_param.to(p.device, non_blocking=True)
 
-                    local_saved = saved_param.to_local() if saved_param.ndim > 0 else saved_param
-                    local_current = p.to_local()
-                    local_current.copy_(local_saved)
-
+                    # Create a DTensor from the local shard directly
+                    saved_param_dtensor = DT.from_local(
+                        saved_param,
+                        device_mesh=param_meta["device_mesh"],
+                        placements=param_meta["placements"],
+                        run_check=False,
+                    )
+                    p.grad = saved_param_dtensor - p
+                    p.data.copy_(saved_param_dtensor.data)
                 else:
-                    if p.grad is None:
-                        p.grad = saved_param - p.data
-                    else:
-                        p.grad += (saved_param - p.data)
+                    saved_param = saved_param.to(p.device, non_blocking=True)
+                    p.grad = saved_param - p.data
                     p.data.copy_(saved_param)
 
         # ---------------------------------------------------------------------- #
@@ -1466,20 +1374,23 @@ class Miner(BaseNode):
     def _get_offloaded_param(self):
         """Get a copy of current parameters and offload them to CPU"""
         params_offloaded = []
-        param_info = []
+        param_info = []  # Store DTensor info for restoration
 
         for param in self.bare_model.parameters():
             if isinstance(param, DT):
-                full_param = param.full_tensor()
-                params_offloaded.append(full_param.detach().clone().to("cpu"))
-                param_info.append({
-                    "is_dtensor": True,
-                    "device_mesh": param.device_mesh,
-                    "placements": param.placements,
-                    "global_shape": param.shape,
-                    "local_shape": param.to_local().shape,
-                })
+                # Get the local TP shard and store the spec
+                local_param = param.to_local()
+                params_offloaded.append(local_param.detach().clone().to("cpu"))
+                param_info.append(
+                    {  # Store the DTensor placement info
+                        "is_dtensor": True,
+                        "device_mesh": param.device_mesh,
+                        "placements": param.placements,
+                        "local_shape": local_param.shape,
+                    }
+                )
             else:
+                # For regular tensors
                 params_offloaded.append(param.data.detach().clone().to("cpu"))
                 param_info.append({"is_dtensor": False})
 

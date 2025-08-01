@@ -43,6 +43,7 @@ from torch.amp.grad_scaler import GradScaler
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.distributed.tensor import DTensor as DT
+import torch.distributed.nn.functional as dist_fn
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
@@ -572,17 +573,9 @@ class Miner(BaseNode):
     @staticmethod
     def _gather_last_dim_dtensor(x: DT) -> torch.Tensor:
         local = x.to_local()
-
-        tp_dim_groups = x.device_mesh.get_dim_groups()[-1]
-        tp_pg         = tp_dim_groups[0]
-        tp_world_size = tp_pg.size()
-
-        gather_buf = [
-            torch.empty_like(local) for _ in range(tp_world_size)
-        ]
-        torch.distributed.all_gather(gather_buf, local, group=tp_pg)
-
-        return torch.cat(gather_buf, dim=-1)
+        full  = dist_fn.all_gather(local, dim=-1,
+                                   group=x.device_mesh.get_dim_groups()[-1][0])
+        return full
 
     # Padding for DCT + TP
     def _pad_tensor_for_tp(self, tensor, param_name):

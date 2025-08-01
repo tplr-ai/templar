@@ -63,15 +63,23 @@ async def run_preprocessing(args, seq_len: int = 2048, token_dtype: np.dtype = n
     )
     bucket = comms_.get_own_bucket("dataset", "read")
     tokens_file, ids_file = sharded_dataset.SharedShardedDataset.locate_shards(0)
-    await asyncio.create_task(comms_.s3_get_object(
-        tokens_file,
-        bucket,
-        load_data=False,
-    ))        
+    print("Downloading first shard")
+    try:
+        downloaded = await asyncio.create_task(
+            comms_.s3_get_object(
+                tokens_file,
+                bucket,
+                load_data=False,
+            )
+        )
+        print(downloaded, type(downloaded))
+        print("Shard downloaded")
+    except Exception as e:
+        print(e)
 
     args.r2_endpoint_url = f"https://{args.r2_endpoint_url}.r2.cloudflarestorage.com"
     # print("R2 mode enabled. Will upload to R2 bucket.")
-    session = boto3.session()
+    session = boto3.session.Session()
     s3_client = session.client(
         "s3",
         endpoint_url=args.r2_endpoint_url,
@@ -111,7 +119,7 @@ async def run_preprocessing(args, seq_len: int = 2048, token_dtype: np.dtype = n
 
 
     # cursor = 0
-    file_getter = asyncio.create_task(time.sleep(0))
+    file_getter = asyncio.create_task(asyncio.sleep(0))
     for i in range(shards): #(files, start=1):
         await file_getter
         #     shard = np.load(f_path)
@@ -131,9 +139,9 @@ async def run_preprocessing(args, seq_len: int = 2048, token_dtype: np.dtype = n
         t1 = time.perf_counter()
         
         if i+1 < shards:
-            tokens_file, ids_file = sharded_dataset.SharedShardedDataset.locate_shards(i + 1)
+            new_tokens_file, new_ids_file = sharded_dataset.SharedShardedDataset.locate_shards(i + 1)
             file_getter = asyncio.create_task(comms_.s3_get_object(
-                tokens_file,
+                new_tokens_file,
                 bucket,
                 load_data=False,
             ))    

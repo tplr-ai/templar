@@ -171,10 +171,10 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    export R2_DATASET_READ_SECRET_ACCESS_KEY=your_dataset_read_secret_access_key
 
    # Aggregator R2 credentials
-   export R2_AGGREGATOR_ACCOUNT_ID="80f15715bb0b882c9e967c13e677ed7d"
+   export R2_AGGREGATOR_ACCOUNT_ID="8af7f92a8a0661cf7f1ac0420c932980"
    export R2_AGGREGATOR_BUCKET_NAME="aggregator"
-   export R2_AGGREGATOR_READ_ACCESS_KEY_ID="aa7ea943895323963edba7323e4e12b9"
-   export R2_AGGREGATOR_READ_SECRET_ACCESS_KEY="8557ba9fc49a5482fff35d591c808bbdf0ec306bf08d9524c2055736aca915d1"
+   export R2_AGGREGATOR_READ_ACCESS_KEY_ID="bb4b9f02a64dacead181786b8f353b67"
+   export R2_AGGREGATOR_READ_SECRET_ACCESS_KEY="f50761d0fbb0773c55f61debdf87439735c32c096fe4b1ab6aa6bfb7f52aa30b"
    
    export GITHUB_USER=your_github_username
    ```

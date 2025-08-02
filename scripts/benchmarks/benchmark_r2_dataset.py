@@ -23,12 +23,12 @@ import argparse
 import asyncio
 import random
 import time
-from typing import List, Optional
+from typing import Optional
 
 import bittensor as bt
 import numpy as np
 import uvloop
-from transformers.models.auto.tokenization_auto import AutoTokenizer
+from transformers import AutoTokenizer
 
 import tplr
 from tplr.r2_dataset import R2DatasetLoader
@@ -418,7 +418,7 @@ class R2DatasetBenchmark:
         R2DatasetLoader.log_profiling_summary()
 
     def _calculate_final_stats(
-        self, window_results: List[dict], total_time: float
+        self, window_results: list[dict], total_time: float
     ) -> dict:
         """Calculate comprehensive benchmark statistics"""
         if not window_results:

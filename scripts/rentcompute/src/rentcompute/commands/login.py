@@ -3,7 +3,6 @@ Login command implementation.
 """
 
 import getpass
-from typing import List
 
 from rentcompute.config import Config
 from rentcompute.providers.factory import ProviderFactory
@@ -29,7 +28,7 @@ def run(config: Config) -> None:
     print(f"API key for {provider} saved successfully.")
 
 
-def _select_provider(available_providers: List[str]) -> str:
+def _select_provider(available_providers: list[str]) -> str:
     """Prompt user to select a provider.
 
     Args:

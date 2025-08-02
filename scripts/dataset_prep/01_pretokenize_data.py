@@ -9,6 +9,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
+
 # Global tokenizer for multiprocessing
 _tokenizer = None
 

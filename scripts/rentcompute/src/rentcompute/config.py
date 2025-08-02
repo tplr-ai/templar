@@ -54,7 +54,7 @@ class Config:
         # Set secure permissions
         os.chmod(self.credentials_file, 0o600)
 
-    def load_credentials(self) -> Dict[str, Any]:
+    def load_credentials(self) -> dict[str, Any]:
         """Load API credentials from credentials file.
 
         Returns:
@@ -102,7 +102,7 @@ class Config:
 
         return provider
 
-    def save_instance(self, instance_id: str, instance_data: Dict[str, Any]) -> None:
+    def save_instance(self, instance_id: str, instance_data: dict[str, Any]) -> None:
         """Save instance data to instances file.
 
         Args:
@@ -115,7 +115,7 @@ class Config:
         with open(self.instances_file, "w") as f:
             yaml.dump(instances, f)
 
-    def load_instances(self) -> Dict[str, Any]:
+    def load_instances(self) -> dict[str, Any]:
         """Load instances data from instances file.
 
         Returns:

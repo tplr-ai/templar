@@ -24,7 +24,7 @@ import statistics
 import threading
 import time
 import uuid
-from typing import Any, Dict, Final
+from typing import Any, Final
 
 import psutil
 import torch
@@ -330,7 +330,7 @@ class MetricsLogger:
         return point
 
 
-def get_gpu_metrics() -> Dict[str, Any]:
+def get_gpu_metrics() -> dict[str, Any]:
     """
     Retrieves real-time GPU utilization metrics.
 
@@ -351,7 +351,7 @@ def get_gpu_metrics() -> Dict[str, Any]:
     }
 
 
-def get_system_metrics() -> Dict[str, Any]:
+def get_system_metrics() -> dict[str, Any]:
     """
     Retrieves CPU and RAM usage metrics.
 

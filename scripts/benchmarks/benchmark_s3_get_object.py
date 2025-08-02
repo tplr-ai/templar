@@ -15,11 +15,12 @@ import os
 import io
 import time
 import asyncio
-from aiobotocore.session import get_session
-import tplr
-from tplr.config import client_config
+from aiobotocore import session
 from dotenv import load_dotenv
 from pathlib import Path
+
+from tplr import config
+from tplr.logging import logger
 
 # Load .env similar to benchmark_parquet_loader.py
 env_path = Path(__file__).parent.parent.parent / ".env"
@@ -68,7 +69,7 @@ class R2Comms:
     """
 
     def __init__(self, config, temp_dir="./tmp_test"):
-        self.session = get_session()
+        self.session = session.get_session()
         self.temp_dir = temp_dir
         os.makedirs(self.temp_dir, exist_ok=True)
         self.config = config
@@ -83,7 +84,7 @@ class R2Comms:
             "s3",
             endpoint_url=self.get_base_url(bucket.account_id),
             region_name=CF_REGION_NAME,
-            config=client_config,
+            config=config.client_config,
             aws_access_key_id=bucket.access_key_id,
             aws_secret_access_key=bucket.secret_access_key,
         ) as s3_client:
@@ -94,7 +95,7 @@ class R2Comms:
                 )
                 return response
             except Exception as e:
-                tplr.logger.error(f"Error in s3_head_object for {key}: {e}")
+                logger.error(f"Error in s3_head_object for {key}: {e}")
                 return None
 
     async def wait_for_object(
@@ -123,7 +124,7 @@ class R2Comms:
                 "s3",
                 endpoint_url=self.get_base_url(bucket.account_id),
                 region_name=CF_REGION_NAME,
-                config=client_config,
+                config=config.client_config,
                 aws_access_key_id=bucket.access_key_id,
                 aws_secret_access_key=bucket.secret_access_key,
             ) as s3_client:
@@ -133,11 +134,11 @@ class R2Comms:
                         timeout=timeout,
                     )
                 except asyncio.TimeoutError:
-                    tplr.logger.debug(f"Timeout checking for {key}")
+                    logger.debug(f"Timeout checking for {key}")
                     return None
                 except Exception as e:
                     if "404" in str(e):
-                        tplr.logger.debug(
+                        logger.debug(
                             f"Object {key} not found in bucket {bucket.name}"
                         )
                         return None
@@ -155,7 +156,7 @@ class R2Comms:
                                 stream.content.read(chunk_size), timeout=timeout
                             )
                         except asyncio.TimeoutError:
-                            tplr.logger.debug(f"Timeout reading chunk from {key}")
+                            logger.debug(f"Timeout reading chunk from {key}")
                             return None
                         if not chunk:
                             break
@@ -164,7 +165,7 @@ class R2Comms:
             # Instead of deserializing, simply return the raw bytes.
             return data_buffer.read()
         except Exception as e:
-            tplr.logger.error(f"Error in s3_get_object_old for {key}: {e}")
+            logger.error(f"Error in s3_get_object_old for {key}: {e}")
             return None
 
     async def s3_get_object_new(self, key: str, bucket: R2Bucket, timeout: int = 5):
@@ -178,7 +179,7 @@ class R2Comms:
                 "s3",
                 endpoint_url=self.get_base_url(bucket.account_id),
                 region_name=CF_REGION_NAME,
-                config=client_config,
+                config=config.client_config,
                 aws_access_key_id=bucket.access_key_id,
                 aws_secret_access_key=bucket.secret_access_key,
             ) as s3_client:
@@ -188,11 +189,11 @@ class R2Comms:
                         timeout=timeout,
                     )
                 except asyncio.TimeoutError:
-                    tplr.logger.debug(f"Timeout checking for {key}")
+                    logger.debug(f"Timeout checking for {key}")
                     return None
                 except Exception as e:
                     if "404" in str(e):
-                        tplr.logger.debug(
+                        logger.debug(
                             f"Object {key} not found in bucket {bucket.name}"
                         )
                         return None
@@ -210,7 +211,7 @@ class R2Comms:
                                 stream.content.read(chunk_size), timeout=timeout
                             )
                         except asyncio.TimeoutError:
-                            tplr.logger.debug(f"Timeout reading chunk from {key}")
+                            logger.debug(f"Timeout reading chunk from {key}")
                             return None
                         if not chunk:
                             break
@@ -219,7 +220,7 @@ class R2Comms:
             # Return the raw bytes without deserializing.
             return data_buffer.read()
         except Exception as e:
-            tplr.logger.error(f"Error in s3_get_object_new for {key}: {e}")
+            logger.error(f"Error in s3_get_object_new for {key}: {e}")
             return None
 
 
@@ -262,7 +263,7 @@ async def benchmark_s3_get_object():
         _ = await comms.s3_get_object_old(TEST_KEY, bucket)
         duration_old = time.perf_counter() - start
         old_times.append(duration_old)
-        tplr.logger.info(
+        logger.info(
             f"Old implementation iteration {i + 1}: {duration_old:.2f} seconds"
         )
 
@@ -270,7 +271,7 @@ async def benchmark_s3_get_object():
         _ = await comms.s3_get_object_new(TEST_KEY, bucket)
         duration_new = time.perf_counter() - start
         new_times.append(duration_new)
-        tplr.logger.info(
+        logger.info(
             f"New implementation iteration {i + 1}: {duration_new:.2f} seconds"
         )
 

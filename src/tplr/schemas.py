@@ -16,13 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Global imports
-from pydantic import BaseModel, Field
-
-# Pydantic v2: ConfigDict replaces inner `class Config`
-try:  # v2
-    from pydantic import ConfigDict
-except ImportError:  # v1 fallback – noqa: D401
-    ConfigDict = dict  # type: ignore
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Bucket(BaseModel):

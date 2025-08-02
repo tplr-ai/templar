@@ -59,7 +59,7 @@ class CeliumProvider(BaseProvider):
 
     def search_machines(
         self,
-        filters: Dict[str, Any],
+        filters: dict[str, Any],
         name_pattern: Optional[str] = None,
     ) -> List[Machine]:
         """Search for available machines with given filters.
@@ -106,7 +106,7 @@ class CeliumProvider(BaseProvider):
             self._logger.error(f"Error searching machines: {e}")
             return []
 
-    def _fetch_pod_details(self, pod_id: str) -> Dict[str, Any]:
+    def _fetch_pod_details(self, pod_id: str) -> dict[str, Any]:
         """Fetch details of a pod from the API.
 
         Args:
@@ -494,8 +494,8 @@ class CeliumProvider(BaseProvider):
         self,
         method: str,
         endpoint: str,
-        params: Optional[Dict[str, Any]] = None,
-        json_data: Optional[Dict[str, Any]] = None,
+        params: Optional[dict[str, Any]] = None,
+        json_data: Optional[dict[str, Any]] = None,
     ) -> requests.Response:
         """Make a request to the Celium API.
 
@@ -528,8 +528,8 @@ class CeliumProvider(BaseProvider):
         )
 
     def _prepare_search_params(
-        self, filters: Dict[str, Any], name_pattern: Optional[str]
-    ) -> Dict[str, Any]:
+        self, filters: dict[str, Any], name_pattern: Optional[str]
+    ) -> dict[str, Any]:
         """Prepare search parameters for the API request.
 
         Args:
@@ -539,7 +539,7 @@ class CeliumProvider(BaseProvider):
         Returns:
             Dictionary of parameters for the API request
         """
-        params: Dict[str, Any] = {
+        params: dict[str, Any] = {
             "page": 0,  # Start with first page
             "size": 100,  # Get a decent amount of results
         }
@@ -590,7 +590,7 @@ class CeliumProvider(BaseProvider):
         return params
 
     def _convert_response_to_machines(
-        self, data: List[Dict[str, Any]]
+        self, data: List[dict[str, Any]]
     ) -> List[Machine]:
         """Convert API response data to Machine objects.
 
@@ -667,7 +667,7 @@ class CeliumProvider(BaseProvider):
         return machines
 
     def _extract_gpu_info(
-        self, specs: Dict[str, Any], machine_name: str = ""
+        self, specs: dict[str, Any], machine_name: str = ""
     ) -> Tuple[str, int]:
         """Extract GPU type and count from machine specs.
 

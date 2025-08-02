@@ -24,7 +24,6 @@ import math
 from typing import Generic, Literal, TypeAlias, TypeVar, cast, overload
 
 import torch
-import torch.fft
 from einops import rearrange
 
 # ---------- type aliases ---------- #

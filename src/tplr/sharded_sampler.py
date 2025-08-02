@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 from torch.utils.data import Sampler
 
-import tplr
+from tplr import sharded_dataset
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -45,7 +45,7 @@ class _BaseWindowSampler(Sampler, ABC):
 
     def __init__(
         self,
-        dataset: tplr.SharedShardedDataset,
+        dataset: sharded_dataset.SharedShardedDataset,
         uid: int,
         window: int,
         *,
@@ -114,7 +114,7 @@ class MinerSampler(_BaseWindowSampler):
     # Explicit constructor so we can pass the dataset reference upward.
     def __init__(
         self,
-        dataset: tplr.SharedShardedDataset,
+        dataset: sharded_dataset.SharedShardedDataset,
         uid: int,
         window: int,
         *,
@@ -161,7 +161,7 @@ class EvalSampler(_BaseWindowSampler):
 
     def __init__(  # signature differs, so we must override
         self,
-        dataset: tplr.SharedShardedDataset,
+        dataset: sharded_dataset.SharedShardedDataset,
         uid: int,
         window: int,
         *,

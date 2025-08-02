@@ -8,10 +8,9 @@
 import os
 import sys
 import asyncio
-import tempfile
 from pathlib import Path
 from dotenv import load_dotenv
-from aiobotocore.session import get_session
+from aiobotocore import session
 import botocore
 
 # Find and load the correct .env file
@@ -77,7 +76,7 @@ async def validate_credentials():
             print(f"  - {var}")
         sys.exit(1)
 
-    session = get_session()
+    session = session.get_session()
     client_config = botocore.config.Config(
         max_pool_connections=32, retries={"max_attempts": 3}
     )

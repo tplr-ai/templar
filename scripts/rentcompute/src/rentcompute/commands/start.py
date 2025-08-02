@@ -4,7 +4,7 @@ Start command implementation.
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from rentcompute.config import Config
 from rentcompute.providers.base import Machine
@@ -13,7 +13,7 @@ from rentcompute.provisioning import provision_instance
 logger = logging.getLogger(__name__)
 
 
-def run(config: Config, instance_config: Dict[str, Any], name: str = None) -> None:
+def run(config: Config, instance_config: dict[str, Any], name: str = None) -> None:
     """Run the start command.
 
     Args:
@@ -197,7 +197,7 @@ def run(config: Config, instance_config: Dict[str, Any], name: str = None) -> No
             )
 
 
-def _select_machine(machines: List[Machine]) -> Optional[Machine]:
+def _select_machine(machines: list[Machine]) -> Optional[Machine]:
     """Select the cheapest machine from the available options.
 
     Args:

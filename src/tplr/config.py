@@ -24,7 +24,7 @@ import botocore.config
 from dotenv import load_dotenv
 
 # Local imports
-from .logging import logger
+from tplr.logging import logger
 
 load_dotenv()
 

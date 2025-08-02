@@ -60,10 +60,10 @@ import shutil
 import subprocess
 import time
 import urllib.request
-from typing import Optional, Tuple
+from typing import Optional
 
 import bittensor as bt
-from transformers.models.llama import LlamaForCausalLM
+from transformers import LlamaForCausalLM
 
 import tplr
 
@@ -263,7 +263,7 @@ class ModelConverter:
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
         self.buckets = self.comms.get_all_buckets()
 
-    async def load_latest_model(self) -> Tuple[bool, dict, int, int]:
+    async def load_latest_model(self) -> tuple[bool, dict, int, int]:
         """Load and prepare the latest model checkpoint for conversion.
 
         This method:

@@ -565,8 +565,10 @@ async def compare_model_with_debug_dict(
     max_diff = 0.0  # largest raw parameter diff
     max_steps = 0.0
 
-    steps_sum = 0.0
+    # Collect per‑tensor step‑ratio vectors so we can take
+    # a single global median later
     tensors = 0
+    step_ratio_list: list[torch.Tensor] = []
 
     named_params = (
         model.module.named_parameters()
@@ -604,16 +606,20 @@ async def compare_model_with_debug_dict(
             step_vec = abs_vec.new_full(abs_vec.size(), learning_rate)
 
         step_ratio = abs_vec / step_vec
-        steps_sum += step_ratio.mean().item()
+        # Accumulate for global median
+        step_ratio_list.append(step_ratio)
         max_steps = max(max_steps, step_ratio.max().item())
         tensors += 1
 
     l2_norm = math.sqrt(total_squared_diff)
     avg_l2_norm = math.inf if tensors == 0 else l2_norm / param_count
     avg_abs_diff = math.inf if tensors == 0 else total_abs_diff / param_count
-    avg_steps = math.inf if tensors == 0 else steps_sum / tensors
-    if tensors == 0:
-        max_steps = math.inf  # nothing compared → undefined
+    if not step_ratio_list:  # nothing compared
+        median_steps = math.inf
+        max_steps = math.inf
+    else:
+        all_steps = torch.cat([t.flatten() for t in step_ratio_list])
+        median_steps = all_steps.median().item()
 
     return {
         "success": True,
@@ -621,7 +627,7 @@ async def compare_model_with_debug_dict(
         "avg_l2_norm": avg_l2_norm,
         "avg_abs_diff": avg_abs_diff,
         "max_diff": max_diff,
-        "avg_steps_behind": avg_steps,
+        "avg_steps_behind": median_steps,
         "max_steps_behind": max_steps,
         "param_count": param_count,
         "learning_rate": learning_rate,

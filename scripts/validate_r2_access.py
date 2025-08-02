@@ -97,8 +97,12 @@ async def validate_credentials():
         aws_secret_access_key=os.getenv("R2_GRADIENTS_READ_SECRET_ACCESS_KEY"),
         config=client_config,
     ) as read_client:
-        can_read = await test_read_access(read_client, gradients_account_id, "  ")
-        can_write = await test_write_access(read_client, gradients_account_id, "  ")
+        can_read = await test_read_access(
+            read_client, os.getenv("R2_GRADIENTS_BUCKET_NAME"), "  "
+        )
+        can_write = await test_write_access(
+            read_client, os.getenv("R2_GRADIENTS_BUCKET_NAME"), "  "
+        )
         if can_write:
             print("  ⚠️  WARNING: READ credentials have write access!")
 
@@ -112,8 +116,12 @@ async def validate_credentials():
         aws_secret_access_key=os.getenv("R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"),
         config=client_config,
     ) as write_client:
-        can_read = await test_read_access(write_client, gradients_account_id, "  ")
-        can_write = await test_write_access(write_client, gradients_account_id, "  ")
+        can_read = await test_read_access(
+            write_client, os.getenv("R2_GRADIENTS_BUCKET_NAME"), "  "
+        )
+        can_write = await test_write_access(
+            write_client, os.getenv("R2_GRADIENTS_BUCKET_NAME"), "  "
+        )
         if not can_read:
             print("  ⚠️  WARNING: WRITE credentials should have read access!")
 
@@ -132,8 +140,12 @@ async def validate_credentials():
         aws_secret_access_key=os.getenv("R2_DATASET_READ_SECRET_ACCESS_KEY"),
         config=client_config,
     ) as read_client:
-        can_read = await test_read_access(read_client, dataset_account_id, "  ")
-        can_write = await test_write_access(read_client, dataset_account_id, "  ")
+        can_read = await test_read_access(
+            read_client, os.getenv("R2_DATASET_BUCKET_NAME"), "  "
+        )
+        can_write = await test_write_access(
+            read_client, os.getenv("R2_DATASET_BUCKET_NAME"), "  "
+        )
         if can_write:
             print("  ⚠️  WARNING: READ credentials have write access!")
 
@@ -147,8 +159,12 @@ async def validate_credentials():
         aws_secret_access_key=os.getenv("R2_DATASET_WRITE_SECRET_ACCESS_KEY"),
         config=client_config,
     ) as write_client:
-        can_read = await test_read_access(write_client, dataset_account_id, "  ")
-        can_write = await test_write_access(write_client, dataset_account_id, "  ")
+        can_read = await test_read_access(
+            write_client, os.getenv("R2_DATASET_BUCKET_NAME"), "  "
+        )
+        can_write = await test_write_access(
+            write_client, os.getenv("R2_DATASET_BUCKET_NAME"), "  "
+        )
         if not can_read:
             print("  ⚠️  WARNING: WRITE credentials should have read access!")
 

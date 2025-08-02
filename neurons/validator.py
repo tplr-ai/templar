@@ -335,29 +335,15 @@ class Validator(BaseNode):
         self.prev_param_state: dict[str, torch.Tensor] = {}
         self.param_change_alpha = 0.2
 
-        self.dataset = tplr.SharedShardedDataset(
+        self.rank = 0
+        self.world_size = 1
+
+        self.windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
+        self.dataset_manager = tplr.sharded_dataset.ShardedDatasetManager(
             sequence_length=self.hparams.sequence_length,
-            rank=0,
-            world_size=1,
-        )
-        self.sampler = tplr.EvalSampler(
-            dataset=self.dataset,
-            uid=self.uid,
-            window=self.current_window,
-            steps_per_window=self.hparams.inner_steps,
-            micro_bs=self.hparams.micro_batch_size,
-            batch_size=self.hparams.target_batch_size,
-            validation_bs=self.hparams.validator_sample_micro_bs
-            * self.hparams.micro_batch_size,
-            rank=0,
-            world_size=1,
-        )
-        self.loader = torch.utils.data.DataLoader(
-            dataset=self.dataset,
-            sampler=self.sampler,
-            batch_size=self.hparams.micro_batch_size,
-            num_workers=2,
-            pin_memory=True,
+            rank=self.rank,
+            world_size=self.world_size,
+            comms=self.comms,
         )
 
         self.burn_uid = 1
@@ -778,6 +764,10 @@ class Validator(BaseNode):
             f"Using start_window: {self.start_window}, global_step: {self.global_step}"
         )
 
+        current_shard = self.global_step // self.windows_per_shard
+        _ = await self.dataset_manager.initialize_datasets(current_shard)
+        self.set_dataloader(validator=True)
+
         checkpoint_window_buffer = 5
         has_new_checkpoint = (
             self.global_step
@@ -838,12 +828,18 @@ class Validator(BaseNode):
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
+
             await self.wait_until_window(
                 self.sync_window + self.hparams.validator_offset + 1
             )
 
             # 2. Increment sync window and update peer lists
             window_start = tplr.T()
+
+            if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
+                tplr.logger.info(f"Swapping dataset at window {self.current_window}")
+                await self.dataset_manager.swap_datasets()
+                self.set_dataloader(validator=True)
 
             # --------------------------------------------------------------+
             #  Simulate the miner’s *inner* loop so the LR schedule advances │
@@ -2859,6 +2855,48 @@ class Validator(BaseNode):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
+
+    def set_dataloader(self, validator: bool = False) -> None:
+        # put here for now...
+        self.dataset = self.dataset_manager.active_dataset
+
+        shared_args = dict(
+            dataset=self.dataset,
+            uid=self.uid,
+            window=self.current_window,
+            steps_per_window=self.hparams.inner_steps,
+            micro_bs=self.hparams.micro_batch_size,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+
+        if validator:
+            SamplerClass = tplr.EvalSampler
+            kwargs = shared_args | dict(
+                batch_size=self.hparams.target_batch_size,
+                validation_bs=self.hparams.validator_sample_micro_bs
+                * self.hparams.micro_batch_size,
+            )
+        else:
+            SamplerClass = tplr.MinerSampler
+            kwargs = shared_args | dict(
+                micro_bs=self.hparams.micro_batch_size,
+                batch_size=self.hparams.batch_size,
+                target_batch_size=self.hparams.target_batch_size,
+            )
+
+        self.sampler = SamplerClass(**kwargs)
+
+        self.loader = torch.utils.data.DataLoader(
+            dataset=self.dataset,
+            sampler=self.sampler,
+            batch_size=self.hparams.micro_batch_size,
+            num_workers=10,
+            pin_memory=True,
+            prefetch_factor=2,
+        )
+        tplr.logger.info("[Run] dataset + sampler ready")
+        return
 
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):

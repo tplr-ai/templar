@@ -22,6 +22,7 @@ import math
 import os
 import random
 import re
+import shutil
 import time
 from datetime import datetime, timezone
 from functools import partial
@@ -469,10 +470,8 @@ class Comms(ChainManager):
                     if target_directory:
                         os.makedirs(target_directory, exist_ok=True)
 
-                    loaded_data = os.rename(
-                        temp_file_path,
-                        key,
-                    )
+                    # with a cross-device-safe move:
+                    loaded_data = shutil.move(temp_file_path, key)
                 else:
                     raise FileNotFoundError(
                         f"Download not successful for file at: {temp_file_path}"

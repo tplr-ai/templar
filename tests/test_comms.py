@@ -2562,3 +2562,1033 @@ async def test_s3_get_object_gather_integration(comms_instance):
     finally:
         # Restore the original method
         comms_instance.gather = original_gather
+
+import pytest
+import asyncio
+import os
+import json
+import tempfile
+import torch
+from unittest.mock import Mock, AsyncMock, patch, MagicMock, call
+from datetime import datetime, timezone
+from types import SimpleNamespace
+import botocore
+from botocore.exceptions import ClientError, ConnectionClosedError
+
+# Import the class under test
+from tplr.comms import Comms
+from tplr.schemas import Bucket
+from tplr.compress import CompressDCT
+
+
+class TestComms:
+    """Test suite for the Comms class using pytest framework."""
+
+    @pytest.fixture
+    def mock_wallet(self):
+        """Mock wallet fixture."""
+        wallet = Mock()
+        wallet.hotkey.ss58_address = "test_hotkey_123"
+        return wallet
+
+    @pytest.fixture
+    def mock_bucket(self):
+        """Mock bucket fixture."""
+        return Bucket(
+            name="test-bucket",
+            account_id="test-account",
+            access_key_id="test-access-key",
+            secret_access_key="test-secret-key"
+        )
+
+    @pytest.fixture
+    def mock_hparams(self):
+        """Mock hyperparameters fixture."""
+        hparams = Mock()
+        hparams.active_check_interval = 60
+        hparams.recent_windows = 3
+        hparams.topk_compression = 100
+        return hparams
+
+    @pytest.fixture
+    async def comms_instance(self, mock_wallet, mock_hparams):
+        """Create a Comms instance for testing."""
+        with patch('tplr.comms.BUCKET_SECRETS', {
+            'gradients': {
+                'name': 'test-gradients',
+                'account_id': 'test-account',
+                'credentials': {
+                    'write': {
+                        'access_key_id': 'write-key',
+                        'secret_access_key': 'write-secret'
+                    },
+                    'read': {
+                        'access_key_id': 'read-key',
+                        'secret_access_key': 'read-secret'
+                    }
+                }
+            }
+        }):
+            comms = Comms(
+                wallet=mock_wallet,
+                uid=123,
+                hparams=mock_hparams
+            )
+            yield comms
+            # Cleanup
+            await comms.close_all_s3_clients()
+
+    def test_init_creates_temp_directory(self, mock_wallet, mock_hparams):
+        """Test that initialization creates the correct temporary directory."""
+        with patch('tplr.comms.BUCKET_SECRETS', {
+            'gradients': {
+                'name': 'test-gradients',
+                'account_id': 'test-account',
+                'credentials': {
+                    'write': {'access_key_id': 'key', 'secret_access_key': 'secret'},
+                    'read': {'access_key_id': 'key', 'secret_access_key': 'secret'}
+                }
+            }
+        }):
+            with patch('os.makedirs') as mock_makedirs:
+                comms = Comms(wallet=mock_wallet, uid=456, hparams=mock_hparams)
+                
+                # Check temp directory creation
+                mock_makedirs.assert_any_call("/tmp/templar_456", exist_ok=True)
+                assert comms.temp_dir == "/tmp/templar_456"
+                assert comms.uid == 456
+
+    def test_get_base_url(self, mock_wallet, mock_hparams):
+        """Test base URL construction."""
+        with patch('tplr.comms.BUCKET_SECRETS', {
+            'gradients': {
+                'name': 'test', 'account_id': 'test',
+                'credentials': {'write': {'access_key_id': 'k', 'secret_access_key': 's'}}
+            }
+        }):
+            comms = Comms(wallet=mock_wallet, uid=123, hparams=mock_hparams)
+            url = comms.get_base_url("test-account-123")
+            assert url == "https://test-account-123.r2.cloudflarestorage.com"
+
+    def test_get_own_bucket_gradients_write(self, mock_wallet, mock_hparams):
+        """Test getting own bucket for gradients with write access."""
+        bucket_secrets = {
+            'gradients': {
+                'name': 'gradients-bucket',
+                'account_id': 'grad-account',
+                'credentials': {
+                    'write': {
+                        'access_key_id': 'write-key',
+                        'secret_access_key': 'write-secret'
+                    }
+                }
+            }
+        }
+        
+        with patch('tplr.comms.BUCKET_SECRETS', bucket_secrets):
+            comms = Comms(wallet=mock_wallet, uid=123, hparams=mock_hparams)
+            bucket = comms.get_own_bucket('gradients', 'write')
+            
+            assert bucket.name == 'gradients-bucket'
+            assert bucket.account_id == 'grad-account'
+            assert bucket.access_key_id == 'write-key'
+            assert bucket.secret_access_key == 'write-secret'
+
+    def test_get_own_bucket_invalid_type(self, mock_wallet, mock_hparams):
+        """Test getting own bucket with invalid bucket type."""
+        with patch('tplr.comms.BUCKET_SECRETS', {}):
+            comms = Comms(wallet=mock_wallet, uid=123, hparams=mock_hparams)
+            
+            with pytest.raises(ValueError, match="bucket_type must be either"):
+                comms.get_own_bucket('invalid_type', 'read')
+
+    def test_get_own_bucket_invalid_access_type(self, mock_wallet, mock_hparams):
+        """Test getting own bucket with invalid access type for gradients."""
+        bucket_secrets = {
+            'gradients': {
+                'name': 'test',
+                'account_id': 'test',
+                'credentials': {'write': {'access_key_id': 'k', 'secret_access_key': 's'}}
+            }
+        }
+        
+        with patch('tplr.comms.BUCKET_SECRETS', bucket_secrets):
+            comms = Comms(wallet=mock_wallet, uid=123, hparams=mock_hparams)
+            
+            with pytest.raises(ValueError, match="access_type must be either"):
+                comms.get_own_bucket('gradients', 'invalid')
+
+    @pytest.mark.asyncio
+    async def test_get_s3_client_creates_new_client(self, comms_instance, mock_bucket):
+        """Test that _get_s3_client creates a new client when none exists."""
+        with patch.object(comms_instance.session, 'create_client') as mock_create:
+            mock_client = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_create.return_value = mock_client
+            
+            client = await comms_instance._get_s3_client(mock_bucket)
+            
+            assert client == mock_client
+            mock_create.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_s3_client_reuses_existing_client(self, comms_instance, mock_bucket):
+        """Test that _get_s3_client reuses existing client."""
+        mock_client = AsyncMock()
+        key = (mock_bucket.access_key_id, mock_bucket.secret_access_key, mock_bucket.account_id)
+        comms_instance._s3_clients[key] = mock_client
+        
+        client = await comms_instance._get_s3_client(mock_bucket)
+        
+        assert client == mock_client
+
+    @pytest.mark.asyncio
+    async def test_close_all_s3_clients(self, comms_instance, mock_bucket):
+        """Test closing all S3 clients."""
+        mock_client1 = AsyncMock()
+        mock_client2 = AsyncMock()
+        
+        comms_instance._s3_clients['key1'] = mock_client1
+        comms_instance._s3_clients['key2'] = mock_client2
+        
+        await comms_instance.close_all_s3_clients()
+        
+        mock_client1.__aexit__.assert_called_once()
+        mock_client2.__aexit__.assert_called_once()
+        assert len(comms_instance._s3_clients) == 0
+
+    @pytest.mark.asyncio
+    async def test_close_all_s3_clients_handles_exceptions(self, comms_instance):
+        """Test that close_all_s3_clients handles exceptions gracefully."""
+        mock_client = AsyncMock()
+        mock_client.__aexit__.side_effect = Exception("Test error")
+        
+        comms_instance._s3_clients['key1'] = mock_client
+        
+        # Should not raise exception
+        await comms_instance.close_all_s3_clients()
+        assert len(comms_instance._s3_clients) == 0
+
+    @pytest.mark.asyncio
+    async def test_purge_s3_client(self, comms_instance, mock_bucket):
+        """Test purging a specific S3 client."""
+        key = (mock_bucket.access_key_id, mock_bucket.secret_access_key, mock_bucket.account_id)
+        comms_instance._s3_clients[key] = AsyncMock()
+        
+        await comms_instance._purge_s3_client(mock_bucket)
+        
+        assert key not in comms_instance._s3_clients
+
+    def test_delete_local_directory_nonexistent(self, comms_instance):
+        """Test deleting a non-existent directory."""
+        with patch('os.path.exists', return_value=False):
+            # Should not raise exception
+            comms_instance.delete_local_directory("/nonexistent/path")
+
+    def test_delete_local_directory_success(self, comms_instance):
+        """Test successful directory deletion."""
+        with patch('os.path.exists', return_value=True), \
+             patch('os.walk', return_value=[("/root", ["dir1"], ["file1.txt"])]), \
+             patch('os.remove') as mock_remove, \
+             patch('os.rmdir') as mock_rmdir:
+            
+            comms_instance.delete_local_directory("/test/path")
+            
+            mock_remove.assert_called_once()
+            assert mock_rmdir.call_count == 2  # dir1 and root
+
+    @pytest.mark.asyncio
+    async def test_cleanup_local_data(self, comms_instance):
+        """Test cleanup of stale local data."""
+        with patch('os.path.exists', return_value=True), \
+             patch('os.listdir', return_value=['10', '20', '25', 'not_a_number']), \
+             patch.object(comms_instance, 'delete_local_directory') as mock_delete:
+            
+            await comms_instance.cleanup_local_data("123", 30, 15)
+            
+            # Should delete directories for windows < 15 (30-15)
+            mock_delete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_s3_data(self, comms_instance, mock_bucket):
+        """Test cleanup of stale S3 data."""
+        mock_client = AsyncMock()
+        mock_client.list_objects_v2.return_value = {
+            'Contents': [
+                {'Key': 'gradient-5-123-v1.0.0.pt'},
+                {'Key': 'gradient-15-123-v1.0.0.pt'},
+                {'Key': 'gradient-25-123-v1.0.0.pt'},
+            ],
+            'IsTruncated': False
+        }
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client), \
+             patch('tplr.__version__', '1.0.0'):
+            
+            await comms_instance.cleanup_s3_data("123", 30, 15)
+            
+            # Should delete objects with window < 15
+            mock_client.delete_objects.assert_called_once()
+            call_args = mock_client.delete_objects.call_args
+            deleted_objects = call_args[1]['Delete']['Objects']
+            assert len(deleted_objects) == 1
+            assert deleted_objects[0]['Key'] == 'gradient-5-123-v1.0.0.pt'
+
+    @pytest.mark.asyncio
+    async def test_s3_put_object_json_file(self, comms_instance, mock_bucket):
+        """Test putting a JSON file to S3."""
+        mock_client = AsyncMock()
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client), \
+             patch('aiofiles.open') as mock_open:
+            
+            mock_file = AsyncMock()
+            mock_file.read.return_value = '{"test": "data"}'
+            mock_open.return_value.__aenter__.return_value = mock_file
+            
+            await comms_instance.s3_put_object("test.json", "/tmp/test.json", mock_bucket)
+            
+            mock_client.put_object.assert_called_once()
+            call_args = mock_client.put_object.call_args
+            assert call_args[1]['Key'] == 'test.json'
+            assert call_args[1]['Body'] == b'{"test": "data"}'
+
+    @pytest.mark.asyncio
+    async def test_s3_put_object_small_file(self, comms_instance, mock_bucket):
+        """Test putting a small PyTorch file to S3."""
+        mock_client = AsyncMock()
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client), \
+             patch('os.path.getsize', return_value=50 * 1024 * 1024), \
+             patch('aiofiles.open') as mock_open:
+            
+            mock_file = AsyncMock()
+            mock_file.read.return_value = b'binary_data'
+            mock_open.return_value.__aenter__.return_value = mock_file
+            
+            await comms_instance.s3_put_object("model.pt", "/tmp/model.pt", mock_bucket)
+            
+            mock_client.put_object.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_s3_put_object_large_file(self, comms_instance, mock_bucket):
+        """Test putting a large file to S3 (multipart upload)."""
+        mock_client = AsyncMock()
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client), \
+             patch('os.path.getsize', return_value=200 * 1024 * 1024), \
+             patch.object(comms_instance, 'upload_large_file') as mock_upload:
+            
+            await comms_instance.s3_put_object("large_model.pt", "/tmp/large_model.pt", mock_bucket)
+            
+            mock_upload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_success(self, comms_instance, mock_bucket):
+        """Test successful S3 object retrieval."""
+        mock_client = AsyncMock()
+        mock_client.head_object.return_value = {
+            'LastModified': datetime.now(timezone.utc),
+            'ContentLength': 1024
+        }
+        
+        mock_stream = AsyncMock()
+        mock_stream.read.return_value = b'test_data'
+        mock_client.get_object.return_value = {
+            'Body': mock_stream
+        }
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client), \
+             patch('aiofiles.open') as mock_open, \
+             patch('torch.load', return_value={'state_dict': {}, 'global_step': 100}), \
+             patch('os.path.exists', return_value=True), \
+             patch('os.remove'):
+            
+            mock_file = AsyncMock()
+            mock_open.return_value.__aenter__.return_value = mock_file
+            
+            result = await comms_instance.s3_get_object("test.pt", mock_bucket)
+            
+            assert result == {'state_dict': {}, 'global_step': 100}
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_not_found(self, comms_instance, mock_bucket):
+        """Test S3 object retrieval when object doesn't exist."""
+        mock_client = AsyncMock()
+        mock_client.head_object.side_effect = ClientError(
+            {'Error': {'Code': '404'}}, 'HeadObject'
+        )
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client):
+            result = await comms_instance.s3_get_object("nonexistent.pt", mock_bucket)
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_too_early(self, comms_instance, mock_bucket):
+        """Test S3 object retrieval with time_min constraint."""
+        now = datetime.now(timezone.utc)
+        past_time = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        
+        mock_client = AsyncMock()
+        mock_client.head_object.return_value = {
+            'LastModified': past_time,
+            'ContentLength': 1024
+        }
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client):
+            result = await comms_instance.s3_get_object(
+                "test.pt", mock_bucket, time_min=now
+            )
+            
+            assert result == {"__status": "TOO_EARLY"}
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_too_late(self, comms_instance, mock_bucket):
+        """Test S3 object retrieval with time_max constraint."""
+        now = datetime.now(timezone.utc)
+        future_time = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        
+        mock_client = AsyncMock()
+        mock_client.head_object.return_value = {
+            'LastModified': future_time,
+            'ContentLength': 1024
+        }
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client):
+            result = await comms_instance.s3_get_object(
+                "test.pt", mock_bucket, time_max=now
+            )
+            
+            assert result == {"__status": "TOO_LATE"}
+
+    @pytest.mark.asyncio
+    async def test_upload_large_file_success(self, comms_instance, mock_bucket):
+        """Test successful large file upload."""
+        mock_client = AsyncMock()
+        mock_client.create_multipart_upload.return_value = {'UploadId': 'test-upload-id'}
+        mock_client.upload_part.return_value = {'ETag': 'test-etag'}
+        
+        with patch('os.path.getsize', return_value=100 * 1024 * 1024), \
+             patch('aiofiles.open') as mock_open:
+            
+            mock_file = AsyncMock()
+            mock_file.read.return_value = b'x' * (32 * 1024 * 1024)
+            mock_open.return_value.__aenter__.return_value = mock_file
+            
+            await comms_instance.upload_large_file("/tmp/large.pt", "large.pt", mock_client, mock_bucket)
+            
+            mock_client.create_multipart_upload.assert_called_once()
+            mock_client.complete_multipart_upload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_download_large_file_success(self, comms_instance, mock_bucket):
+        """Test successful large file download."""
+        mock_client = AsyncMock()
+        mock_stream = AsyncMock()
+        mock_stream.read.return_value = b'x' * (5 * 1024 * 1024)
+        mock_client.get_object.return_value = {'Body': mock_stream}
+        
+        with patch('torch.cuda.is_available', return_value=False), \
+             patch('os.cpu_count', return_value=4), \
+             patch('os.makedirs'), \
+             patch('aiofiles.open') as mock_open:
+            
+            mock_file = AsyncMock()
+            mock_open.return_value.__aenter__.return_value = mock_file
+            
+            result = await comms_instance.download_large_file(
+                mock_client, mock_bucket, "large.pt", 50 * 1024 * 1024, "/tmp/large.pt"
+            )
+            
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_put_local_storage(self, comms_instance):
+        """Test putting data to local storage."""
+        state_dict = {'param1': torch.tensor([1, 2, 3])}
+        
+        with patch('os.makedirs'), \
+             patch('os.path.exists', return_value=True), \
+             patch('os.remove'), \
+             patch('os.replace'), \
+             patch('asyncio.to_thread') as mock_thread, \
+             patch.object(comms_instance, 'cleanup_local_data'):
+            
+            mock_thread.return_value = None
+            
+            result = await comms_instance.put(
+                state_dict=state_dict,
+                window=10,
+                key="gradient",
+                uid="123",
+                local=True
+            )
+            
+            assert isinstance(result, float)
+            assert result >= 0
+
+    @pytest.mark.asyncio
+    async def test_put_remote_storage(self, comms_instance):
+        """Test putting data to remote storage."""
+        state_dict = {'param1': torch.tensor([1, 2, 3])}
+        
+        with patch('os.makedirs'), \
+             patch('os.path.exists', return_value=True), \
+             patch('os.remove'), \
+             patch('asyncio.to_thread') as mock_thread, \
+             patch.object(comms_instance, 's3_put_object'), \
+             patch('asyncio.create_task'):
+            
+            mock_thread.return_value = None
+            
+            result = await comms_instance.put(
+                state_dict=state_dict,
+                window=10,
+                key="gradient",
+                uid="123",
+                local=False
+            )
+            
+            assert isinstance(result, float)
+            assert result >= 0
+
+    @pytest.mark.asyncio
+    async def test_get_local_storage(self, comms_instance):
+        """Test getting data from local storage."""
+        with patch('os.path.exists', return_value=True), \
+             patch('torch.load', return_value={'state_dict': {'param1': torch.tensor([1, 2, 3])}, 'global_step': 100}), \
+             patch.object(comms_instance, 'cleanup_local_data'):
+            
+            result = await comms_instance.get(
+                uid="123",
+                window=10,
+                key="gradient",
+                local=True
+            )
+            
+            assert result is not None
+            state_dict, global_step = result
+            assert 'param1' in state_dict
+            assert global_step == 100
+
+    @pytest.mark.asyncio
+    async def test_get_remote_storage(self, comms_instance):
+        """Test getting data from remote storage."""
+        comms_instance.commitments = {123: Mock()}
+        
+        with patch.object(comms_instance, 's3_get_object', return_value={'state_dict': {'param1': torch.tensor([1, 2, 3])}, 'global_step': 100}):
+            result = await comms_instance.get(
+                uid="123",
+                window=10,
+                key="gradient",
+                local=False
+            )
+            
+            assert result is not None
+            state_dict, global_step = result
+            assert 'param1' in state_dict
+            assert global_step == 100
+
+    @pytest.mark.asyncio
+    async def test_get_with_retry_success(self, comms_instance):
+        """Test get_with_retry successful retrieval."""
+        with patch.object(comms_instance, 'get', return_value=({'param1': torch.tensor([1, 2, 3])}, 100)):
+            result = await comms_instance.get_with_retry(
+                uid="123",
+                window=10,
+                key="gradient",
+                timeout=5
+            )
+            
+            assert result == ({'param1': torch.tensor([1, 2, 3])}, 100)
+
+    @pytest.mark.asyncio
+    async def test_get_with_retry_timeout(self, comms_instance):
+        """Test get_with_retry timeout behavior."""
+        with patch.object(comms_instance, 'get', return_value=None), \
+             patch('time.time', side_effect=[0, 1, 2, 3, 4, 5, 6]):
+            
+            result = await comms_instance.get_with_retry(
+                uid="123",
+                window=10,
+                key="gradient",
+                timeout=5
+            )
+            
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_gather_success(self, comms_instance):
+        """Test successful gather operation."""
+        mock_compressor = Mock(spec=CompressDCT)
+        mock_compressor._dequantize_values.return_value = torch.tensor([1.0, 2.0, 3.0])
+        
+        state_dict_response = {
+            'param1_idxs': torch.tensor([0, 1, 2]),
+            'param1_vals': torch.tensor([1, 2, 3], dtype=torch.uint8),
+            'param1_quant_params': (torch.tensor(0.0), 1.0, 0, torch.tensor([1.0, 2.0, 3.0]), torch.float32)
+        }
+        
+        totalks = {'param1': 1000}
+        
+        with patch.object(comms_instance, 'get_with_retry', return_value=(state_dict_response, 100)), \
+             patch.object(comms_instance, 'check_compressed_indices'):
+            
+            result = await comms_instance.gather(
+                my_uid=1,
+                uids=[2, 3],
+                window=10,
+                key="gradient",
+                timeout=30,
+                device="cpu",
+                totalks=totalks,
+                compressor=mock_compressor
+            )
+            
+            assert result is not None
+            assert len(result.uids) == 2
+            assert result.success_rate == 1.0
+
+    @pytest.mark.asyncio
+    async def test_gather_with_reserve_primary_success(self, comms_instance):
+        """Test gather_with_reserve when primary gather succeeds."""
+        mock_result = SimpleNamespace(
+            time=1.0,
+            upload_bytes=100,
+            download_bytes=200,
+            success_rate=1.0,
+            state_dict=SimpleNamespace(param1=[torch.tensor([1, 2, 3])]),
+            uids=[2, 3],
+            global_steps=[100, 101],
+            skipped_uids=[]
+        )
+        
+        with patch.object(comms_instance, 'gather', return_value=mock_result):
+            result = await comms_instance.gather_with_reserve(
+                my_uid=1,
+                gather_uids=[2, 3],
+                reserve_uids=[4, 5],
+                window=10
+            )
+            
+            assert result.uids == [2, 3]
+            assert result.success_rate == 1.0
+
+    @pytest.mark.asyncio
+    async def test_gather_with_reserve_fallback_to_reserve(self, comms_instance):
+        """Test gather_with_reserve using reserve peers when primary fails."""
+        primary_result = SimpleNamespace(
+            time=1.0,
+            upload_bytes=100,
+            download_bytes=200,
+            success_rate=0.5,
+            state_dict=SimpleNamespace(param1=[torch.tensor([1, 2])]),
+            uids=[2],
+            global_steps=[100],
+            skipped_uids=[3]
+        )
+        
+        fallback_result = SimpleNamespace(
+            time=0.5,
+            upload_bytes=50,
+            download_bytes=100,
+            success_rate=1.0,
+            state_dict=SimpleNamespace(param1=[torch.tensor([4])]),
+            uids=[4],
+            global_steps=[102],
+            skipped_uids=[]
+        )
+        
+        with patch.object(comms_instance, 'gather', side_effect=[primary_result, fallback_result]):
+            result = await comms_instance.gather_with_reserve(
+                my_uid=1,
+                gather_uids=[2, 3],
+                reserve_uids=[4, 5],
+                window=10
+            )
+            
+            assert len(result.uids) == 2
+            assert result.uids == [2, 4]
+            assert len(result.state_dict.param1) == 2
+
+    @pytest.mark.asyncio
+    async def test_is_miner_active_true(self, comms_instance):
+        """Test is_miner_active returns True when miner is active."""
+        comms_instance.current_window = 100
+        comms_instance.commitments = {123: Mock()}
+        
+        mock_client = AsyncMock()
+        mock_client.head_object.return_value = {'LastModified': datetime.now()}
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client), \
+             patch('tplr.comms.__version__', '1.0.0'):
+            
+            result = await comms_instance.is_miner_active(123, recent_windows=3)
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_is_miner_active_false(self, comms_instance):
+        """Test is_miner_active returns False when miner is inactive."""
+        comms_instance.current_window = 100
+        comms_instance.commitments = {123: Mock()}
+        
+        mock_client = AsyncMock()
+        mock_client.head_object.side_effect = ClientError(
+            {'Error': {'Code': '404'}}, 'HeadObject'
+        )
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client), \
+             patch('tplr.comms.__version__', '1.0.0'):
+            
+            result = await comms_instance.is_miner_active(123, recent_windows=3)
+            assert result is False
+
+    @pytest.mark.asyncio
+    async def test_track_active_peers(self, comms_instance):
+        """Test track_active_peers background task."""
+        comms_instance.commitments = {1: Mock(), 2: Mock(), 3: Mock()}
+        comms_instance.active_check_interval = 0.1  # Short interval for testing
+        
+        # Mock the is_miner_active method to return different results
+        async def mock_is_active(uid, recent_windows):
+            return uid in [1, 3]  # Only UIDs 1 and 3 are active
+        
+        with patch.object(comms_instance, 'is_miner_active', side_effect=mock_is_active):
+            # Start the task and let it run briefly
+            task = asyncio.create_task(comms_instance.track_active_peers())
+            await asyncio.sleep(0.2)
+            task.cancel()
+            
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            
+            # Check that active peers were updated
+            assert 1 in comms_instance.active_peers
+            assert 3 in comms_instance.active_peers
+            assert 2 not in comms_instance.active_peers
+
+    @pytest.mark.asyncio
+    async def test_gradient_timestamp_success(self, comms_instance):
+        """Test successful gradient timestamp retrieval."""
+        mock_bucket = Mock()
+        comms_instance.commitments = {123: mock_bucket}
+        
+        timestamp = datetime.now(timezone.utc)
+        mock_client = AsyncMock()
+        mock_client.head_object.return_value = {'LastModified': timestamp}
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client), \
+             patch('tplr.__version__', '1.0.0'):
+            
+            result = await comms_instance.gradient_timestamp(123, 10)
+            assert result == timestamp.timestamp()
+
+    @pytest.mark.asyncio
+    async def test_gradient_timestamp_not_found(self, comms_instance):
+        """Test gradient timestamp when bucket not found."""
+        comms_instance.commitments = {}
+        
+        result = await comms_instance.gradient_timestamp(123, 10)
+        assert result == 0.0
+
+    def test_check_compressed_indices_valid_scalar(self, comms_instance):
+        """Test check_compressed_indices with valid scalar index."""
+        # Should not raise exception
+        comms_instance.check_compressed_indices("param1", 5, 100, 10)
+
+    def test_check_compressed_indices_invalid_scalar(self, comms_instance):
+        """Test check_compressed_indices with invalid scalar index."""
+        with pytest.raises(ValueError, match="Index.*out of bounds"):
+            comms_instance.check_compressed_indices("param1", 150, 100, 10)
+
+    def test_check_compressed_indices_valid_tensor(self, comms_instance):
+        """Test check_compressed_indices with valid tensor indices."""
+        indices = torch.tensor([1, 5, 10, 20, 30])
+        # Should not raise exception
+        comms_instance.check_compressed_indices("param1", indices, 100, 5)
+
+    def test_check_compressed_indices_invalid_length(self, comms_instance):
+        """Test check_compressed_indices with wrong number of indices."""
+        indices = torch.tensor([1, 5, 10])  # 3 indices but expect 5
+        with pytest.raises(ValueError, match="Invalid number of indices"):
+            comms_instance.check_compressed_indices("param1", indices, 100, 5)
+
+    def test_check_compressed_indices_out_of_bounds(self, comms_instance):
+        """Test check_compressed_indices with out-of-bounds indices."""
+        indices = torch.tensor([1, 5, 150, 20, 30])  # 150 is out of bounds
+        with pytest.raises(ValueError, match="out of bounds"):
+            comms_instance.check_compressed_indices("param1", indices, 100, 5)
+
+    def test_weighted_random_sample_no_replacement_basic(self, comms_instance):
+        """Test basic weighted random sampling."""
+        candidates = [1, 2, 3, 4, 5]
+        weights = [10, 20, 30, 40, 50]
+        
+        with patch('random.uniform', side_effect=[25, 75, 35]):
+            result = comms_instance.weighted_random_sample_no_replacement(candidates, weights, 3)
+            
+            assert len(result) == 3
+            assert all(item in candidates for item in result)
+
+    def test_weighted_random_sample_empty_inputs(self, comms_instance):
+        """Test weighted random sampling with empty inputs."""
+        result = comms_instance.weighted_random_sample_no_replacement([], [], 5)
+        assert result == []
+
+    def test_weighted_random_sample_zero_weights(self, comms_instance):
+        """Test weighted random sampling with zero total weight."""
+        candidates = [1, 2, 3]
+        weights = [0, 0, 0]
+        
+        result = comms_instance.weighted_random_sample_no_replacement(candidates, weights, 2)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_size_success(self, comms_instance, mock_bucket):
+        """Test successful S3 object size retrieval."""
+        mock_client = AsyncMock()
+        mock_client.head_object.return_value = {'ContentLength': 1024}
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client):
+            size = await comms_instance.s3_get_object_size(mock_bucket, "test.pt")
+            assert size == 1024
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_size_not_found(self, comms_instance, mock_bucket):
+        """Test S3 object size retrieval when object doesn't exist."""
+        mock_client = AsyncMock()
+        mock_client.head_object.side_effect = ClientError(
+            {'Error': {'Code': '404'}}, 'HeadObject'
+        )
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client):
+            size = await comms_instance.s3_get_object_size(mock_bucket, "nonexistent.pt")
+            assert size is None
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_range_success(self, comms_instance, mock_bucket):
+        """Test successful S3 object range retrieval."""
+        mock_client = AsyncMock()
+        mock_stream = AsyncMock()
+        mock_stream.read.return_value = b'test_chunk_data'
+        mock_client.get_object.return_value = {'Body': mock_stream}
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client):
+            data = await comms_instance.s3_get_object_range(mock_bucket, "test.pt", 0, 14)
+            assert data == b'test_chunk_data'
+
+    @pytest.mark.asyncio
+    async def test_s3_get_object_range_size_mismatch(self, comms_instance, mock_bucket):
+        """Test S3 object range retrieval with size mismatch."""
+        mock_client = AsyncMock()
+        mock_stream = AsyncMock()
+        mock_stream.read.return_value = b'short'  # Wrong size
+        mock_client.get_object.return_value = {'Body': mock_stream}
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client):
+            data = await comms_instance.s3_get_object_range(mock_bucket, "test.pt", 0, 14)
+            assert data is None
+
+    @pytest.mark.asyncio
+    async def test_post_peer_list_success(self, comms_instance):
+        """Test successful peer list posting."""
+        peers = [1, 2, 3]
+        reserve_peers = [4, 5]
+        
+        with patch('aiofiles.open') as mock_open, \
+             patch.object(comms_instance, 's3_put_object') as mock_put, \
+             patch('os.path.exists', return_value=True), \
+             patch('os.remove'):
+            
+            mock_file = AsyncMock()
+            mock_open.return_value.__aenter__.return_value = mock_file
+            
+            await comms_instance.post_peer_list(
+                peers=peers,
+                reserve_peers=reserve_peers,
+                first_effective_window=100,
+                sync_window=95,
+                initial_selection=True
+            )
+            
+            mock_put.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_post_start_window_success(self, comms_instance):
+        """Test successful start window posting."""
+        with patch('aiofiles.open') as mock_open, \
+             patch.object(comms_instance, 's3_put_object') as mock_put, \
+             patch('os.path.exists', return_value=True), \
+             patch('os.remove'):
+            
+            mock_file = AsyncMock()
+            mock_open.return_value.__aenter__.return_value = mock_file
+            
+            await comms_instance.post_start_window(100)
+            
+            mock_put.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_peer_list_success(self, comms_instance):
+        """Test successful peer list retrieval."""
+        mock_bucket = Mock()
+        mock_bucket.name = "test-bucket"
+        
+        mock_client = AsyncMock()
+        mock_client.list_objects_v2.return_value = {
+            'Contents': [
+                {'Key': 'peers_100_v1.0.0.json'},
+                {'Key': 'peers_95_v1.0.0.json'}
+            ],
+            'IsTruncated': False
+        }
+        
+        peers_data = {
+            'peers': [1, 2, 3],
+            'reserve_peers': [4, 5],
+            'first_effective_window': 100
+        }
+        
+        with patch.object(comms_instance, '_get_highest_stake_validator_bucket', return_value=(mock_bucket, 1)), \
+             patch.object(comms_instance, '_get_s3_client', return_value=mock_client), \
+             patch.object(comms_instance, 's3_get_object', return_value=peers_data), \
+             patch('tplr.comms.__version__', '1.0.0'):
+            
+            result = await comms_instance.get_peer_list()
+            
+            assert result is not None
+            peers, reserves, effective_window = result
+            assert peers == [1, 2, 3]
+            assert reserves == [4, 5]
+            assert effective_window == 100
+
+    @pytest.mark.asyncio
+    async def test_get_start_window_success(self, comms_instance):
+        """Test successful start window retrieval."""
+        mock_bucket = Mock()
+        start_window_data = {'start_window': 50}
+        
+        with patch.object(comms_instance, '_get_highest_stake_validator_bucket', return_value=(mock_bucket, 1)), \
+             patch.object(comms_instance, 's3_get_object', return_value=start_window_data), \
+             patch('tplr.comms.__version__', '1.0.0'):
+            
+            result = await comms_instance.get_start_window(retries=1)
+            assert result == 50
+
+    @pytest.mark.asyncio
+    async def test_cleanup_old_checkpoints(self, comms_instance):
+        """Test cleanup of old checkpoints."""
+        mock_client = AsyncMock()
+        mock_paginator = AsyncMock()
+        
+        # Mock checkpoint files
+        checkpoint_files = [
+            {'Key': 'checkpoint-100.pt', 'LastModified': datetime(2023, 1, 3)},
+            {'Key': 'checkpoint-99.pt', 'LastModified': datetime(2023, 1, 2)},
+            {'Key': 'checkpoint-98.pt', 'LastModified': datetime(2023, 1, 1)},
+            {'Key': 'checkpoint-97.pt', 'LastModified': datetime(2022, 12, 31)},
+        ]
+        
+        async def mock_paginate(*args, **kwargs):
+            yield {'Contents': checkpoint_files}
+        
+        mock_paginator.paginate = mock_paginate
+        mock_client.get_paginator.return_value = mock_paginator
+        
+        with patch.object(comms_instance, '_get_s3_client', return_value=mock_client):
+            await comms_instance.cleanup_old_checkpoints(keep_last=2)
+            
+            # Should delete 2 old checkpoints
+            mock_client.delete_objects.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_save_checkpoint_success(self, comms_instance):
+        """Test successful checkpoint saving."""
+        mock_model = Mock()
+        mock_model.state_dict.return_value = {'param1': torch.tensor([1, 2, 3])}
+        
+        mock_optimizer = Mock()
+        mock_optimizer.state_dict.return_value = {'state': {}}
+        
+        mock_scheduler = Mock()
+        mock_scheduler.state_dict.return_value = {'step': 100}
+        
+        momentum = {'param1': torch.tensor([0.1, 0.2, 0.3])}
+        
+        with patch.object(comms_instance, 'put') as mock_put:
+            result = await comms_instance.save_checkpoint(
+                model=mock_model,
+                optimizer=mock_optimizer,
+                scheduler=mock_scheduler,
+                momentum=momentum,
+                global_step=100,
+                current_window=50,
+                start_window=1
+            )
+            
+            assert result is True
+            assert mock_put.call_count == 2  # Local and remote saves
+
+    @pytest.mark.asyncio
+    async def test_load_checkpoint_success(self, comms_instance):
+        """Test successful checkpoint loading."""
+        mock_model = Mock()
+        checkpoint_data = {
+            'model_state_dict': {'param1': torch.tensor([1, 2, 3])},
+            'start_window': 1,
+            'current_window': 50,
+            'sync_window': 48
+        }
+        
+        with patch.object(comms_instance, 'get_latest_checkpoint', return_value=(checkpoint_data, 50)):
+            success, sync_window = await comms_instance.load_checkpoint(
+                model=mock_model,
+                current_window=55,
+                device="cpu"
+            )
+            
+            assert success is True
+            assert sync_window == 48
+
+    @pytest.mark.asyncio
+    async def test_load_checkpoint_no_checkpoint(self, comms_instance):
+        """Test checkpoint loading when no checkpoint exists."""
+        mock_model = Mock()
+        
+        with patch.object(comms_instance, 'get_latest_checkpoint', return_value=None):
+            success, sync_window = await comms_instance.load_checkpoint(
+                model=mock_model,
+                current_window=55,
+                device="cpu"
+            )
+            
+            assert success is False
+            assert sync_window == 0
+
+    @pytest.mark.asyncio
+    async def test_get_debug_dict_success(self, comms_instance):
+        """Test successful debug dictionary retrieval."""
+        mock_bucket = Mock()
+        debug_data = {'debug_info': 'test_data'}
+        
+        with patch.object(comms_instance, '_get_highest_stake_validator_bucket', return_value=(mock_bucket, 1)), \
+             patch.object(comms_instance, 's3_get_object', return_value=debug_data), \
+             patch('tplr.__version__', '1.0.0'):
+            
+            result = await comms_instance.get_debug_dict(window=100)
+            assert result == debug_data
+
+    @pytest.mark.asyncio
+    async def test_get_debug_dict_not_found(self, comms_instance):
+        """Test debug dictionary retrieval when not found."""
+        mock_bucket = Mock()
+        
+        with patch.object(comms_instance, '_get_highest_stake_validator_bucket', return_value=(mock_bucket, 1)), \
+             patch.object(comms_instance, 's3_get_object', return_value=None), \
+             patch('tplr.__version__', '1.0.0'):
+            
+            result = await comms_instance.get_debug_dict(window=100)
+            assert result is None
+

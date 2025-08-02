@@ -992,12 +992,19 @@ class Miner(BaseNode):
 
                 # Add model parameters debug info
                 for name, param in self.bare_model.named_parameters():
-                    if (
-                        param is not None and param.numel() >= 2
-                    ):  # Check if tensor has at least 2 elements
-                        debug_dict[name + "_debug"] = (
-                            param.flatten()[10:12].detach().cpu().tolist()
-                        )
+                    if param is not None:
+                        # Handle DTensor vs regular tensor
+                        if isinstance(param, DT):
+                            local_param = param.to_local()
+                            if local_param.numel() >= 2:
+                                debug_dict[name + "_debug"] = (
+                                    local_param.flatten()[10:12].detach().cpu().tolist()
+                                )
+                        else:
+                            if param.numel() >= 2:
+                                debug_dict[name + "_debug"] = (
+                                    param.flatten()[10:12].detach().cpu().tolist()
+                                )
 
                 # Add successful peers information
                 if gather_result is not None:

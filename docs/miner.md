@@ -38,7 +38,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
 - **Ubuntu** (or Ubuntu-based Linux distribution)
 - **Git**
 - **Cloudflare R2 Bucket Configuration**:
-  - **Dataset Setup**: You must set up your own **DCLM dataset** (current dataset) following the instructions in the [R2 Dataset Guide](./r2_dataset.md)
+  - **Dataset Setup**: The current dataset instructions can be found in the [Shared Sharded Dataset](./shared_sharded_datset.md) doc. Please configure your environment for this change. No pre-download is required, but bucket syncing is optional and recommended.
   - **Gradient Bucket Setup**:
     1. **Create a Bucket**: Name it the same as your **account ID** and set the **region** to **ENAM**.
     2. **Generate Tokens**:
@@ -163,12 +163,14 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    export R2_GRADIENTS_WRITE_ACCESS_KEY_ID=your_r2_write_access_key_id
    export R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY=your_r2_write_secret_access_key
 
-   # Dataset R2 credentials - You must set up your own DCLM dataset (current dataset)
-   # See docs/r2_dataset.md for instructions
-   export R2_DATASET_ACCOUNT_ID=your_dataset_account_id
-   export R2_DATASET_BUCKET_NAME=your_dataset_bucket_name
-   export R2_DATASET_READ_ACCESS_KEY_ID=your_dataset_read_access_key_id
-   export R2_DATASET_READ_SECRET_ACCESS_KEY=your_dataset_read_secret_access_key
+   # Dataset R2 credentials - You may set up your own Shared Sharded Dataset, but must at minimum set these keys
+   # See docs/shared_sharded_dataset.md for instructions
+   export R2_DATASET_ACCOUNT_ID="8af7f92a8a0661cf7f1ac0420c932980"
+   export R2_DATASET_BUCKET_NAME="dataset-migration"
+   export R2_DATASET_READ_ACCESS_KEY_ID="5c42b46cfe147cd175295eb78500c291"
+   export R2_DATASET_READ_SECRET_ACCESS_KEY="40900cbd916b47c1012396afdd29ee6cae39606ad334886849944dd03362f42d"
+   export DATASET_BINS_PATH="remote/tokenized/"
+
 
    # Aggregator R2 credentials
    export R2_AGGREGATOR_ACCOUNT_ID="8af7f92a8a0661cf7f1ac0420c932980"
@@ -253,7 +255,7 @@ DEBUG=false
   - **Minimum CPU**: 32 cores, 3.5 GHz
   - **Minimum RAM**: 800 GB
   - **Minimum Network**: 1024 Mbps download/upload bandwidth
-- **Storage**: 100GB+ recommended for model and data
+- **Storage**: 500GB+ recommended for model and data
 - **Network**: Stable internet connection with good bandwidth
 
 ### Network Options

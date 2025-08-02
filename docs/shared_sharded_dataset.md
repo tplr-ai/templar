@@ -46,6 +46,8 @@ R2_DATASET_READ_SECRET_ACCESS_KEY=
 DATASET_BINS_PATH="remote/tokenized/"
 ```
 
+That's all! The dataset has been built and is available by providing those keys. The `SharedShardedDatasetManager` takes care of everything else. Unlike previously where user steps were required, now you just have to point to a bucket with the shards in it.
+
 ## Troubleshooting
 
 ### Common Issues

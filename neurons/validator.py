@@ -1148,6 +1148,24 @@ class Validator(BaseNode):
                 current_window=self.current_window,
             )
 
+            # Compute gather-quality metrics
+            intended_gather_uids = list(self.comms.peers)
+            actual_gather_uids = list(gather_result.uids)
+
+            mean_final_intended = (
+                float(self.final_scores[intended_gather_uids].mean().item())
+                if intended_gather_uids
+                else 0.0
+            )
+            mean_final_actual = (
+                float(self.final_scores[actual_gather_uids].mean().item())
+                if actual_gather_uids
+                else 0.0
+            )
+            reserve_used = len(
+                [uid for uid in actual_gather_uids if uid in self.comms.reserve_peers]
+            )
+
             gather_sync_scores = await asyncio.gather(
                 *(self.evaluate_miner_sync(uid) for uid in self.comms.peers)
             )
@@ -2069,6 +2087,10 @@ class Validator(BaseNode):
                 "validator/overlap/mean": idx_overlap["mean_overlap"],
                 "validator/overlap/min": idx_overlap["min_overlap"],
                 "validator/overlap/max": idx_overlap["max_overlap"],
+                # ── gather quality extras ────────────────────────────────
+                "validator/gather/intended_mean_final": mean_final_intended,
+                "validator/gather/actual_mean_final": mean_final_actual,
+                "validator/gather/reserve_used": reserve_used,
             }
             self.wandb.log(evaluation_metrics, step=self.global_step)
 

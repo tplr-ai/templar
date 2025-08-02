@@ -380,7 +380,7 @@ class Miner(BaseNode):
             world_size=self.world_size,
             comms=self.comms,
         )
-        self.windows_per_shard = getattr(self.hparams, "windows_per_shard", 100)
+        self.windows_per_shard = getattr(self.hparams, "windows_per_shard")
 
         tplr.logger.info("[Init] ✔ fully done – entering run()")
 

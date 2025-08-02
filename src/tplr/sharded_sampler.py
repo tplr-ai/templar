@@ -67,7 +67,7 @@ class _BaseWindowSampler(Sampler, ABC):
         denom = micro_bs * world_size
         self.grad_accum_steps = batch_size // denom
         self.set_window_uid(uid, window)
-        
+
     # --------------------------------------------------------------------- #
     # public API
     # --------------------------------------------------------------------- #
@@ -101,7 +101,7 @@ class _BaseWindowSampler(Sampler, ABC):
         Must be deterministic w.r.t. `(uid, window)`.
         """
         raise NotImplementedError
-    
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # MinerSampler

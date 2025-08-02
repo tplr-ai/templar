@@ -214,7 +214,10 @@ class ShardedDatasetManager:
         return task
 
     async def download_files(
-        self, bucket: str, tokens_file: os.PathLike, ids_file: os.PathLike
+        self,
+        bucket: tplr.schemas.Bucket,
+        tokens_file: os.PathLike,
+        ids_file: os.PathLike,
     ) -> asyncio.TaskGroup:
         """
         Downloads the shard and its indices
@@ -225,19 +228,15 @@ class ShardedDatasetManager:
             ids_file: The path to the tokens file's indices in bucket
         """
         return await asyncio.gather(
-            asyncio.create_task(
-                self.comms.s3_get_object(
-                    tokens_file,
-                    bucket,
-                    load_data=False,
-                )
+            self.comms.s3_get_object(
+                tokens_file,
+                bucket,
+                load_data=False,
             ),
-            asyncio.create_task(
-                self.comms.s3_get_object(
-                    ids_file,
-                    bucket,
-                    load_data=False,
-                )
+            self.comms.s3_get_object(
+                ids_file,
+                bucket,
+                load_data=False,
             ),
         )
 
@@ -301,7 +300,7 @@ class ShardedDatasetManager:
                     os.remove(filepath)
                 except FileNotFoundError:
                     tplr.logger.error(f"{name} file not available for deletion")
-                    
+
         del old_dataset
 
         return self.shard_index

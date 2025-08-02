@@ -261,6 +261,23 @@ wheels = [
 ]
 
 [[package]]
+name = "awscli"
+version = "1.35.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+    { name = "colorama" },
+    { name = "docutils" },
+    { name = "pyyaml" },
+    { name = "rsa" },
+    { name = "s3transfer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c6/f3/7053f5f98659d1bfaee01bb3efdc574ec227f9001c3d19e9ca453c7c9423/awscli-1.35.2.tar.gz", hash = "sha256:78f9ad964dcb3e35890617396614d0683310fdf55082801afbe5909e1421cc23", size = 1828384, upload-time = "2024-10-08T19:17:22.724Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/6a/a6ed3017545aa310c0a41d7723bf4d1c3b65b0d3483dd43ebb48a1ac9ecc/awscli-1.35.2-py3-none-any.whl", hash = "sha256:16deab86354105ab47ad28212825bc59b62878b75f61ba50b735d65c34047b3e", size = 4521003, upload-time = "2024-10-08T19:17:19.446Z" },
+]
+
+[[package]]
 name = "backoff"
 version = "2.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -872,6 +889,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/b2/9d/c3b43da9515bd270df0f80548d9944e389870713cc1fe2b8fb35fe2bcefd/docstring_parser-0.17.0.tar.gz", hash = "sha256:583de4a309722b3315439bb31d64ba3eebada841f2e2cee23b99df001434c912", size = 27442, upload-time = "2025-07-21T07:35:01.868Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/55/e2/2537ebcff11c1ee1ff17d8d0b6f4db75873e3b0fb32c2d4a2ee31ecb310a/docstring_parser-0.17.0-py3-none-any.whl", hash = "sha256:cf2569abd23dce8099b300f9b4fa8191e9582dda731fd533daf54c4551658708", size = 36896, upload-time = "2025-07-21T07:35:00.684Z" },
+]
+
+[[package]]
+name = "docutils"
+version = "0.16"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2f/e0/3d435b34abd2d62e8206171892f174b180cd37b09d57b924ca5c2ef2219d/docutils-0.16.tar.gz", hash = "sha256:c2de3a60e9e7d07be26b7f2b00ca0309c207e06c100f9cc2a94931fc75a478fc", size = 1962041, upload-time = "2020-01-12T13:55:25.917Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/81/44/8a15e45ffa96e6cf82956dd8d7af9e666357e16b0d93b253903475ee947f/docutils-0.16-py2.py3-none-any.whl", hash = "sha256:0c5b78adfbf7762415433f5515cd5c9e762339e23369dbe8000d84a4bf4ab3af", size = 548181, upload-time = "2020-01-12T13:55:21.393Z" },
 ]
 
 [[package]]
@@ -2680,6 +2706,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pyasn1"
+version = "0.6.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/e9/01f1a64245b89f039897cb0130016d79f77d52669aae6ee7b159a6c4c018/pyasn1-0.6.1.tar.gz", hash = "sha256:6f580d2bdd84365380830acf45550f2511469f673cb4a5ae3857a3170128b034", size = 145322, upload-time = "2024-09-10T22:41:42.55Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/f1/d6a797abb14f6283c0ddff96bbdd46937f64122b8c925cab503dd37f8214/pyasn1-0.6.1-py3-none-any.whl", hash = "sha256:0d632f46f2ba09143da3a8afe9e33fb6f92fa2320ab7e886e2d0f7672af84629", size = 83135, upload-time = "2024-09-11T16:00:36.122Z" },
+]
+
+[[package]]
 name = "pybind11"
 version = "3.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3314,6 +3349,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e2/c5/9136736c37022a6ad27fea38f3111eb8f02fe75d067f9a985cc358653102/rouge_score-0.1.2.tar.gz", hash = "sha256:c7d4da2683e68c9abf0135ef915d63a46643666f848e558a1b9f7ead17ff0f04", size = 17400, upload-time = "2022-07-22T22:46:22.909Z" }
 
 [[package]]
+name = "rsa"
+version = "4.7.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyasn1" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/db/b5/475c45a58650b0580421746504b680cd2db4e81bc941e94ca53785250269/rsa-4.7.2.tar.gz", hash = "sha256:9d689e6ca1b3038bc82bf8d23e944b6b6037bc02301a574935b2dd946e0353b9", size = 39711, upload-time = "2021-02-24T10:55:05.846Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/93/0c0f002031f18b53af7a6166103c02b9c0667be528944137cc954ec921b3/rsa-4.7.2-py3-none-any.whl", hash = "sha256:78f9a9bf4e7be0c5ded4583326e7461e3a3c5aae24073648b4bdfa797d78c9d2", size = 34505, upload-time = "2021-02-24T10:55:03.55Z" },
+]
+
+[[package]]
 name = "ruff"
 version = "0.12.8"
 source = { registry = "https://pypi.org/simple" }
@@ -3884,6 +3931,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },
     { name = "aiofiles" },
+    { name = "awscli" },
     { name = "bittensor" },
     { name = "boto3" },
     { name = "bt-decode" },
@@ -3931,6 +3979,7 @@ requires-dist = [
     { name = "aioboto3", specifier = "==13.2.0" },
     { name = "aiofiles" },
     { name = "aiofiles", specifier = "==24.1.0" },
+    { name = "awscli", specifier = ">=1.35.2" },
     { name = "bittensor", specifier = "==9.1.0" },
     { name = "bittensor-cli", marker = "extra == 'dev'" },
     { name = "boto3" },

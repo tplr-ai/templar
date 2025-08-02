@@ -688,7 +688,7 @@ class Miner(BaseNode):
                     reserve_uids=self.comms.reserve_peers,
                     window=step_window,
                     key="gradient",
-                    timeout=60,
+                    timeout=75,
                     device=str(self.device),
                     local=False,
                     stale_retention=100,

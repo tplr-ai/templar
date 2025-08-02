@@ -111,7 +111,7 @@ class Comms(ChainManager):
         self.reserve_peers: list[int] = []
 
         self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
-        self.gather_semaphore = asyncio.Semaphore(15)
+        self.gather_semaphore = asyncio.Semaphore(20)
 
     async def _get_s3_client(self, bucket: Bucket):
         """
@@ -370,7 +370,7 @@ class Comms(ChainManager):
         self,
         key: str,
         bucket: Bucket = None,
-        timeout: int = 20,
+        timeout: int = 30,
         time_min: datetime = None,
         time_max: datetime = None,
         load_data: bool = True,
@@ -841,7 +841,7 @@ class Comms(ChainManager):
         key: Literal["checkpoint", "debug", "gradient", "aggregator"],
         local: bool = True,
         stale_retention: int = 10,
-        timeout: int = 20,
+        timeout: int = 30,
         time_min: datetime = None,
         time_max: datetime = None,
     ) -> Optional[tuple[dict, int]]:
@@ -1001,7 +1001,7 @@ class Comms(ChainManager):
                 return state_dict
 
             # Short delay before retrying
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)
 
     async def gather(
         self,

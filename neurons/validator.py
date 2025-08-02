@@ -1082,7 +1082,7 @@ class Validator(BaseNode):
                 reserve_uids=self.comms.reserve_peers,
                 window=self.sync_window,
                 key="gradient",
-                timeout=60,
+                timeout=75,
                 device=cast(str, self.config.device),
                 local=False,
                 totalks=self.totalks,

@@ -46,6 +46,7 @@ import os
 import shutil
 import time
 import typing
+from pathlib import Path
 from typing import Optional, Tuple
 
 import bittensor as bt
@@ -597,11 +598,27 @@ class Evaluator:
         os.environ["DATASET_BINS_PATH"] = self.config.custom_eval_path
 
         try:
-            # 1. Setup dataset and dataloader
+            # 1. Determine the file prefix by checking what exists
+            eval_path = Path(self.config.custom_eval_path)
+            file_prefix = "train"  # default
+
+            # Check for different possible prefixes
+            if (eval_path / "val_000000.npy").exists():
+                file_prefix = "val"
+            elif (eval_path / "eval_000000.npy").exists():
+                file_prefix = "eval"
+            elif (eval_path / "test_000000.npy").exists():
+                file_prefix = "test"
+
+            tplr.logger.info(f"Using file prefix: {file_prefix}")
+
+            # 2. Setup dataset and dataloader
             custom_dataset = tplr.SharedShardedDataset(
+                shard_index=0,  # Use shard index 0 for evaluation dataset
                 sequence_length=self.hparams.sequence_length,
                 rank=0,  # Evaluator is single-process
                 world_size=1,
+                file_prefix=file_prefix,  # Use detected or default prefix
             )
             # Limit evaluation to 1024 samples as requested
             sampler = torch.utils.data.SubsetRandomSampler(

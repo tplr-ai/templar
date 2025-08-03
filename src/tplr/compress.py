@@ -28,7 +28,7 @@ import torch.fft
 from einops import rearrange
 
 # ---------- type aliases ---------- #
-IdxT: TypeAlias = torch.Tensor  # int16 indices
+IdxT: TypeAlias = torch.Tensor  # 12-bit packed indices (stored as uint8 tensor)
 ValT: TypeAlias = torch.Tensor  # (possibly quantised) values
 ShapeT: TypeAlias = tuple[int, ...]  # original tensor shape
 TotK: TypeAlias = int  # size of the last dim
@@ -277,8 +277,11 @@ class CompressDCT(Generic[Q]):
     def _clamp_topk(self, x, topk):
         if topk > x.shape[-1]:
             topk = x.shape[-1]
-        if topk < 1:
-            topk = 1
+        if topk < 2:
+            topk = 2
+        # Ensure topk is even for 12-bit packing efficiency
+        if topk % 2 != 0:
+            topk = topk - 1  # Round down to nearest even number
         return int(topk)
 
     # ------------------------------------------------------------------ #
@@ -315,8 +318,9 @@ class CompressDCT(Generic[Q]):
         ).indices
         val = torch.gather(x, dim=-1, index=idx_int64)
 
-        # Cast idx to int16 for saving or transmission
-        idx = idx_int64.to(torch.int16)
+        # Pack indices into 12-bit representation for efficient storage
+        # This reduces storage by 25% compared to int16
+        idx = pack_12bit_indices(idx_int64)
 
         # Apply 8-bit quantization if enabled
         if self.use_quantization:
@@ -343,8 +347,13 @@ class CompressDCT(Generic[Q]):
         if len(xshape) > 2:  # 2D weights
             x = rearrange(x, "y x h w -> y x (h w)")
 
-        # Cast back to int64 before using scatter/gather
-        idx_int64 = idx.to(torch.int64)
+        # Unpack 12-bit indices using val shape
+        if idx.dtype == torch.uint8:
+            # 12-bit packed format - unpack using values shape
+            idx_int64 = unpack_12bit_indices(idx, val.shape)
+        else:
+            # Legacy int16 format - cast back to int64
+            idx_int64 = idx.to(torch.int64)
         x.scatter_reduce_(
             dim=-1, index=idx_int64, src=val, reduce="mean", include_self=False
         ).reshape(xshape)
@@ -421,8 +430,19 @@ class CompressDCT(Generic[Q]):
                 v = v * clip_factor
             processed_vals.append(v)
 
-        # Concatenate everything
-        idx_concat = torch.cat([i.to(p.device) for i in idx], dim=-1)
+        # Unpack and concatenate indices
+        unpacked_indices = []
+        for i, i_data in enumerate(idx):
+            if i_data.dtype == torch.uint8:
+                # Unpack 12-bit format using corresponding values shape
+                v_data = val[i] if isinstance(val, list) else val
+                idx_unpacked = unpack_12bit_indices(i_data.to(p.device), v_data.shape)
+            else:
+                # Legacy format
+                idx_unpacked = i_data.to(p.device)
+            unpacked_indices.append(idx_unpacked)
+
+        idx_concat = torch.cat(unpacked_indices, dim=-1)
         val_concat = torch.cat(processed_vals, dim=-1).to(p.dtype)
 
         # Use decompress without quantization (since we already dequantized)

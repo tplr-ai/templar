@@ -133,6 +133,8 @@ class Validator(BaseNode):
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
+
+        self.current_hotkeys = dict(zip(self.metagraph.uids, self.metagraph.hotkeys))
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             tplr.logger.error(
                 f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
@@ -912,7 +914,12 @@ class Validator(BaseNode):
             )
             peer_update_time = tplr.T() - peer_start
 
-            self.eval_peers = self.comms.eval_peers
+            self.eval_peers = {
+                peer: value
+                for peer, value in self.comms.eval_peers.items()
+                if peer not in self.naughty_peers
+            }
+
             tplr.log_with_context(
                 level="info",
                 message=f"{tplr.P(self.sync_window, peer_update_time)} Updated peers - eval:{len(self.eval_peers)}",
@@ -2322,7 +2329,11 @@ class Validator(BaseNode):
         4) If not enough high-weight peers, fill remaining with random active peers
         """
         # Get all active peers as a list
-        active_peers = [int(peer) for peer in self.comms.active_peers]
+        active_peers = [
+            int(peer)
+            for peer in self.comms.active_peers
+            if peer not in self.naughty_peers
+        ]
 
         # Check if we have enough active peers
         if len(active_peers) < self.hparams.minimum_peers:
@@ -2888,6 +2899,36 @@ class Validator(BaseNode):
                     current_window=self.current_window,
                 )
 
+    def check_deregistered_uids(self, idx_overlap_peers: dict) -> dict:
+        """
+        Find updates in metagraph that indicate a uid is a net-new user
+        to avoid unintentionally punishing new miners where the old
+        miner was naughty
+
+        Args:
+            idx_overlap_peers: The combined uids of the previously
+                naughty peers and the current peers that exceed
+                overlap threshold
+
+        Returns:
+            Updated idx_overlap_peers, keeping in mind deregistering
+        """
+        found_uids = list(idx_overlap_peers.keys())
+        latest_hotkeys = dict(zip(self.metagraph.uids, self.metagraph.hotkeys))
+
+        for uid in found_uids:
+            if (
+                latest_hotkeys.get(uid) != self.current_hotkeys.get(uid)
+                and idx_overlap_peers.get(uid)
+                != "mega"  # not actively cheating already
+            ):
+                # peer has changed from deregistering
+                self.naughty_peers.pop(uid, None)
+                idx_overlap_peers.pop(uid, None)
+
+        self.current_hotkeys = latest_hotkeys
+        return idx_overlap_peers
+
     def slash_from_overlap(self, idx_overlap: dict) -> None:
         """
         Anyone with overly similar gradients is slashed; those
@@ -2897,8 +2938,11 @@ class Validator(BaseNode):
         Args:
             idx_overlap: The overlap dictionary from tplr.neurons
         """
-        idx_overlap_peers = idx_overlap.get("uids_over_thresh", {})
-        idx_overlap_peers.update({uid: "max" for uid in self.naughty_peers})
+        idx_overlap_peers = {uid: "max" for uid in self.naughty_peers}
+        idx_overlap_peers.update(idx_overlap.get("uids_over_thresh", {}))
+
+        idx_overlap_peers = self.check_deregistered_uids(idx_overlap_peers)
+
         for uid, level in idx_overlap_peers.items():
             old_score = self.final_scores[uid].item()
             slash_multiplier = self.idx_similarity_slashing_rate.get(level, 0.5)
@@ -2935,6 +2979,7 @@ class Validator(BaseNode):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
+
         return
 
     def set_dataloader(self, validator: bool = False) -> None:

@@ -738,7 +738,7 @@ async def check_uid_index_overlap(
             min_overlap=0.0,
             max_overlap=0.0,
             pairs_over_thresh=[],
-            uids_over_thresh=set(),
+            uids_over_thresh={},
         )
 
     ts_map = dict(

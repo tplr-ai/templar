@@ -200,7 +200,7 @@ class CompressDCT(Generic[Q]):
     ) -> tuple[IdxT, ValT, ShapeT, TotK]: ...
 
     @torch.no_grad()
-    def compress(self, x: torch.Tensor, topk: int, align_to: int = 1):  # type: ignore[override]
+    def compress(self, x: torch.Tensor, topk: int):  # type: ignore[override]
         if isinstance(x, torch.distributed.tensor.DTensor):   # check for dtensors
             x = x.to_local()
         xshape = x.shape
@@ -219,24 +219,6 @@ class CompressDCT(Generic[Q]):
 
         # Cast idx to int16 for saving or transmission
         idx = idx_int64.to(torch.int16)
-
-        # pad for TP
-        if align_to > 1:
-            k = idx.shape[-1]
-            rem = k % align_to
-            if rem:
-                pad = align_to - rem
-
-                pad_shape = list(idx.shape)
-                pad_shape[-1] = pad
-
-                idx_pad = idx.new_zeros(pad_shape)
-                val_pad = val.new_zeros(pad_shape)
-
-                idx = torch.cat([idx, idx_pad], dim=-1)
-                val = torch.cat([val, val_pad], dim=-1)
-
-        totalk = idx.shape[-1]
 
         # Apply 8-bit quantization if enabled
         if self.use_quantization:

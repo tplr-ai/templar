@@ -37,6 +37,8 @@ import bittensor as bt
 import numpy as np
 
 # Third party
+import cytoolz as c
+import cytoolz.curried as cc
 import torch
 import torch.distributed as dist
 import uvloop
@@ -414,27 +416,29 @@ class Validator(BaseNode):
     def log_sync_score(
         self, eval_uid: int, sync_result: dict[str, bool | float | int | str]
     ) -> None:
-        l2_norm = float(sync_result.get("l2_norm", 99.0))
-        avg_l2_norm = float(sync_result.get("avg_l2_norm", 99.0))
-        avg_abs_diff = float(sync_result.get("avg_abs_diff", 99.0))
-        max_diff = float(sync_result.get("max_diff", 99.0))
-        avg_steps_behind = float(sync_result.get("avg_steps_behind", 99.0))
-        max_steps_behind = float(sync_result.get("max_steps_behind", 99.0))
+        keys = [
+            "l2_norm",
+            "avg_l2_norm",
+            "avg_abs_diff",
+            "max_diff",
+            "avg_steps_behind",
+            "max_steps_behind",
+        ]
+        values = c.get(keys, sync_result, 99.0)
+        values = list(map(float, values))
+        fields = dict(zip(keys, values))
+        
         tplr.log_with_context(
             level="info",
-            message=f"Sync average steps behind: {avg_steps_behind:.3f}",
+            message=f"Sync average steps behind: {fields['avg_steps_behind']:.3f}",
             sync_window=self.sync_window,
             current_window=self.current_window,
             eval_uid=eval_uid,
         )
         self.wandb.log(
             {
-                f"validator/sync/l2_norm/{eval_uid}": l2_norm,
-                f"validator/sync/avg_l2_norm/{eval_uid}": avg_l2_norm,
-                f"validator/sync/avg_abs_diff/{eval_uid}": avg_abs_diff,
-                f"validator/sync/sync_max_diff/{eval_uid}": max_diff,
-                f"validator/sync/avg_steps_behind/{eval_uid}": avg_steps_behind,
-                f"validator/sync/max_steps_behind/{eval_uid}": max_steps_behind,
+                f"validator/sync/{k}/{eval_uid}": v
+                for k,v in fields.items()
             },
             step=self.global_step,
         )
@@ -445,14 +449,7 @@ class Validator(BaseNode):
                 "window": int(self.sync_window),
                 "global_step": int(self.global_step),
             },
-            fields={
-                "l2_norm": l2_norm,
-                "avg_l2_norm": avg_l2_norm,
-                "avg_abs_diff": avg_abs_diff,
-                "max_diff": max_diff,
-                "avg_steps_behind": avg_steps_behind,
-                "max_steps_behind": max_steps_behind,
-            },
+            fields=fields,
             with_system_metrics=True,
             with_gpu_metrics=True,
         )
@@ -509,16 +506,18 @@ class Validator(BaseNode):
                 self.openskill_ratings[uid] = rated_teams[i][0]
 
                 # Log updated OpenSkill values
-                openskill_mu = float(self.openskill_ratings[uid].mu)
-                openskill_sigma = float(self.openskill_ratings[uid].sigma)
-                openskill_ordinal = float(self.openskill_ratings[uid].ordinal())
+                openskill_dict = dict(
+                    mu = float(self.openskill_ratings[uid].mu),
+                    sigma = float(self.openskill_ratings[uid].sigma),
+                    ordinal = float(self.openskill_ratings[uid].ordinal()),
+                )
 
                 sync_score = float(
                     self.sync_scores[uid].item() if uid in self.evaluated_uids else 0.0
                 )
 
                 self.final_scores[uid] = (
-                    openskill_ordinal
+                    openskill_dict["ordinal"]
                     * max(0, self.binary_moving_averages[uid].item())
                     * sync_score
                 )
@@ -533,9 +532,8 @@ class Validator(BaseNode):
                 # Log to WandB
                 self.wandb.log(
                     {
-                        f"validator/openskill/mu/{uid}": openskill_mu,
-                        f"validator/openskill/sigma/{uid}": openskill_sigma,
-                        f"validator/openskill/ordinal/{uid}": openskill_ordinal,
+                        f"validator/openskill/{k}/{uid}": v
+                        for k,v in openskill_dict.items()
                     },
                     step=self.global_step,
                 )
@@ -548,11 +546,7 @@ class Validator(BaseNode):
                         "window": int(self.sync_window),
                         "global_step": int(self.global_step),
                     },
-                    fields={
-                        "mu": openskill_mu,
-                        "sigma": openskill_sigma,
-                        "ordinal": openskill_ordinal,
-                    },
+                    fields=openskill_dict,
                 )
 
             # Create a ranking table to display current match rankings
@@ -2435,31 +2429,30 @@ class Validator(BaseNode):
             dict: Synchronization metrics and score
         """
         # Fetch the miner's debug dictionary
-        debug_result = await self.comms.get(
+        miner_debug_dict, *_ = await self.comms.get(
             uid=str(eval_uid),
             window=self.sync_window - 1,
             key="debug",
             local=False,
             stale_retention=10,
         )
+        miner_debug_dict = cast(dict, miner_debug_dict)
+
+        base_output = {
+            "success": False,
+            "sync_score": 0.0,
+        }
 
         # Check if we got a valid result
-        if debug_result is None:
-            return {
-                "success": False,
-                "error": "Failed to retrieve debug dictionary",
-                "sync_score": 0.0,
+        if not isinstance(miner_debug_dict, dict):
+            output = base_output | {
+                "error": "Invalid debug dictionary format"
             }
-
-        miner_debug_dict = cast(dict, debug_result[0])
-
-        # Validate debug dictionary format
-        if miner_debug_dict is None or not isinstance(miner_debug_dict, dict):
-            return {
-                "success": False,
-                "error": "Invalid debug dictionary format",
-                "sync_score": 0.0,
-            }
+            if miner_debug_dict is None:
+                output = base_output | {
+                    "error": "Failed to retrieve debug dictionary"
+                }
+            return output
 
         # Compare miner's debug dict with validator's model
         comparison_metrics = await tplr.neurons.compare_model_with_debug_dict(
@@ -2471,10 +2464,8 @@ class Validator(BaseNode):
         )
 
         if not comparison_metrics["success"]:
-            return {
-                "success": False,
+            return base_output | {
                 "error": "Failed to compare model with debug dictionary",
-                "sync_score": 0.0,
             }
 
         # Calculate sync score using the formula: score = (1-x/5)^2.5
@@ -2648,7 +2639,11 @@ class Validator(BaseNode):
 
         # ── stage 1: read file ─────────────────────────────────────────────
         try:
-            state = torch.load(self.state_path, map_location=self.config.device)
+            state = torch.load(
+                self.state_path, 
+                map_location=self.config.device,
+                weights_only=False,
+            )
         except FileNotFoundError:
             tplr.logger.warning(f"No validator state found at {self.state_path}")
             return
@@ -2826,7 +2821,7 @@ class Validator(BaseNode):
 
         # Get weights for weighted sampling
         candidate_uids = list(bin_peers)
-        candidate_weights = [self.eval_peers[uid] for uid in candidate_uids]
+        candidate_weights = c.get(candidate_uids, self.eval_peers)
 
         # Determine how many peers to select (either all in the bin or uids_per_window)
         k = min(self.hparams.uids_per_window, len(candidate_uids))

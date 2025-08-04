@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -29,6 +31,29 @@ def validator_instance(monkeypatch):
     validator.naughty_peer_timeout = 200
     validator.sync_window = 0
     validator.current_window = 0
+
+    # Mock metagraph and hotkeys
+    validator.metagraph = SimpleNamespace()
+    validator.metagraph.uids = [0, 1, 2, 3, 4, 5, 6]
+    validator.metagraph.hotkeys = [
+        "hotkey_0",
+        "hotkey_1",
+        "hotkey_2",
+        "hotkey_3",
+        "hotkey_4",
+        "hotkey_5",
+        "hotkey_6_new",
+    ]
+    validator.current_hotkeys = {
+        0: "hotkey_0",
+        1: "hotkey_1",
+        2: "hotkey_2",
+        3: "hotkey_3",
+        4: "hotkey_4",
+        5: "hotkey_5",
+        6: "hotkey_6_old",
+    }
+
     return validator
 
 
@@ -81,8 +106,7 @@ def test_slash_from_overlap(validator_instance):
     assert validator.final_scores[3] == 0.0
     assert validator.binary_moving_averages[3] == 0.0
     assert 3 in validator.naughty_peers
-    expected_timeout = validator.sync_window + validator.naughty_peer_timeout - 1
-    assert validator.naughty_peers[3] == expected_timeout
+    assert validator.naughty_peers[3] == validator.naughty_peer_timeout - 1
 
     # Test case 4: Naughty peer timeout
     validator.naughty_peers = {4: 1}
@@ -98,3 +122,36 @@ def test_slash_from_overlap(validator_instance):
     validator.slash_from_overlap(idx_overlap_none)
     assert validator.final_scores[5] == 1.0
     assert validator.binary_moving_averages[5] == 1.0
+
+
+def test_check_deregistered_uids(validator_instance):
+    validator = validator_instance
+    original_hotkeys = validator.current_hotkeys.copy()
+
+    # Test case 1: UID 6's hotkey changed (removed), UID 2's did not (remains)
+    validator.current_hotkeys = original_hotkeys.copy()
+    idx_overlap_peers = {6: "high", 2: "max"}
+    updated_peers = validator.check_deregistered_uids(idx_overlap_peers)
+    assert 6 not in updated_peers
+    assert 2 in updated_peers
+
+    # Test case 2: UID 2's hotkey did not change, should remain
+    validator.current_hotkeys = original_hotkeys.copy()
+    idx_overlap_peers = {2: "max"}
+    updated_peers = validator.check_deregistered_uids(idx_overlap_peers)
+    assert 2 in updated_peers
+
+    # Test case 3: UID 6 is 'mega' and should not be removed even if hotkey changed
+    validator.current_hotkeys = original_hotkeys.copy()
+    idx_overlap_peers = {6: "mega"}
+    validator.naughty_peers = {6: 100}
+    updated_peers = validator.check_deregistered_uids(idx_overlap_peers)
+    assert 6 in updated_peers
+
+    # Test case 4: UID 6 is in naughty_peers and should be removed (since it's not 'mega')
+    validator.current_hotkeys = original_hotkeys.copy()
+    validator.naughty_peers = {6: 100}
+    idx_overlap_peers = {6: "high"}
+    updated_peers = validator.check_deregistered_uids(idx_overlap_peers)
+    assert 6 not in updated_peers
+    assert 6 not in validator.naughty_peers

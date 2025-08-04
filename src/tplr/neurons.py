@@ -29,9 +29,9 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
+from wandb.sdk.wandb_run import Run
 
 import tplr
-from wandb.sdk.wandb_run import Run
 
 if TYPE_CHECKING:
     from neurons.miner import Miner

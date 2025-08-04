@@ -4,6 +4,7 @@ import pytest
 import torch
 
 # ---- import the function under test -----------------------------------------
+from tplr.compress import pack_12bit_indices
 from tplr.neurons import check_uid_index_overlap  # <-- fix this path
 
 # -----------------------------------------------------------------------------
@@ -44,19 +45,32 @@ def _make_inputs(idx_lists, ts_map):
 
     # gather_result.state_dict expects attribute <param_name + "idxs">
     state_dict = SimpleNamespace()
-    # single parameter called "w", concatenate chunks along new dim
-    # shape: (P, *chunk_dims, k)
-    state_dict.widxs = [
-        torch.stack(idx_lists[p], dim=0)
-        if isinstance(idx_lists[p], list)
-        else idx_lists[p]
-        for p in range(P)
-    ]
+    # Convert to 12-bit packed format for each peer
+    packed_indices = []
+    vals_list = []  # Need vals for shape information
+    for p in range(P):
+        if isinstance(idx_lists[p], list):
+            # Stack chunks and pack
+            stacked = torch.stack(idx_lists[p], dim=0)
+            packed_data = pack_12bit_indices(stacked)
+            packed_indices.append(packed_data)
+            # Create dummy values with same shape as indices
+            vals_list.append(torch.randn_like(stacked, dtype=torch.float32))
+        else:
+            # Single tensor, pack directly
+            packed_data = pack_12bit_indices(idx_lists[p])
+            packed_indices.append(packed_data)
+            # Create dummy values with same shape as indices
+            vals_list.append(torch.randn_like(idx_lists[p], dtype=torch.float32))
+
+    state_dict.widxs = packed_indices
+    state_dict.wvals = vals_list  # Add vals for unpacking
 
     gather_result = SimpleNamespace(uids=uids, state_dict=state_dict)
     neuron = SimpleNamespace(
         comms=_FakeComms(ts_map),
         model=_DummyModel(),  # .named_parameters()->[('w', …)]
+        config=SimpleNamespace(device="cpu"),  # Add device config
     )
     return neuron, gather_result
 
@@ -73,7 +87,9 @@ async def test_skip_when_less_than_two():
 @pytest.mark.asyncio
 async def test_detect_full_overlap_and_offender_choice():
     # Two peers share exactly the same indices -> 100 % overlap (over threshold)
-    same_idxs = [torch.tensor([0, 1, 2], dtype=torch.int16)]
+    same_idxs = [
+        torch.tensor([0, 1, 2, 3], dtype=torch.int64)
+    ]  # Even count for 12-bit packing
     idx_lists = [same_idxs, same_idxs]  # P=2, C=1, k=3
     ts_map = {0: 100, 1: 200}  # peer 1 uploaded later
     neuron, gather = _make_inputs(idx_lists, ts_map)
@@ -89,8 +105,8 @@ async def test_detect_full_overlap_and_offender_choice():
 async def test_detect_no_overlap():
     # Two peers with disjoint indices -> 0 % overlap (below threshold)
     idx_lists = [
-        [torch.tensor([0, 1, 2], dtype=torch.int16)],
-        [torch.tensor([3, 4, 5], dtype=torch.int16)],
+        [torch.tensor([0, 1, 2, 3], dtype=torch.int64)],  # Even count
+        [torch.tensor([4, 5, 6, 7], dtype=torch.int64)],  # Even count
     ]
     ts_map = {0: 100, 1: 101}
     neuron, gather = _make_inputs(idx_lists, ts_map)

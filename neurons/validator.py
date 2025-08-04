@@ -2915,7 +2915,7 @@ class Validator(BaseNode):
                     self.naughty_peers.pop(uid)
 
             # Only reduce positive scores
-            if self.final_scores[uid] > 0:
+            if old_score > 0:
                 self.final_scores[uid] *= slash_multiplier
                 self.binary_moving_averages[uid] *= slash_multiplier
 

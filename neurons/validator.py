@@ -3026,7 +3026,6 @@ class Validator(BaseNode):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-
         return
 
     def set_dataloader(self, validator: bool = False) -> None:

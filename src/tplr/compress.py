@@ -232,8 +232,8 @@ class TransformDCT:
         return x
 
 
-class CompressDCT(Generic[Q]):
-    """DCT-style sparsifier/compressor with optional 8-bit quantisation."""
+class TopKCompressor(Generic[Q]):
+    """Top-k gradient sparsifier/compressor with optional quantization."""
 
     use_quantization: Q
     n_bins: int
@@ -244,7 +244,7 @@ class CompressDCT(Generic[Q]):
     # ------------------------------------------------------------------ #
     @overload
     def __init__(
-        self: "CompressDCT[Literal[True]]",
+        self: "TopKCompressor[Literal[True]]",
         *,
         use_quantization: Literal[True] = True,
         quantization_bins: int = 256,
@@ -253,7 +253,7 @@ class CompressDCT(Generic[Q]):
 
     @overload
     def __init__(
-        self: "CompressDCT[Literal[False]]",
+        self: "TopKCompressor[Literal[False]]",
         *,
         use_quantization: Literal[False] = False,
         quantization_bins: int = 256,
@@ -287,13 +287,13 @@ class CompressDCT(Generic[Q]):
     # ------------------------------------------------------------------ #
     @overload
     def compress(
-        self: "CompressDCT[Literal[True]]",
+        self: "TopKCompressor[Literal[True]]",
         x: torch.Tensor,
         topk: int,
     ) -> tuple[IdxT, ValT, ShapeT, TotK, QuantParamsT]: ...
     @overload
     def compress(
-        self: "CompressDCT[Literal[False]]",
+        self: "TopKCompressor[Literal[False]]",
         x: torch.Tensor,
         topk: int,
     ) -> tuple[IdxT, ValT, ShapeT, TotK]: ...

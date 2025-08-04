@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from tplr.compress import (
-    CompressDCT,
+    TopKCompressor,
     TransformDCT,
     _dct,
     _get_smaller_split,
@@ -15,23 +15,23 @@ from tplr.compress import (
 )
 
 
-class TestCompressDCT:
-    """Test CompressDCT class using actual implementation"""
+class TestTopKCompressor:
+    """Test TopKCompressor class using actual implementation"""
 
     @pytest.fixture
-    def compress_instance(self) -> CompressDCT[Literal[False]]:
-        """Create CompressDCT instance"""
-        return CompressDCT(use_quantization=False)
+    def compress_instance(self) -> TopKCompressor[Literal[False]]:
+        """Create TopKCompressor instance"""
+        return TopKCompressor(use_quantization=False)
 
     @pytest.fixture
-    def compress_instance_quantized(self) -> CompressDCT[Literal[True]]:
-        """Create CompressDCT instance with quantization"""
-        return CompressDCT(
+    def compress_instance_quantized(self) -> TopKCompressor[Literal[True]]:
+        """Create TopKCompressor instance with quantization"""
+        return TopKCompressor(
             use_quantization=True, quantization_bins=256, quantization_range=6
         )
 
     def test_compress_produces_int16_indices(
-        self, compress_instance: CompressDCT[Literal[False]]
+        self, compress_instance: TopKCompressor[Literal[False]]
     ):
         """Test that compress() produces 12-bit packed indices"""
         # Create test tensor
@@ -50,7 +50,7 @@ class TestCompressDCT:
             assert totalk == x.shape[-1]  # For 2D tensor, it's the last dimension
 
     def test_compress_with_quantization(
-        self, compress_instance_quantized: CompressDCT[Literal[True]]
+        self, compress_instance_quantized: TopKCompressor[Literal[True]]
     ):
         """Test compression with quantization enabled"""
         x = torch.randn(10, 10)
@@ -70,7 +70,7 @@ class TestCompressDCT:
         assert len(qparams) == 5  # shift, scale, offset, lookup, orig_dtype
 
     def test_decompress_with_12bit_tuple_format(
-        self, compress_instance: CompressDCT[Literal[False]]
+        self, compress_instance: TopKCompressor[Literal[False]]
     ):
         """Test that decompress can handle 12-bit packed tuple format"""
         # Setup
@@ -95,7 +95,7 @@ class TestCompressDCT:
         assert result.dtype == p.dtype
 
     def test_batch_decompress_multiple_12bit_formats(
-        self, compress_instance: CompressDCT[Literal[False]]
+        self, compress_instance: TopKCompressor[Literal[False]]
     ):
         """Test batch_decompress with multiple 12-bit packed indices"""
         # Setup
@@ -125,7 +125,7 @@ class TestCompressDCT:
         assert result.dtype == p.dtype
 
     def test_compress_decompress_round_trip(
-        self, compress_instance: CompressDCT[Literal[False]]
+        self, compress_instance: TopKCompressor[Literal[False]]
     ):
         """Test full compress-decompress round trip"""
         x = torch.zeros(10, 10)
@@ -158,7 +158,7 @@ class TestCompressDCT:
         assert torch.allclose(top_vals, expected_vals, atol=1e-5)
 
     def test_12bit_index_value_range(
-        self, compress_instance: CompressDCT[Literal[False]]
+        self, compress_instance: TopKCompressor[Literal[False]]
     ):
         """Test that indices can represent values appropriate for 12-bit range"""
         # Create a large tensor that would have indices beyond 8-bit range
@@ -187,7 +187,7 @@ class TestCompressDCT:
             )
 
     def test_batch_decompress_with_norm_options(
-        self, compress_instance: CompressDCT[Literal[False]]
+        self, compress_instance: TopKCompressor[Literal[False]]
     ):
         """Test batch_decompress with normalisation and clip_norm options"""
         p = torch.zeros(10, 10)

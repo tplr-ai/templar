@@ -152,7 +152,7 @@ def outer_step(
     *,
     gather_result: SimpleNamespace | None,
     transformer: tplr.compress.TransformDCT,
-    compressor: tplr.compress.CompressDCT,
+    compressor: tplr.compress.TopKCompressor,
     xshapes: dict,
     totalks: dict,
     device: str,

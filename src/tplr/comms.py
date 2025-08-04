@@ -41,7 +41,7 @@ from botocore.exceptions import ClientError, ConnectionClosedError
 from tqdm import tqdm as std_tqdm
 
 import tplr as tplr
-from tplr.compress import CompressDCT
+from tplr.compress import TopKCompressor
 
 from . import __version__
 from .chain import ChainManager
@@ -1013,7 +1013,7 @@ class Comms(ChainManager):
         timeout: int,
         device: str,
         totalks: dict,
-        compressor: CompressDCT,
+        compressor: TopKCompressor,
         expected_compressed_params: set[str] | None = None,
         local: bool = True,
         stale_retention: int = 10,

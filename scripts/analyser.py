@@ -83,7 +83,7 @@ class Analyzer:
                 self.model,
                 target_chunk=self.hparams.target_chunk,
             )
-            self.compressor = tplr.compress.CompressDCT(
+            self.compressor = tplr.compress.TopKCompressor(
                 use_quantization=True,
                 quantization_bins=self.hparams.quantization_bins,
                 quantization_range=self.hparams.quantization_range,

@@ -91,9 +91,9 @@ def mock_config():
 
 @pytest.fixture(scope="session")
 def dummy_compressor():
-    from tplr.compress import CompressDCT
+    from tplr.compress import TopKCompressor
 
-    return CompressDCT(use_quantization=False)
+    return TopKCompressor(use_quantization=False)
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -115,7 +115,7 @@ def _patch_bittensor_subtensor():
 
 
 from tplr.schemas import Bucket
-from tplr.compress import TransformDCT, CompressDCT
+from tplr.compress import TransformDCT, TopKCompressor
 
 # Load environment variables from .env file
 load_dotenv()
@@ -408,7 +408,7 @@ async def test_gather_quant_params_validation(comms_instance):
         side_effect=[peer1_response, peer2_response]
     )
 
-    compressor = CompressDCT(use_quantization=True)  # needed by gather()
+    compressor = TopKCompressor(use_quantization=True)  # needed by gather()
 
     # ------------------------------------------------------------------
     # 3.  Run gather()

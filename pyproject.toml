@@ -85,7 +85,7 @@ filterwarnings = [
 prerelease = "allow"
 
 [tool.uv.sources]
-torchtitan = { path = "external/torchtitan", editable = true }
+torchtitan = { git = "https://github.com/tplr-ai/torchtitan", branch = "templar-main" }
 
 [tool.ruff]
 # Exclude directories that often trigger permission issues

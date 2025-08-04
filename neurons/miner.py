@@ -51,24 +51,9 @@ from torch.optim.lr_scheduler import (
 )
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss
-from torchtitan.config_manager import (
-    ActivationCheckpoint,
-    Float8,
-    JobConfig,
-    Model,
-    Parallelism,
-    Training,
-)
-from torchtitan.distributed import ParallelDims
-from torchtitan.models.llama3 import (
-    Transformer as TitanLlama,
-)
-from torchtitan.models.llama3 import (
-    TransformerModelArgs,
-)
-from torchtitan.models.llama3.infra.parallelize import parallelize_llama
 
 import tplr
+from tplr.model_factory import initialize_torchtitan_model
 
 # Local
 from neurons import BaseNode
@@ -262,103 +247,21 @@ class Miner(BaseNode):
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         super().__init__()
 
-        # Init model with hparams config
-        hf_cfg = self.hparams.model_config  # a transformers.LlamaConfig
-        titan_args = TransformerModelArgs(
-            dim=hf_cfg.hidden_size,
-            n_layers=hf_cfg.num_hidden_layers,
-            n_heads=hf_cfg.num_attention_heads,
-            n_kv_heads=getattr(hf_cfg, "num_key_value_heads", None),
-            vocab_size=hf_cfg.vocab_size,
-            multiple_of=256,
-            max_seq_len=self.hparams.sequence_length,
-            rope_theta=getattr(hf_cfg, "rope_theta", 1e4),
-            depth_init=True,
+        # Initialize TorchTitan model using model factory
+        self.model = initialize_torchtitan_model(
+            hparams=self.hparams,
+            role="miner",
+            device=str(self.device),
+            world_size=self.world_size,
         )
-        with torch.device("meta"):
-            self.model = TitanLlama(titan_args)
-
-        # ──────────────────────────────────────────────────────────────
-        # TorchTitan parallelism parameters come from hparams.torchtitan
-        # ──────────────────────────────────────────────────────────────
+        
+        # Store parallelization parameters for later use
         tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
-
         self.tp_degree = int(getattr(tt, "tp_degree", 1))
         self.pp_degree = int(getattr(tt, "pp_degree", 1))
         self.cp_degree = int(getattr(tt, "cp_degree", 1))
-
         self.dp_replicate = int(getattr(tt, "dp_replicate", 1))
-        self.dp_shard     = int(getattr(tt, "dp_shard",     1))
-
-        if self.dp_replicate > 1 and self.dp_shard > 1:
-            raise ValueError(
-                "Specify either torchtitan.dp_replicate or torchtitan.dp_shard, "
-                "but not both."
-            )
-
-        if self.dp_replicate > 1 and (self.tp_degree > 1 or self.pp_degree > 1 or self.cp_degree > 1):
-            raise ValueError("dp_replicate can only be used when tp/pp/cp are all 1.")
-        
-        self.dp_replicate = int(self.dp_replicate or 1)
-        self.dp_shard     = int(self.dp_shard or 1)
-
-        if self.world_size % (self.dp_replicate * self.dp_shard) != 0:
-            raise ValueError(
-                f"world_size ({self.world_size}) must be divisible by "
-                f"dp_replicate × dp_shard ({self.dp_replicate}×{self.dp_shard})."
-            )
-
-        if self.world_size % self.tp_degree != 0:
-            raise ValueError(
-                f"World size ({self.world_size}) must be divisible by tensor-parallel degree ({self.tp_degree})"
-            )
-
-        pdims = ParallelDims(
-            dp_replicate=self.dp_replicate,
-            dp_shard=self.dp_shard,
-            tp=self.tp_degree,
-            pp=self.pp_degree,
-            cp=self.cp_degree,
-            ep=1,
-            world_size=self.world_size,
-        )
-
-        world_mesh = pdims.build_mesh()
-
-        job_config_for_titan = JobConfig(
-            training=Training(
-                seq_len=self.hparams.sequence_length,
-                compile=tt.compile,
-                enable_cpu_offload=tt.enable_cpu_offload,
-                mixed_precision_param=tt.mixed_precision_param,
-                mixed_precision_reduce=tt.mixed_precision_reduce,
-            ),
-            parallelism=Parallelism(
-                enable_async_tensor_parallel=tt.enable_async_tensor_parallel,
-                disable_loss_parallel=tt.disable_loss_parallel,
-                fsdp_reshard_after_forward=tt.fsdp_reshard_after_forward,
-                enable_compiled_autograd=tt.enable_compiled_autograd,
-            ),
-            model=Model(converters=getattr(tt, "converters", [])),
-            float8=Float8(recipe_name=tt.float8_recipe_name),
-            activation_checkpoint=ActivationCheckpoint(
-                mode=tt.activation_checkpoint.get("mode", "selective"),
-                selective_ac_option=tt.activation_checkpoint.get("option", "op"),
-            ),
-        )
-
-        self.model = parallelize_llama(
-            self.model,
-            parallel_dims=pdims,
-            job_config=job_config_for_titan,
-        )
-
-        self.model.to_empty(device=self.device)  # type: ignore[reportArgumentType]
-        self.model.init_weights()
-
-        tplr.logger.info(
-            f"[Init] Llama model parallelized with TP={self.tp_degree} and DP_shard={self.dp_shard}, and on device"
-        )
+        self.dp_shard = int(getattr(tt, "dp_shard", 1))
 
         self.bare_model = getattr(self.model, "module", self.model)
         self.tokenizer = self.hparams.tokenizer

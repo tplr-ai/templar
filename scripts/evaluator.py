@@ -46,29 +46,14 @@ import os
 import shutil
 import time
 from pathlib import Path
-from types import SimpleNamespace
-
 import bittensor as bt
 import torch
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss
-from torchtitan.config_manager import (
-    ActivationCheckpoint,
-    Float8,
-    JobConfig,
-    Model,
-    Parallelism,
-    Training,
-)
-from torchtitan.distributed import ParallelDims
-
-# TorchTitan model imports
-from torchtitan.models.llama3 import Transformer as TitanLlama
-from torchtitan.models.llama3 import TransformerModelArgs
-from torchtitan.models.llama3.infra.parallelize import parallelize_llama
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 
 import tplr
+from tplr.model_factory import initialize_torchtitan_model
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"
@@ -203,79 +188,13 @@ class Evaluator:
         # Mock for the comms class
         self.uid = 1
 
-        # Initialize TorchTitan model
-        hf_cfg = self.hparams.model_config  # a transformers.LlamaConfig
-        titan_args = TransformerModelArgs(
-            dim=hf_cfg.hidden_size,
-            n_layers=hf_cfg.num_hidden_layers,
-            n_heads=hf_cfg.num_attention_heads,
-            n_kv_heads=getattr(hf_cfg, "num_key_value_heads", None),
-            vocab_size=hf_cfg.vocab_size,
-            multiple_of=256,
-            max_seq_len=self.hparams.sequence_length,
-            rope_theta=getattr(hf_cfg, "rope_theta", 1e4),
-            depth_init=True,
-        )
-
-        # Create model on meta device first
-        with torch.device("meta"):
-            self.model = TitanLlama(titan_args)
-
-        # Set up parallelization (no sharding for evaluator)
-        pdims = ParallelDims(
-            dp_replicate=1,
-            dp_shard=1,
-            tp=1,
-            pp=1,
-            cp=1,
-            ep=1,
+        # Initialize TorchTitan model using model factory
+        self.model = initialize_torchtitan_model(
+            hparams=self.hparams,
+            role="evaluator",
+            device="cpu",
             world_size=1,
         )
-
-        # Get TorchTitan config from hparams
-        tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
-
-        job_config = JobConfig(
-            training=Training(
-                seq_len=self.hparams.sequence_length,
-                compile=getattr(tt, "compile", False),
-                enable_cpu_offload=getattr(tt, "enable_cpu_offload", False),
-                mixed_precision_param=getattr(tt, "mixed_precision_param", "float32"),
-                mixed_precision_reduce=getattr(tt, "mixed_precision_reduce", "float32"),
-            ),
-            parallelism=Parallelism(
-                enable_async_tensor_parallel=getattr(
-                    tt, "enable_async_tensor_parallel", False
-                ),
-                disable_loss_parallel=getattr(tt, "disable_loss_parallel", True),
-                fsdp_reshard_after_forward=getattr(
-                    tt, "fsdp_reshard_after_forward", "default"
-                ),
-                enable_compiled_autograd=getattr(tt, "enable_compiled_autograd", False),
-            ),
-            model=Model(converters=getattr(tt, "converters", [])),
-            float8=Float8(recipe_name=getattr(tt, "float8_recipe_name", None)),
-            activation_checkpoint=ActivationCheckpoint(
-                mode=tt.activation_checkpoint.get("mode", "selective")
-                if hasattr(tt, "activation_checkpoint")
-                and isinstance(tt.activation_checkpoint, dict)
-                else "selective",
-                selective_ac_option=tt.activation_checkpoint.get("option", "op")
-                if hasattr(tt, "activation_checkpoint")
-                and isinstance(tt.activation_checkpoint, dict)
-                else "op",
-            ),
-        )
-
-        self.model = parallelize_llama(
-            self.model,
-            parallel_dims=pdims,
-            job_config=job_config,
-        )
-
-        # Initialize model weights on CPU
-        self.model.to_empty(device="cpu")
-        self.model.init_weights()  # type: ignore
 
         self.tokenizer = self.hparams.tokenizer
         self.comms = tplr.comms.Comms(

@@ -82,15 +82,14 @@ def create_job_config(
     # Role-specific defaults
     mixed_precision_param_default: Literal["bfloat16", "float32"]
     mixed_precision_reduce_default: Literal["float32"] = "float32"  # Only valid value
+    compile_default = getattr(tt, "compile", False)
 
     if role == "evaluator":
         # Evaluator uses minimal settings for inference
-        compile_default = False
         mixed_precision_param_default = "float32"
         enable_cpu_offload_default = False
     elif role == "validator":
         # Validator uses conservative settings
-        compile_default = False
         # Ensure we only get valid values
         mp_param = getattr(tt, "mixed_precision_param", "float32")
         mixed_precision_param_default = (
@@ -99,7 +98,6 @@ def create_job_config(
         enable_cpu_offload_default = False
     else:  # miner
         # Miner uses full settings from config
-        compile_default = getattr(tt, "compile", False)
         # Ensure we only get valid values
         mp_param = getattr(tt, "mixed_precision_param", "float32")
         mixed_precision_param_default = (

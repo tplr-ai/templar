@@ -344,7 +344,6 @@ class Miner(BaseNode):
         self.global_step = 0  # Initialize global_step to zero
         self.comms.current_window = self.current_window
         self.step_counter = 0
-        # self.windows_per_shard = 500
 
         # Track additional metrics
         self.total_tokens_processed = 0
@@ -527,16 +526,9 @@ class Miner(BaseNode):
 
             # 2. Load data
             data_start = tplr.T()
+
             # Update sampler for current window
             self.sampler.set_window_uid(self.uid, step_window)
-            
-            if (
-                step_window > 0 
-                and 
-                step_window % self.windows_per_shard == 0
-            ):
-                tplr.logger.info(f"Swapping dataset at wondow {step_window}")
-                await self.dataset_manager.swap_datasets()
 
             if self.global_step > 0 and self.global_step % self.windows_per_shard == 0:
                 tplr.logger.info(f"Swapping dataset at window {step_window}")
@@ -549,6 +541,7 @@ class Miner(BaseNode):
             tplr.logger.info(
                 f"{tplr.P(step_window, data_loading_time)} Loaded training data"
             )
+
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
             tplr.logger.info("Start accumulating...")

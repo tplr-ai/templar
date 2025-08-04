@@ -19,7 +19,6 @@ import asyncio
 import os
 import time
 from pathlib import Path
-import asyncio
 
 import numpy as np
 import numpy.typing as npt
@@ -161,6 +160,7 @@ class SharedShardedDataset(Dataset):
 
 class ShardedDatasetManager:
     """Manages the lifecycle of sharded datasets, including downloading and swapping."""
+
     def __init__(
         self,
         sequence_length: int,
@@ -297,19 +297,19 @@ class ShardedDatasetManager:
         if self.upcoming_dataset:
             await self.upcoming_dataset
 
-        if self.upcoming_dataset is None:
-            # end of training shards, restart?
-            # more like pass incremented shards and see
-            # if > max_dataset_idx
-            pass
-
-        old_dataset = getattr(self, "active_dataset")
-        _ = self.initialize_datasets(self.shard_index)
+        old_dataset = self.active_dataset
+        await self.initialize_datasets(self.shard_index)
         tplr.logger.info("successfully swapped datasets.")
 
-        if old_dataset:
-            os.remove(old_dataset.tokens_file)
-            os.remove(old_dataset.ids_file)
-            del old_dataset
+        if old_dataset and self.rank == 0:
+            filenames = ["tokens_file", "ids_file"]
+            files_to_delete = [old_dataset.tokens_file, old_dataset.ids_file]
+            for name, filepath in zip(filenames, files_to_delete):
+                try:
+                    os.remove(filepath)
+                except FileNotFoundError:
+                    tplr.logger.error(f"{name} file not available for deletion")
 
-        return
+        del old_dataset
+
+        return self.shard_index

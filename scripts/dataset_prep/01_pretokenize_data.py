@@ -1,30 +1,21 @@
 import argparse
 import glob
-<<<<<<< HEAD
 import io
-=======
->>>>>>> feature/1tb-dataset-sharder
 import math
 import multiprocessing as mp
 import os
 
-<<<<<<< HEAD
 import boto3
 import dotenv
 import numpy as np
 from botocore import config
+from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer
-
-from datasets import load_dataset
 
 dotenv.load_dotenv()
-=======
-import numpy as np
-from datasets import load_dataset
-from tqdm import tqdm
-from transformers import AutoTokenizer
->>>>>>> feature/1tb-dataset-sharder
+
+from tplr import config
 
 # Global tokenizer for multiprocessing
 _tokenizer = None
@@ -40,20 +31,13 @@ def init_worker(tokenizer_name, r2_args=None):
         raise ValueError(f"Tokenizer {tokenizer_name} must have an EOS token.")
 
     if r2_args and r2_args["bucket"]:
-        client_config = config.Config(
-            max_pool_connections=256,
-            tcp_keepalive=True,
-            retries={
-                "max_attempts": 10,
-                "mode": "adaptive",
-            },
-        )
-        _s3_client = boto3.client(
+        session = boto3.session.Session()
+        _s3_client = session.client(
             "s3",
             endpoint_url=r2_args["endpoint_url"],
             aws_access_key_id=r2_args["access_key_id"],
             aws_secret_access_key=r2_args["secret_access_key"],
-            config=client_config,
+            config=config.client_config,
         )
 
 
@@ -132,7 +116,10 @@ def main(args):
             response = s3_client.list_objects_v2(
                 Bucket=args.r2_bucket, Prefix=os.path.join(args.r2_prefix, "train_")
             )
-            existing_count = len(response.get("Contents", []))
+            contents = response.get("Contents", [])
+            shards = list(filter(lambda c: c["Key"].endswith(".npy"), contents))
+            existing_count = len(shards)
+            print(f"Shards found: {existing_count}")
         except Exception as e:
             print(f"Could not list objects in R2 bucket: {e}")
             existing_count = 0

@@ -30,6 +30,15 @@ if [ "$DEBUG" = "true" ]; then
     DEBUG_FLAG="--debug"
 fi
 
+# Extract GPU ID from CUDA_DEVICE (e.g., "cuda:0" -> "0")
+if [[ "$CUDA_DEVICE" =~ cuda:([0-9]+) ]]; then
+    GPU_ID="${BASH_REMATCH[1]}"
+    export CUDA_VISIBLE_DEVICES="$GPU_ID"
+    echo "Setting CUDA_VISIBLE_DEVICES=$GPU_ID"
+else
+    echo "Warning: Could not parse GPU ID from CUDA_DEVICE=$CUDA_DEVICE, using default"
+fi
+
 # Check CUDA version
 CUDA_VERSION=$(python3 -c "import torch; print(torch.version.cuda)")
 if [[ "${CUDA_VERSION}" != "12.6" ]]; then
@@ -38,8 +47,12 @@ fi
 
 # Check NODE_TYPE and start appropriate process
 if [ "$NODE_TYPE" = "miner" ]; then
-    echo "Starting miner..."
-    exec python3 neurons/miner.py \
+    echo "Starting miner with torchrun..."
+    exec torchrun \
+        --standalone \
+        --nnodes 1 \
+        --nproc_per_node 2 \
+        neurons/miner.py \
         --wallet.name ${WALLET_NAME} \
         --wallet.hotkey ${WALLET_HOTKEY} \
         --netuid ${NETUID} \
@@ -48,15 +61,18 @@ if [ "$NODE_TYPE" = "miner" ]; then
         --use_wandb \
         ${DEBUG_FLAG}
 elif [ "$NODE_TYPE" = "validator" ]; then
-    echo "Starting validator..."
-    exec python3 neurons/validator.py \
+    echo "Starting validator with torchrun..."
+    exec torchrun \
+        --standalone \
+        --nnodes 1 \
+        --nproc_per_node 1 \
+        neurons/validator.py \
         --wallet.name ${WALLET_NAME} \
         --wallet.hotkey ${WALLET_HOTKEY} \
         --netuid ${NETUID} \
         --device ${CUDA_DEVICE} \
         --subtensor.network ${NETWORK} \
         --use_wandb \
-        # --store-gathers \
         ${DEBUG_FLAG}
 else
     echo "Error: NODE_TYPE must be either \"miner\" or \"validator\""

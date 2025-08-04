@@ -64,22 +64,28 @@ module.exports = {
 
     /*──────────────────────── Validator ──────────────────────*/
     {
-      name: 'TV1',
-      script: 'neurons/validator.py',
-      interpreter: 'python3',
+      name            : "TV1",
+      exec_mode       : "fork",
+      exec_interpreter: "none",
+      script          : "torchrun",
+      args: [
+        "--standalone",
+        "--nnodes", "1",
+        "--nproc_per_node", "1",
+        "neurons/validator.py",
+        "--wallet.name", "templar_test",
+        "--wallet.hotkey", "V1",
+        "--device", "cuda",
+        "--subtensor.network", "local",
+        "--netuid", "2",
+        "--use_wandb",
+        "--project", PROJECT_NAME
+      ],
       env: {
         ...process.env,
-        PROJECT_NAME
-      },
-      args: [
-        '--wallet.name', 'templar_test',
-        '--wallet.hotkey', 'V1',
-        '--device', 'cuda:0',
-        '--subtensor.network', 'local',
-        '--netuid', '2',
-        '--use_wandb',
-        `--project "${PROJECT_NAME}"`
-      ].join(' ')
+        PROJECT_NAME,
+        CUDA_VISIBLE_DEVICES: "0"
+      }
     }
   ]
 };

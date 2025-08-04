@@ -8,7 +8,6 @@ import time
 
 import boto3
 import numpy as np
-from joblib import Parallel, delayed
 from tqdm.auto import tqdm
 
 import tplr
@@ -16,7 +15,18 @@ from neurons import miner
 from tplr import comms, hparams, sharded_dataset
 
 
-def tokens_handler(x):
+def tokens_handler(x: np.ndarray) -> int:
+    """
+    Takes the incoming numpy array and creates the sample_id
+    corresponding to that array
+
+    Args:
+        x: A numpy array representing a data slice where
+           len == seq_len
+
+    Returns:
+        The hashed representation of this slice
+    """
     x = x.tobytes()
     x = hashlib.blake2b(x, digest_size=8).digest()
     x = struct.unpack("<Q", x)[0]
@@ -41,18 +51,20 @@ async def run_preprocessing(
     )
     bucket = comms_.get_own_bucket("dataset", "read")
     tokens_file, ids_file = sharded_dataset.SharedShardedDataset.locate_shards(0)
-    print("Downloading first shard")
-    try:
-        downloaded = await asyncio.create_task(
-            comms_.s3_get_object(
-                tokens_file,
-                bucket,
-                load_data=False,
+    if not os.path.exists(tokens_file):
+        try:
+            print("Downloading first shard")
+
+            _ = await asyncio.create_task(
+                comms_.s3_get_object(
+                    tokens_file,
+                    bucket,
+                    load_data=False,
+                )
             )
-        )
-        tplr.logging.info("Shard downloaded")
-    except Exception as e:
-        print(e)
+            tplr.logging.info("Shard downloaded")
+        except Exception as e:
+            tplr.logger.error(e)
 
     args.r2_endpoint_url = f"https://{args.r2_endpoint_url}.r2.cloudflarestorage.com"
     session = boto3.session.Session()
@@ -83,6 +95,7 @@ async def run_preprocessing(
 
         t1 = time.perf_counter()
 
+        new_tokens_file, new_ids_file = None, None
         if i + 1 < shards:
             new_tokens_file, new_ids_file = (
                 sharded_dataset.SharedShardedDataset.locate_shards(i + 1)
@@ -102,10 +115,10 @@ async def run_preprocessing(
         starts = raw_idx[:-1]
         ends = raw_idx[1:]
 
-        bits = Parallel(n_jobs=os.cpu_count() * 2, prefer="threads")(
-            delayed(tokens_handler)(tok_u32[start:end])
+        bits = [
+            tokens_handler(tok_u32[start:end])
             for start, end in tqdm(zip(starts, ends), total=len(starts))
-        )
+        ]
         sample_ids = np.stack(bits).view(np.uint64)
 
         buffer = io.BytesIO()
@@ -127,7 +140,13 @@ async def run_preprocessing(
     return
 
 
-async def main():
+async def main() -> None:
+    """
+    Run the process that hashes the sample_ids
+
+    Raises:
+        ValueError: If sequence_length is invalid
+    """
     parser = argparse.ArgumentParser(
         description="Create sample_ids.bin for each .npy shard",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

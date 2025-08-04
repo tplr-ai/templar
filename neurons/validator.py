@@ -2526,6 +2526,7 @@ class Validator(BaseNode):
                     idxs,
                     self.totalks[n],
                     allowed_topk=self.hparams.topk_compression,
+                    vals=vals,
                 )
 
                 # Check for NaN or Inf values

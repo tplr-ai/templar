@@ -12,6 +12,7 @@ def mock_validator_init(self):
 
 @pytest.fixture
 def validator_instance(monkeypatch):
+    """Test validator instance"""
     monkeypatch.setattr(Validator, "__init__", mock_validator_init)
     validator = Validator()
     validator.final_scores = torch.ones(10, dtype=torch.float32)
@@ -32,18 +33,25 @@ def validator_instance(monkeypatch):
 
 
 def test_determine_slash_egregiousness():
-    assert determine_slash_egregiousness(0.9) == "high"
-    assert determine_slash_egregiousness(0.94) == "high"
-    assert determine_slash_egregiousness(0.95) == "max"
+    assert determine_slash_egregiousness(0.0) == "high"
+    assert determine_slash_egregiousness(0.8) == "high"
+    assert determine_slash_egregiousness(0.949) == "high"
+    assert determine_slash_egregiousness(0.951) == "max"
     assert determine_slash_egregiousness(0.99) == "max"
     assert determine_slash_egregiousness(1.0) == "mega"
+
+    # Test invalid inputs if validation is added
+    with pytest.raises(ValueError):
+        determine_slash_egregiousness(-0.1)
+    with pytest.raises(ValueError):
+        determine_slash_egregiousness(1.1)
 
 
 def test_instantiate_slashing_multiplier():
     output_dict = instantiate_slashing_multiplier()
     assert isinstance(output_dict, dict)
     assert all(isinstance(val, float) for val in output_dict.values())
-    assert all(isinstance(key, str) for key in output_dict.keys())
+    assert all(isinstance(key, str) for key in output_dict)
 
 
 def test_slash_from_overlap(validator_instance):
@@ -73,7 +81,8 @@ def test_slash_from_overlap(validator_instance):
     assert validator.final_scores[3] == 0.0
     assert validator.binary_moving_averages[3] == 0.0
     assert 3 in validator.naughty_peers
-    assert validator.naughty_peers[3] == 199
+    expected_timeout = validator.sync_window + validator.naughty_peer_timeout - 1
+    assert validator.naughty_peers[3] == expected_timeout
 
     # Test case 4: Naughty peer timeout
     validator.naughty_peers = {4: 1}

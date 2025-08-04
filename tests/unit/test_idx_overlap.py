@@ -81,7 +81,7 @@ async def test_detect_full_overlap_and_offender_choice():
     res = await check_uid_index_overlap(neuron, gather, window=1)
     assert res["pairs_checked"] == 1
     assert res["pairs_high_ovlap"] == 1
-    assert res["uids_over_thresh"] == {1}  # offender is the later one
+    assert res["uids_over_thresh"] == {1: "mega"}  # offender is the later one
     assert pytest.approx(res["mean_overlap"]) == 1.0
 
 
@@ -97,5 +97,5 @@ async def test_detect_no_overlap():
 
     res = await check_uid_index_overlap(neuron, gather, window=1)
     assert res["pairs_high_ovlap"] == 0
-    assert res["uids_over_thresh"] == set()
+    assert res["uids_over_thresh"] == {}
     assert pytest.approx(res["mean_overlap"]) == 0.0

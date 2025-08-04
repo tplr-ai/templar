@@ -1,25 +1,38 @@
+from typing import Literal
+
 import pytest
 import torch
+import torch.nn as nn
 
-from tplr.compress import CompressDCT, pack_12bit_indices, unpack_12bit_indices
+from tplr.compress import (
+    CompressDCT,
+    TransformDCT,
+    _dct,
+    _get_smaller_split,
+    _idct,
+    pack_12bit_indices,
+    unpack_12bit_indices,
+)
 
 
 class TestCompressDCT:
     """Test CompressDCT class using actual implementation"""
 
     @pytest.fixture
-    def compress_instance(self):
+    def compress_instance(self) -> CompressDCT[Literal[False]]:
         """Create CompressDCT instance"""
         return CompressDCT(use_quantization=False)
 
     @pytest.fixture
-    def compress_instance_quantized(self):
+    def compress_instance_quantized(self) -> CompressDCT[Literal[True]]:
         """Create CompressDCT instance with quantization"""
         return CompressDCT(
             use_quantization=True, quantization_bins=256, quantization_range=6
         )
 
-    def test_compress_produces_int16_indices(self, compress_instance):
+    def test_compress_produces_int16_indices(
+        self, compress_instance: CompressDCT[Literal[False]]
+    ):
         """Test that compress() produces 12-bit packed indices"""
         # Create test tensor
         x = torch.randn(10, 10)
@@ -36,7 +49,9 @@ class TestCompressDCT:
         if len(x.shape) == 2:
             assert totalk == x.shape[-1]  # For 2D tensor, it's the last dimension
 
-    def test_compress_with_quantization(self, compress_instance_quantized):
+    def test_compress_with_quantization(
+        self, compress_instance_quantized: CompressDCT[Literal[True]]
+    ):
         """Test compression with quantization enabled"""
         x = torch.randn(10, 10)
         topk = 20
@@ -54,33 +69,9 @@ class TestCompressDCT:
         assert qparams is not None
         assert len(qparams) == 5  # shift, scale, offset, lookup, orig_dtype
 
-    def test_decompress_with_legacy_int16(self, compress_instance):
-        """Test that decompress handles legacy int16 indices"""
-        # Setup
-        p = torch.zeros(10, 10)
-        xshape = (10, 10)
-        totalk = 10  # Last dimension size for 2D tensor
-
-        # Create legacy format indices (int16) - using actual valid indices
-        # For a 10x10 tensor reshaped, indices should be within valid range
-        idx = torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.int16)
-        val = torch.tensor([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=torch.float32)
-
-        # Test decompression - this should work with legacy format
-        try:
-            result = compress_instance.decompress(p, idx, val, xshape, totalk)
-            assert result.shape == xshape
-            assert result.dtype == p.dtype
-
-            # Verify some values were placed (they get scattered into the tensor)
-            assert result.abs().sum() > 0, "Result should have non-zero values"
-        except NameError as e:
-            if "unpack_12bit_indices" in str(e):
-                pytest.skip("unpack_12bit_indices not implemented yet")
-            else:
-                raise
-
-    def test_decompress_with_12bit_tuple_format(self, compress_instance):
+    def test_decompress_with_12bit_tuple_format(
+        self, compress_instance: CompressDCT[Literal[False]]
+    ):
         """Test that decompress can handle 12-bit packed tuple format"""
         # Setup
         p = torch.zeros(10, 10)
@@ -103,36 +94,39 @@ class TestCompressDCT:
         assert result.shape == xshape
         assert result.dtype == p.dtype
 
-    def test_batch_decompress_mixed_formats(self, compress_instance):
-        """Test batch_decompress with mixed legacy and 12-bit formats"""
+    def test_batch_decompress_multiple_12bit_formats(
+        self, compress_instance: CompressDCT[Literal[False]]
+    ):
+        """Test batch_decompress with multiple 12-bit packed indices"""
         # Setup
         p = torch.zeros(10, 10)
         xshape = (10, 10)
         totalk = 100
 
-        # Mix of legacy and potential 12-bit format indices
-        idx1 = torch.tensor([[0, 1], [2, 3]], dtype=torch.int16)  # Legacy
-        idx2 = torch.tensor([[4, 5], [6, 7]], dtype=torch.int16)  # Legacy for now
-        idx_list = [idx1, idx2]
+        # Create multiple 12-bit packed indices
+        idx1_orig = torch.tensor([[0, 1], [2, 3]], dtype=torch.int64)
+        idx2_orig = torch.tensor([[4, 5], [6, 7]], dtype=torch.int64)
+
+        # Pack them using the 12-bit format
+        idx1_packed = pack_12bit_indices(idx1_orig)
+        idx2_packed = pack_12bit_indices(idx2_orig)
+
+        idx_list = [idx1_packed, idx2_packed]
 
         val1 = torch.tensor([[0.1, 0.2], [0.3, 0.4]], dtype=torch.float32)
         val2 = torch.tensor([[0.5, 0.6], [0.7, 0.8]], dtype=torch.float32)
         val_list = [val1, val2]
 
         # Test batch decompression
-        try:
-            result = compress_instance.batch_decompress(
-                p, idx_list, val_list, xshape, totalk
-            )
-            assert result.shape == xshape
-            assert result.dtype == p.dtype
-        except NameError as e:
-            if "unpack_12bit_indices" in str(e):
-                pytest.skip("unpack_12bit_indices not implemented yet")
-            else:
-                raise
+        result = compress_instance.batch_decompress(
+            p, idx_list, val_list, xshape, totalk
+        )
+        assert result.shape == xshape
+        assert result.dtype == p.dtype
 
-    def test_compress_decompress_round_trip(self, compress_instance):
+    def test_compress_decompress_round_trip(
+        self, compress_instance: CompressDCT[Literal[False]]
+    ):
         """Test full compress-decompress round trip"""
         x = torch.zeros(10, 10)
         x[0, 0] = 1.0
@@ -150,28 +144,22 @@ class TestCompressDCT:
 
         # Decompress
         p = torch.zeros_like(x)
-        try:
-            result = compress_instance.decompress(p, idx, val, xshape, totalk)
+        result = compress_instance.decompress(p, idx, val, xshape, totalk)
 
-            # Verify shape
-            assert result.shape == x.shape
+        # Verify shape
+        assert result.shape == x.shape
 
-            # Verify the top values were preserved
-            assert result.abs().max() > 0, (
-                "Decompressed tensor should have non-zero values"
-            )
+        # Verify the top values were preserved
+        assert result.abs().max() > 0, "Decompressed tensor should have non-zero values"
 
-            # The top 4 values should be approximately 4, 3, 2, 1
-            top_vals = torch.topk(result.abs().flatten(), k=4).values
-            expected_vals = torch.tensor([4.0, 3.0, 2.0, 1.0])
-            assert torch.allclose(top_vals, expected_vals, atol=1e-5)
-        except NameError as e:
-            if "unpack_12bit_indices" in str(e):
-                pytest.skip("unpack_12bit_indices not implemented yet")
-            else:
-                raise
+        # The top 4 values should be approximately 4, 3, 2, 1
+        top_vals = torch.topk(result.abs().flatten(), k=4).values
+        expected_vals = torch.tensor([4.0, 3.0, 2.0, 1.0])
+        assert torch.allclose(top_vals, expected_vals, atol=1e-5)
 
-    def test_12bit_index_value_range(self, compress_instance):
+    def test_12bit_index_value_range(
+        self, compress_instance: CompressDCT[Literal[False]]
+    ):
         """Test that indices can represent values appropriate for 12-bit range"""
         # Create a large tensor that would have indices beyond 8-bit range
         x = torch.randn(100, 100)  # 10,000 elements
@@ -198,40 +186,38 @@ class TestCompressDCT:
                 "Large tensor should have indices beyond 8-bit range"
             )
 
-    def test_batch_decompress_with_norm_options(self, compress_instance):
+    def test_batch_decompress_with_norm_options(
+        self, compress_instance: CompressDCT[Literal[False]]
+    ):
         """Test batch_decompress with normalisation and clip_norm options"""
         p = torch.zeros(10, 10)
         xshape = (10, 10)
         totalk = 100
 
-        # Create test data
-        idx = [torch.tensor([[0, 1]], dtype=torch.int16)]
-        val = [torch.tensor([[10.0, 20.0]], dtype=torch.float32)]
+        # Create test data with 12-bit packed format
+        idx_orig = torch.tensor([[0, 1, 2, 3]], dtype=torch.int64)  # Even count
+        idx_packed = pack_12bit_indices(idx_orig)
+        idx = [idx_packed]
+        val = [torch.tensor([[10.0, 20.0, 30.0, 40.0]], dtype=torch.float32)]
 
         # Test with normalisation
-        try:
-            result_norm = compress_instance.batch_decompress(
-                p, idx, val, xshape, totalk, normalise=True
-            )
-            assert result_norm.shape == xshape
+        result_norm = compress_instance.batch_decompress(
+            p, idx, val, xshape, totalk, normalise=True
+        )
+        assert result_norm.shape == xshape
 
-            # Test with clip_norm
-            result_clip = compress_instance.batch_decompress(
-                p, idx, val, xshape, totalk, clip_norm=True
-            )
-            assert result_clip.shape == xshape
+        # Test with clip_norm
+        result_clip = compress_instance.batch_decompress(
+            p, idx, val, xshape, totalk, clip_norm=True
+        )
+        assert result_clip.shape == xshape
 
-            # Test with block_norms provided
-            block_norms = torch.tensor([15.0])
-            result_with_norms = compress_instance.batch_decompress(
-                p, idx, val, xshape, totalk, block_norms=block_norms, clip_norm=True
-            )
-            assert result_with_norms.shape == xshape
-        except NameError as e:
-            if "unpack_12bit_indices" in str(e):
-                pytest.skip("unpack_12bit_indices not implemented yet")
-            else:
-                raise
+        # Test with block_norms provided
+        block_norms = torch.tensor([15.0])
+        result_with_norms = compress_instance.batch_decompress(
+            p, idx, val, xshape, totalk, block_norms=block_norms, clip_norm=True
+        )
+        assert result_with_norms.shape == xshape
 
 
 class TestTransformDCT:
@@ -240,7 +226,6 @@ class TestTransformDCT:
     @pytest.fixture
     def mock_model(self):
         """Create a simple model for testing"""
-        import torch.nn as nn
 
         class SimpleModel(nn.Module):
             def __init__(self):
@@ -252,7 +237,6 @@ class TestTransformDCT:
 
     def test_transform_init(self, mock_model):
         """Test TransformDCT initialization with real model"""
-        from tplr.compress import TransformDCT
 
         target_chunk = 16
         transform = TransformDCT(mock_model, target_chunk)
@@ -270,8 +254,6 @@ class TestTransformDCT:
 
     def test_encode_decode_real_tensors(self, mock_model):
         """Test encoding and decoding with real model tensors"""
-        from tplr.compress import TransformDCT
-
         target_chunk = 8
         transform = TransformDCT(mock_model, target_chunk)
 
@@ -298,8 +280,6 @@ class TestUtilityFunctions:
 
     def test_dct_idct_round_trip(self):
         """Test DCT and IDCT implementations"""
-        from tplr.compress import _dct, _idct
-
         x = torch.randn(4, 8)
 
         # Apply DCT then IDCT
@@ -311,8 +291,6 @@ class TestUtilityFunctions:
 
     def test_get_smaller_split(self):
         """Test _get_smaller_split function"""
-        from tplr.compress import _get_smaller_split
-
         # Test with actual use case
         assert _get_smaller_split(64, 8) == 8  # Exact divisor
         assert _get_smaller_split(64, 7) == 4  # Next smaller divisor

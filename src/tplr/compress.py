@@ -21,29 +21,32 @@
 # Global imports
 
 import math
-from typing import Generic, Literal, TypeAlias, TypeVar, cast, overload
+from typing import Generic, Literal, Sequence, TypeAlias, TypeVar, cast, overload
 
 import torch
 import torch.fft
 from einops import rearrange
+from torch.distributed.tensor import DTensor as DT
 
-# ---------- type aliases ---------- #
-IdxT: TypeAlias = torch.Tensor  # 12-bit packed indices (stored as uint8 tensor)
-ValT: TypeAlias = torch.Tensor  # (possibly quantised) values
-ShapeT: TypeAlias = tuple[int, ...]  # original tensor shape
-TotK: TypeAlias = int  # size of the last dim
+# ─────────── type aliases ────────────────────────────────────────────────
+# primitive shapes
+ShapeT: TypeAlias = tuple[int, ...]  # original dense tensor shape
 Shape4D = tuple[int, int, int, int]  # y, x, h, w
+TotK: TypeAlias = int  # size of the last dim
 
-# (shift, scale, offset, lookup table, original dtype)
+# 12‑bit packed representation - just the uint8 buffer, no tuple
+IdxT: TypeAlias = torch.Tensor  # 12-bit packed indices (stored as uint8 tensor)
+
 QuantParamsT: TypeAlias = tuple[torch.Tensor, float, int, torch.Tensor, torch.dtype]
+
+# For historical names kept elsewhere in the code
+ValT: TypeAlias = torch.Tensor
 
 # Boolean flag that propagates the chosen quantisation mode
 Q = TypeVar("Q", Literal[True], Literal[False])
 
 
-def pack_12bit_indices(
-    indices: torch.Tensor,
-) -> torch.Tensor:
+def pack_12bit_indices(indices: torch.Tensor) -> torch.Tensor:
     """
     Pack int64 indices into 12-bit representation.
     Every 2 indices (24 bits) are packed into 3 uint8 values.
@@ -94,9 +97,7 @@ def pack_12bit_indices(
     return packed
 
 
-def unpack_12bit_indices(
-    packed: torch.Tensor, values_shape: tuple[int, ...]
-) -> torch.Tensor:
+def unpack_12bit_indices(packed: torch.Tensor, values_shape: ShapeT) -> torch.Tensor:
     """
     Unpack 12-bit packed indices back to int64.
     Assumes even number of indices.
@@ -165,7 +166,7 @@ class TransformDCT:
                     self.b_dict[sc] = _idct(I, norm=norm).to(p.dtype).to(p.device)
 
     @torch.no_grad()
-    def einsum_2d(self, x, b, d=None):
+    def einsum_2d(self, x, b, d=None) -> torch.Tensor:
         if d is None:
             return torch.einsum("...ij, jb -> ...ib", x, b)
         else:
@@ -173,7 +174,7 @@ class TransformDCT:
             return torch.einsum("...ijkl, jb, ld -> ...ikbd", x, b, d)
 
     @torch.no_grad()
-    def einsum_2d_t(self, x, b, d=None):
+    def einsum_2d_t(self, x, b, d=None) -> torch.Tensor:
         if d is None:
             return torch.einsum("...ij, jb -> ...ib", x, b)
         else:
@@ -206,7 +207,7 @@ class TransformDCT:
         return x
 
     @torch.no_grad()
-    def decode(self, x: torch.Tensor, *, use_dct: bool = False):
+    def decode(self, x: torch.Tensor, *, use_dct: bool = False) -> torch.Tensor:
         if len(x.shape) > 2:  # 2D weights
             if use_dct:
                 n1 = x.shape[2]
@@ -274,14 +275,11 @@ class CompressDCT(Generic[Q]):
                 quantization_range  # Quantization range in standard deviations
             )
 
-    def _clamp_topk(self, x, topk):
-        if topk > x.shape[-1]:
-            topk = x.shape[-1]
-        if topk < 2:
-            topk = 2
+    def _clamp_topk(self, x, topk) -> int:
+        topk = min(topk, x.shape[-1])
+        topk = max(topk, 2)
         # Ensure topk is even for 12-bit packing efficiency
-        if topk % 2 != 0:
-            topk = topk - 1  # Round down to nearest even number
+        topk = topk - (topk % 2)
         return int(topk)
 
     # ------------------------------------------------------------------ #
@@ -302,7 +300,7 @@ class CompressDCT(Generic[Q]):
 
     @torch.no_grad()
     def compress(self, x: torch.Tensor, topk: int):  # type: ignore[override]
-        if isinstance(x, torch.distributed.tensor.DTensor):  # check for dtensors
+        if isinstance(x, DT):  # check for dtensors
             x = x.to_local()
         xshape = x.shape
 
@@ -369,21 +367,16 @@ class CompressDCT(Generic[Q]):
     def batch_decompress(
         self,
         p: torch.Tensor,
-        idx: torch.Tensor | list[torch.Tensor],
-        val: torch.Tensor | list[torch.Tensor],
+        idx: torch.Tensor | Sequence[torch.Tensor],
+        val: torch.Tensor | Sequence[torch.Tensor],
         xshape: ShapeT,
         totalk: int,
-        quantize_params: QuantParamsT | list[QuantParamsT] | None = None,
+        quantize_params: Sequence[QuantParamsT] | None = None,
         *,
         block_norms: torch.Tensor | None = None,
         normalise: bool = False,
         clip_norm: bool = True,
     ) -> torch.Tensor:
-        if not isinstance(idx, list):
-            idx = [idx]
-        if not isinstance(val, list):
-            val = [val]
-
         if quantize_params is not None and not isinstance(quantize_params, list):
             quantize_params = [quantize_params] * len(val)  # type: ignore[list-item]
 
@@ -432,10 +425,13 @@ class CompressDCT(Generic[Q]):
 
         # Unpack and concatenate indices
         unpacked_indices = []
-        for i, i_data in enumerate(idx):
+        val_list = val if isinstance(val, Sequence) else [val]
+        idx_list = idx if isinstance(idx, Sequence) else [idx]
+
+        for i, i_data in enumerate(idx_list):
             if i_data.dtype == torch.uint8:
                 # Unpack 12-bit format using corresponding values shape
-                v_data = val[i] if isinstance(val, list) else val
+                v_data = val_list[i]
                 idx_unpacked = unpack_12bit_indices(i_data.to(p.device), v_data.shape)
             else:
                 # Legacy format
@@ -493,15 +489,15 @@ class CompressDCT(Generic[Q]):
 
 
 # Code modified and sourced from https://github.com/zh217/torch-dct
-def _dct_fft_impl(v):
+def _dct_fft_impl(v) -> torch.Tensor:
     return torch.view_as_real(torch.fft.fft(v, dim=1))
 
 
-def _idct_irfft_impl(V):
+def _idct_irfft_impl(V) -> torch.Tensor:
     return torch.fft.irfft(torch.view_as_complex(V), n=V.shape[1], dim=1)
 
 
-def _dct(x, norm=None):
+def _dct(x, norm=None) -> torch.Tensor:
     """
     Discrete Cosine Transform, Type II (a.k.a. the DCT)
 
@@ -535,7 +531,7 @@ def _dct(x, norm=None):
     return V
 
 
-def _idct(X, norm=None):
+def _idct(X, norm=None) -> torch.Tensor:
     """
     The inverse to DCT-II, which is a scaled Discrete Cosine Transform, Type III
 
@@ -582,7 +578,7 @@ def _idct(X, norm=None):
     return x.view(*x_shape)
 
 
-def _get_prime_divisors(n):
+def _get_prime_divisors(n: int) -> list[int]:
     divisors = []
     while n % 2 == 0:
         divisors.append(2)
@@ -602,7 +598,7 @@ def _get_prime_divisors(n):
     return divisors
 
 
-def _get_divisors(n):
+def _get_divisors(n: int) -> list[int]:
     divisors = []
     if n == 1:
         divisors.append(1)
@@ -626,7 +622,7 @@ def _get_divisors(n):
     return divisors
 
 
-def _get_smaller_split(n, close_to):
+def _get_smaller_split(n: int, close_to: int) -> int:
     all_divisors = _get_divisors(n)
     for ix, val in enumerate(all_divisors):
         if val == close_to:

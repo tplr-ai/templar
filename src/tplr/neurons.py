@@ -151,7 +151,7 @@ def outer_step(
     optimizer: Optimizer,
     *,
     gather_result: SimpleNamespace | None,
-    transformer: tplr.compress.TransformDCT,
+    transformer: tplr.compress.ChunkingTransformer,
     compressor: tplr.compress.TopKCompressor,
     xshapes: dict,
     totalks: dict,

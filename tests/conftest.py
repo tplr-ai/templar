@@ -112,7 +112,7 @@ async def comms_instance():
     )
 
     # Manually add transformer and compressor as production code expects them to be available later.
-    transformer = compress.TransformDCT(None, target_chunk=hparams.target_chunk)
+    transformer = compress.ChunkingTransformer(None, target_chunk=hparams.target_chunk)
     compressor = compress.TopKCompressor()
 
     # Set expected parameter shapes and totalks.

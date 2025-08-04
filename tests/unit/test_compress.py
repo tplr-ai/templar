@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from tplr.compress import (
     TopKCompressor,
-    TransformDCT,
+    ChunkingTransformer,
     _dct,
     _get_smaller_split,
     _idct,
@@ -220,8 +220,8 @@ class TestTopKCompressor:
         assert result_with_norms.shape == xshape
 
 
-class TestTransformDCT:
-    """Test TransformDCT using actual implementation"""
+class TestChunkingTransformer:
+    """Test ChunkingTransformer using actual implementation"""
 
     @pytest.fixture
     def mock_model(self):
@@ -236,10 +236,10 @@ class TestTransformDCT:
         return SimpleModel()
 
     def test_transform_init(self, mock_model):
-        """Test TransformDCT initialization with real model"""
+        """Test ChunkingTransformer initialization with real model"""
 
         target_chunk = 16
-        transform = TransformDCT(mock_model, target_chunk)
+        transform = ChunkingTransformer(mock_model, target_chunk)
 
         # Check that dictionaries were populated
         assert len(transform.shape_dict) > 0
@@ -255,7 +255,7 @@ class TestTransformDCT:
     def test_encode_decode_real_tensors(self, mock_model):
         """Test encoding and decoding with real model tensors"""
         target_chunk = 8
-        transform = TransformDCT(mock_model, target_chunk)
+        transform = ChunkingTransformer(mock_model, target_chunk)
 
         # Get actual parameter from model
         param = next(mock_model.parameters())

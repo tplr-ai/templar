@@ -140,7 +140,9 @@ def unpack_12bit_indices(packed: torch.Tensor, values_shape: ShapeT) -> torch.Te
     return indices
 
 
-class TransformDCT:
+class ChunkingTransformer:
+    """Tensor chunking transformer for efficient gradient processing."""
+
     @torch.no_grad()
     def __init__(self, model, target_chunk, norm="ortho"):
         self.target_chunk = target_chunk

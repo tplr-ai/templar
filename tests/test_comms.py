@@ -115,7 +115,7 @@ def _patch_bittensor_subtensor():
 
 
 from tplr.schemas import Bucket
-from tplr.compress import TransformDCT, TopKCompressor
+from tplr.compress import ChunkingTransformer, TopKCompressor
 
 # Load environment variables from .env file
 load_dotenv()

@@ -79,7 +79,7 @@ class Analyzer:
             self.model.to(self.config.device)
 
             # Initialize compression components
-            self.transformer = tplr.compress.TransformDCT(
+            self.transformer = tplr.compress.ChunkingTransformer(
                 self.model,
                 target_chunk=self.hparams.target_chunk,
             )

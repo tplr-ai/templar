@@ -207,7 +207,7 @@ class Validator(BaseNode):
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
-        self.transformer = tplr.compress.TransformDCT(
+        self.transformer = tplr.compress.ChunkingTransformer(
             self.model, target_chunk=self.hparams.target_chunk
         )
         self.compressor = tplr.compress.TopKCompressor(

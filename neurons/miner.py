@@ -288,7 +288,7 @@ class Miner(BaseNode):
         self.cp_degree = int(getattr(tt, "cp_degree", 1))
 
         self.dp_replicate = int(getattr(tt, "dp_replicate", 1))
-        self.dp_shard = int(getattr(tt, "dp_shard", 1))
+        self.dp_shard     = int(getattr(tt, "dp_shard",     1))
 
         if self.dp_replicate > 1 and self.dp_shard > 1:
             raise ValueError(
@@ -296,13 +296,11 @@ class Miner(BaseNode):
                 "but not both."
             )
 
-        if self.dp_replicate > 1 and (
-            self.tp_degree > 1 or self.pp_degree > 1 or self.cp_degree > 1
-        ):
+        if self.dp_replicate > 1 and (self.tp_degree > 1 or self.pp_degree > 1 or self.cp_degree > 1):
             raise ValueError("dp_replicate can only be used when tp/pp/cp are all 1.")
-
+        
         self.dp_replicate = int(self.dp_replicate or 1)
-        self.dp_shard = int(self.dp_shard or 1)
+        self.dp_shard     = int(self.dp_shard or 1)
 
         if self.world_size % (self.dp_replicate * self.dp_shard) != 0:
             raise ValueError(
@@ -428,9 +426,9 @@ class Miner(BaseNode):
 
         for idx, (n, p) in enumerate(model_iterator):
             if idx % self.world_size == self.rank:
+                # this rank “owns” the parameter
                 self.owned_params.add(n)
                 self.error_feedback[n] = torch.zeros_like(p, device=self.device)
-
             # Handle DTensor for tensor parallelism
             if isinstance(p, DT):
                 dummy = torch.zeros_like(p.to_local())
@@ -1151,11 +1149,13 @@ class Miner(BaseNode):
             else:
                 input_ids = torch.tensor(batch, dtype=torch.long, device=self.device)
 
+
             # temporary
-            # vocab_size = self.model.vocab_size
-            # invalid = input_ids >= vocab_size
-            # if invalid.any():
+            #vocab_size = self.model.vocab_size
+            #invalid = input_ids >= vocab_size
+            #if invalid.any():
             #    input_ids[invalid] = self.tokenizer.pad_token_id
+            
 
             local_bs = len(batch)  # type: ignore
             accum_batch_size += local_bs
@@ -1168,7 +1168,7 @@ class Miner(BaseNode):
             labels[:, :-1] = input_ids[:, 1:]  # ✓ shift by +1
             labels[:, -1] = self.tokenizer.pad_token_id
             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-            # labels = torch.where(labels >= vocab_size, -100, labels) FOR SOME TESTING, DO NOT MERGE
+            #labels = torch.where(labels >= vocab_size, -100, labels) FOR SOME TESTING, DO NOT MERGE
 
             # ------------------------------------------------------------------ #
             # 3. Forward + backward

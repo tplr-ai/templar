@@ -20,6 +20,7 @@ from transformers import LlamaForCausalLM
 
 # Local imports
 import tplr
+from tplr.compress import unpack_12bit_indices
 from tplr.config import BUCKET_SECRETS
 
 # GPU optimizations.
@@ -318,14 +319,21 @@ class Analyzer:
                 vals = state_dict.get(f"{param_name}vals")
 
                 if idxs is not None and vals is not None:
-                    # Convert numpy arrays to torch tensors
+                    # Handle 12-bit packed format (uint8 tensor)
                     if isinstance(idxs, np.ndarray):
                         idxs = torch.from_numpy(idxs).to(self.config.device)
+                    else:
+                        idxs = idxs.to(self.config.device)
+
+                    # Unpack 12-bit indices using vals shape
+                    idxs_unpacked = unpack_12bit_indices(idxs, vals.shape)
+                    # Store unpacked indices for analysis
+                    peer_indices[param_name] = set(
+                        idxs_unpacked.flatten().cpu().numpy()
+                    )
+
                     if isinstance(vals, np.ndarray):
                         vals = torch.from_numpy(vals).to(self.config.device)
-
-                    # Store indices for analysis
-                    peer_indices[param_name] = set(idxs.flatten().cpu().numpy())
 
                     # Decode the gradient using transformer/compressor
                     decoded_grad = transformer.decode(
@@ -373,9 +381,12 @@ class Analyzer:
                 idxs = state_dict.get(f"{param_name}idxs")
                 vals = state_dict.get(f"{param_name}vals")
                 if idxs is not None and vals is not None:
-                    # Convert numpy arrays to torch tensors
+                    # Handle 12-bit packed format (uint8 tensor)
                     if isinstance(idxs, np.ndarray):
                         idxs = torch.from_numpy(idxs).to(self.config.device)
+                    else:
+                        idxs = idxs.to(self.config.device)
+
                     if isinstance(vals, np.ndarray):
                         vals = torch.from_numpy(vals).to(self.config.device)
 

@@ -766,7 +766,8 @@ async def check_uid_index_overlap(
 
 def determine_slash_egregiousness(overlap_pct: float) -> str:
     """
-    Based on the overlap_pct, 
+    Based on the overlap_pct, return a level corresponding
+    to an action which will be taken
 
     Args:
         overlap_pct: The percentage of overlap in the grads with
@@ -786,7 +787,7 @@ def determine_slash_egregiousness(overlap_pct: float) -> str:
 
 def instantiate_slashing_multiplier():
     """Centralize slashing config
-    
+
     We multiply these percentages against the base final_score
     """
     return {

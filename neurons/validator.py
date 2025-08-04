@@ -323,7 +323,9 @@ class Validator(BaseNode):
         self.inactivity_slash_rate = 0.25  # 25% slash per window
         self.missing_gradient_slash_rate = 0.75
         self.sync_score_slash_rate = 0.75
-        self.idx_similarity_slashing_rate = tplr.neurons.instantiate_slashing_multiplier()
+        self.idx_similarity_slashing_rate = (
+            tplr.neurons.instantiate_slashing_multiplier()
+        )
         self.naughty_peers = {}
         self.naughty_peer_timeout = 200
 
@@ -962,11 +964,10 @@ class Validator(BaseNode):
                     continue
 
                 if (
-                    peer_reset := self.current_window - inactive_since
+                    self.current_window - inactive_since
                     > self.hparams.reset_inactivity_windows
                 ):
                     self.reset_peer(uid)
-                if peer_reset:
                     tplr.log_with_context(
                         level="info",
                         message=f"UID {uid} fully reset after extended inactivity",
@@ -2890,7 +2891,7 @@ class Validator(BaseNode):
     def slash_from_overlap(self, idx_overlap: dict) -> None:
         """
         Anyone with overly similar gradients is slashed; those
-        with particularly egregious levels of overlap are 100% 
+        with particularly egregious levels of overlap are 100%
         slashed. When 100% overlap, sent to timeout corner
 
         Args:

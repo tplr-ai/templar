@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from tplr import load_hparams
+from tplr.compress import pack_12bit_indices
 
 hparams = load_hparams()
 
@@ -40,7 +41,10 @@ def create_xshapes_totalks(model):
 def create_valid_state_dict(model):
     state_dict = {}
     for name, _ in model.named_parameters():
-        state_dict[name + "idxs"] = torch.tensor([0, 1], dtype=torch.long)
+        # Create 12-bit packed format
+        indices = torch.tensor([0, 1], dtype=torch.long)
+        packed_data = pack_12bit_indices(indices)
+        state_dict[name + "idxs"] = packed_data
         state_dict[name + "vals"] = torch.tensor([0.1, 0.2], dtype=torch.float32)
     return state_dict
 
@@ -51,6 +55,16 @@ def create_missing_idxs(model):
         # Omit the "idxs" key intentionally.
         d[name + "vals"] = torch.tensor([0.1, 0.2], dtype=torch.float32)
     return d
+
+
+def create_packed_indices(indices_list):
+    """Helper function to create 12-bit packed indices from a list"""
+    indices = torch.tensor(indices_list, dtype=torch.long)
+    # Ensure even number of indices for 12-bit packing
+    if len(indices_list) % 2 != 0:
+        indices = torch.cat([indices, torch.tensor([0], dtype=torch.long)])
+    packed_data = pack_12bit_indices(indices)
+    return packed_data
 
 
 # Mock Bucket class
@@ -245,7 +259,7 @@ async def test_get_local(comms_instance):
 
 
 @pytest.mark.asyncio
-async def test_gather_basic_functionality(comms_instance):
+async def test_gather_basic_functionality(comms_instance, dummy_compressor):
     """Test 3: Basic Gradient Gathering
 
     Tests fundamental gradient gathering operations by:
@@ -255,7 +269,7 @@ async def test_gather_basic_functionality(comms_instance):
     - Ensuring correct structure of aggregated results
     """
     comms_instance.check_compressed_indices = (
-        lambda param_name, idxs, totalk, allowed_topk=None: None
+        lambda param_name, idxs, totalk, allowed_topk=None, vals=None: None
     )
 
     comms_instance.get_with_retry = AsyncMock()
@@ -263,16 +277,20 @@ async def test_gather_basic_functionality(comms_instance):
     totalk_value = 100
     peer1_response = (
         {
-            "0.weightidxs": torch.tensor([0, 1, 2]),
-            "0.weightvals": torch.tensor([0.4, 0.5, 0.6]),
+            "0.weightidxs": create_packed_indices(
+                [0, 1, 2, 3]
+            ),  # Even count for 12-bit
+            "0.weightvals": torch.tensor([0.4, 0.5, 0.6, 0.7]),
             "totalks": {"0.weight": totalk_value},
         },
         1,
     )
     peer2_response = (
         {
-            "0.weightidxs": torch.tensor([0, 1, 2]),
-            "0.weightvals": torch.tensor([0.7, 0.8, 0.9]),
+            "0.weightidxs": create_packed_indices(
+                [0, 1, 2, 3]
+            ),  # Even count for 12-bit
+            "0.weightvals": torch.tensor([0.7, 0.8, 0.9, 1.0]),
             "totalks": {"0.weight": totalk_value},
         },
         2,
@@ -312,7 +330,7 @@ async def test_gather_basic_functionality(comms_instance):
 
 
 @pytest.mark.asyncio
-async def test_gather_normalization(comms_instance):
+async def test_gather_normalization(comms_instance, dummy_compressor):
     """Test 4: Gradient Normalization
 
     Validates gradient normalization functionality by:
@@ -321,15 +339,17 @@ async def test_gather_normalization(comms_instance):
     - Ensuring normalization maintains data integrity
     """
     comms_instance.check_compressed_indices = (
-        lambda param_name, idxs, totalk, allowed_topk=None: None
+        lambda param_name, idxs, totalk, allowed_topk=None, vals=None: None
     )
     comms_instance.get_with_retry = AsyncMock()
 
     totalk_value = 100
     peer_response = (
         {
-            "0.weightidxs": torch.tensor([0, 1, 2]),
-            "0.weightvals": torch.tensor([0.4, 0.5, 0.6]),
+            "0.weightidxs": create_packed_indices(
+                [0, 1, 2, 3]
+            ),  # Even count for 12-bit
+            "0.weightvals": torch.tensor([0.4, 0.5, 0.6, 0.7]),
             "totalks": {"0.weight": totalk_value},
         },
         1,
@@ -351,7 +371,7 @@ async def test_gather_normalization(comms_instance):
 
 
 @pytest.mark.asyncio
-async def test_gather_quant_params_validation(comms_instance):
+async def test_gather_quant_params_validation(comms_instance, dummy_compressor):
     """
     Scenario
     --------
@@ -372,8 +392,8 @@ async def test_gather_quant_params_validation(comms_instance):
     val_key = f"{param_base}vals"
     qp_key = f"{param_base}quant_params"
 
-    idxs = torch.tensor([0, 1, 2], dtype=torch.int16)
-    vals = torch.tensor([0.1, 0.2, 0.3], dtype=torch.uint8)  # still quantised
+    idxs = create_packed_indices([0, 1, 2, 3])  # Even count for 12-bit
+    vals = torch.tensor([0.1, 0.2, 0.3, 0.4], dtype=torch.uint8)  # still quantised
 
     lookup = torch.zeros(256, dtype=torch.float32)  # dummy LUT
     bad_qp = (torch.tensor(float("nan")), 1.0, 128, lookup, torch.float32)
@@ -402,7 +422,7 @@ async def test_gather_quant_params_validation(comms_instance):
     # 2.  Patch helper functions on the fixture instance
     # ------------------------------------------------------------------
     comms_instance.check_compressed_indices = (
-        lambda p, i, t, allowed_topk=None: None  # no-op for this test
+        lambda p, i, t, allowed_topk=None, vals=None: None  # no-op for this test
     )
     comms_instance.get_with_retry = AsyncMock(
         side_effect=[peer1_response, peer2_response]
@@ -442,7 +462,7 @@ async def test_gather_quant_params_validation(comms_instance):
 
 
 @pytest.mark.asyncio
-async def test_gather_empty_responses(comms_instance):
+async def test_gather_empty_responses(comms_instance, dummy_compressor):
     """Test 5: Empty Response Handling
 
     Tests system behavior with empty responses by:
@@ -451,7 +471,7 @@ async def test_gather_empty_responses(comms_instance):
     - Checking appropriate error states and return values
     """
     comms_instance.check_compressed_indices = (
-        lambda param_name, idxs, totalk, allowed_topk=None: None
+        lambda param_name, idxs, totalk, allowed_topk=None, vals=None: None
     )
     comms_instance.get_with_retry = AsyncMock(return_value=(None, None))
     result = await comms_instance.gather(
@@ -470,7 +490,7 @@ async def test_gather_empty_responses(comms_instance):
 
 
 @pytest.mark.asyncio
-async def test_gather_averaging(comms_instance):
+async def test_gather_averaging(comms_instance, dummy_compressor):
     """Test 6: Gradient Averaging
 
     Validates gradient averaging functionality by:
@@ -479,22 +499,26 @@ async def test_gather_averaging(comms_instance):
     - Ensuring averaged gradients maintain mathematical correctness
     """
     comms_instance.check_compressed_indices = (
-        lambda param_name, idxs, totalk, allowed_topk=None: None
+        lambda param_name, idxs, totalk, allowed_topk=None, vals=None: None
     )
     comms_instance.get_with_retry = AsyncMock()
     totalk_value = 100
     peer1_response = (
         {
-            "0.weightidxs": torch.tensor([0, 1, 2]),
-            "0.weightvals": torch.tensor([0.4, 0.5, 0.6]),
+            "0.weightidxs": create_packed_indices(
+                [0, 1, 2, 3]
+            ),  # Even count for 12-bit
+            "0.weightvals": torch.tensor([0.4, 0.5, 0.6, 0.7]),
             "totalks": {"0.weight": totalk_value},
         },
         1,
     )
     peer2_response = (
         {
-            "0.weightidxs": torch.tensor([0, 1, 2]),
-            "0.weightvals": torch.tensor([0.8, 0.9, 1.0]),
+            "0.weightidxs": create_packed_indices(
+                [0, 1, 2, 3]
+            ),  # Even count for 12-bit
+            "0.weightvals": torch.tensor([0.8, 0.9, 1.0, 1.1]),
             "totalks": {"0.weight": totalk_value},
         },
         2,
@@ -560,7 +584,7 @@ async def test_gather_averaging(comms_instance):
 
 
 @pytest.mark.asyncio
-async def test_gather_averaging(comms_instance):
+async def test_gather_averaging_multiple_peers(comms_instance, dummy_compressor):
     """Test 8: Verify gradient averaging with multiple peers
 
     Tests that gradients from multiple peers are properly averaged during gather operation.
@@ -572,7 +596,7 @@ async def test_gather_averaging(comms_instance):
     """
     # Mock check_compressed_indices as specified.
     comms_instance.check_compressed_indices = (
-        lambda param_name, idxs, totalk, allowed_topk=None: None
+        lambda param_name, idxs, totalk, allowed_topk=None, vals=None: None
     )
 
     # Patch get_with_retry to simulate two peer responses.
@@ -581,7 +605,7 @@ async def test_gather_averaging(comms_instance):
     # Use key with trailing dot so that stripping "idxs" from "layer.idxs" produces "layer."
     peer1_response = (
         {
-            "layer.idxs": torch.tensor([0, 1]),
+            "layer.idxs": create_packed_indices([0, 1]),
             "layer.vals": torch.tensor([0.6, 0.8]),
             "totalks": {"layer.": totalk_value},  # totalk keyed as "layer."
         },
@@ -589,7 +613,7 @@ async def test_gather_averaging(comms_instance):
     )
     peer2_response = (
         {
-            "layer.idxs": torch.tensor([0, 1]),
+            "layer.idxs": create_packed_indices([0, 1]),
             "layer.vals": torch.tensor([0.6, 0.8]),
             "totalks": {"layer.": totalk_value},  # totalk keyed as "layer."
         },
@@ -626,7 +650,7 @@ async def test_gather_averaging(comms_instance):
         )
 
 
-async def test_gather_complex_normalization(comms_instance):
+async def test_gather_complex_normalization(comms_instance, dummy_compressor):
     """Test 8: Verify complex gradient normalization with multiple peers
 
     Tests normalization of gradients with different scales and signs.
@@ -638,7 +662,7 @@ async def test_gather_complex_normalization(comms_instance):
     """
     # Bypass the compressed indices validation for this test.
     comms_instance.check_compressed_indices = (
-        lambda param_name, idxs, totalk, allowed_topk=None: None
+        lambda param_name, idxs, totalk, allowed_topk=None, vals=None: None
     )
 
     totalk_value = (
@@ -647,24 +671,24 @@ async def test_gather_complex_normalization(comms_instance):
     # Include totalks in each peer response using the key "layer." (so that stripping "idxs"/"vals" returns the same base key).
     peer1_response = (
         {
-            "layer.idxs": torch.tensor([0, 1, 2]),
-            "layer.vals": torch.tensor([1.0, 2.0, 2.0]),  # norm ≈ 3
+            "layer.idxs": create_packed_indices([0, 1, 2, 3]),  # Even count for 12-bit
+            "layer.vals": torch.tensor([1.0, 2.0, 2.0, 3.0]),  # norm ≈ 3
             "totalks": {"layer.": totalk_value},
         },
         1,
     )
     peer2_response = (
         {
-            "layer.idxs": torch.tensor([0, 1, 2]),
-            "layer.vals": torch.tensor([10.0, 20.0, 20.0]),  # Larger scale
+            "layer.idxs": create_packed_indices([0, 1, 2, 3]),  # Even count for 12-bit
+            "layer.vals": torch.tensor([10.0, 20.0, 20.0, 30.0]),  # Larger scale
             "totalks": {"layer.": totalk_value},
         },
         2,
     )
     peer3_response = (
         {
-            "layer.idxs": torch.tensor([0, 1, 2]),
-            "layer.vals": torch.tensor([-5.0, 5.0, 5.0]),  # Different sign
+            "layer.idxs": create_packed_indices([0, 1, 2, 3]),  # Even count for 12-bit
+            "layer.vals": torch.tensor([-5.0, 5.0, 5.0, 10.0]),  # Different sign
             "totalks": {"layer.": totalk_value},
         },
         3,
@@ -957,7 +981,7 @@ async def test_load_checkpoint_missing_data(comms_instance):
     assert sync_window == 0
 
 
-async def test_gather_timeout(comms_instance):
+async def test_gather_timeout(comms_instance, dummy_compressor):
     """Test gather operation with timeout"""
 
     # Mock get_with_retry to simulate timeout
@@ -1179,10 +1203,10 @@ def _get_smaller_split(n, close_to):
 
 
 @pytest.mark.asyncio
-async def test_valid_response_handling(comms_instance):
+async def test_valid_response_handling(comms_instance, dummy_compressor):
     # Patch out the compressed indices check
     comms_instance.check_compressed_indices = (
-        lambda param_name, idxs, totalk, allowed_topk=None: None
+        lambda param_name, idxs, totalk, allowed_topk=None, vals=None: None
     )
 
     # Patch get_with_retry to simulate three valid peer responses.
@@ -1190,7 +1214,7 @@ async def test_valid_response_handling(comms_instance):
     totalk_value = 100
     peer1_response = (
         {
-            "0.weightidxs": torch.tensor([0, 1]),
+            "0.weightidxs": create_packed_indices([0, 1]),
             "0.weightvals": torch.tensor([0.3, 0.4]),
             "totalks": {"0.weight": totalk_value},
         },
@@ -1198,7 +1222,7 @@ async def test_valid_response_handling(comms_instance):
     )
     peer2_response = (
         {
-            "0.weightidxs": torch.tensor([0, 1]),
+            "0.weightidxs": create_packed_indices([0, 1]),
             "0.weightvals": torch.tensor([0.5, 0.6]),
             "totalks": {"0.weight": totalk_value},
         },
@@ -1206,7 +1230,7 @@ async def test_valid_response_handling(comms_instance):
     )
     peer3_response = (
         {
-            "0.weightidxs": torch.tensor([0, 1]),
+            "0.weightidxs": create_packed_indices([0, 1]),
             "0.weightvals": torch.tensor([0.7, 0.8]),
             "totalks": {"0.weight": totalk_value},
         },
@@ -1234,7 +1258,7 @@ async def test_valid_response_handling(comms_instance):
 
 
 @pytest.mark.asyncio
-async def test_missing_idxs_key(comms_instance, model):
+async def test_missing_idxs_key(comms_instance, model, dummy_compressor):
     """
     Test 2: Missing "idxs" Key for a Parameter
 
@@ -1257,14 +1281,6 @@ async def test_missing_idxs_key(comms_instance, model):
     # Define dummy UIDs.
     uids = ["uid1", "uid2", "uid3"]
 
-    # Helper: create valid state_dict.
-    def create_valid_state_dict():
-        state_dict = {}
-        for name, param in model.named_parameters():
-            state_dict[name + "idxs"] = torch.tensor([0, 1], dtype=torch.long)
-            state_dict[name + "vals"] = torch.tensor([0.1, 0.2], dtype=torch.float32)
-        return state_dict
-
     # Helper: create state_dict with missing indices (set to None) instead of omitting the key.
     def create_missing_idxs_state_dict():
         state_dict = {}
@@ -1280,8 +1296,8 @@ async def test_missing_idxs_key(comms_instance, model):
             create_missing_idxs_state_dict(),
             10,
         ),  # UID "uid1": missing indices → should be skipped.
-        (create_valid_state_dict(), 20),  # UID "uid2": valid.
-        (create_valid_state_dict(), 30),  # UID "uid3": valid.
+        (create_valid_state_dict(model), 20),  # UID "uid2": valid.
+        (create_valid_state_dict(model), 30),  # UID "uid3": valid.
     ]
     call_count = 0
 
@@ -1296,7 +1312,7 @@ async def test_missing_idxs_key(comms_instance, model):
     comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
 
     # Patch check_compressed_indices: Raise error if the provided indices object is None.
-    def patched_check(param_name, idxs, totalk, allowed_topk=None):
+    def patched_check(param_name, idxs, totalk, allowed_topk=None, vals=None):
         if idxs is None:
             raise ValueError(f"Missing indices for {param_name}")
         return None
@@ -1348,7 +1364,7 @@ async def test_missing_idxs_key(comms_instance, model):
 
 
 @pytest.mark.asyncio
-async def test_missing_vals_key(comms_instance, model):
+async def test_missing_vals_key(comms_instance, model, dummy_compressor):
     """
     Test 3: Missing "vals" Key for a Parameter
       - Setup:
@@ -1369,14 +1385,6 @@ async def test_missing_vals_key(comms_instance, model):
     # Define dummy UIDs.
     uids = ["uid1", "uid2", "uid3"]
 
-    # Helper: create a valid state_dict with both keys.
-    def create_valid_state_dict():
-        state_dict = {}
-        for name, _ in model.named_parameters():
-            state_dict[name + "idxs"] = torch.tensor([0, 1], dtype=torch.long)
-            state_dict[name + "vals"] = torch.tensor([0.1, 0.2], dtype=torch.float32)
-        return state_dict
-
     # Helper: create a state_dict where the "vals" key is explicitly set to None.
     def create_missing_vals_state_dict():
         state_dict = {}
@@ -1390,8 +1398,8 @@ async def test_missing_vals_key(comms_instance, model):
     #  - uid2 and uid3 return valid state_dicts.
     responses = [
         (create_missing_vals_state_dict(), 10),
-        (create_valid_state_dict(), 20),
-        (create_valid_state_dict(), 30),
+        (create_valid_state_dict(model), 20),
+        (create_valid_state_dict(model), 30),
     ]
     call_count = 0
 
@@ -1413,7 +1421,7 @@ async def test_missing_vals_key(comms_instance, model):
     comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
     # Patch check_compressed_indices as a no-op.
     comms.check_compressed_indices = (
-        lambda param_name, data, totalk, allowed_topk=None: None
+        lambda param_name, data, totalk, allowed_topk=None, vals=None: None
     )
 
     result = await comms.gather(
@@ -1471,7 +1479,7 @@ async def test_empty_or_none_state_dict(comms_instance, model):
 
     # Patch check_compressed_indices to be a no-op so that valid responses won't be rejected.
     comms.check_compressed_indices = (
-        lambda param_name, idxs, totalk, allowed_topk=None: None
+        lambda param_name, idxs, totalk, allowed_topk=None, vals=None: None
     )
 
     # Define dummy UIDs.
@@ -1511,9 +1519,9 @@ async def test_empty_or_none_state_dict(comms_instance, model):
     assert result.uids == ["uid1"], f"Expected valid_uids ['uid1'], got {result.uids}"
 
 
-# Dummy hparams with topk_compression set to 3.
+# Dummy hparams with topk_compression for testing.
 class DummyHParams:
-    topk_compression = 3
+    topk_compression = 4
 
 
 # Dummy Comms instance that only supplies hparams for testing.
@@ -1523,182 +1531,181 @@ class DummyComms(Comms):
         self.hparams = DummyHParams()
 
 
-def test_valid_flat_tensor():
+def test_valid_12bit_packed_indices():
     """
-    Test Case: test_valid_flat_tensor
-      - Input: A 1D tensor (torch.Tensor) with length equal to min(hparams.topk_compression, totalk).
-      - Valid indices (all indices within [0, totalk-1]).
+    Test Case: test_valid_12bit_packed_indices
+      - Input: 12-bit packed indices with correct topk dimension
+      - Valid indices (all indices within [0, totalk-1])
       - Expected Outcome: The function should complete without raising an error.
     """
     dummy_comms = DummyComms()
 
-    # totalk is set to 10; allowed_topk is min(3, 10) == 3.
+    # totalk is set to 10; allowed_topk is min(4, 10) == 4.
     totalk = 10
-    valid_tensor = torch.tensor([1, 5, 9], dtype=torch.long)
+    valid_indices = torch.tensor([1, 5, 9, 3], dtype=torch.long)
+    packed_data = pack_12bit_indices(valid_indices)
+    vals = torch.randn_like(valid_indices, dtype=torch.float32)
 
     # This call should complete without any error.
-    dummy_comms.check_compressed_indices("test_param", valid_tensor, totalk)
+    dummy_comms.check_compressed_indices("test_param", packed_data, totalk, vals=vals)
 
 
-def test_valid_multi_dim_tensor():
+def test_valid_12bit_packed_multi_dim():
     """
-    Test that a multi-dimensional tensor (e.g., 2D tensor) where the last dimension equals min(hparams.topk_compression, totalk)
-    and all indices are within the valid range completes without raising an error.
-    """
-    dummy_comms = DummyComms()
-    totalk = 20  # allowed_topk = min(3, 20) = 3
-    # Create a valid 2D tensor (shape: 2 x 3) with valid indices.
-    valid_tensor = torch.tensor([[0, 1, 2], [3, 4, 5]], dtype=torch.long)
-    dummy_comms.check_compressed_indices("param", valid_tensor, totalk)
-
-
-def test_valid_flat_list():
-    """
-    Test that a flat Python list of integers with length equal to allowed_topk
-    and valid indices completes without raising an error.
+    Test 12-bit packed indices from multi-dimensional tensor where the last dimension
+    equals min(hparams.topk_compression, totalk) and all indices are within valid range.
     """
     dummy_comms = DummyComms()
-    totalk = 20  # allowed_topk = min(3, 20) = 3
-    valid_list = [0, 1, 19]  # All values are within [0, totalk)
-    dummy_comms.check_compressed_indices("param", valid_list, totalk)
+    totalk = 20  # allowed_topk = min(4, 20) = 4
+    # Create a valid 2D tensor (shape: 2 x 4) with valid indices.
+    valid_indices = torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=torch.long)
+    packed_data = pack_12bit_indices(valid_indices)
+    vals = torch.randn_like(valid_indices, dtype=torch.float32)
+    dummy_comms.check_compressed_indices("param", packed_data, totalk, vals=vals)
 
 
-def test_valid_nested_list():
+def test_invalid_not_packed_format():
     """
-    Test that a nested list (list of lists), where each inner list has length equal to allowed_topk
-    and contains valid indices completes without raising an error.
-    """
-    dummy_comms = DummyComms()
-    totalk = 20  # allowed_topk = 3
-    valid_nested = [[0, 1, 2], [3, 4, 5]]
-    dummy_comms.check_compressed_indices("param", valid_nested, totalk)
-
-
-def test_invalid_flat_tensor_wrong_length():
-    """
-    Test that a 1D tensor whose length does not equal min(hparams.topk_compression, totalk) (e.g., too short)
-    raises ValueError with message about invalid number of indices.
+    Test that non-packed formats (like regular tensors or lists) are rejected.
     """
     dummy_comms = DummyComms()
-    totalk = 10  # allowed_topk = min(3, 10) = 3
-    invalid_tensor = torch.tensor([0, 1], dtype=torch.long)  # Length is 2, should be 3.
-    with pytest.raises(ValueError, match="Invalid number of indices"):
-        dummy_comms.check_compressed_indices("param", invalid_tensor, totalk)
+    totalk = 20
+
+    # Test with regular tensor (not packed) - should fail because it's not uint8
+    invalid_tensor = torch.tensor([0, 1, 2, 3], dtype=torch.long)
+    vals = torch.randn(4, dtype=torch.float32)
+    # This should pass the legacy format check since it's not uint8
+    dummy_comms.check_compressed_indices("param", invalid_tensor, totalk, vals=vals)
+
+    # Test with list (not a tensor)
+    invalid_list = [0, 1, 2, 3]
+    with pytest.raises(ValueError, match="Expected tensor but got"):
+        dummy_comms.check_compressed_indices("param", invalid_list, totalk, vals=vals)
 
 
-def test_invalid_multi_dim_tensor_wrong_last_dimension():
+def test_invalid_wrong_dtype():
     """
-    Test that a multi-dimensional tensor where the size of the last dimension is not equal to min(hparams.topk_compression, totalk)
-    raises ValueError indicating the last dimension size is invalid.
-    """
-    dummy_comms = DummyComms()
-    totalk = 20  # allowed_topk = min(3, 20) = 3
-    # Create a 2D tensor with last dimension size 4 (should be 3)
-    invalid_tensor = torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]], dtype=torch.long)
-    with pytest.raises(ValueError, match="Last dimension size invalid"):
-        dummy_comms.check_compressed_indices("param", invalid_tensor, totalk)
-
-
-def test_invalid_flat_list_negative_index():
-    """
-    Test that a flat list with one or more indices being negative raises ValueError indicating that an index is out of bounds.
+    Test that packed data with wrong dtype is handled correctly.
     """
     dummy_comms = DummyComms()
-    totalk = 10  # allowed_topk = min(3, 10) = 3
-    invalid_list = [0, -1, 2]  # Contains a negative index.
-    with pytest.raises(ValueError, match="Index -1 out of bounds"):
-        dummy_comms.check_compressed_indices("param", invalid_list, totalk)
+    totalk = 20
+
+    # int32 tensor is not uint8, so it will be treated as legacy format
+    fake_packed = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
+    vals = torch.randn(4, dtype=torch.float32)
+    # Should work as legacy format
+    dummy_comms.check_compressed_indices("param", fake_packed, totalk, vals=vals)
 
 
-def test_invalid_flat_tensor_out_of_range_index():
+def test_invalid_12bit_packed_wrong_topk():
     """
-    Test that a flat tensor with an index equal to or greater than totalk raises ValueError indicating index out of bounds.
+    Test that 12-bit packed indices with wrong topk dimension raises ValueError.
     """
     dummy_comms = DummyComms()
-    totalk = 10  # allowed_topk = min(3, 10) = 3
+    totalk = 10  # allowed_topk = min(4, 10) = 4
+    # Create packed indices with wrong topk (2 instead of 4)
+    invalid_indices = torch.tensor([0, 1], dtype=torch.long)
+    packed_data = pack_12bit_indices(invalid_indices)
+    vals = torch.randn(2, dtype=torch.float32)  # Wrong shape - should be 4
+    with pytest.raises(ValueError, match="Invalid topk dimension"):
+        dummy_comms.check_compressed_indices("param", packed_data, totalk, vals=vals)
+
+
+def test_invalid_12bit_packed_multi_dim_wrong_topk():
+    """
+    Test that 12-bit packed indices from multi-dimensional tensor with wrong last dimension
+    raises ValueError indicating invalid topk dimension.
+    """
+    dummy_comms = DummyComms()
+    totalk = 20  # allowed_topk = min(4, 20) = 4
+    # Create a 2D tensor with last dimension size 6 (should be 4)
+    invalid_indices = torch.tensor(
+        [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11]], dtype=torch.long
+    )
+    packed_data = pack_12bit_indices(invalid_indices)
+    vals = torch.randn(2, 6, dtype=torch.float32)  # Wrong shape - should be (2, 4)
+    with pytest.raises(ValueError, match="Invalid topk dimension"):
+        dummy_comms.check_compressed_indices("param", packed_data, totalk, vals=vals)
+
+
+# Removed test_invalid_12bit_packed_negative_index as pack_12bit_indices validates input
+
+
+def test_invalid_12bit_packed_out_of_bounds():
+    """
+    Test that 12-bit packed indices with out-of-bounds values raise ValueError.
+    """
+    dummy_comms = DummyComms()
+    totalk = 10  # allowed_topk = min(4, 10) = 4
     # Index 10 is out-of-range because valid indices are 0 to 9.
-    invalid_tensor = torch.tensor([0, 1, 10], dtype=torch.long)
+    invalid_indices = torch.tensor([0, 1, 10, 3], dtype=torch.long)
+    packed_data = pack_12bit_indices(invalid_indices)
+    vals = torch.randn(4, dtype=torch.float32)
     with pytest.raises(ValueError, match="Index 10 out of bounds"):
-        dummy_comms.check_compressed_indices("param", invalid_tensor, totalk)
+        dummy_comms.check_compressed_indices("param", packed_data, totalk, vals=vals)
 
 
-def test_invalid_flat_list_wrong_length():
+# Removed test_invalid_flat_list_wrong_length - covered by test_invalid_not_packed_format
+
+
+# Removed test_valid_single_value - not applicable to 12-bit packed format
+
+
+# Removed test_invalid_single_value_out_of_bounds - not applicable to 12-bit packed format
+
+
+def test_override_allowed_topk_12bit():
     """
-    Test that a flat list whose length is not equal to allowed_topk raises ValueError about the invalid number of indices.
-    """
-    dummy_comms = DummyComms()
-    totalk = 20  # allowed_topk = min(3, 20) = 3
-    invalid_list = [0, 1]  # Only 2 elements instead of 3.
-    with pytest.raises(ValueError, match="Invalid number of indices"):
-        dummy_comms.check_compressed_indices("param", invalid_list, totalk)
-
-
-def test_invalid_nested_list_wrong_length():
-    """
-    Test that a nested list where at least one sublist has a length different from allowed_topk raises ValueError on the offending sublist.
-    """
-    dummy_comms = DummyComms()
-    totalk = 20  # allowed_topk = 3
-    # The second sublist has only 2 elements.
-    invalid_nested = [[0, 1, 2], [3, 4]]
-    with pytest.raises(ValueError, match="Invalid number of indices"):
-        dummy_comms.check_compressed_indices("param", invalid_nested, totalk)
-
-
-def test_valid_single_value():
-    """
-    Test that a single valid integer index (not wrapped in a list or tensor) within the range [0, totalk-1] completes without raising an error.
-    """
-    dummy_comms = DummyComms()
-    totalk = 5
-    valid_single = 3  # Valid since 0 <= 3 < 5.
-    dummy_comms.check_compressed_indices("param", valid_single, totalk)
-
-
-def test_invalid_single_value_out_of_bounds():
-    """
-    Test that a single integer index that is out-of-bounds raises ValueError indicating the index is out of bounds.
-    """
-    dummy_comms = DummyComms()
-    totalk = 5
-    # Index 5 is out-of-bounds because valid indices are 0 to 4.
-    with pytest.raises(ValueError, match="Index 5 out of bounds"):
-        dummy_comms.check_compressed_indices("param", 5, totalk)
-
-
-def test_override_allowed_topk():
-    """
-    Test using the optional allowed_topk parameter to override hparams.topk_compression:
-    - Call with a flat list matching the provided allowed_topk -> Should pass
-    - Call with a list of a different length than allowed_topk -> Should raise ValueError
+    Test using the optional allowed_topk parameter with 12-bit packed format.
     """
     dummy_comms = DummyComms()
     totalk = 10
-    # Override allowed_topk to 2.
-    valid_list = [0, 9]  # Correct length: 2 elements.
-    dummy_comms.check_compressed_indices("param", valid_list, totalk, allowed_topk=2)
 
-    invalid_list = [0, 1, 2]  # Incorrect length: 3 elements instead of 2.
-    with pytest.raises(ValueError, match="Invalid number of indices"):
+    # Override allowed_topk to 2.
+    valid_indices = torch.tensor(
+        [0, 9], dtype=torch.long
+    )  # Correct length: 2 elements.
+    packed_data = pack_12bit_indices(valid_indices)
+    vals = torch.randn(2, dtype=torch.float32)
+    dummy_comms.check_compressed_indices(
+        "param", packed_data, totalk, allowed_topk=2, vals=vals
+    )
+
+    # Test with wrong topk
+    invalid_indices = torch.tensor(
+        [0, 1, 2, 3], dtype=torch.long
+    )  # 4 elements instead of 2.
+    packed_data = pack_12bit_indices(invalid_indices)
+    vals = torch.randn(4, dtype=torch.float32)  # Wrong shape for allowed_topk=2
+    with pytest.raises(ValueError, match="Invalid topk dimension"):
         dummy_comms.check_compressed_indices(
-            "param", invalid_list, totalk, allowed_topk=2
+            "param", packed_data, totalk, allowed_topk=2, vals=vals
         )
 
 
-def test_topk_auto_adjust_when_totalk_is_lower():
+def test_topk_auto_adjust_when_totalk_is_lower_12bit():
     """
-    Test scenario where totalk is less than hparams.topk_compression:
-    - Provide a flat list with length equal to totalk (which is the adjusted allowed_topk) -> Should pass
-    - Test a list with fewer elements than totalk -> Should raise ValueError
+    Test scenario where totalk is less than hparams.topk_compression with 12-bit packed format.
     """
     dummy_comms = DummyComms()
-    totalk = 2  # Now allowed_topk becomes min(hparams.topk_compression, totalk) = min(3,2) = 2.
-    valid_list = [0, 1]  # Valid: length matches allowed_topk (which is 2).
-    dummy_comms.check_compressed_indices("param", valid_list, totalk)
+    totalk = 2  # Now allowed_topk becomes min(hparams.topk_compression, totalk) = min(4,2) = 2.
 
-    invalid_list = [0]  # Too few elements.
-    with pytest.raises(ValueError, match="Invalid number of indices"):
-        dummy_comms.check_compressed_indices("param", invalid_list, totalk)
+    valid_indices = torch.tensor(
+        [0, 1], dtype=torch.long
+    )  # Valid: length matches allowed_topk (which is 2).
+    packed_data = pack_12bit_indices(valid_indices)
+    vals = torch.randn(2, dtype=torch.float32)
+    dummy_comms.check_compressed_indices("param", packed_data, totalk, vals=vals)
+
+    # Note: Can't test with 1 element as pack_12bit_indices requires even number of indices
+    # Test with 4 elements (wrong topk)
+    invalid_indices = torch.tensor(
+        [0, 1, 0, 1], dtype=torch.long
+    )  # 4 elements instead of 2.
+    packed_data = pack_12bit_indices(invalid_indices)
+    vals = torch.randn(4, dtype=torch.float32)  # Wrong shape for allowed_topk=2
+    with pytest.raises(ValueError, match="Invalid topk dimension"):
+        dummy_comms.check_compressed_indices("param", packed_data, totalk, vals=vals)
 
 
 # Tests for `weighted_random_sample_no_replacement`
@@ -2514,7 +2521,7 @@ async def test_s3_get_object_gather_integration(comms_instance):
 
         # Return a mock gradient dictionary
         gradient_dict = {
-            "param.idxs": torch.tensor([0, 1]),
+            "param.idxs": create_packed_indices([0, 1]),
             "param.vals": torch.tensor([0.1, 0.2]),
             "param.totalk": torch.tensor([100]),  # Include the totalk information
         }

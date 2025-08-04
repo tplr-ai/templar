@@ -5,8 +5,8 @@ import torch
 import torch.nn as nn
 
 from tplr.compress import (
-    TopKCompressor,
     ChunkingTransformer,
+    TopKCompressor,
     _dct,
     _get_smaller_split,
     _idct,

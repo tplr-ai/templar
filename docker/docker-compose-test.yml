@@ -8,21 +8,21 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: templar-miner-M111
-    networks:
-      - test
+    network_mode: host
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
-      - ./${DATASET_BINS_PATH:-remote/tokenized}:/app/${DATASET_BINS_PATH:-remote/tokenized}
+      - ../${DATASET_BINS_PATH:-remote/tokenized}:/app/${DATASET_BINS_PATH:-remote/tokenized}
     environment:
       NODE_TYPE: miner
-      WALLET_NAME: Bistro
-      WALLET_HOTKEY: M111
-      CUDA_DEVICE: cuda:0
-      NETWORK: test
+      WALLET_NAME: ${WALLET_NAME:-miner1}
+      WALLET_HOTKEY: ${WALLET_HOTKEY:-default}
+      CUDA_DEVICE: cuda:1
+      NETWORK: ${NETWORK:-local}
       DEBUG: 'true'
       WANDB_API_KEY: ${WANDB_API_KEY}
-      NETUID: 268
+      PROJECT: ${PROJECT}
+      NETUID: ${NETUID:-2}
       HOST_CUDA_VERSION: 12.6
       R2_GRADIENTS_ACCOUNT_ID: ${R2_GRADIENTS_ACCOUNT_ID}
       R2_GRADIENTS_BUCKET_NAME: ${R2_GRADIENTS_BUCKET_NAME}
@@ -54,21 +54,21 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: templar-miner-M222
-    networks:
-      - test
+    network_mode: host
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
-      - ./${DATASET_BINS_PATH:-remote/tokenized}:/app/${DATASET_BINS_PATH:-remote/tokenized}
+      - ../${DATASET_BINS_PATH:-remote/tokenized}:/app/${DATASET_BINS_PATH:-remote/tokenized}
     environment:
       NODE_TYPE: miner
-      WALLET_NAME: Bistro
-      WALLET_HOTKEY: M222
-      CUDA_DEVICE: cuda:0
-      NETWORK: test
+      WALLET_NAME: ${WALLET_NAME:-miner2}
+      WALLET_HOTKEY: ${WALLET_HOTKEY:-default}
+      CUDA_DEVICE: cuda:2
+      NETWORK: ${NETWORK:-local}
       DEBUG: 'true'
       WANDB_API_KEY: ${WANDB_API_KEY}
-      NETUID: 268
+      PROJECT: ${PROJECT}
+      NETUID: ${NETUID:-2}
       HOST_CUDA_VERSION: 12.6
       R2_GRADIENTS_ACCOUNT_ID: ${R2_GRADIENTS_ACCOUNT_ID}
       R2_GRADIENTS_BUCKET_NAME: ${R2_GRADIENTS_BUCKET_NAME}
@@ -99,22 +99,22 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: templar-validator-V11
-    networks:
-      - test
+    container_name: templar-validator-test
+    network_mode: host
     volumes:
       - ~/.bittensor/wallets:/root/.bittensor/wallets
       - ./logs:/app/logs
-      - ./${DATASET_BINS_PATH:-remote/tokenized}:/app/${DATASET_BINS_PATH:-remote/tokenized}
+      - ../${DATASET_BINS_PATH:-remote/tokenized}:/app/${DATASET_BINS_PATH:-remote/tokenized}
     environment:
       NODE_TYPE: validator
-      WALLET_NAME: Bistro
-      WALLET_HOTKEY: V11
-      CUDA_DEVICE: cuda:0
-      NETWORK: test
+      WALLET_NAME: ${WALLET_NAME:-validator}
+      WALLET_HOTKEY: ${WALLET_HOTKEY:-default}
+      CUDA_DEVICE: ${CUDA_DEVICE:-cuda:0}
+      NETWORK: local
       DEBUG: 'true'
       WANDB_API_KEY: ${WANDB_API_KEY}
-      NETUID: 268
+      PROJECT: ${PROJECT}
+      NETUID: ${NETUID}
       HOST_CUDA_VERSION: 12.6
       R2_GRADIENTS_ACCOUNT_ID: ${R2_GRADIENTS_ACCOUNT_ID}
       R2_GRADIENTS_BUCKET_NAME: ${R2_GRADIENTS_BUCKET_NAME}

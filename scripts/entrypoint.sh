@@ -59,6 +59,7 @@ if [ "$NODE_TYPE" = "miner" ]; then
         --device ${CUDA_DEVICE} \
         --subtensor.network ${NETWORK} \
         --use_wandb \
+        ${PROJECT:+--project ${PROJECT}} \
         ${DEBUG_FLAG}
 elif [ "$NODE_TYPE" = "validator" ]; then
     echo "Starting validator with torchrun..."
@@ -73,6 +74,7 @@ elif [ "$NODE_TYPE" = "validator" ]; then
         --device ${CUDA_DEVICE} \
         --subtensor.network ${NETWORK} \
         --use_wandb \
+        ${PROJECT:+--project ${PROJECT}} \
         ${DEBUG_FLAG}
 else
     echo "Error: NODE_TYPE must be either \"miner\" or \"validator\""

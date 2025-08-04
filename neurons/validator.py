@@ -323,11 +323,7 @@ class Validator(BaseNode):
         self.inactivity_slash_rate = 0.25  # 25% slash per window
         self.missing_gradient_slash_rate = 0.75
         self.sync_score_slash_rate = 0.75
-        self.idx_similarity_slashing_rate = {
-            "high": 0.5,  # case when similarity high
-            "max": 0.0,  # case when similarity >= 95%
-            "mega": 0.0,  # case when similarity = 100%
-        }
+        self.idx_similarity_slashing_rate = tplr.neurons.instantiate_slashing_multiplier()
         self.naughty_peers = {}
         self.naughty_peer_timeout = 200
 
@@ -2891,27 +2887,37 @@ class Validator(BaseNode):
                     current_window=self.current_window,
                 )
 
-    def slash_from_overlap(self, idx_overlap) -> None:
+    def slash_from_overlap(self, idx_overlap: dict) -> None:
+        """
+        Anyone with overly similar gradients is slashed; those
+        with particularly egregious levels of overlap are 100% 
+        slashed. When 100% overlap, sent to timeout corner
+
+        Args:
+            idx_overlap: The overlap dictionary from tplr.neurons
+        """
         idx_overlap_peers = idx_overlap.get("uids_over_thresh", {})
         idx_overlap_peers.update({uid: "max" for uid in self.naughty_peers})
         for uid, level in idx_overlap_peers.items():
             old_score = self.final_scores[uid].item()
-            slash_pct = self.idx_similarity_slashing_rate.get(level, 0.5)
+            slash_multiplier = self.idx_similarity_slashing_rate.get(level, 0.5)
 
-            if level == "mega":
-                self.naughty_peers[uid] = self.naughty_peer_timeout
+            if level in ["mega", "max"]:
+                # For the most egregious offenders, reset scores
+                self.reset_peer(uid)
+
+                if level == "mega":
+                    self.naughty_peers[uid] = self.naughty_peer_timeout
 
             if self.naughty_peers.get(uid):
-                slash_pct = 0.0  # manually force down
                 self.naughty_peers[uid] -= 1
-                self.reset_peer(uid)
-                if self.naughty_peers[uid] == 0:
+                if self.naughty_peers[uid] <= 0:
                     self.naughty_peers.pop(uid)
 
             # Only reduce positive scores
             if self.final_scores[uid] > 0:
-                self.final_scores[uid] *= slash_pct
-                self.binary_moving_averages[uid] *= slash_pct
+                self.final_scores[uid] *= slash_multiplier
+                self.binary_moving_averages[uid] *= slash_multiplier
 
                 new_score = self.final_scores[uid].item()
                 tplr.log_with_context(

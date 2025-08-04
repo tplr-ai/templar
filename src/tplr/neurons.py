@@ -764,21 +764,33 @@ async def check_uid_index_overlap(
     )
 
 
-def determine_slash_egregiousness(pct: float) -> str:
+def determine_slash_egregiousness(overlap_pct: float) -> str:
     """
-    _summary_
+    Based on the overlap_pct, 
 
     Args:
-        pct: The percentage of overlap in the grads with
+        overlap_pct: The percentage of overlap in the grads with
              other miners
 
     Returns:
         Category of overlap pct
     """
     egregiousness = "high"
-    if pct >= 0.95:
+    if overlap_pct >= 0.95:
         egregiousness = "max"
-    if pct == 1.0:
+    if overlap_pct == 1.0:
         egregiousness = "mega"
 
     return egregiousness
+
+
+def instantiate_slashing_multiplier():
+    """Centralize slashing config
+    
+    We multiply these percentages against the base final_score
+    """
+    return {
+        "high": 0.5,  # case when similarity high
+        "max": 0.0,  # case when similarity >= 95%
+        "mega": 0.0,  # case when similarity = 100%
+    }

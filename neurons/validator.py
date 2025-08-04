@@ -1242,6 +1242,7 @@ class Validator(BaseNode):
 
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
+            eval_window = self.current_window  # Store window at evaluation start
 
             # 6. Select peers to evaluate using bin rotation
             tplr.log_with_context(
@@ -1267,15 +1268,8 @@ class Validator(BaseNode):
                 current_bin,
             )
 
-            # Reset counters for chosen peers
-            for uid in evaluation_uids:
-                self.eval_peers[uid] = 1
-
-            # Increment counters for not chosen peers
-            for uid in self.eval_peers.keys():
-                if uid not in evaluation_uids:
-                    self.eval_peers[uid] += 1
-            self.comms.eval_peers = self.eval_peers
+            # Track UIDs that were attempted to be evaluated this window
+            uids_attempted_this_window = set()
 
             tplr.log_with_context(
                 level="info",
@@ -1303,6 +1297,18 @@ class Validator(BaseNode):
 
             # Process each UID with sliding window loading
             for eval_uid in evaluation_uids:
+                # Check if window has changed before starting evaluation
+                if self.current_window != eval_window:
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Window changed during evaluation (was {eval_window}, now {self.current_window}), exiting evaluation loop early. Evaluated {len(uids_attempted_this_window)}/{len(evaluation_uids)} UIDs.",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
+                    break
+
+                # Mark this UID as attempted (for counter management)
+                uids_attempted_this_window.add(eval_uid)
                 self.peers_last_eval_window[eval_uid] = self.sync_window
 
                 tplr.log_with_context(
@@ -1707,6 +1713,28 @@ class Validator(BaseNode):
 
             torch.cuda.empty_cache()
             self.sampler._cached_indices.clear()
+
+            # Update eval_peers counters based on actual evaluation attempts
+            # Reset counters for UIDs that were attempted (whether successful or not)
+            for uid in uids_attempted_this_window:
+                self.eval_peers[uid] = 1
+
+            # Increment counters for peers that weren't attempted due to window change
+            for uid in self.eval_peers.keys():
+                if uid not in uids_attempted_this_window:
+                    self.eval_peers[uid] += 1
+
+            self.comms.eval_peers = self.eval_peers
+
+            # Log if some evaluations were skipped due to window exhaustion
+            if len(uids_attempted_this_window) < len(evaluation_uids):
+                skipped_uids = set(evaluation_uids) - uids_attempted_this_window
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Window exhaustion: Skipped evaluation for UIDs {sorted(skipped_uids)}. Completed {len(uids_attempted_this_window)}/{len(evaluation_uids)} evaluations.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
 
             # elapsed time for full peer-evaluation loop
             evaluation_time = tplr.T() - eval_start

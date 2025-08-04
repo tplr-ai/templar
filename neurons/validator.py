@@ -323,7 +323,13 @@ class Validator(BaseNode):
         self.inactivity_slash_rate = 0.25  # 25% slash per window
         self.missing_gradient_slash_rate = 0.75
         self.sync_score_slash_rate = 0.75
-        self.idx_similarity_slashing_rate = 0.5
+        self.idx_similarity_slashing_rate = {
+            "high": 0.5,  # case when similarity high
+            "max": 0.0,  # case when similarity >= 95%
+            "mega": 0.0,  # case when similarity = 100%
+        }
+        self.naughty_peers = {}
+        self.naughty_peer_timeout = 200
 
         # Initialize peer related attributes
         self.next_peers: list[int] | None = None
@@ -348,27 +354,20 @@ class Validator(BaseNode):
 
         self.burn_uid = 1
 
-    def reset_peer(self, inactive_since: int, uid: int) -> bool:
-        if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
-            self.final_scores[uid] = 0.0
-            self.weights[uid] = 0.0
-            self.gradient_scores[uid] = 0.0
-            self.binary_moving_averages[uid] = 0.0
-            self.binary_indicator_scores[uid] = 0.0
-            self.sync_scores[uid] = 0.0
-            if uid in self.openskill_ratings:
-                del self.openskill_ratings[uid]
-            if uid in self.eval_peers:
-                del self.eval_peers[uid]
-            del self.inactive_scores[uid]
-            tplr.log_with_context(
-                level="info",
-                message=f"UID {uid} fully reset after extended inactivity",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
-            return True
-        return False
+    def reset_peer(self, uid: int) -> None:
+        self.final_scores[uid] = 0.0
+        self.weights[uid] = 0.0
+        self.gradient_scores[uid] = 0.0
+        self.binary_moving_averages[uid] = 0.0
+        self.binary_indicator_scores[uid] = 0.0
+        self.sync_scores[uid] = 0.0
+        if uid in self.openskill_ratings:
+            del self.openskill_ratings[uid]
+        if uid in self.eval_peers:
+            del self.eval_peers[uid]
+        del self.inactive_scores[uid]
+
+        return
 
     def log_sync_score(
         self, eval_uid: int, sync_result: dict[str, bool | float | int | str]
@@ -966,8 +965,18 @@ class Validator(BaseNode):
                     )
                     continue
 
-                peer_reset = self.reset_peer(inactive_since, uid)
+                if (
+                    peer_reset := self.current_window - inactive_since
+                    > self.hparams.reset_inactivity_windows
+                ):
+                    self.reset_peer(uid)
                 if peer_reset:
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"UID {uid} fully reset after extended inactivity",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
                     continue
 
                 # Apply flat 25% penalty instead of exponential decay
@@ -1111,31 +1120,7 @@ class Validator(BaseNode):
                 self.sync_window,
                 overlap_threshold=self.hparams.idx_overlap_threshold,
             )
-            idx_overlap_peers = idx_overlap.get("uids_over_thresh", [])
-            for uid in idx_overlap_peers:
-                old_score = self.final_scores[uid].item()
-
-                # Only reduce positive scores
-                if self.final_scores[uid] > 0:
-                    self.final_scores[uid] *= self.idx_similarity_slashing_rate
-                    self.binary_moving_averages[uid] *= (
-                        self.idx_similarity_slashing_rate
-                    )
-
-                    new_score = self.final_scores[uid].item()
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to similarity in idxs.",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                else:
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"Skipped score of UID {uid} (current score: {old_score:.4f}) due to negative or zero value.",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
+            self.slash_from_overlap(idx_overlap)
 
             skipped_uids = gather_result.skipped_uids
             success_rate = gather_result.success_rate
@@ -2905,6 +2890,45 @@ class Validator(BaseNode):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
+
+    def slash_from_overlap(self, idx_overlap) -> None:
+        idx_overlap_peers = idx_overlap.get("uids_over_thresh", {})
+        idx_overlap_peers.update({uid: "max" for uid in self.naughty_peers})
+        for uid, level in idx_overlap_peers.items():
+            old_score = self.final_scores[uid].item()
+            slash_pct = self.idx_similarity_slashing_rate.get(level, 0.5)
+
+            if level == "mega":
+                self.naughty_peers[uid] = self.naughty_peer_timeout
+
+            if self.naughty_peers.get(uid):
+                slash_pct = 0.0  # manually force down
+                self.naughty_peers[uid] -= 1
+                self.reset_peer(uid)
+                if self.naughty_peers[uid] == 0:
+                    self.naughty_peers.pop(uid)
+
+            # Only reduce positive scores
+            if self.final_scores[uid] > 0:
+                self.final_scores[uid] *= slash_pct
+                self.binary_moving_averages[uid] *= slash_pct
+
+                new_score = self.final_scores[uid].item()
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to similarity in idxs.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+
+            else:
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Skipped score of UID {uid} (current score: {old_score:.4f}) due to negative or zero value.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+        return
 
     def set_dataloader(self, validator: bool = False) -> None:
         # put here for now...

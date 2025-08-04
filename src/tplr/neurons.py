@@ -29,9 +29,9 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
-from wandb.sdk.wandb_run import Run
 
 import tplr
+from wandb.sdk.wandb_run import Run
 
 if TYPE_CHECKING:
     from neurons.miner import Miner
@@ -708,7 +708,7 @@ async def check_uid_index_overlap(
                 acc[1] += param_weight
 
     # ── 3. second pass – decide offenders & track min/max ─────────────────
-    pairs_high, pairs_over, uids_over = 0, [], set()
+    pairs_high, pairs_over, uids_with_slashing = 0, [], {}
     min_pair, min_val = None, 1.0
     max_pair, max_val = None, 0.0
 
@@ -726,7 +726,8 @@ async def check_uid_index_overlap(
             pairs_high += 1
             uid_i, uid_j = uids[i], uids[j]
             offender = uid_i if ts_map[uid_i] >= ts_map[uid_j] else uid_j
-            uids_over.add(offender)
+            uids_with_slashing[offender] = determine_slash_egregiousness(avg_overlap)
+
             pairs_over.append((uid_i, uid_j, avg_overlap))
             tplr.logger.debug(
                 f"[overlap] peers {uid_i}/{uid_j} share "
@@ -746,8 +747,10 @@ async def check_uid_index_overlap(
             f"[overlap]   min {min_val * 100:.1f}%  (peers {min_pair[0]}/{min_pair[1]}) ; "
             f"max {max_val * 100:.1f}%  (peers {max_pair[0]}/{max_pair[1]})"
         )
-    if uids_over:
-        tplr.logger.warning(f"[overlap] offenders: {sorted(uids_over)}")
+    if uids_with_slashing:
+        tplr.logger.warning(
+            f"[overlap] offenders: {sorted(list(uids_with_slashing.keys()))}"
+        )
 
     return dict(
         pairs_checked=len(pair_acc),
@@ -757,5 +760,25 @@ async def check_uid_index_overlap(
         min_overlap=min_val if min_pair is not None else 0.0,
         max_overlap=max_val if max_pair is not None else 0.0,
         pairs_over_thresh=pairs_over,
-        uids_over_thresh=uids_over,
+        uids_over_thresh=uids_with_slashing,
     )
+
+
+def determine_slash_egregiousness(pct: float) -> str:
+    """
+    _summary_
+
+    Args:
+        pct: The percentage of overlap in the grads with
+             other miners
+
+    Returns:
+        Category of overlap pct
+    """
+    egregiousness = "high"
+    if pct >= 0.95:
+        egregiousness = "max"
+    if pct == 1.0:
+        egregiousness = "mega"
+
+    return egregiousness

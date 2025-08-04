@@ -46,6 +46,7 @@ class SharedShardedDataset(Dataset):
         world_size: int,
         *,
         token_dtype: npt.DTypeLike = np.uint16,  # MUST match preprocessing
+        file_prefix: str = "train",  # Allow custom file prefix (e.g., "val", "eval")
     ):
         super().__init__()
         t0 = time.perf_counter()
@@ -57,7 +58,9 @@ class SharedShardedDataset(Dataset):
         if self.world > 1:
             dist.barrier(device_ids=[self.rank])
 
-        self.tokens_file, self.ids_file = self.locate_shards(shard_index)
+        self.tokens_file, self.ids_file = self.locate_shards(
+            shard_index, file_prefix=file_prefix
+        )
         _ = self.check_paths([self.tokens_file, self.ids_file])
         _ = self.mmap_tokens_and_ids(token_dtype)
 
@@ -71,6 +74,7 @@ class SharedShardedDataset(Dataset):
     def locate_shards(
         shard_index: int,
         custom_path: os.PathLike | None = None,
+        file_prefix: str = "train",
     ) -> list[Path]:
         """Locates the file paths for a given shard index.
 
@@ -91,7 +95,7 @@ class SharedShardedDataset(Dataset):
                 "Dataset path not configured. Set $DATASET_BINS_PATH or provide custom_path"
             )
 
-        tokens_file = os.path.join(shards_path, f"train_{shard_index:06d}.npy")
+        tokens_file = os.path.join(shards_path, f"{file_prefix}_{shard_index:06d}.npy")
         ids_file = os.path.join(shards_path, f"sample_ids_{shard_index:06d}.bin")
 
         return tokens_file, ids_file
@@ -164,6 +168,7 @@ class ShardedDatasetManager:
         world_size: int,
         comms: tplr.comms.Comms,
         token_dtype: npt.DTypeLike = np.uint16,
+        file_prefix: str = "train",
     ):
         """Initializes the dataset manager.
 
@@ -178,6 +183,7 @@ class ShardedDatasetManager:
         self.rank = rank
         self.world_size = world_size
         self.token_dtype = token_dtype
+        self.file_prefix = file_prefix
         self.shard_index = 0
 
         self.active_dataset: SharedShardedDataset | None = None
@@ -197,7 +203,9 @@ class ShardedDatasetManager:
         Returns:
             An asyncio Task that completes when the download is finished
         """
-        tokens_file, ids_file = SharedShardedDataset.locate_shards(shard_index)
+        tokens_file, ids_file = SharedShardedDataset.locate_shards(
+            shard_index, file_prefix=self.file_prefix
+        )
         tplr.logger.info(f"Preparing shard {shard_index} at {tokens_file}")
 
         if os.path.exists(tokens_file) and os.path.exists(ids_file):
@@ -258,6 +266,7 @@ class ShardedDatasetManager:
             rank=self.rank,
             world_size=self.world_size,
             token_dtype=self.token_dtype,
+            file_prefix=self.file_prefix,
         )
         return dataset
 

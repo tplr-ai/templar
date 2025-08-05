@@ -39,6 +39,7 @@ dependencies = [
     "openskill>=6.0.2",
     "dnspython>=2.7.0",
     "torchtitan",
+    "cytoolz",
 ]
 
 [tool.setuptools.dynamic]

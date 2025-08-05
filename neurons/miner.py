@@ -53,7 +53,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 
-class Miner(BaseNode):
+class Miner(BaseNode, Trainer):
     # Command line config items.
     @staticmethod
     def miner_config():

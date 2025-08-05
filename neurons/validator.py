@@ -114,6 +114,7 @@ class Validator(BaseNode):
         parser.add_argument(
             "--local",
             action="store_true",
+            default=True,
             help="Local run - use toy model, small enough for a laptop.",
         )
         parser.add_argument(
@@ -870,7 +871,7 @@ class Validator(BaseNode):
             await self.save_state()
 
             # Create and post peers
-            _ = self.create_and_post_peers()
+            _ = await self.create_and_post_peers()
 
             self.comms.update_peers_with_buckets()
             peer_start = tplr.T()
@@ -978,7 +979,7 @@ class Validator(BaseNode):
                 # For evaluation, also use all peers but track separately with equal initial weight
                 self.eval_peers = {uid: 1 for uid in self.comms.peers}
 
-            continue_to_next_iter, idx_overlap, gather_results = (
+            continue_to_next_iter, idx_overlap, gather_results = await (
                 self.gather_and_maybe_slash(time_min, time_max)
             )
             if continue_to_next_iter:
@@ -987,7 +988,7 @@ class Validator(BaseNode):
 
             # 5. Save original model state for evaluation
             eval_start = tplr.T()
-            evals_output_dict = self.calculate_evals_and_loss(
+            evals_output_dict = await self.calculate_evals_and_loss(
                 eval_start, time_min, time_max
             )
             # elapsed time for full peer-evaluation loop

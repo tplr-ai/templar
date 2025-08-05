@@ -40,8 +40,6 @@ import torch.distributed as dist
 import uvloop
 from torch import autocast
 from torch.amp.grad_scaler import GradScaler
-from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.distributed.tensor import DTensor as DT
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
@@ -53,13 +51,12 @@ from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss
 
 import tplr
-from tplr.model_factory import initialize_torchtitan_model
 
 # Local
 from neurons import BaseNode
 
 # Import the DCT functions from the transformer module
-from tplr.compress import _dct, _get_smaller_split, _idct
+from tplr.model_factory import initialize_torchtitan_model
 
 # Local
 
@@ -254,7 +251,7 @@ class Miner(BaseNode):
             device=str(self.device),
             world_size=self.world_size,
         )
-        
+
         # Store parallelization parameters for later use
         tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
         self.tp_degree = int(getattr(tt, "tp_degree", 1))
@@ -323,53 +320,29 @@ class Miner(BaseNode):
         self.xshapes = {}
         self.totalks = {}
         model_iterator = self.bare_model.named_parameters()
-        # collect all padded shapes and pre-register them with DCT
-        padded_shapes_to_register = set()
         param_info = {}  # Store parameter info for second pass
 
         for idx, (n, p) in enumerate(model_iterator):
-            if idx % self.world_size == self.rank:
-                # this rank “owns” the parameter
-                self.owned_params.add(n)
-                self.error_feedback[n] = torch.zeros_like(p, device=self.device)
-            # Handle DTensor for tensor parallelism
+            # Handle DTensor - use full tensor shape for DCT registration
+            # since we're not supporting TP and will use full tensors for compression
             if isinstance(p, DT):
-                dummy = torch.zeros_like(p.to_local())
+                full_p = p.full_tensor()
+                # Ensure the dummy tensor is on the correct device
+                dummy = torch.zeros_like(full_p, device=self.device)
+                tplr.logger.debug(f"DTensor {n}: full_p.device={full_p.device}, dummy.device={dummy.device}, self.device={self.device}")
             else:
-                dummy = torch.zeros_like(p)
+                dummy = torch.zeros_like(p, device=self.device)
 
-            # Store info for second pass  
+            # Store info for second pass
             param_info[n] = {
                 "dummy": dummy,
                 "idx": idx,
             }
-
-            # Collect all dimensions that need DCT registration
-            for dim_size in dummy.shape:
-                padded_shapes_to_register.add(dim_size)
-
-        # Pre-register all padded shapes with the DCT transformer
-        tplr.logger.info(
-            f"Pre-registering {len(padded_shapes_to_register)} DCT shapes..."
-        )
-
-        for shape_dim in padded_shapes_to_register:
-            # Force registration by updating the transformer's internal dictionaries
-            if shape_dim not in self.transformer.shape_dict:
-                # Use the transformer's own logic to get the split size
-                sc = _get_smaller_split(shape_dim, self.transformer.target_chunk)
-                self.transformer.shape_dict[shape_dim] = sc
-
-                # Pregenerate DCT basis matrices if not already done
-                if sc not in self.transformer.f_dict:
-                    I = torch.eye(sc, device=self.device)
-                    # Use the custom DCT/IDCT functions with 'ortho' normalization
-                    self.transformer.f_dict[sc] = _dct(I, norm="ortho").to(self.device)
-                    self.transformer.b_dict[sc] = _idct(I, norm="ortho").to(self.device)
-
-                tplr.logger.debug(
-                    f"Registered DCT shape: {shape_dim} -> chunk size: {sc}"
-                )
+            if idx % self.world_size == self.rank:
+                # this rank "owns" the parameter
+                self.owned_params.add(n)
+                # For DTensors, create error feedback based on full tensor since TP is not supported
+                self.error_feedback[n] = dummy
 
         # Second pass: now encode all tensors (DCT shapes should be registered)
         for n, info in param_info.items():
@@ -464,6 +437,7 @@ class Miner(BaseNode):
         self.windows_per_shard = getattr(self.hparams, "windows_per_shard")
 
         tplr.logger.info("[Init] ✔ fully done – entering run()")
+
     # Main training loop.
     async def run(self):
         # Start background block listener
@@ -1052,14 +1026,6 @@ class Miner(BaseNode):
             else:
                 input_ids = torch.tensor(batch, dtype=torch.long, device=self.device)
 
-
-            # temporary
-            #vocab_size = self.model.vocab_size
-            #invalid = input_ids >= vocab_size
-            #if invalid.any():
-            #    input_ids[invalid] = self.tokenizer.pad_token_id
-            
-
             local_bs = len(batch)  # type: ignore
             accum_batch_size += local_bs
 
@@ -1071,7 +1037,6 @@ class Miner(BaseNode):
             labels[:, :-1] = input_ids[:, 1:]  # ✓ shift by +1
             labels[:, -1] = self.tokenizer.pad_token_id
             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-            #labels = torch.where(labels >= vocab_size, -100, labels) FOR SOME TESTING, DO NOT MERGE
 
             # ------------------------------------------------------------------ #
             # 3. Forward + backward

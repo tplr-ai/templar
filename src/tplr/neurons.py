@@ -68,7 +68,6 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
     for n, p in model_iterator:
         # Skip parameters not owned by this rank
         if n not in miner.owned_params:
-            p.grad = None
             continue
 
         # Apply momentum decay.
@@ -76,28 +75,23 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
 
         # Ensure the gradient is on the same device as the parameter.
         assert p.grad is not None
-        grad = p.grad.to(p.device)
+
+        # For DTensors, we need to get the full gradient since error_feedback stores full tensors
+        if isinstance(p.grad, DT):
+            # Get the full gradient from all shards
+            grad = p.grad.full_tensor().to(p.device)
+        else:
+            grad = p.grad.to(p.device)
+
         if miner.error_feedback[n].device != p.device:
             miner.error_feedback[n] = miner.error_feedback[n].to(p.device)
 
         # Normal behavior for later iterations
         miner.error_feedback[n].add_(grad, alpha=lr)
 
-        # Handle DTensor vs regular tensor for compression
-        if isinstance(p, DT):
-            local_error_feedback = (
-                miner.error_feedback[n].to_local()
-                if isinstance(miner.error_feedback[n], DT)
-                else miner.error_feedback[n]
-            )
-            # Skip padding for TP - not supported
-            encoded = miner.transformer.encode(
-                local_error_feedback, use_dct=miner.hparams.use_dct
-            )
-        else:
-            encoded = miner.transformer.encode(
-                miner.error_feedback[n], use_dct=miner.hparams.use_dct
-            )
+        encoded = miner.transformer.encode(
+            miner.error_feedback[n], use_dct=miner.hparams.use_dct
+        )
 
         idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
             encoded, miner.hparams.topk_compression
@@ -107,53 +101,28 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
         del encoded  # Free the encoded tensor immediately
 
         # Estimate transmitted gradient
-        decompressed = miner.compressor.decompress(
-            p, idxs, vals, xshape, totalk, quant_params
-        )
+        # For DTensors, use full tensor for decompression since we compressed the full tensor
+        if isinstance(p, DT):
+            full_p = p.full_tensor().to(p.device)
+            decompressed = miner.compressor.decompress(
+                full_p, idxs, vals, xshape, totalk, quant_params
+            )
+        else:
+            decompressed = miner.compressor.decompress(
+                p, idxs, vals, xshape, totalk, quant_params
+            )
         transmit_grad = miner.transformer.decode(
             decompressed, use_dct=miner.hparams.use_dct
         )
         del decompressed  # Free intermediate tensor
 
         # Handle DTensor compatibility for subtraction
-        if isinstance(p, DT) and isinstance(miner.error_feedback[n], DT):
-            # Both are DTensors - need to handle local shard operations
-            local_transmit_grad = transmit_grad
-            if isinstance(transmit_grad, DT):
-                local_transmit_grad = transmit_grad.to_local()
-
-            # Skip unpadding - TP not supported
-
-            # Update the local shard of the DTensor error feedback
-            local_error_feedback = miner.error_feedback[n].to_local()
-            local_error_feedback.sub_(local_transmit_grad)
-
-            # Create a new DTensor from the updated local shard
-            miner.error_feedback[n] = DT.from_local(
-                local_error_feedback,
-                device_mesh=miner.error_feedback[n].device_mesh,
-                placements=miner.error_feedback[n].placements,
-                run_check=False,
-            )
-        elif isinstance(miner.error_feedback[n], DT) and not isinstance(
-            transmit_grad, DT
-        ):
-            # error_feedback is DTensor, transmit_grad is regular tensor
-            # Convert transmit_grad to DTensor
-            transmit_grad_dt = DT.from_local(
-                transmit_grad,
-                device_mesh=miner.error_feedback[n].device_mesh,
-                placements=miner.error_feedback[n].placements,
-                run_check=False,
-            )
-            miner.error_feedback[n].sub_(transmit_grad_dt)
-        elif not isinstance(miner.error_feedback[n], DT) and isinstance(
-            transmit_grad, DT
-        ):
-            # error_feedback is regular tensor, transmit_grad is DTensor
-            # Convert to local tensor
-            local_transmit_grad = transmit_grad.to_local()
-            miner.error_feedback[n].sub_(local_transmit_grad)
+        # Since we're not supporting TP and using full tensors for DTensors,
+        # the error_feedback for DTensor parameters is already a full tensor
+        if isinstance(p, DT):
+            # When p is DTensor, error_feedback[n] is a regular full tensor
+            # and transmit_grad should also be a regular full tensor
+            miner.error_feedback[n].sub_(transmit_grad)
         else:
             # Both are regular tensors
             miner.error_feedback[n].sub_(transmit_grad)

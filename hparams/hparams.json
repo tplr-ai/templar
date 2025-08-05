@@ -54,7 +54,7 @@
     "pp_degree": 1,
     "cp_degree": 1,
 
-    "dp_replicate": 1,
+    "dp_replicate": 8,
     "dp_shard": 1,
 
     "compile": false,

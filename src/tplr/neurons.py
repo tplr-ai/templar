@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, TypeVar
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.tensor import DTensor as DT
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from wandb.sdk.wandb_run import Run
@@ -67,7 +68,6 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
     for n, p in model_iterator:
         # Skip parameters not owned by this rank
         if n not in miner.owned_params:
-            p.grad = None
             continue
 
         # Apply momentum decay.
@@ -75,17 +75,24 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
 
         # Ensure the gradient is on the same device as the parameter.
         assert p.grad is not None
-        grad = p.grad.to(p.device)
+
+        # For DTensors, we need to get the full gradient since error_feedback stores full tensors
+        if isinstance(p.grad, DT):
+            # Get the full gradient from all shards
+            grad = p.grad.full_tensor().to(p.device)
+        else:
+            grad = p.grad.to(p.device)
+
         if miner.error_feedback[n].device != p.device:
             miner.error_feedback[n] = miner.error_feedback[n].to(p.device)
 
         # Normal behavior for later iterations
         miner.error_feedback[n].add_(grad, alpha=lr)
 
-        # Compress momentum
         encoded = miner.transformer.encode(
             miner.error_feedback[n], use_dct=miner.hparams.use_dct
         )
+
         idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
             encoded, miner.hparams.topk_compression
         )
@@ -94,15 +101,31 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
         del encoded  # Free the encoded tensor immediately
 
         # Estimate transmitted gradient
-        decompressed = miner.compressor.decompress(
-            p, idxs, vals, xshape, totalk, quant_params
-        )
+        # For DTensors, use full tensor for decompression since we compressed the full tensor
+        if isinstance(p, DT):
+            full_p = p.full_tensor().to(p.device)
+            decompressed = miner.compressor.decompress(
+                full_p, idxs, vals, xshape, totalk, quant_params
+            )
+        else:
+            decompressed = miner.compressor.decompress(
+                p, idxs, vals, xshape, totalk, quant_params
+            )
         transmit_grad = miner.transformer.decode(
             decompressed, use_dct=miner.hparams.use_dct
         )
         del decompressed  # Free intermediate tensor
 
-        miner.error_feedback[n].sub_(transmit_grad)
+        # Handle DTensor compatibility for subtraction
+        # Since we're not supporting TP and using full tensors for DTensors,
+        # the error_feedback for DTensor parameters is already a full tensor
+        if isinstance(p, DT):
+            # When p is DTensor, error_feedback[n] is a regular full tensor
+            # and transmit_grad should also be a regular full tensor
+            miner.error_feedback[n].sub_(transmit_grad)
+        else:
+            # Both are regular tensors
+            miner.error_feedback[n].sub_(transmit_grad)
 
         # Move compressed values to CPU to save GPU memory
         gradient[n + "idxs"] = idxs.cpu() if isinstance(idxs, torch.Tensor) else idxs
@@ -189,23 +212,59 @@ def outer_step(
 
                 block_norms = torch.stack([torch.norm(v, p=2) for v in vals_f32])
 
-                new_grad = transformer.decode(
-                    compressor.batch_decompress(
-                        p.to(device),
-                        typing.cast(list[torch.Tensor], idxs),
-                        typing.cast(list[torch.Tensor], vals_f32),
-                        xshapes[n],
-                        totalks[n],
-                        quantize_params=None,  # already de-quantised
-                        block_norms=block_norms,
-                        normalise=False,
-                        clip_norm=True,
-                    ),
-                    use_dct=use_dct,
-                )
+                # Handle DTensor parameters
+                if isinstance(p, DT):
+                    # Work with local shard for decompression
+                    local_p = p.to_local()
+                    new_grad = transformer.decode(
+                        compressor.batch_decompress(
+                            local_p,
+                            typing.cast(list[torch.Tensor], idxs),
+                            typing.cast(list[torch.Tensor], vals_f32),
+                            xshapes[n],
+                            totalks[n],
+                            quantize_params=None,  # already de-quantised
+                            block_norms=block_norms,
+                            normalise=False,
+                            clip_norm=True,
+                        ),
+                        use_dct=use_dct,
+                    )
+
+                    # Convert back to DTensor
+                    new_grad_dt = DT.from_local(
+                        new_grad,
+                        device_mesh=p.device_mesh,
+                        placements=p.placements,
+                        run_check=False,
+                    )
+                    new_grad = new_grad_dt
+                else:
+                    new_grad = transformer.decode(
+                        compressor.batch_decompress(
+                            p.to(device),
+                            typing.cast(list[torch.Tensor], idxs),
+                            typing.cast(list[torch.Tensor], vals_f32),
+                            xshapes[n],
+                            totalks[n],
+                            quantize_params=None,  # already de-quantised
+                            block_norms=block_norms,
+                            normalise=False,
+                            clip_norm=True,
+                        ),
+                        use_dct=use_dct,
+                    )
 
                 # 2️⃣  last-chance validation
-                if (not torch.isfinite(new_grad).all()) or new_grad.abs().max() > 1e3:
+                if isinstance(new_grad, DT):
+                    local_grad_check = new_grad.to_local()
+                    finite_check = torch.isfinite(local_grad_check).all()
+                    max_check = local_grad_check.abs().max() <= 1e3
+                else:
+                    finite_check = torch.isfinite(new_grad).all()
+                    max_check = new_grad.abs().max() <= 1e3
+
+                if not finite_check or not max_check:
                     tplr.logger.warning(f"Non-finite gradient for {n}; dropping.")
                     continue
 
@@ -238,17 +297,22 @@ def outer_step(
         optimizer.step()
         torch.cuda.empty_cache()
 
-        # broadcast updated weights to other ranks
         if world_size > 1:
-            for t in bare_model.state_dict().values():
-                if torch.is_tensor(t):
-                    dist.broadcast(t.data, src=0)
+            for name, tensor in bare_model.state_dict().items():
+                if torch.is_tensor(tensor):
+                    if isinstance(tensor, DT):
+                        continue
+                    else:
+                        dist.broadcast(tensor.data, src=0)
 
-    else:  # non-master ranks just receive the broadcast
+    else:
         if world_size > 1:
-            for t in bare_model.state_dict().values():
-                if torch.is_tensor(t):
-                    dist.broadcast(t.data, src=0)
+            for name, tensor in bare_model.state_dict().items():
+                if torch.is_tensor(tensor):
+                    if isinstance(tensor, DT):
+                        continue
+                    else:
+                        dist.broadcast(tensor.data, src=0)
 
 
 async def update_peers(instance: NeuronT, window: int, peer_start: float) -> None:
@@ -486,9 +550,9 @@ async def catchup_with_aggregation_server(
             )
 
             if debug_fetch is not None and isinstance(debug_fetch[0], dict):
-                debug_dict = debug_fetch[0]  # validator’s payload
+                debug_dict = debug_fetch[0]  # validator's payload
 
-                # --- update EMA of parameter‑slice changes ------------------
+                # --- update EMA of parameter-slice changes ------------------
                 bare_model = (
                     instance.model.module
                     if isinstance(
@@ -499,7 +563,13 @@ async def catchup_with_aggregation_server(
                 for name, p in bare_model.named_parameters():
                     if p.numel() < 2:
                         continue
-                    curr_slice = p.detach().cpu().flatten()[slice_idx]
+
+                    # Handle DTensor parameters
+                    if isinstance(p, DT):
+                        curr_slice = p.to_local().detach().cpu().flatten()[slice_idx]
+                    else:
+                        curr_slice = p.detach().cpu().flatten()[slice_idx]
+
                     if name in prev_param_state:
                         delta = (curr_slice - prev_param_state[name]).abs()
                         if name not in param_avg_change:
@@ -582,8 +652,14 @@ async def compare_model_with_debug_dict(
             continue
 
         # --- grab the slice we care about --------------------------------
-        curr_slice = p.data.flatten()[index_range[0] : index_range[1]]
-        debug_slice = torch.tensor(debug_dict[key], dtype=p.dtype, device=p.device)
+        if isinstance(p, DT):
+            curr_slice = p.to_local().data.flatten()[index_range[0] : index_range[1]]
+        else:
+            curr_slice = p.data.flatten()[index_range[0] : index_range[1]]
+
+        debug_slice = torch.tensor(
+            debug_dict[key], dtype=p.dtype, device=curr_slice.device
+        )
 
         diff_vec = curr_slice - debug_slice
         abs_vec = torch.abs(diff_vec)
@@ -597,7 +673,7 @@ async def compare_model_with_debug_dict(
         # --- element-wise steps-behind -----------------------------------
         if param_avg_change and name in param_avg_change:
             step_vec = torch.clamp(
-                param_avg_change[name].to(p.device), min=min_step_size
+                param_avg_change[name].to(curr_slice.device), min=min_step_size
             )
             if step_vec.numel() != abs_vec.numel():
                 # fallback if stored slice has wrong length

@@ -20,7 +20,7 @@ EXPECTED = {
 }
 
 
-def run_preprocessing(data_root: str, seq_len: int, token_dtype: np.dtype) -> bool:
+def run_preprocessing(data_root: str, seq_len: int, token_dtype: np.dtype, skip_validation: bool) -> bool:
     """
     Consolidates .npy shards into single 'tokens.bin' and 'sample_ids.bin'.
     Also prints a SHA-256 digest and element count for sample_ids.bin.
@@ -89,47 +89,51 @@ def run_preprocessing(data_root: str, seq_len: int, token_dtype: np.dtype) -> bo
     print(f"sample_ids.bin written in {time.perf_counter() - t1:.1f}s")
 
     # ── 4. Integrity summary and validation ─────────────────────────────
-    print("\n🔍  Verifying output files …")
+    if not skip_validation:
+        print("\n🔍  Verifying output files …")
 
-    def sha256_file(path: Path, chunk_bytes: int = 64 << 20) -> str:
-        h = hashlib.sha256()
-        with open(path, "rb") as f:
-            while chunk := f.read(chunk_bytes):
-                h.update(chunk)
-        return h.hexdigest()
+        def sha256_file(path: Path, chunk_bytes: int = 64 << 20) -> str:
+            h = hashlib.sha256()
+            with open(path, "rb") as f:
+                while chunk := f.read(chunk_bytes):
+                    h.update(chunk)
+            return h.hexdigest()
 
-    # Calculate checksums and counts
-    t_sha = sha256_file(tokens_file)
-    t_count = os.path.getsize(tokens_file) // np.dtype(token_dtype).itemsize
-    i_sha = sha256_file(ids_file)
-    i_count = os.path.getsize(ids_file) // np.dtype(np.uint64).itemsize
+        # Calculate checksums and counts
+        t_sha = sha256_file(tokens_file)
+        t_count = os.path.getsize(tokens_file) // np.dtype(token_dtype).itemsize
+        i_sha = sha256_file(ids_file)
+        i_count = os.path.getsize(ids_file) // np.dtype(np.uint64).itemsize
 
-    print(f"tokens.bin SHA-256     : {t_sha}  ({t_count:,} elems)")
-    print(f"sample_ids.bin SHA-256 : {i_sha}  ({i_count:,} elems)")
+        print(f"tokens.bin SHA-256     : {t_sha}  ({t_count:,} elems)")
+        print(f"sample_ids.bin SHA-256 : {i_sha}  ({i_count:,} elems)")
 
-    # Validation checks
-    checks = [
-        (t_sha, EXPECTED["tokens"]["sha256"], "tokens.bin sha256"),
-        (t_count, EXPECTED["tokens"]["elements"], "tokens.bin count"),
-        (i_sha, EXPECTED["sample_ids"]["sha256"], "sample_ids.bin sha256"),
-        (i_count, EXPECTED["sample_ids"]["elements"], "sample_ids.bin count"),
-    ]
+        # Validation checks
+        checks = [
+            (t_sha, EXPECTED["tokens"]["sha256"], "tokens.bin sha256"),
+            (t_count, EXPECTED["tokens"]["elements"], "tokens.bin count"),
+            (i_sha, EXPECTED["sample_ids"]["sha256"], "sample_ids.bin sha256"),
+            (i_count, EXPECTED["sample_ids"]["elements"], "sample_ids.bin count"),
+        ]
 
-    all_ok = True
-    for actual, expect, label in checks:
-        ok = actual == expect
-        all_ok &= ok
-        print(f"{label:25}: {'PASS' if ok else 'FAIL'}")
-        if not ok:
-            print(f"  expected: {expect}")
-            print(f"  actual  : {actual}")
+        all_ok = True
+        for actual, expect, label in checks:
+            ok = actual == expect
+            all_ok &= ok
+            print(f"{label:25}: {'PASS' if ok else 'FAIL'}")
+            if not ok:
+                print(f"  expected: {expect}")
+                print(f"  actual  : {actual}")
 
-    if all_ok:
-        print("\n✅  Preprocessing complete!")
+        if all_ok:
+            print("\n✅  Preprocessing complete!")
+        else:
+            print("\n❌  Preprocessing failed validation!")
+
+        return all_ok
     else:
-        print("\n❌  Preprocessing failed validation!")
-
-    return all_ok
+        print("✅ Skipping final validation for test run.")
+        return True
 
 
 def main():
@@ -160,6 +164,12 @@ def main():
         help="Data type used in the shards",
     )
 
+    parser.add_argument(
+        "--skip_validation",
+        action="store_true",
+        help="Skip the final SHA-256 and count validation. Only for testing purposes."
+    )
+
     args = parser.parse_args()
 
     # Convert string dtype to numpy dtype
@@ -176,9 +186,10 @@ def main():
     print(f"  • Shards path: {args.data_root}")
     print(f"  • Sequence length: {args.seq_len}")
     print(f"  • Token dtype: {args.token_dtype}")
+    print(f"  • Skip Validation: {args.skip_validation}")
     print()
 
-    success = run_preprocessing(args.data_root, args.seq_len, token_dtype)
+    success = run_preprocessing(args.data_root, args.seq_len, token_dtype, args.skip_validation)
 
     if not success:
         exit(1)

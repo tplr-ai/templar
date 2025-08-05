@@ -1,4 +1,98 @@
-checkpoints
-wandb
+# Data directories and files
+eval_dataset/
+remote/
+**/data/
+**/dataset/
+**/datasets/
+*.npy
+*.npz
+*.pt
+*.pth
+*.safetensors
+*.bin
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment files
+.env
+.env.*
+*.env
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Version control
+.git/
+.gitignore
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs and temporary files
+logs/
+*.log
+tmp/
+temp/
+
+# Testing
+.coverage
+coverage.xml
+.pytest_cache/
 .pytest*
-.venv 
+.tox/
+
+# Documentation
+docs/
+*.md
+
+# Wandb
+wandb/
+
+# Node modules (if any)
+node_modules/
+
+# Jupyter
+*.ipynb
+.ipynb_checkpoints/
+
+# Model checkpoints
+checkpoints/
+models/
+*.ckpt
+
+# Archive files
+*.zip
+*.tar
+*.tar.gz
+*.rar
+
+# Bittensor wallets (should be mounted, not copied)
+wallets/
+.bittensor/
+
+# Cache directories
+.cache/
+*.cache
+
+# Other large/unnecessary files
+downloads/
+influxdb_data/
+chain-specs/
+*.patch 

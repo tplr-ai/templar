@@ -38,6 +38,7 @@ dependencies = [
     "uvloop>=0.21.0",
     "openskill>=6.0.2",
     "dnspython>=2.7.0",
+    "torchtitan",
 ]
 
 [tool.setuptools.dynamic]
@@ -82,6 +83,9 @@ filterwarnings = [
 
 [tool.uv]
 prerelease = "allow"
+
+[tool.uv.sources]
+torchtitan = { git = "https://github.com/tplr-ai/torchtitan", branch = "templar-main" }
 
 [tool.ruff]
 # Exclude directories that often trigger permission issues

@@ -261,7 +261,9 @@ class Comms(ChainManager):
 
             # Regex pattern to match filenames of the form:
             # gradient-<window>-<uid>-v<version>.pt
-            pattern = re.compile(rf"^gradient-(\d+)-{uid}-v{tplr.__version__}.pt$")
+            pattern = re.compile(
+                rf"^gradient-(\d+)-{uid}-v{re.escape(tplr.__version__)}.pt$"
+            )
 
             prefix = "gradient"
 
@@ -1799,7 +1801,7 @@ class Comms(ChainManager):
                 )
 
                 s3_client = await self._get_s3_client(validator_bucket)
-                pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{__version__}\.json$"
+                pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{re.escape(__version__)}\.json$"
                 keys = []
                 continuation_token = None
 

@@ -1202,12 +1202,14 @@ class Comms(ChainManager):
                                     valid_response = False
                                     break
 
-                    missing_params = expected_compressed_params - received_compressed_params              
-                    if missing_params:                                                                    
-                        tplr.logger.warning(                                                              
-                            f"UID {uid} missing compressed parameters: {missing_params}, skipping UID."   
-                        )                                                                                 
-                        valid_response = False                                                                
+                    missing_params = (
+                        expected_compressed_params - received_compressed_params
+                    )
+                    if missing_params:
+                        tplr.logger.warning(
+                            f"UID {uid} missing compressed parameters: {missing_params}, skipping UID."
+                        )
+                        valid_response = False
 
                     # If any check failed, skip this UID entirely
                     if not valid_response:
@@ -1305,7 +1307,7 @@ class Comms(ChainManager):
         """
         if len(gather_uids + reserve_uids) == 0:
             return None
-        
+
         if not expected_compressed_params:
             expected_compressed_params = set()
 

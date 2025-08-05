@@ -50,12 +50,11 @@ from torch.optim import SGD
 from torchtitan.components.loss import cross_entropy_loss
 
 # Third‑party – TorchTitan
-
 import tplr
-from tplr.model_factory import initialize_torchtitan_model
 
 # Local
 from neurons import BaseNode
+from tplr.model_factory import initialize_torchtitan_model
 
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
@@ -3074,19 +3073,19 @@ class Validator(BaseNode):
         )
         tplr.logger.info("[Run] dataset + sampler ready")
         return
-    
+
     def get_expected_params(self) -> set[str]:
-        """ 
-        Creates a set of expected names for validation 
-           
+        """
+        Creates a set of expected names for validation
+
             Returns: The names of all expected keys from a miner
         """
         expected_compressed_params = set()
         for param_name, _ in self.model.named_parameters():
-            expected_compressed_params.add(param_name + "idxs")                               
-            expected_compressed_params.add(param_name + "vals")                               
-            expected_compressed_params.add(param_name + "quant_params")   
-            
+            expected_compressed_params.add(param_name + "idxs")
+            expected_compressed_params.add(param_name + "vals")
+            expected_compressed_params.add(param_name + "quant_params")
+
         return expected_compressed_params
 
 

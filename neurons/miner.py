@@ -40,6 +40,7 @@ import torch.distributed as dist
 import uvloop
 from torch import autocast
 from torch.amp.grad_scaler import GradScaler
+from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.distributed.tensor import DTensor as DT
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
@@ -47,7 +48,6 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
-from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss
 
@@ -251,8 +251,8 @@ class Miner(BaseNode):
             role="miner",
             device=str(self.device),
             world_size=self.world_size,
-            self.expected_compressed_params = self.get_expected_params()
         )
+        self.expected_compressed_params = self.get_expected_params()
 
         # Store parallelization parameters for later use
         tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
@@ -334,7 +334,9 @@ class Miner(BaseNode):
                 full_p = p.full_tensor()
                 # Ensure the dummy tensor is on the correct device
                 dummy = torch.zeros_like(full_p, device=self.device)
-                tplr.logger.debug(f"DTensor {n}: full_p.device={full_p.device}, dummy.device={dummy.device}, self.device={self.device}")
+                tplr.logger.debug(
+                    f"DTensor {n}: full_p.device={full_p.device}, dummy.device={dummy.device}, self.device={self.device}"
+                )
             else:
                 dummy = torch.zeros_like(p, device=self.device)
 
@@ -1265,21 +1267,20 @@ class Miner(BaseNode):
         )
         tplr.logger.info("[Run] dataset + sampler ready")
         return
-    
+
     def get_expected_params(self) -> set[str]:
-        """ 
-        Creates a set of expected names for validation 
-           
+        """
+        Creates a set of expected names for validation
+
             Returns: The names of all expected keys from a miner
         """
         expected_compressed_params = set()
         for param_name, _ in self.model.named_parameters():
-            expected_compressed_params.add(param_name + "idxs")                               
-            expected_compressed_params.add(param_name + "vals")                               
-            expected_compressed_params.add(param_name + "quant_params")   
-            
-        return expected_compressed_params
+            expected_compressed_params.add(param_name + "idxs")
+            expected_compressed_params.add(param_name + "vals")
+            expected_compressed_params.add(param_name + "quant_params")
 
+        return expected_compressed_params
 
 
 # Start miner.

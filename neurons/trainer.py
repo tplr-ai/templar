@@ -424,7 +424,7 @@ class Trainer:
     def _is_distributed(self) -> bool:
         """True iff torch.distributed is initialised and world_size > 1."""
         return dist.is_available() and dist.is_initialized() and self.world_size > 1
-    
+
     def _ddp_reduce(
         self,
         value: int | float | torch.Tensor,

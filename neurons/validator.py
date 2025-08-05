@@ -73,7 +73,7 @@ def timer(name: str, wandb_obj=None, step=None, metrics_logger=None):
         )
 
 
-class Validator(BaseNode):
+class Validator(BaseNode, Trainer):
     @staticmethod
     def validator_config():
         parser = argparse.ArgumentParser(description="Validator script")

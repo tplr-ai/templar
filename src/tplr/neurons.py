@@ -658,6 +658,8 @@ async def check_uid_index_overlap(
             pairs_high_ovlap=0,
             ratio_high_ovlap=0.0,
             mean_overlap=0.0,
+            min_overlap=0.0,
+            max_overlap=0.0,
             pairs_over_thresh=[],
             uids_over_thresh=set(),
         )
@@ -752,8 +754,8 @@ async def check_uid_index_overlap(
         pairs_high_ovlap=pairs_high,
         ratio_high_ovlap=ratio_high,
         mean_overlap=mean_overlap,
-        min_overlap=min_val,
-        max_overlap=max_val,
+        min_overlap=min_val if min_pair is not None else 0.0,
+        max_overlap=max_val if max_pair is not None else 0.0,
         pairs_over_thresh=pairs_over,
         uids_over_thresh=uids_over,
     )

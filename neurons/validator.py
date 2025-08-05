@@ -133,6 +133,8 @@ class Validator(BaseNode):
         self.wallet = bt.wallet(config=self.config)
         self.subtensor = bt.subtensor(config=self.config)
         self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
+
+        self.current_hotkeys = dict(zip(self.metagraph.uids, self.metagraph.hotkeys))
         if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
             tplr.logger.error(
                 f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
@@ -323,7 +325,11 @@ class Validator(BaseNode):
         self.inactivity_slash_rate = 0.25  # 25% slash per window
         self.missing_gradient_slash_rate = 0.75
         self.sync_score_slash_rate = 0.75
-        self.idx_similarity_slashing_rate = 0.5
+        self.idx_similarity_slashing_rate = (
+            tplr.neurons.instantiate_slashing_multiplier()
+        )
+        self.naughty_peers = {}
+        self.naughty_peer_timeout = 200
 
         # Initialize peer related attributes
         self.next_peers: list[int] | None = None
@@ -348,27 +354,20 @@ class Validator(BaseNode):
 
         self.burn_uid = 1
 
-    def reset_peer(self, inactive_since: int, uid: int) -> bool:
-        if self.current_window - inactive_since > self.hparams.reset_inactivity_windows:
-            self.final_scores[uid] = 0.0
-            self.weights[uid] = 0.0
-            self.gradient_scores[uid] = 0.0
-            self.binary_moving_averages[uid] = 0.0
-            self.binary_indicator_scores[uid] = 0.0
-            self.sync_scores[uid] = 0.0
-            if uid in self.openskill_ratings:
-                del self.openskill_ratings[uid]
-            if uid in self.eval_peers:
-                del self.eval_peers[uid]
-            del self.inactive_scores[uid]
-            tplr.log_with_context(
-                level="info",
-                message=f"UID {uid} fully reset after extended inactivity",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
-            return True
-        return False
+    def reset_peer(self, uid: int) -> None:
+        self.final_scores[uid] = 0.0
+        self.weights[uid] = 0.0
+        self.gradient_scores[uid] = 0.0
+        self.binary_moving_averages[uid] = 0.0
+        self.binary_indicator_scores[uid] = 0.0
+        self.sync_scores[uid] = 0.0
+        if uid in self.openskill_ratings:
+            del self.openskill_ratings[uid]
+        if uid in self.eval_peers:
+            del self.eval_peers[uid]
+        del self.inactive_scores[uid]
+
+        return
 
     def log_sync_score(
         self, eval_uid: int, sync_result: dict[str, bool | float | int | str]
@@ -915,7 +914,12 @@ class Validator(BaseNode):
             )
             peer_update_time = tplr.T() - peer_start
 
-            self.eval_peers = self.comms.eval_peers
+            self.eval_peers = {
+                peer: value
+                for peer, value in self.comms.eval_peers.items()
+                if peer not in self.naughty_peers
+            }
+
             tplr.log_with_context(
                 level="info",
                 message=f"{tplr.P(self.sync_window, peer_update_time)} Updated peers - eval:{len(self.eval_peers)}",
@@ -966,8 +970,17 @@ class Validator(BaseNode):
                     )
                     continue
 
-                peer_reset = self.reset_peer(inactive_since, uid)
-                if peer_reset:
+                if (
+                    self.current_window - inactive_since
+                    > self.hparams.reset_inactivity_windows
+                ):
+                    self.reset_peer(uid)
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"UID {uid} fully reset after extended inactivity",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
                     continue
 
                 # Apply flat 25% penalty instead of exponential decay
@@ -1111,31 +1124,7 @@ class Validator(BaseNode):
                 self.sync_window,
                 overlap_threshold=self.hparams.idx_overlap_threshold,
             )
-            idx_overlap_peers = idx_overlap.get("uids_over_thresh", [])
-            for uid in idx_overlap_peers:
-                old_score = self.final_scores[uid].item()
-
-                # Only reduce positive scores
-                if self.final_scores[uid] > 0:
-                    self.final_scores[uid] *= self.idx_similarity_slashing_rate
-                    self.binary_moving_averages[uid] *= (
-                        self.idx_similarity_slashing_rate
-                    )
-
-                    new_score = self.final_scores[uid].item()
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to similarity in idxs.",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                else:
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"Skipped score of UID {uid} (current score: {old_score:.4f}) due to negative or zero value.",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
+            self.slash_from_overlap(idx_overlap)
 
             skipped_uids = gather_result.skipped_uids
             success_rate = gather_result.success_rate
@@ -2340,7 +2329,11 @@ class Validator(BaseNode):
         4) If not enough high-weight peers, fill remaining with random active peers
         """
         # Get all active peers as a list
-        active_peers = [int(peer) for peer in self.comms.active_peers]
+        active_peers = [
+            int(peer)
+            for peer in self.comms.active_peers
+            if peer not in self.naughty_peers
+        ]
 
         # Check if we have enough active peers
         if len(active_peers) < self.hparams.minimum_peers:
@@ -2905,6 +2898,89 @@ class Validator(BaseNode):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
+
+    def check_deregistered_uids(self, idx_overlap_peers: dict) -> dict:
+        """
+        Find updates in metagraph that indicate a uid is a net-new user
+        to avoid unintentionally punishing new miners where the old
+        miner was naughty
+
+        Args:
+            idx_overlap_peers: The combined uids of the previously
+                naughty peers and the current peers that exceed
+                overlap threshold
+
+        Returns:
+            Updated idx_overlap_peers, keeping in mind deregistering
+        """
+        found_uids = list(idx_overlap_peers.keys())
+        latest_hotkeys = dict(zip(self.metagraph.uids, self.metagraph.hotkeys))
+
+        for uid in found_uids:
+            if (
+                latest_hotkeys.get(uid) != self.current_hotkeys.get(uid)
+                and idx_overlap_peers.get(uid)
+                != "mega"  # not actively cheating already
+            ):
+                # peer has changed from deregistering
+                self.naughty_peers.pop(uid, None)
+                idx_overlap_peers.pop(uid, None)
+
+        self.current_hotkeys = latest_hotkeys
+        return idx_overlap_peers
+
+    def slash_from_overlap(self, idx_overlap: dict) -> None:
+        """
+        Anyone with overly similar gradients is slashed; those
+        with particularly egregious levels of overlap are 100%
+        slashed. When 100% overlap, sent to timeout corner
+
+        Args:
+            idx_overlap: The overlap dictionary from tplr.neurons
+        """
+        idx_overlap_peers = {uid: "max" for uid in self.naughty_peers}
+        idx_overlap_peers.update(idx_overlap.get("uids_over_thresh", {}))
+
+        idx_overlap_peers = self.check_deregistered_uids(idx_overlap_peers)
+
+        for uid, level in idx_overlap_peers.items():
+            old_score = self.final_scores[uid].item()
+            slash_multiplier = self.idx_similarity_slashing_rate.get(level, 0.5)
+
+            if level in ["mega", "max"]:
+                # For the most egregious offenders, reset scores
+                self.reset_peer(uid)
+
+                if level == "mega":
+                    self.naughty_peers[uid] = self.naughty_peer_timeout
+
+            if self.naughty_peers.get(uid):
+                self.naughty_peers[uid] -= 1
+                if self.naughty_peers[uid] <= 0:
+                    self.naughty_peers.pop(uid)
+
+            # Only reduce positive scores
+            if old_score > 0:
+                self.final_scores[uid] *= slash_multiplier
+                self.binary_moving_averages[uid] *= slash_multiplier
+
+                new_score = self.final_scores[uid].item()
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Reduced score of UID {uid} from {old_score:.4f} to {new_score:.4f} due to similarity in idxs.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+
+            else:
+                tplr.log_with_context(
+                    level="info",
+                    message=f"Skipped score of UID {uid} (current score: {old_score:.4f}) due to negative or zero value.",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+
+        return
 
     def set_dataloader(self, validator: bool = False) -> None:
         # put here for now...

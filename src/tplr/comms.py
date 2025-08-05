@@ -1005,19 +1005,23 @@ class Comms(ChainManager):
     async def gather(
         self,
         my_uid: int | None,
-        uids: List[int],
+        uids: list[int],
         window: int,
         key: str,
         timeout: int,
         device: str,
         totalks: dict,
         compressor: CompressDCT,
+        expected_compressed_params: set[str] | None = None,
         local: bool = True,
         stale_retention: int = 10,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
     ) -> SimpleNamespace | None:
         """Gather operation with individual gradient normalization and connection management."""
+        if not expected_compressed_params:
+            expected_compressed_params = set()
+            
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
 
@@ -1100,6 +1104,8 @@ class Comms(ChainManager):
                     # ---------- Begin Compressed Indices and Values Check ----------
                     valid_response = True
                     for param_name, tensor in state_dict_resp.items():
+                        received_compressed_params.add(param_name)
+
                         # ----------------------------------------------------------
                         # (1)  Validate quantisation parameters themselves
                         # ----------------------------------------------------------
@@ -1193,6 +1199,13 @@ class Comms(ChainManager):
                                     valid_response = False
                                     break
 
+                    missing_params = expected_compressed_params - received_compressed_params              
+                    if missing_params:                                                                    
+                        tplr.logger.warning(                                                              
+                            f"UID {uid} missing compressed parameters: {missing_params}, skipping UID."   
+                        )                                                                                 
+                        valid_response = False                                                                
+
                     # If any check failed, skip this UID entirely
                     if not valid_response:
                         tplr.logger.info(
@@ -1277,6 +1290,7 @@ class Comms(ChainManager):
         my_uid: int | None,
         gather_uids: list[int],
         reserve_uids: list[int],
+        expected_compressed_params: set[str] | None = None,
         **kwargs,
     ) -> SimpleNamespace | None:
         """
@@ -1288,6 +1302,10 @@ class Comms(ChainManager):
         """
         if len(gather_uids + reserve_uids) == 0:
             return None
+        
+        if not expected_compressed_params:
+            expected_compressed_params = set()
+
         window = kwargs.get("window", None)  # for contextual logs
         context_log = partial(tplr.log_with_context, level="info", window=window)
 
@@ -1296,7 +1314,12 @@ class Comms(ChainManager):
             f"gather={gather_uids} reserve={reserve_uids}"
         )
 
-        primary = await self.gather(my_uid=my_uid, uids=gather_uids, **kwargs)
+        primary = await self.gather(
+            my_uid=my_uid,
+            uids=gather_uids,
+            expected_compressed_params=expected_compressed_params,
+            **kwargs,
+        )
 
         # Normalise to an empty shell if absolutely nothing came back
         if primary is None:

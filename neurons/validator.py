@@ -159,6 +159,7 @@ class Validator(BaseNode):
         self.model = cast(
             LlamaForCausalLM, torch.compile(self.model, mode=compile_mode)
         )
+        self.expected_compressed_params = self.get_expected_params()
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
@@ -1102,6 +1103,7 @@ class Validator(BaseNode):
                 compressor=self.compressor,
                 time_min=time_min,
                 time_max=time_max,
+                expected_compressed_params=self.expected_compressed_params,
             )
 
             if gather_result is None:
@@ -3023,6 +3025,20 @@ class Validator(BaseNode):
         )
         tplr.logger.info("[Run] dataset + sampler ready")
         return
+    
+    def get_expected_params(self) -> set[str]:
+        """ 
+        Creates a set of expected names for validation 
+           
+            Returns: The names of all expected keys from a miner
+        """
+        expected_compressed_params = set()
+        for param_name, _ in self.model.named_parameters():
+            expected_compressed_params.add(param_name + "idxs")                               
+            expected_compressed_params.add(param_name + "vals")                               
+            expected_compressed_params.add(param_name + "quant_params")   
+            
+        return expected_compressed_params
 
 
 def min_power_normalization(logits, power=2.0, epsilon=1e-8):

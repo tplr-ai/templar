@@ -1272,13 +1272,17 @@ class Validator(BaseNode):
             dict: Synchronization metrics and score
         """
         # Fetch the miner's debug dictionary
-        miner_debug_dict, *_ = await self.comms.get(
+        miner_debug_dict = await self.comms.get(
             uid=str(eval_uid),
             window=self.sync_window - 1,
             key="debug",
             local=False,
             stale_retention=10,
         )
+        if isinstance(miner_debug_dict, tuple):
+            # comms.get has variable length outputs
+            miner_debug_dict = miner_debug_dict[0]
+            
         miner_debug_dict = cast(dict, miner_debug_dict)
 
         base_output = {

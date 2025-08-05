@@ -78,6 +78,10 @@ def create_namespace(hparams: dict) -> SimpleNamespace:
 
     hparams_ns = SimpleNamespace(**full_hparams)
 
+    # ── expose torchtitan sub‑dict as its own namespace ──────────────
+    if isinstance(full_hparams.get("torchtitan"), dict):
+        hparams_ns.torchtitan = SimpleNamespace(**full_hparams["torchtitan"])
+
     # Initialize tokenizer
     try:
         hparams_ns.tokenizer = AutoTokenizer.from_pretrained(

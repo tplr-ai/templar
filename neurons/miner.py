@@ -28,6 +28,7 @@ import sys
 import time
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import cast
 
 import bittensor as bt
@@ -36,23 +37,27 @@ import torch
 import torch.distributed as dist
 
 # Third party
-import torch.nn.parallel
 import uvloop
 from torch import autocast
-from torch.distributed.optim import ZeroRedundancyOptimizer
+from torch.amp.grad_scaler import GradScaler
+from torch.distributed.tensor import DTensor as DT
 from torch.optim import SGD
 from torch.optim.lr_scheduler import (
     CosineAnnealingLR,
     LinearLR,
     SequentialLR,
 )
+from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.utils.data import DataLoader
-from transformers.models.llama import LlamaForCausalLM
+from torchtitan.components.loss import cross_entropy_loss
 
 import tplr
 
 # Local
 from neurons import BaseNode
+
+# Import the DCT functions from the transformer module
+from tplr.model_factory import initialize_torchtitan_model
 
 # Local
 
@@ -91,6 +96,12 @@ class Miner(BaseNode):
             "--device", type=str, default="cuda", help="Device to use for training"
         )
         parser.add_argument(
+            "--amp-dtype",
+            choices=["bf16", "fp16"],
+            default="bf16",
+            help="Mixed-precision data type. Use «fp16» to enable GradScaler.",
+        )
+        parser.add_argument(
             "--local_rank", type=int, default=int(os.getenv("LOCAL_RANK", 0))
         )
         parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -109,6 +120,18 @@ class Miner(BaseNode):
             "--local",
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
+        )
+        parser.add_argument(
+            "--profile-iters",
+            type=int,
+            default=0,
+            help="Active iterations per Torch‑Profiler trace (0 = disable)",
+        )
+        parser.add_argument(
+            "--profile-dir",
+            type=str,
+            default="./log/profiler",
+            help="Directory to save profiler traces",
         )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
@@ -187,6 +210,17 @@ class Miner(BaseNode):
         self.device = torch.device(self.config.device)
         tplr.logger.info(f"[Init] device set → {self.device}")
 
+        # Mixed precision setup
+        self.amp_dtype = (
+            torch.bfloat16 if self.config.amp_dtype == "bf16" else torch.float16
+        )
+        self.scaler = GradScaler(
+            enabled=(self.amp_dtype is torch.float16 and self.device.type == "cuda")
+        )
+        tplr.logger.info(
+            f"[Init] Using {self.config.amp_dtype}. GradScaler enabled: {self.scaler.is_enabled()}"
+        )
+
         # Convenience flags
         self.is_master = self.rank == 0
         self.config.local = cast(bool, self.config.local)
@@ -211,26 +245,22 @@ class Miner(BaseNode):
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         super().__init__()
 
-        # Init model with hparams config
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.device)  # type: ignore[reportArgumentType]
-        if self.world_size < 4:
-            self.model.gradient_checkpointing_enable()
-        tplr.logger.info("[Init] Llama model instantiated & on device")
-
-        compile_mode = "default"
-        self.model = cast(
-            LlamaForCausalLM, torch.compile(self.model, mode=compile_mode)
+        # Initialize TorchTitan model using model factory
+        self.model = initialize_torchtitan_model(
+            hparams=self.hparams,
+            role="miner",
+            device=str(self.device),
+            world_size=self.world_size,
         )
 
-        if self.world_size > 1:
-            self.model = torch.nn.parallel.DistributedDataParallel(
-                self.model,
-                device_ids=[self.local_rank],
-                output_device=self.local_rank,
-                gradient_as_bucket_view=True,
-            )
-            tplr.logger.info("[Init] wrapped model with DistributedDataParallel")
+        # Store parallelization parameters for later use
+        tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
+        self.tp_degree = int(getattr(tt, "tp_degree", 1))
+        self.pp_degree = int(getattr(tt, "pp_degree", 1))
+        self.cp_degree = int(getattr(tt, "cp_degree", 1))
+        self.dp_replicate = int(getattr(tt, "dp_replicate", 1))
+        self.dp_shard = int(getattr(tt, "dp_shard", 1))
+
         self.bare_model = getattr(self.model, "module", self.model)
         self.tokenizer = self.hparams.tokenizer
 
@@ -294,20 +324,48 @@ class Miner(BaseNode):
         self.xshapes = {}
         self.totalks = {}
         model_iterator = self.bare_model.named_parameters()
+        param_info = {}  # Store parameter info for second pass
 
         for idx, (n, p) in enumerate(model_iterator):
+            # Handle DTensor - use full tensor shape for DCT registration
+            # since we're not supporting TP and will use full tensors for compression
+            if isinstance(p, DT):
+                full_p = p.full_tensor()
+                # Ensure the dummy tensor is on the correct device
+                dummy = torch.zeros_like(full_p, device=self.device)
+                tplr.logger.debug(f"DTensor {n}: full_p.device={full_p.device}, dummy.device={dummy.device}, self.device={self.device}")
+            else:
+                dummy = torch.zeros_like(p, device=self.device)
+
+            # Store info for second pass
+            param_info[n] = {
+                "dummy": dummy,
+                "idx": idx,
+            }
             if idx % self.world_size == self.rank:
-                # this rank “owns” the parameter
+                # this rank "owns" the parameter
                 self.owned_params.add(n)
-                self.error_feedback[n] = torch.zeros_like(p, device=self.device)
+                # For DTensors, create error feedback based on full tensor since TP is not supported
+                self.error_feedback[n] = dummy
+
+        # Second pass: now encode all tensors (DCT shapes should be registered)
+        for n, info in param_info.items():
+            dummy = info["dummy"]
+
+            enc = self.transformer.encode(dummy, use_dct=self.hparams.use_dct)
+            tplr.logger.debug(
+                f"[Init] Successfully applied DCT to {n} with shape {dummy.shape}"
+            )
             _, _, xshape, totalk, _ = self.compressor.compress(
-                self.transformer.encode(
-                    torch.zeros_like(p), use_dct=self.hparams.use_dct
-                ),
+                enc,
                 self.hparams.topk_compression,
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
+
+        tplr.logger.info(
+            f"[Init] DCT compression initialized for {len(param_info)} parameters"
+        )
 
         self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
         tplr.logger.info(
@@ -491,7 +549,7 @@ class Miner(BaseNode):
 
             # 1) parameters & buffers
             for tensor in self.bare_model.state_dict().values():
-                if torch.is_tensor(tensor):
+                if torch.is_tensor(tensor) and not isinstance(tensor, DT):
                     dist.broadcast(tensor.data, src=0)
 
             bcast_time = tplr.T() - bcast_start
@@ -742,12 +800,19 @@ class Miner(BaseNode):
 
                 # Add model parameters debug info
                 for name, param in self.bare_model.named_parameters():
-                    if (
-                        param is not None and param.numel() >= 2
-                    ):  # Check if tensor has at least 2 elements
-                        debug_dict[name + "_debug"] = (
-                            param.flatten()[10:12].detach().cpu().tolist()
-                        )
+                    if param is not None:
+                        # Handle DTensor vs regular tensor
+                        if isinstance(param, DT):
+                            local_param = param.to_local()
+                            if local_param.numel() >= 2:
+                                debug_dict[name + "_debug"] = (
+                                    local_param.flatten()[10:12].detach().cpu().tolist()
+                                )
+                        else:
+                            if param.numel() >= 2:
+                                debug_dict[name + "_debug"] = (
+                                    param.flatten()[10:12].detach().cpu().tolist()
+                                )
 
                 # Add successful peers information
                 if gather_result is not None:
@@ -886,6 +951,11 @@ class Miner(BaseNode):
                 del processed_state_dict, gradient
 
             await self.cleanup_window()
+
+            # ── profiler step (only master) ─────────────────────────────
+            if self.is_master and self._prof is not None:
+                self._prof.step()
+
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
             await self.wait_until_window(step_window + 1)
@@ -904,6 +974,14 @@ class Miner(BaseNode):
         dict
             Keys: total_loss (float), batch_count (int), batch_tokens (int)
         """
+
+        # Ensure the event loop and executor are initialized, which is normally
+        # done in the `run()` method. This makes the method safe for isolated testing.
+        if not hasattr(self, "loop"):
+            self.loop = asyncio.get_running_loop()
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
+            self.loop.set_default_executor(self.executor)
+
         self.inner_optimizer.zero_grad()
 
         total_loss: float = 0.0
@@ -916,7 +994,7 @@ class Miner(BaseNode):
         local_tokens_sum: int = 0  # local running totals
         local_loss_sum: float = 0.0
 
-        params_offloaded = self._get_offloaded_param()
+        params_offloaded, param_specs = self._get_offloaded_param()
 
         inner_step_count: int = 0
         loader_iter = iter(loader)
@@ -960,29 +1038,36 @@ class Miner(BaseNode):
             local_tokens_sum += tokens_this_batch
 
             labels = input_ids.clone()
+            labels[:, :-1] = input_ids[:, 1:]  # ✓ shift by +1
+            labels[:, -1] = self.tokenizer.pad_token_id
             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
 
             # ------------------------------------------------------------------ #
             # 3. Forward + backward
             # ------------------------------------------------------------------ #
-            with autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                outputs = self.model(input_ids=input_ids, labels=labels)
+            with autocast(device_type=self.device.type, dtype=self.amp_dtype):
+                outputs = self.model(input_ids, labels)
 
-            loss = outputs.loss / self.sampler.grad_accum_steps
-            loss_item = outputs.loss.detach().item()
+            calculated_loss = cross_entropy_loss(outputs, labels)
+
+            loss = calculated_loss / self.sampler.grad_accum_steps
+            loss_item = calculated_loss.detach().item()
 
             # -------------------------------------------------------------- #
             # 3-a.  Back-prop with no_sync() on non-final micro-batches
             # -------------------------------------------------------------- #
             final_micro_batch = (batch_count + 1) % self.sampler.grad_accum_steps == 0
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) and (
-                self.world_size > 1 and not final_micro_batch
+            if (
+                hasattr(self.model, "no_sync")
+                and self.world_size > 1
+                and not final_micro_batch
             ):
                 sync_ctx = self.model.no_sync()
             else:
                 sync_ctx = nullcontext()
             with sync_ctx:
-                loss.backward()
+                self.scaler.scale(loss).backward()
+
             total_loss += loss_item
             local_loss_sum += loss_item  # defer collective
 
@@ -1009,7 +1094,11 @@ class Miner(BaseNode):
                 log_loss = self._ddp_reduce(loss_item, op=dist.ReduceOp.AVG)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
-                self.inner_optimizer.step()
+                # Unscale, clip, then step via GradScaler if using fp16
+                self.scaler.unscale_(self.inner_optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                self.scaler.step(self.inner_optimizer)
+                self.scaler.update()
                 self.inner_scheduler.step()
                 self.inner_optimizer.zero_grad(set_to_none=True)
 
@@ -1058,14 +1147,26 @@ class Miner(BaseNode):
         # 6. parameter offloading logic
         # ------------------------------------------------------------------ #
         with torch.no_grad():
-            for saved_param, p in zip(params_offloaded, self.bare_model.parameters()):
-                saved_param = saved_param.to(p.device, non_blocking=True)
+            for (saved_param, param_meta), p in zip(
+                zip(params_offloaded, param_specs), self.bare_model.parameters()
+            ):
+                if param_meta["is_dtensor"] and isinstance(p, DT):
+                    # Handle TP DTensors
+                    saved_param = saved_param.to(p.device, non_blocking=True)
 
-                # (a) pseudo-gradient for outer step
-                p.grad = saved_param - p.data
-
-                # (b) ***in-place*** restore original weights
-                p.data.copy_(saved_param)
+                    # Create a DTensor from the local shard directly
+                    saved_param_dtensor = DT.from_local(
+                        saved_param,
+                        device_mesh=param_meta["device_mesh"],
+                        placements=param_meta["placements"],
+                        run_check=False,
+                    )
+                    p.grad = saved_param_dtensor - p
+                    p.data.copy_(saved_param_dtensor.data)
+                else:
+                    saved_param = saved_param.to(p.device, non_blocking=True)
+                    p.grad = saved_param - p.data
+                    p.data.copy_(saved_param)
 
         # ---------------------------------------------------------------------- #
         # 7. Return aggregated metrics
@@ -1080,10 +1181,28 @@ class Miner(BaseNode):
 
     def _get_offloaded_param(self):
         """Get a copy of current parameters and offload them to CPU"""
-        return [
-            param.data.detach().clone().to("cpu")
-            for param in self.bare_model.parameters()
-        ]
+        params_offloaded = []
+        param_info = []  # Store DTensor info for restoration
+
+        for param in self.bare_model.parameters():
+            if isinstance(param, DT):
+                # Get the local TP shard and store the spec
+                local_param = param.to_local()
+                params_offloaded.append(local_param.detach().clone().to("cpu"))
+                param_info.append(
+                    {  # Store the DTensor placement info
+                        "is_dtensor": True,
+                        "device_mesh": param.device_mesh,
+                        "placements": param.placements,
+                        "local_shape": local_param.shape,
+                    }
+                )
+            else:
+                # For regular tensors
+                params_offloaded.append(param.data.detach().clone().to("cpu"))
+                param_info.append({"is_dtensor": False})
+
+        return params_offloaded, param_info
 
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""

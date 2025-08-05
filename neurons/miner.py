@@ -47,6 +47,7 @@ from torch.optim.lr_scheduler import (
     LinearLR,
     SequentialLR,
 )
+from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss
 
@@ -281,11 +282,14 @@ class Miner(BaseNode):
         self.outer_optimizer = SGD(
             self.model.parameters(), lr=self.hparams.outer_learning_rate
         )
-        self.inner_optimizer = torch.optim.AdamW(
+        self.inner_optimizer = ZeroRedundancyOptimizer(
             self.model.parameters(),
+            optimizer_class=torch.optim.AdamW,
             lr=self.hparams.inner_learning_rate,
             weight_decay=self.hparams.weight_decay,
             betas=(0.9, 0.95),
+            parameters_as_bucket_view=True,
+            overlap_with_ddp=False,
         )
         inner_steps_before_outer_step = self.hparams.inner_steps * (
             self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1

@@ -201,7 +201,7 @@ class CompressDCT(Generic[Q]):
 
     @torch.no_grad()
     def compress(self, x: torch.Tensor, topk: int):  # type: ignore[override]
-        if isinstance(x, torch.distributed.tensor.DTensor):   # check for dtensors
+        if isinstance(x, torch.distributed.tensor.DTensor):  # check for dtensors
             x = x.to_local()
         xshape = x.shape
 

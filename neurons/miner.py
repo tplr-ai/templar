@@ -217,6 +217,7 @@ class Miner(BaseNode):
         if self.world_size < 4:
             self.model.gradient_checkpointing_enable()
         tplr.logger.info("[Init] Llama model instantiated & on device")
+        self.expected_compressed_params = self.get_expected_params()
 
         compile_mode = "default"
         self.model = cast(
@@ -696,6 +697,7 @@ class Miner(BaseNode):
                     compressor=self.compressor,
                     time_min=time_min,
                     time_max=time_max,
+                    expected_compressed_params=self.expected_compressed_params,
                 )
                 tplr.logger.info("Gather task completed!")
                 gather_time = tplr.T() - gather_start
@@ -1144,6 +1146,21 @@ class Miner(BaseNode):
         )
         tplr.logger.info("[Run] dataset + sampler ready")
         return
+    
+    def get_expected_params(self) -> set[str]:
+        """ 
+        Creates a set of expected names for validation 
+           
+            Returns: The names of all expected keys from a miner
+        """
+        expected_compressed_params = set()
+        for param_name, _ in self.model.named_parameters():
+            expected_compressed_params.add(param_name + "idxs")                               
+            expected_compressed_params.add(param_name + "vals")                               
+            expected_compressed_params.add(param_name + "quant_params")   
+            
+        return expected_compressed_params
+
 
 
 # Start miner.

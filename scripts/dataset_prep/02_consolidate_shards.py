@@ -20,7 +20,9 @@ EXPECTED = {
 }
 
 
-def run_preprocessing(data_root: str, seq_len: int, token_dtype: np.dtype, skip_validation: bool) -> bool:
+def run_preprocessing(
+    data_root: str, seq_len: int, token_dtype: np.dtype, skip_validation: bool
+) -> bool:
     """
     Consolidates .npy shards into single 'tokens.bin' and 'sample_ids.bin'.
     Also prints a SHA-256 digest and element count for sample_ids.bin.
@@ -167,7 +169,7 @@ def main():
     parser.add_argument(
         "--skip_validation",
         action="store_true",
-        help="Skip the final SHA-256 and count validation. Only for testing purposes."
+        help="Skip the final SHA-256 and count validation. Only for testing purposes.",
     )
 
     args = parser.parse_args()
@@ -189,7 +191,9 @@ def main():
     print(f"  • Skip Validation: {args.skip_validation}")
     print()
 
-    success = run_preprocessing(args.data_root, args.seq_len, token_dtype, args.skip_validation)
+    success = run_preprocessing(
+        args.data_root, args.seq_len, token_dtype, args.skip_validation
+    )
 
     if not success:
         exit(1)

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
-import os
 import argparse
 import multiprocessing as mp
+import os
+
 import numpy as np
-from transformers import AutoTokenizer
-from datasets import load_dataset
 from tqdm import tqdm
+from transformers import AutoTokenizer
+
+from datasets import load_dataset
 
 _tokenizer = None
 
@@ -134,7 +136,9 @@ if __name__ == "__main__":
         default=1 * (1024**3),
         help="Tokens in shard (default: 1B)",
     )
-    parser.add_argument("--seed", type=int, default=42, help="Seed for dataset shuffling")
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Seed for dataset shuffling"
+    )
     parser.add_argument(
         "--buffer_size", type=int, default=10000, help="Shuffle buffer size"
     )

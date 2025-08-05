@@ -46,6 +46,7 @@ import os
 import shutil
 import time
 from pathlib import Path
+
 import bittensor as bt
 import torch
 from torch.utils.data import DataLoader
@@ -613,18 +614,25 @@ class Evaluator:
             # TorchTitan calculates this as a multiple of 256
             titan_state_dict = self.model.state_dict()
             actual_intermediate_size = None
-            for key in ["_orig_mod.layers.0.feed_forward.w1.weight", "layers.0.feed_forward.w1.weight"]:
+            for key in [
+                "_orig_mod.layers.0.feed_forward.w1.weight",
+                "layers.0.feed_forward.w1.weight",
+            ]:
                 if key in titan_state_dict:
                     actual_intermediate_size = titan_state_dict[key].shape[0]
                     break
-            
+
             if actual_intermediate_size is None:
                 # Fallback to hparams if we can't determine from model
                 actual_intermediate_size = self.hparams.model_config.intermediate_size
-                tplr.logger.warning(f"Could not determine intermediate_size from model, using hparams value: {actual_intermediate_size}")
+                tplr.logger.warning(
+                    f"Could not determine intermediate_size from model, using hparams value: {actual_intermediate_size}"
+                )
             else:
-                tplr.logger.info(f"Using actual intermediate_size from model: {actual_intermediate_size}")
-            
+                tplr.logger.info(
+                    f"Using actual intermediate_size from model: {actual_intermediate_size}"
+                )
+
             hf_config = LlamaConfig(
                 vocab_size=self.hparams.model_config.vocab_size,
                 hidden_size=self.hparams.model_config.hidden_size,

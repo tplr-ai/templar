@@ -45,17 +45,8 @@ from rich.console import Console
 from rich.table import Table
 
 import tplr
-<<<<<<< HEAD
-# Local
-from neurons import BaseNode
-from tplr.model_factory import initialize_torchtitan_model
-
-CPU_COUNT = os.cpu_count() or 4
-CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
-=======
 from neurons import BaseNode, Trainer
 from neurons.base_node import CPU_COUNT
->>>>>>> b723f1d ((squash) Updated work)
 
 # GPU optimizations.
 torch.manual_seed(42)

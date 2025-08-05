@@ -166,8 +166,8 @@ def outer_step(
     """
     Synchronize gradients (if DDP) and apply optimizer step
     """
-    bare_model = getattr(model, 'module', model)
-    
+    bare_model = getattr(model, "module", model)
+
     if is_master:
         min_median_norm = float("inf")
         max_median_norm = float("-inf")
@@ -551,7 +551,7 @@ async def catchup_with_aggregation_server(
                 debug_dict = debug_fetch[0]  # validator's payload
 
                 # --- update EMA of parameter‑slice changes ------------------
-                bare_model = getattr(instance.model, 'module', instance.model)
+                bare_model = getattr(instance.model, "module", instance.model)
                 for name, p in bare_model.named_parameters():
                     if p.numel() < 2:
                         continue

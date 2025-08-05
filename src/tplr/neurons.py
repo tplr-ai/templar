@@ -90,11 +90,9 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
                 if isinstance(miner.error_feedback[n], DT)
                 else miner.error_feedback[n]
             )
-            padded_error_feedback, padding_info = miner._pad_tensor_for_tp(
-                local_error_feedback, n
-            )
+            # Skip padding for TP - not supported
             encoded = miner.transformer.encode(
-                padded_error_feedback, use_dct=miner.hparams.use_dct
+                local_error_feedback, use_dct=miner.hparams.use_dct
             )
         else:
             encoded = miner.transformer.encode(
@@ -124,11 +122,7 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
             if isinstance(transmit_grad, DT):
                 local_transmit_grad = transmit_grad.to_local()
 
-            # Unpad the transmitted gradient if padding was applied
-            if isinstance(p, DT):
-                local_transmit_grad = miner._unpad_tensor(
-                    local_transmit_grad, padding_info
-                )
+            # Skip unpadding - TP not supported
 
             # Update the local shard of the DTensor error feedback
             local_error_feedback = miner.error_feedback[n].to_local()

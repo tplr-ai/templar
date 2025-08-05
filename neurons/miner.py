@@ -26,7 +26,6 @@ import os
 import random
 import sys
 import time
-from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import cast
@@ -35,34 +34,13 @@ import bittensor as bt
 import numpy as np
 import torch
 import torch.distributed as dist
-
-# Third party
 import uvloop
-from torch import autocast
 from torch.amp.grad_scaler import GradScaler
-from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.distributed.tensor import DTensor as DT
-from torch.optim import SGD
-from torch.optim.lr_scheduler import (
-    CosineAnnealingLR,
-    LinearLR,
-    SequentialLR,
-)
-from torch.utils.data import DataLoader
-from torchtitan.components.loss import cross_entropy_loss
 
 import tplr
-
-# Local
-from neurons import BaseNode
-
-# Import the DCT functions from the transformer module
-from tplr.model_factory import initialize_torchtitan_model
-
-# Local
-
-CPU_COUNT = os.cpu_count() or 4
-CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
+from neurons import BaseNode, Trainer
+from neurons.base_node import CPU_COUNT
 
 # GPU optimizations
 torch.manual_seed(42)
@@ -249,6 +227,14 @@ class Miner(BaseNode):
         self.bare_model = getattr(self.model, "module", self.model)
         self.tokenizer = self.hparams.tokenizer
 
+        # Store parallelization parameters for later use
+        tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
+        self.tp_degree = int(getattr(tt, "tp_degree", 1))
+        self.pp_degree = int(getattr(tt, "pp_degree", 1))
+        self.cp_degree = int(getattr(tt, "cp_degree", 1))
+        self.dp_replicate = int(getattr(tt, "dp_replicate", 1))
+        self.dp_shard = int(getattr(tt, "dp_shard", 1))
+
         # Init compression
         self.transformer = tplr.compress.TransformDCT(
             self.model, target_chunk=self.hparams.target_chunk
@@ -265,7 +251,7 @@ class Miner(BaseNode):
 
         self.error_feedback = {}
         self.owned_params = set()
-        
+
         self.xshapes = {}
         self.totalks = {}
         model_iterator = self.bare_model.named_parameters()
@@ -422,9 +408,6 @@ class Miner(BaseNode):
             val = tensor.item()
             self.start_window = None if val == -1 else int(val)
 
-        # Finalize the dataloader
-        self.set_dataloader() 
-        
         self.global_step = self.current_window - self.start_window
         current_shard = self.global_step // self.windows_per_shard
         tplr.logger.info(f"starting at Global Step : {self.global_step}")
@@ -730,7 +713,7 @@ class Miner(BaseNode):
             # 8. Apply gathered gradients
             update_start = tplr.T()
             _ = self.outer_step(gather_result)
-            
+
             model_update_time = tplr.T() - update_start
             tplr.logger.info(f"{tplr.P(step_window, model_update_time)} Updated model")
 
@@ -940,62 +923,6 @@ class Miner(BaseNode):
         tplr.logger.info(
             f"After cleanup - GPU reserved: {torch.cuda.memory_reserved(self.device) / 1024**3:.2f} GB"
         )
-
-    def set_dataloader(self, validator: bool = False) -> None:
-        # put here for now...
-        self.dataset = self.dataset_manager.active_dataset
-
-        shared_args = dict(
-            dataset=self.dataset,
-            uid=self.uid,
-            window=self.current_window,
-            steps_per_window=self.hparams.inner_steps,
-            micro_bs=self.hparams.micro_batch_size,
-            rank=self.rank,
-            world_size=self.world_size,
-        )
-
-        if validator:
-            SamplerClass = tplr.EvalSampler
-            kwargs = shared_args | dict(
-                batch_size=self.hparams.target_batch_size,
-                validation_bs=self.hparams.validator_sample_micro_bs
-                * self.hparams.micro_batch_size,
-            )
-        else:
-            SamplerClass = tplr.MinerSampler
-            kwargs = shared_args | dict(
-                micro_bs=self.hparams.micro_batch_size,
-                batch_size=self.hparams.batch_size,
-                target_batch_size=self.hparams.target_batch_size,
-            )
-
-        self.sampler = SamplerClass(**kwargs)
-
-        self.loader = torch.utils.data.DataLoader(
-            dataset=self.dataset,
-            sampler=self.sampler,
-            batch_size=self.hparams.micro_batch_size,
-            num_workers=10,
-            pin_memory=True,
-            prefetch_factor=2,
-        )
-        tplr.logger.info("[Run] dataset + sampler ready")
-        return
-
-    def get_expected_params(self) -> set[str]:
-        """
-        Creates a set of expected names for validation
-
-            Returns: The names of all expected keys from a miner
-        """
-        expected_compressed_params = set()
-        for param_name, _ in self.model.named_parameters():
-            expected_compressed_params.add(param_name + "idxs")
-            expected_compressed_params.add(param_name + "vals")
-            expected_compressed_params.add(param_name + "quant_params")
-
-        return expected_compressed_params
 
 
 # Start miner.

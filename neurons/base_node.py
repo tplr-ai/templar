@@ -18,6 +18,9 @@ from bittensor.core.subtensor import ScaleObj
 
 import tplr
 
+CPU_COUNT = os.cpu_count() or 4
+CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
+
 
 <<<<<<< HEAD
 class BaseNode:

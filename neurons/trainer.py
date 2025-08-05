@@ -114,6 +114,8 @@ class Trainer:
             world_size=self.world_size,
         )
         self.expected_compressed_params = self.get_expected_params()
+        self.tokenizer = self.hparams.tokenizer
+
         return
 
     def init_optimizers_schedulers(self, validator=False):
@@ -418,3 +420,29 @@ class Trainer:
             use_dct=self.hparams.use_dct,
         )
         return
+
+    def _is_distributed(self) -> bool:
+        """True iff torch.distributed is initialised and world_size > 1."""
+        return dist.is_available() and dist.is_initialized() and self.world_size > 1
+    
+    def _ddp_reduce(
+        self,
+        value: int | float | torch.Tensor,
+        op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
+    ) -> float:
+        """
+        Reduce ``value`` across all ranks and return a **python float**.
+        Use ``op=dist.ReduceOp.AVG`` for mean; default is SUM.
+        """
+        # single-GPU fast path
+        if not self._is_distributed():
+            return float(value.item() if isinstance(value, torch.Tensor) else value)
+
+        # convert to tensor on the right device
+        if not isinstance(value, torch.Tensor):
+            tensor = torch.tensor(float(value), device=self.device)
+        else:
+            tensor = value.to(self.device)
+
+        dist.all_reduce(tensor, op=op)
+        return float(tensor.item())

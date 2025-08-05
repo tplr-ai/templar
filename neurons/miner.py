@@ -131,32 +131,6 @@ class Miner(BaseNode):
         dist.all_reduce(flag_tensor, op=dist.ReduceOp.MIN)
         return bool(flag_tensor.item())
 
-    def _is_distributed(self) -> bool:
-        """True iff torch.distributed is initialised and world_size > 1."""
-        return dist.is_available() and dist.is_initialized() and self.world_size > 1
-
-    def _ddp_reduce(
-        self,
-        value: int | float | torch.Tensor,
-        op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
-    ) -> float:
-        """
-        Reduce ``value`` across all ranks and return a **python float**.
-        Use ``op=dist.ReduceOp.AVG`` for mean; default is SUM.
-        """
-        # single-GPU fast path
-        if not self._is_distributed():
-            return float(value.item() if isinstance(value, torch.Tensor) else value)
-
-        # convert to tensor on the right device
-        if not isinstance(value, torch.Tensor):
-            tensor = torch.tensor(float(value), device=self.device)
-        else:
-            tensor = value.to(self.device)
-
-        dist.all_reduce(tensor, op=op)
-        return float(tensor.item())
-
     def __init__(self):
         tplr.logger.debug("Starting initialization...")
 
@@ -225,7 +199,6 @@ class Miner(BaseNode):
 
         self.init_model()
         self.bare_model = getattr(self.model, "module", self.model)
-        self.tokenizer = self.hparams.tokenizer
 
         # Store parallelization parameters for later use
         tt = getattr(self.hparams, "torchtitan", SimpleNamespace())

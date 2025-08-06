@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Docker Compose already handles GPU mapping via device_ids
+# No need to set CUDA_VISIBLE_DEVICES - Docker provides the correct GPU
+echo "Using Docker-mapped GPU configuration"
+
 # Check required environment variables
 for var in WALLET_NAME WALLET_HOTKEY NODE_TYPE WANDB_API_KEY NETUID; do
     if [ -z "${!var}" ]; then
@@ -18,6 +22,8 @@ mkdir -p /app/logs
 # Check CUDA availability
 if ! python3 -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'"; then
     echo "Error: CUDA is not available"
+    echo "Available GPUs:"
+    (set +e; nvidia-smi -L 2>/dev/null) || echo "nvidia-smi not available"
     exit 1
 fi
 
@@ -30,14 +36,6 @@ if [ "$DEBUG" = "true" ]; then
     DEBUG_FLAG="--debug"
 fi
 
-# Extract GPU ID from CUDA_DEVICE (e.g., "cuda:0" -> "0")
-if [[ "$CUDA_DEVICE" =~ cuda:([0-9]+) ]]; then
-    GPU_ID="${BASH_REMATCH[1]}"
-    export CUDA_VISIBLE_DEVICES="$GPU_ID"
-    echo "Setting CUDA_VISIBLE_DEVICES=$GPU_ID"
-else
-    echo "Warning: Could not parse GPU ID from CUDA_DEVICE=$CUDA_DEVICE, using default"
-fi
 
 # Check CUDA version
 CUDA_VERSION=$(python3 -c "import torch; print(torch.version.cuda)")
@@ -56,7 +54,7 @@ if [ "$NODE_TYPE" = "miner" ]; then
         --wallet.name ${WALLET_NAME} \
         --wallet.hotkey ${WALLET_HOTKEY} \
         --netuid ${NETUID} \
-        --device ${CUDA_DEVICE} \
+        --device cuda \
         --subtensor.network ${NETWORK} \
         --use_wandb \
         ${PROJECT:+--project ${PROJECT}} \
@@ -71,12 +69,26 @@ elif [ "$NODE_TYPE" = "validator" ]; then
         --wallet.name ${WALLET_NAME} \
         --wallet.hotkey ${WALLET_HOTKEY} \
         --netuid ${NETUID} \
-        --device ${CUDA_DEVICE} \
+        --device cuda \
         --subtensor.network ${NETWORK} \
         --use_wandb \
         ${PROJECT:+--project ${PROJECT}} \
         ${DEBUG_FLAG}
+elif [ "$NODE_TYPE" = "evaluator" ]; then
+    echo "Starting evaluator with torchrun..."
+    exec torchrun \
+        --standalone \
+        --nnodes 1 \
+        --nproc_per_node 1 \
+        scripts/evaluator.py \
+        --netuid ${NETUID} \
+        --device cuda \
+        --actual_batch_size ${EVAL_BATCH_SIZE:-8} \
+        --tasks "${EVAL_TASKS:-arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu}" \
+        --eval_interval ${EVAL_INTERVAL:-600} \
+        ${CUSTOM_EVAL_PATH:+--custom_eval_path "${CUSTOM_EVAL_PATH}"} \
+        ${DEBUG_FLAG}
 else
-    echo "Error: NODE_TYPE must be either \"miner\" or \"validator\""
+    echo "Error: NODE_TYPE must be \"miner\", \"validator\", or \"evaluator\""
     exit 1
 fi 

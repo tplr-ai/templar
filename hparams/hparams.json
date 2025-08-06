@@ -48,7 +48,7 @@
     "quantization_bins": 16,
     "quantization_range": 6,
     "burn_rate": 0.8,
-    "idx_overlap_threshold": 0.5,
+    "idx_overlap_threshold": 0.4,
   "torchtitan": {
     "tp_degree": 1,
     "pp_degree": 1,

@@ -406,12 +406,9 @@ class Validator(BaseNode):
         self.binary_moving_averages[uid] = 0.0
         self.binary_indicator_scores[uid] = 0.0
         self.sync_scores[uid] = 0.0
-        if uid in self.openskill_ratings:
-            del self.openskill_ratings[uid]
-        if uid in self.eval_peers:
-            del self.eval_peers[uid]
-        del self.inactive_scores[uid]
-
+        self.openskill_ratings.pop(uid, None)
+        self.eval_peers.pop(uid, None)
+        self.inactive_scores.pop(uid, None)
         return
 
     def log_sync_score(

@@ -1023,7 +1023,6 @@ class Comms(ChainManager):
         """Gather operation with individual gradient normalization and connection management."""
         if not expected_compressed_params:
             expected_compressed_params = set()
-        received_compressed_params = set()
 
         start_time = time.time()
         metrics = {"upload_bytes": 0, "download_bytes": 0, "successes": []}
@@ -1070,6 +1069,8 @@ class Comms(ChainManager):
                 )
                 process_start = tplr.T()
                 for uid, response in zip(uids, batch_responses):
+                    received_compressed_params = set()
+
                     if isinstance(response, Exception):
                         tplr.log_with_context(
                             level="debug",

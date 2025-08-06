@@ -246,7 +246,7 @@ async def test_get_local(comms_instance):
     torch.save(test_state_dict, local_path)
 
     with patch.object(comms_instance, "cleanup_local_data") as mock_cleanup:
-        state_dict, global_step = await comms_instance.get(
+        result = await comms_instance.get(
             uid=uid,
             window=window,
             key=key,
@@ -254,8 +254,8 @@ async def test_get_local(comms_instance):
         )
         mock_cleanup.assert_called_once()
 
-    assert torch.equal(state_dict["param"], test_state_dict["state_dict"]["param"])
-    assert global_step == test_state_dict["global_step"]
+    assert torch.equal(result.data["param"], test_state_dict["state_dict"]["param"])
+    assert result.global_step == test_state_dict["global_step"]
 
 
 @pytest.mark.asyncio

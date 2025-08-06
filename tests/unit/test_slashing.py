@@ -58,11 +58,16 @@ def validator_instance(monkeypatch):
 
 
 def test_determine_slash_egregiousness():
+    # 0.0 won't make it to this function for miner clarity
     assert determine_slash_egregiousness(0.0) == "high"
-    assert determine_slash_egregiousness(0.8) == "high"
-    assert determine_slash_egregiousness(0.949) == "high"
-    assert determine_slash_egregiousness(0.951) == "max"
-    assert determine_slash_egregiousness(0.99) == "max"
+
+    # high/max threshold
+    assert determine_slash_egregiousness(0.499) == "high"
+    assert determine_slash_egregiousness(0.501) == "max"
+
+    # max/mega threshold
+    assert determine_slash_egregiousness(0.599) == "max"
+    assert determine_slash_egregiousness(0.601) == "mega"
     assert determine_slash_egregiousness(1.0) == "mega"
 
     # Test invalid inputs if validation is added

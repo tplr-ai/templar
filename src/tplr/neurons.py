@@ -858,9 +858,9 @@ def determine_slash_egregiousness(overlap_pct: float) -> str:
         raise ValueError(f"overlap_pct must be between 0.0 and 1.0, got {overlap_pct}")
 
     egregiousness = "high"
-    if overlap_pct >= 0.95:
+    if overlap_pct >= 0.5:
         egregiousness = "max"
-    if overlap_pct == 1.0:
+    if overlap_pct >= 0.6:
         egregiousness = "mega"
 
     return egregiousness

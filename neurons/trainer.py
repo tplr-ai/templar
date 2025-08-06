@@ -231,6 +231,14 @@ class Trainer:
         dict
             Keys: total_loss (float), batch_count (int), batch_tokens (int)
         """
+
+        # Ensure the event loop and executor are initialized, which is normally
+        # done in the `run()` method. This makes the method safe for isolated testing.
+        if not hasattr(self, "loop"):
+            self.loop = asyncio.get_running_loop()
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
+            self.loop.set_default_executor(self.executor)
+
         self.inner_optimizer.zero_grad()
 
         total_loss: float = 0.0
@@ -243,7 +251,7 @@ class Trainer:
         local_tokens_sum: int = 0  # local running totals
         local_loss_sum: float = 0.0
 
-        params_offloaded = self._get_offloaded_param()
+        params_offloaded, param_specs = self._get_offloaded_param()
 
         inner_step_count: int = 0
         loader_iter = iter(loader)
@@ -287,29 +295,36 @@ class Trainer:
             local_tokens_sum += tokens_this_batch
 
             labels = input_ids.clone()
+            labels[:, :-1] = input_ids[:, 1:]  # ✓ shift by +1
+            labels[:, -1] = self.tokenizer.pad_token_id
             labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
 
             # ------------------------------------------------------------------ #
             # 3. Forward + backward
             # ------------------------------------------------------------------ #
-            with autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                outputs = self.model(input_ids=input_ids, labels=labels)
+            with autocast(device_type=self.device.type, dtype=self.amp_dtype):
+                outputs = self.model(input_ids, labels)
 
-            loss = outputs.loss / self.sampler.grad_accum_steps
-            loss_item = outputs.loss.detach().item()
+            calculated_loss = cross_entropy_loss(outputs, labels)
+
+            loss = calculated_loss / self.sampler.grad_accum_steps
+            loss_item = calculated_loss.detach().item()
 
             # -------------------------------------------------------------- #
             # 3-a.  Back-prop with no_sync() on non-final micro-batches
             # -------------------------------------------------------------- #
             final_micro_batch = (batch_count + 1) % self.sampler.grad_accum_steps == 0
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) and (
-                self.world_size > 1 and not final_micro_batch
+            if (
+                hasattr(self.model, "no_sync")
+                and self.world_size > 1
+                and not final_micro_batch
             ):
                 sync_ctx = self.model.no_sync()
             else:
                 sync_ctx = nullcontext()
             with sync_ctx:
-                loss.backward()
+                self.scaler.scale(loss).backward()
+
             total_loss += loss_item
             local_loss_sum += loss_item  # defer collective
 
@@ -336,7 +351,11 @@ class Trainer:
                 log_loss = self._ddp_reduce(loss_item, op=dist.ReduceOp.AVG)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
-                self.inner_optimizer.step()
+                # Unscale, clip, then step via GradScaler if using fp16
+                self.scaler.unscale_(self.inner_optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                self.scaler.step(self.inner_optimizer)
+                self.scaler.update()
                 self.inner_scheduler.step()
                 self.inner_optimizer.zero_grad(set_to_none=True)
 
@@ -385,14 +404,26 @@ class Trainer:
         # 6. parameter offloading logic
         # ------------------------------------------------------------------ #
         with torch.no_grad():
-            for saved_param, p in zip(params_offloaded, self.bare_model.parameters()):
-                saved_param = saved_param.to(p.device, non_blocking=True)
+            for (saved_param, param_meta), p in zip(
+                zip(params_offloaded, param_specs), self.bare_model.parameters()
+            ):
+                if param_meta["is_dtensor"] and isinstance(p, DT):
+                    # Handle TP DTensors
+                    saved_param = saved_param.to(p.device, non_blocking=True)
 
-                # (a) pseudo-gradient for outer step
-                p.grad = saved_param - p.data
-
-                # (b) ***in-place*** restore original weights
-                p.data.copy_(saved_param)
+                    # Create a DTensor from the local shard directly
+                    saved_param_dtensor = DT.from_local(
+                        saved_param,
+                        device_mesh=param_meta["device_mesh"],
+                        placements=param_meta["placements"],
+                        run_check=False,
+                    )
+                    p.grad = saved_param_dtensor - p
+                    p.data.copy_(saved_param_dtensor.data)
+                else:
+                    saved_param = saved_param.to(p.device, non_blocking=True)
+                    p.grad = saved_param - p.data
+                    p.data.copy_(saved_param)
 
         # ---------------------------------------------------------------------- #
         # 7. Return aggregated metrics

@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
 from types import SimpleNamespace
-from typing import Iterable, cast
+from typing import cast
 
 import bittensor as bt
 import numpy as np
@@ -185,6 +185,7 @@ class Validator(BaseNode, Trainer):
         except Exception as e:
             tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
+        self.device = torch.device(self.config.device)
         self.init_model(validator=True)
         self.expected_compressed_params = self.get_expected_params()
         self.tokenizer = self.hparams.tokenizer

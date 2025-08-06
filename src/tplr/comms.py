@@ -24,6 +24,7 @@ import random
 import re
 import shutil
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 
@@ -46,7 +47,7 @@ from tplr.compress import TopKCompressor, unpack_12bit_indices
 from . import __version__
 from .chain import ChainManager
 from .config import BUCKET_SECRETS, client_config
-from .schemas import Bucket
+from .schemas import Bucket, CommsGetResult
 
 # Constants
 CF_REGION_NAME: str = "enam"
@@ -845,7 +846,7 @@ class Comms(ChainManager):
         timeout: int = 30,
         time_min: datetime = None,
         time_max: datetime = None,
-    ) -> Optional[tuple[dict, int]]:
+    ) -> CommsGetResult:
         """GET operation."""
         if key == "aggregator":
             filename = f"{key}-{window}-v{__version__}.pt"
@@ -855,7 +856,7 @@ class Comms(ChainManager):
 
         try:
             if local:
-                # Local storage logic remains unchanged
+                # Local storage logic
                 await self.cleanup_local_data(
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
@@ -864,13 +865,13 @@ class Comms(ChainManager):
                 )
                 if not os.path.exists(local_path):
                     tplr.logger.debug(f"Local file not found: {local_path}")
-                    return None
+                    return CommsGetResult(status="NOT_FOUND")
                 loaded_data = torch.load(local_path, weights_only=True)
                 if key == "checkpoint":
-                    return loaded_data, None
+                    return CommsGetResult(data=loaded_data)
                 state_dict = loaded_data.get("state_dict")
                 global_step = loaded_data.get("global_step", 0)
-                return state_dict, global_step
+                return CommsGetResult(data=state_dict, global_step=global_step)
 
             # Remote storage logic
             if key == "aggregator":
@@ -888,7 +889,7 @@ class Comms(ChainManager):
                 bucket = self.commitments.get(int(uid))
             tplr.logger.debug(f"Peer bucket : {bucket}")
             if not bucket:
-                return None
+                return CommsGetResult(status="NOT_FOUND")
 
             loaded_data = await self.s3_get_object(
                 key=filename,
@@ -899,7 +900,7 @@ class Comms(ChainManager):
             )
 
             if loaded_data is None:
-                return None
+                return CommsGetResult(status="NOT_FOUND")
 
             # Check for TOO_LATE/TOO_EARLY marker
             if isinstance(loaded_data, dict):
@@ -907,23 +908,23 @@ class Comms(ChainManager):
                     tplr.logger.info(
                         f"Object for UID {uid}, window {window}, key {key} was uploaded too late. Skipping."
                     )
-                    return {"__status": "TOO_LATE"}, global_step
+                    return CommsGetResult(status="TOO_LATE")
                 elif loaded_data.get("__status") == "TOO_EARLY":
                     tplr.logger.info(
                         f"Object for UID {uid}, window {window}, key {key} was uploaded too early. Skipping."
                     )
-                    return {"__status": "TOO_EARLY"}, global_step
+                    return CommsGetResult(status="TOO_EARLY")
 
             if key == "checkpoint":
-                return loaded_data, None
+                return CommsGetResult(data=loaded_data)
 
             state_dict = loaded_data.get("state_dict")
             global_step = loaded_data.get("global_step", 0)
-            return state_dict, global_step
+            return CommsGetResult(data=state_dict, global_step=global_step)
 
         except Exception as e:
             tplr.logger.debug(f"GET error {filename}: {e}")
-            return None
+            return CommsGetResult(status="ERROR")
         finally:
             tplr.logger.debug(f"GET {filename} <--")
 
@@ -937,7 +938,7 @@ class Comms(ChainManager):
         stale_retention: int = 10,
         time_min: datetime = None,
         time_max: datetime = None,
-    ) -> Optional[dict]:
+    ) -> Optional[tuple[dict, int]]:
         """GET with retry operation."""
         start_time = time.time()
         end_time = start_time + timeout
@@ -974,7 +975,7 @@ class Comms(ChainManager):
                 )
 
             # Make the request
-            state_dict = await self.get(
+            result = await self.get(
                 uid=uid,
                 window=window,
                 key=key,
@@ -984,23 +985,16 @@ class Comms(ChainManager):
                 time_max=time_max,
             )
 
-            # Check for TOO_LATE/TOO_EARLY markers
-            if isinstance(state_dict, dict):
-                if state_dict.get("__status") == "TOO_LATE":
-                    tplr.logger.info(
-                        f"Gradient for UID {uid}, window {window} exists but was uploaded too late. Skipping."
-                    )
-                    return None
-                elif state_dict.get("__status") == "TOO_EARLY":
-                    tplr.logger.info(
-                        f"Gradient for UID {uid}, window {window} exists but was uploaded too early. Skipping."
-                    )
-                    return None
+            if result.success:
+                return result.data, result.global_step
 
-            # If we got a result, return it
-            if state_dict is not None:
-                return state_dict
+            if result.status == "TOO_LATE":
+                tplr.logger.info(
+                    f"Gradient for UID {uid}, window {window} exists but was uploaded too late. Skipping."
+                )
+                return None
 
+            # For NOT_FOUND, ERROR, or TOO_EARLY, we retry.
             # Short delay before retrying
             await asyncio.sleep(0.5)
 

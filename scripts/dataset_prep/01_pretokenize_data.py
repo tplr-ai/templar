@@ -5,10 +5,9 @@ import multiprocessing as mp
 import os
 
 import numpy as np
+from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer
-
-from datasets import load_dataset
 
 # Global tokenizer for multiprocessing
 _tokenizer = None

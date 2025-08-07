@@ -41,7 +41,7 @@ from botocore.exceptions import ClientError, ConnectionClosedError
 from tqdm import tqdm as std_tqdm
 
 import tplr as tplr
-from tplr.compress import CompressDCT
+from tplr.compress import TopKCompressor, unpack_12bit_indices
 
 from . import __version__
 from .chain import ChainManager
@@ -1013,7 +1013,7 @@ class Comms(ChainManager):
         timeout: int,
         device: str,
         totalks: dict,
-        compressor: CompressDCT,
+        compressor: TopKCompressor,
         expected_compressed_params: set[str] | None = None,
         local: bool = True,
         stale_retention: int = 10,
@@ -1149,12 +1149,15 @@ class Comms(ChainManager):
                                 )
                                 valid_response = False
                                 break
+                            # Get corresponding vals tensor for 12-bit unpacking
+                            vals_tensor = state_dict_resp.get(base_name + "vals", None)
                             try:
                                 self.check_compressed_indices(
                                     param_name,
-                                    tensor.to(device),
+                                    tensor,
                                     totalk,
                                     allowed_topk=self.hparams.topk_compression,
+                                    vals=vals_tensor,
                                 )
                             except Exception as e:
                                 tplr.logger.warning(
@@ -1226,8 +1229,9 @@ class Comms(ChainManager):
                         # 1️⃣  Indices are kept as‑is -----------------------------------------
                         if param_name.endswith("idxs"):
                             aggregated_state_dict.setdefault(param_name, []).append(
-                                tensor.to(device)
+                                tensor
                             )
+                            # Handle 12-bit packed format (uint8 tensor)
                             metrics["download_bytes"] += (
                                 tensor.element_size() * tensor.nelement()
                             )
@@ -2033,9 +2037,10 @@ class Comms(ChainManager):
     def check_compressed_indices(
         self,
         param_name: str,
-        idxs: Any,
+        idxs: torch.Tensor,
         totalk: int,
         allowed_topk: int | None = None,
+        vals: torch.Tensor | None = None,
     ) -> None:
         allowed_topk = (
             min(self.hparams.topk_compression, totalk)
@@ -2053,55 +2058,34 @@ class Comms(ChainManager):
                     f"[{param_name}] Index {bad} out of bounds (totalk = {totalk})"
                 )
 
-        if isinstance(idxs, (int, float)) or (torch.is_tensor(idxs) and idxs.ndim == 0):
-            idx_int = int(idxs)
-            if not (0 <= idx_int < totalk):
+        # Handle 12-bit packed index format only
+        if isinstance(idxs, torch.Tensor):
+            if idxs.dtype != torch.uint8:
                 raise ValueError(
-                    f"[{param_name}] Index {idx_int} out of bounds (totalk = {totalk})"
+                    f"[{param_name}] Expected uint8 for 12-bit packed indices, got {idxs.dtype}"
                 )
-            return  # single scalar is always length-independent
+            # 12-bit packed format is the only supported format
+            if vals is None:
+                raise ValueError(
+                    f"[{param_name}] Values tensor required to validate 12-bit packed indices"
+                )
+            if idxs.numel() == 0:
+                raise ValueError(f"[{param_name}] Empty packed indices tensor")
 
-        if (
-            isinstance(idxs, (list, tuple))
-            and idxs
-            and isinstance(idxs[0], (list, tuple))
-        ):
-            for sub in idxs:
-                if len(sub) != allowed_topk:
+            # Unpack using the values shape
+            try:
+                unpacked = unpack_12bit_indices(idxs, vals.shape)
+                # Validate that the last dimension matches allowed_topk
+                if unpacked.shape[-1] != allowed_topk:
                     raise ValueError(
-                        f"[{param_name}] Invalid number of indices: "
-                        f"got {len(sub)} but expected {allowed_topk}"
+                        f"[{param_name}] Invalid topk dimension: "
+                        f"shape[-1]={unpacked.shape[-1]} but expected {allowed_topk}"
                     )
-                # vectorised bounds check on each sub-tensor
-                t = torch.as_tensor(sub, dtype=torch.long)
-                _bounds_check(t)
-            return
-
-        try:
-            t = (
-                idxs
-                if torch.is_tensor(idxs)
-                else torch.as_tensor(idxs, dtype=torch.long)
-            )
-        except Exception as e:
-            raise ValueError(f"[{param_name}] Failed to convert indices to tensor: {e}")
-
-        if t.ndim == 1:  # flat
-            if t.numel() != allowed_topk:
-                raise ValueError(
-                    f"[{param_name}] Invalid number of indices: "
-                    f"{t.numel()} but expected {allowed_topk}"
-                )
-            _bounds_check(t)
-            return
-
-        # n-D compressed: last dim must be allowed_topk
-        if t.size(-1) != allowed_topk:
-            raise ValueError(
-                f"[{param_name}] Last dimension size invalid: "
-                f"{t.size(-1)} but expected {allowed_topk}"
-            )
-        _bounds_check(t)
+                _bounds_check(unpacked)
+            except Exception as e:
+                raise ValueError(f"[{param_name}] Failed to unpack 12-bit indices: {e}")
+        else:
+            raise ValueError(f"[{param_name}] Expected tensor but got {type(idxs)}")
 
     async def s3_get_object_size(self, bucket: Bucket, key: str) -> Optional[int]:
         """Get the size of an S3 object without downloading it using HEAD request."""

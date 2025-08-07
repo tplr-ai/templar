@@ -33,6 +33,7 @@ from torch.optim.lr_scheduler import LRScheduler
 from wandb.sdk.wandb_run import Run
 
 import tplr
+from tplr.compress import unpack_12bit_indices
 
 if TYPE_CHECKING:
     from neurons.miner import Miner
@@ -151,8 +152,8 @@ def outer_step(
     optimizer: Optimizer,
     *,
     gather_result: SimpleNamespace | None,
-    transformer: tplr.compress.TransformDCT,
-    compressor: tplr.compress.CompressDCT,
+    transformer: tplr.compress.ChunkingTransformer,
+    compressor: tplr.compress.TopKCompressor,
     xshapes: dict,
     totalks: dict,
     device: str,
@@ -737,7 +738,7 @@ async def check_uid_index_overlap(
             min_overlap=0.0,
             max_overlap=0.0,
             pairs_over_thresh=[],
-            uids_over_thresh=set(),
+            uids_over_thresh={},
         )
 
     ts_map = dict(
@@ -762,7 +763,25 @@ async def check_uid_index_overlap(
         if idxs_all is None:
             continue
 
-        idxs_tensor = torch.stack([idxs_all[i] for i in range(Ptot)], dim=0)
+        # Get values for unpacking shape
+        vals_key = pname + "vals"
+        vals_all = getattr(gather_result.state_dict, vals_key, None)
+        if vals_all is None:
+            continue
+
+        # Unpack all 12-bit packed indices using values shape
+        unpacked_indices = []
+        for i in range(Ptot):
+            idx_data = idxs_all[i] if isinstance(idxs_all, list) else idxs_all
+            val_data = vals_all[i] if isinstance(vals_all, list) else vals_all
+
+            # 12-bit packed format - use values shape for unpacking
+            unpacked = unpack_12bit_indices(
+                idx_data.to(neuron.config.device), val_data.shape
+            )
+            unpacked_indices.append(unpacked)
+
+        idxs_tensor = torch.stack(unpacked_indices, dim=0)
         P, *chunk_dims, k = idxs_tensor.shape
         C = int(torch.prod(torch.tensor(chunk_dims)))  # num chunks
         idxs_flat = idxs_tensor.reshape(P, C, k)
@@ -789,7 +808,7 @@ async def check_uid_index_overlap(
     max_pair, max_val = None, 0.0
 
     for (i, j), (w_sum, w_tot) in pair_acc.items():
-        avg_overlap = w_sum / w_tot
+        avg_overlap = w_sum / w_tot if w_tot > 0 else 0.0
 
         # --- track global min / max --------------------------------------
         if avg_overlap < min_val:

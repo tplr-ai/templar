@@ -207,10 +207,10 @@ class Validator(BaseNode):
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
-        self.transformer = tplr.compress.TransformDCT(
+        self.transformer = tplr.compress.ChunkingTransformer(
             self.model, target_chunk=self.hparams.target_chunk
         )
-        self.compressor = tplr.compress.CompressDCT(
+        self.compressor = tplr.compress.TopKCompressor(
             use_quantization=True,
             quantization_bins=self.hparams.quantization_bins,
             quantization_range=self.hparams.quantization_range,
@@ -2503,8 +2503,12 @@ class Validator(BaseNode):
             quant_params = eval_state_dict.get(quant_key, None)
 
             if idxs is not None and vals is not None and quant_params is not None:
-                # Move tensors to device
-                idxs = idxs.to(self.config.device)
+                # Handle 12-bit packed format: (packed_tensor, original_shape)
+                if isinstance(idxs, tuple) and len(idxs) == 2:
+                    packed_data, original_shape = idxs
+                    # Move packed data to device
+                    packed_data = packed_data.to(self.config.device)
+                    idxs = (packed_data, original_shape)
                 vals = vals.to(self.config.device)
 
                 # Validate indices are within bounds
@@ -2526,6 +2530,7 @@ class Validator(BaseNode):
                     idxs,
                     self.totalks[n],
                     allowed_topk=self.hparams.topk_compression,
+                    vals=vals,
                 )
 
                 # Check for NaN or Inf values
@@ -2551,9 +2556,6 @@ class Validator(BaseNode):
             quant_params = eval_state_dict.get(quant_key, None)
 
             if idxs is not None and vals is not None and quant_params is not None:
-                idxs = idxs.to(self.config.device)
-                vals = vals.to(self.config.device)
-
                 grad = self.transformer.decode(
                     self.compressor.decompress(
                         p.to(self.config.device),

@@ -18,8 +18,11 @@ from bittensor.core.subtensor import ScaleObj
 
 import tplr
 
+CPU_COUNT = os.cpu_count() or 4
+CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
-class BaseNode:
+
+class BaseNode(abc.ABC):
     # ――― attributes that subclasses will overwrite ―――
     executor: ThreadPoolExecutor
     world_size: int = 1

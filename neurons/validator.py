@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
 from types import SimpleNamespace
-from typing import Iterable, cast
+from typing import cast
 
 import bittensor as bt
 
@@ -45,21 +45,10 @@ import uvloop
 from openskill.models import PlackettLuce
 from rich.console import Console
 from rich.table import Table
-from torch import autocast
-from torch.optim import SGD
 
-# Fallback CE helper (Titan returns raw logits)
-from torchtitan.components.loss import cross_entropy_loss
-
-# Third‑party – TorchTitan
 import tplr
-
-# Local
-from neurons import BaseNode
-from tplr.model_factory import initialize_torchtitan_model
-
-CPU_COUNT = os.cpu_count() or 4
-CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
+from neurons import BaseNode, Trainer
+from neurons.base_node import CPU_COUNT
 
 # GPU optimizations.
 torch.manual_seed(42)
@@ -86,7 +75,7 @@ def timer(name: str, wandb_obj=None, step=None, metrics_logger=None):
         )
 
 
-class Validator(BaseNode):
+class Validator(BaseNode, Trainer):
     @staticmethod
     def validator_config():
         parser = argparse.ArgumentParser(description="Validator script")
@@ -199,13 +188,8 @@ class Validator(BaseNode):
         except Exception as e:
             tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
-        # Initialize TorchTitan model using model factory
-        self.model = initialize_torchtitan_model(
-            hparams=self.hparams,
-            role="validator",
-            device=self.config.device,
-            world_size=self.world_size,
-        )
+        self.device = torch.device(self.config.device)
+        self.init_model(validator=True)
         self.expected_compressed_params = self.get_expected_params()
         self.tokenizer = self.hparams.tokenizer
 
@@ -220,46 +204,7 @@ class Validator(BaseNode):
         )
 
         # Init optimizer
-        self.lr = float(self.hparams.outer_learning_rate)
-        self.outer_optimizer = SGD(self.model.parameters(), lr=self.lr)
-
-        # inner scheduler and dummy optimizer for logging purposes
-
-        _dummy_param = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
-        # Any optimiser will do; SGD is the simplest and has no extra state.
-        self.inner_optimizer = torch.optim.SGD(
-            [_dummy_param],
-            lr=self.hparams.inner_learning_rate,
-        )
-        inner_steps_before_outer_step = self.hparams.inner_steps * (
-            self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
-        )
-
-        init_scheduler = torch.optim.lr_scheduler.LinearLR(
-            self.inner_optimizer,
-            start_factor=0.1,
-            end_factor=0.1,
-            total_iters=inner_steps_before_outer_step,
-        )
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            self.inner_optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=self.hparams.warmup_steps,
-        )
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.inner_optimizer,
-            T_max=self.hparams.t_max,
-            eta_min=self.hparams.inner_learning_rate * 0.1,
-        )
-        self.inner_scheduler = torch.optim.lr_scheduler.SequentialLR(
-            self.inner_optimizer,
-            schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
-            milestones=[
-                inner_steps_before_outer_step,
-                inner_steps_before_outer_step + self.hparams.warmup_steps,
-            ],
-        )
+        self.init_optimizers_schedulers(validator=True)
 
         self.xshapes = {}
         self.totalks = {}
@@ -711,49 +656,6 @@ class Validator(BaseNode):
         else:
             # fall‑back: allocate all non‑burn weight to burn_uid
             self.weights[self.burn_uid] = 1.0
-
-    async def evaluate_model(
-        self,
-        model: torch.nn.Module,
-        loader: Iterable[torch.Tensor],
-    ) -> tuple[float, int]:
-        device: torch.device = next(model.parameters()).device
-        total_loss = 0.0
-        n_batches = 0
-
-        with torch.inference_mode():
-            model.eval()
-            for i, batch in enumerate(loader):
-                if batch is None or len(batch) == 0:
-                    tplr.log_with_context(
-                        level="warning",
-                        message=f"Empty batch at index {i}, skipping",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                    continue
-
-                if isinstance(batch, torch.Tensor):
-                    input_ids = batch.to(device, dtype=torch.long, non_blocking=True)
-                else:
-                    input_ids = torch.tensor(batch, dtype=torch.long, device=device)
-                labels = input_ids.clone()
-                labels[:, :-1] = input_ids[:, 1:]  # shift left by one
-                labels[:, -1] = self.tokenizer.pad_token_id
-                labels = torch.where(
-                    labels == self.tokenizer.pad_token_id, -100, labels
-                )
-                with autocast(device_type=device.type, dtype=torch.bfloat16):
-                    logits = model(input_ids)
-                loss = cross_entropy_loss(logits, labels)
-                total_loss += loss.item()
-                n_batches += 1
-                del input_ids, labels, logits
-                torch.cuda.empty_cache()
-
-                await asyncio.sleep(0)
-
-        return total_loss, n_batches
 
     async def run(self):
         # Start background block listener
@@ -3152,107 +3054,6 @@ class Validator(BaseNode):
             sync_window=self.sync_window,
             current_window=self.current_window,
         )
-        return
-
-    def set_dataloader(self, validator: bool = False) -> None:
-        # put here for now...
-        self.dataset = self.dataset_manager.active_dataset
-
-        shared_args = dict(
-            dataset=self.dataset,
-            uid=self.uid,
-            window=self.current_window,
-            steps_per_window=self.hparams.inner_steps,
-            micro_bs=self.hparams.micro_batch_size,
-            rank=self.rank,
-            world_size=self.world_size,
-        )
-
-        if validator:
-            SamplerClass = tplr.EvalSampler
-            kwargs = shared_args | dict(
-                batch_size=self.hparams.target_batch_size,
-                validation_bs=self.hparams.validator_sample_micro_bs
-                * self.hparams.micro_batch_size,
-            )
-        else:
-            SamplerClass = tplr.MinerSampler
-            kwargs = shared_args | dict(
-                micro_bs=self.hparams.micro_batch_size,
-                batch_size=self.hparams.batch_size,
-                target_batch_size=self.hparams.target_batch_size,
-            )
-
-        self.sampler = SamplerClass(**kwargs)
-
-        self.loader = torch.utils.data.DataLoader(
-            dataset=self.dataset,
-            sampler=self.sampler,
-            batch_size=self.hparams.micro_batch_size,
-            num_workers=10,
-            pin_memory=True,
-            prefetch_factor=2,
-        )
-        tplr.logger.info("[Run] dataset + sampler ready")
-        return
-
-    def get_expected_params(self) -> set[str]:
-        """
-        Creates a set of expected names for validation
-
-            Returns: The names of all expected keys from a miner
-        """
-        expected_compressed_params = set()
-        for param_name, _ in self.model.named_parameters():
-            expected_compressed_params.add(param_name + "idxs")
-            expected_compressed_params.add(param_name + "vals")
-            expected_compressed_params.add(param_name + "quant_params")
-
-        return expected_compressed_params
-    
-    async def load_checkpoint(self) -> None:
-        """Load the latest checkpoint"""
-        checkpoint_window_buffer = 5
-        has_new_checkpoint = (
-            self.global_step
-            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
-        )
-        # Proceed to load checkpoint
-        (
-            success,
-            loaded_checkpoint_window,
-        ) = await self.comms.load_checkpoint(
-            model=self.model,
-            current_window=self.current_window,
-            device=cast(str, self.config.device),
-            init_version=tplr.__version__
-            if has_new_checkpoint
-            else self.bootstrap_version,
-        )
-        if success:
-            tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
-            # Only catch up if we're behind
-            for _ in range(
-                self.start_window,
-                (loaded_checkpoint_window + 1) * self.hparams.inner_steps,
-            ):
-                self.inner_scheduler.step()
-            if (
-                loaded_checkpoint_window < self.current_window
-                and self.global_step > checkpoint_window_buffer
-            ):
-                tplr.logger.info(
-                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
-                )
-                await tplr.neurons.catchup_with_aggregation_server(
-                    self, max(loaded_checkpoint_window, self.start_window)
-                )
-            else:
-                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
-
-        else:
-            tplr.logger.info("Starting from scratch")
-            self.model.to(self.config.device)  # type: ignore
         return
 
 

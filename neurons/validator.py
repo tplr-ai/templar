@@ -345,6 +345,12 @@ class Validator(BaseNode, Trainer):
         self.burn_uid = 1
 
     def reset_peer(self, uid: int) -> None:
+        """
+        Generally based on peer behavior, reset their scores
+
+        Args:
+            uid: The uid from the chain representing a user
+        """
         self.final_scores[uid] = 0.0
         self.weights[uid] = 0.0
         self.gradient_scores[uid] = 0.0
@@ -402,7 +408,7 @@ class Validator(BaseNode, Trainer):
             with_gpu_metrics=True,
         )
 
-    def update_openskill_ratings(self):
+    def update_openskill_ratings(self) -> None:
         """
         Update OpenSkill ratings based on gradient scores and recalculate final scores.
 
@@ -712,47 +718,49 @@ class Validator(BaseNode, Trainer):
         _ = await self.dataset_manager.initialize_datasets(current_shard)
         self.set_dataloader(validator=True)
 
-        checkpoint_window_buffer = 5
-        has_new_checkpoint = (
-            self.global_step
-            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
-        )
-        # Proceed to load checkpoint
-        (
-            success,
-            loaded_checkpoint_window,
-        ) = await self.comms.load_checkpoint(
-            model=self.model,
-            current_window=self.current_window,
-            device=cast(str, self.config.device),
-            init_version=tplr.__version__
-            if has_new_checkpoint
-            else self.bootstrap_version,
-        )
-        if success:
-            tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
-            # Only catch up if we're behind
-            for _ in range(
-                self.start_window,
-                (loaded_checkpoint_window + 1) * self.hparams.inner_steps,
-            ):
-                self.inner_scheduler.step()
-            if (
-                loaded_checkpoint_window < self.current_window
-                and self.global_step > checkpoint_window_buffer
-            ):
-                tplr.logger.info(
-                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
-                )
-                await tplr.neurons.catchup_with_aggregation_server(
-                    self, max(loaded_checkpoint_window, self.start_window)
-                )
-            else:
-                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
+        _ = await self.load_checkpoint()
+        
+        # checkpoint_window_buffer = 5
+        # has_new_checkpoint = (
+        #     self.global_step
+        #     >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
+        # )
+        # # Proceed to load checkpoint
+        # (
+        #     success,
+        #     loaded_checkpoint_window,
+        # ) = await self.comms.load_checkpoint(
+        #     model=self.model,
+        #     current_window=self.current_window,
+        #     device=cast(str, self.config.device),
+        #     init_version=tplr.__version__
+        #     if has_new_checkpoint
+        #     else self.bootstrap_version,
+        # )
+        # if success:
+        #     tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
+        #     # Only catch up if we're behind
+        #     for _ in range(
+        #         self.start_window,
+        #         (loaded_checkpoint_window + 1) * self.hparams.inner_steps,
+        #     ):
+        #         self.inner_scheduler.step()
+        #     if (
+        #         loaded_checkpoint_window < self.current_window
+        #         and self.global_step > checkpoint_window_buffer
+        #     ):
+        #         tplr.logger.info(
+        #             f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
+        #         )
+        #         await tplr.neurons.catchup_with_aggregation_server(
+        #             self, max(loaded_checkpoint_window, self.start_window)
+        #         )
+        #     else:
+        #         tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
 
-        else:
-            tplr.logger.info("Starting from scratch")
-            self.model.to(self.config.device)  # type: ignore
+        # else:
+        #     tplr.logger.info("Starting from scratch")
+        #     self.model.to(self.config.device)  # type: ignore
 
         self.comms.start_commitment_fetcher()
         self.comms.start_background_tasks()
@@ -813,44 +821,46 @@ class Validator(BaseNode, Trainer):
             await self.save_state()
 
             # Create and post peers
-            initial_selection = False
-            if (
-                self.last_peer_update_window is None
-                or self.sync_window - self.last_peer_update_window
-                >= self.hparams.peer_replacement_frequency
-            ):
-                reason = (
-                    f"{self.last_peer_update_window=}"
-                    if self.last_peer_update_window is None
-                    else f"{self.sync_window=}>="
-                    f"{self.last_peer_update_window}+"
-                    f"{self.hparams.peer_replacement_frequency}="
-                    "self.last_peer_update_window+"
-                    "self.hparams.peer_replacement_frequency"
-                )
+            _ = await self.create_and_post_peers()
+            
+            # initial_selection = False
+            # if (
+            #     self.last_peer_update_window is None
+            #     or self.sync_window - self.last_peer_update_window
+            #     >= self.hparams.peer_replacement_frequency
+            # ):
+            #     reason = (
+            #         f"{self.last_peer_update_window=}"
+            #         if self.last_peer_update_window is None
+            #         else f"{self.sync_window=}>="
+            #         f"{self.last_peer_update_window}+"
+            #         f"{self.hparams.peer_replacement_frequency}="
+            #         "self.last_peer_update_window+"
+            #         "self.hparams.peer_replacement_frequency"
+            #     )
 
-                tplr.log_with_context(
-                    level="info",
-                    message=f"Time to create and post a new peer list because {reason}",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                if self.last_peer_update_window is None:
-                    selected_peers = self.select_initial_peers()
-                    initial_selection = True
-                else:
-                    selected_peers = self.select_next_peers()
-                if selected_peers is not None:
-                    self.last_peer_update_window = self.sync_window
-                    gather_peers, reserve_peers = selected_peers
-                    await self.comms.post_peer_list(
-                        peers=gather_peers,
-                        reserve_peers=reserve_peers,
-                        first_effective_window=self.current_window
-                        + self.hparams.peer_list_window_margin,
-                        sync_window=self.sync_window,
-                        initial_selection=initial_selection,
-                    )
+            #     tplr.log_with_context(
+            #         level="info",
+            #         message=f"Time to create and post a new peer list because {reason}",
+            #         sync_window=self.sync_window,
+            #         current_window=self.current_window,
+            #     )
+            #     if self.last_peer_update_window is None:
+            #         selected_peers = self.select_initial_peers()
+            #         initial_selection = True
+            #     else:
+            #         selected_peers = self.select_next_peers()
+            #     if selected_peers is not None:
+            #         self.last_peer_update_window = self.sync_window
+            #         gather_peers, reserve_peers = selected_peers
+            #         await self.comms.post_peer_list(
+            #             peers=gather_peers,
+            #             reserve_peers=reserve_peers,
+            #             first_effective_window=self.current_window
+            #             + self.hparams.peer_list_window_margin,
+            #             sync_window=self.sync_window,
+            #             initial_selection=initial_selection,
+            #         )
 
             self.comms.update_peers_with_buckets()
             peer_start = tplr.T()
@@ -903,72 +913,73 @@ class Validator(BaseNode, Trainer):
                     )
 
             # Apply penalties to all inactive peers
-            for uid, (inactive_since, _) in list(self.inactive_scores.items()):
-                # If peer became active again, remove from inactive tracking
-                if uid in self.eval_peers.keys():
-                    del self.inactive_scores[uid]
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"UID {uid} became active again",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                    continue
+            _ = self.penalize_inactive_peers()
+            # for uid, (inactive_since, _) in list(self.inactive_scores.items()):
+            #     # If peer became active again, remove from inactive tracking
+            #     if uid in self.eval_peers.keys():
+            #         del self.inactive_scores[uid]
+            #         tplr.log_with_context(
+            #             level="info",
+            #             message=f"UID {uid} became active again",
+            #             sync_window=self.sync_window,
+            #             current_window=self.current_window,
+            #         )
+            #         continue
 
-                if (
-                    self.current_window - inactive_since
-                    > self.hparams.reset_inactivity_windows
-                ):
-                    self.reset_peer(uid)
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"UID {uid} fully reset after extended inactivity",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
-                    continue
+            #     if (
+            #         self.current_window - inactive_since
+            #         > self.hparams.reset_inactivity_windows
+            #     ):
+            #         self.reset_peer(uid)
+            #         tplr.log_with_context(
+            #             level="info",
+            #             message=f"UID {uid} fully reset after extended inactivity",
+            #             sync_window=self.sync_window,
+            #             current_window=self.current_window,
+            #         )
+            #         continue
 
-                # Apply flat 25% penalty instead of exponential decay
-                old_score = self.final_scores[uid].item()
-                new_score = old_score  # Initialize new_score with old_score value
-                if self.final_scores[uid] > 0:
-                    self.final_scores[uid] *= (
-                        0.75  # Apply flat 25% reduction for positive scores only
-                    )
+            #     # Apply flat 25% penalty instead of exponential decay
+            #     old_score = self.final_scores[uid].item()
+            #     new_score = old_score  # Initialize new_score with old_score value
+            #     if self.final_scores[uid] > 0:
+            #         self.final_scores[uid] *= (
+            #             0.75  # Apply flat 25% reduction for positive scores only
+            #         )
 
-                    new_score = self.final_scores[uid].item()
+            #         new_score = self.final_scores[uid].item()
 
-                    tplr.log_with_context(
-                        level="info",
-                        message=f"UID {uid} penalized for inactivity: {old_score:.4f} -> {new_score:.4f}",
-                        sync_window=self.sync_window,
-                        current_window=self.current_window,
-                    )
+            #         tplr.log_with_context(
+            #             level="info",
+            #             message=f"UID {uid} penalized for inactivity: {old_score:.4f} -> {new_score:.4f}",
+            #             sync_window=self.sync_window,
+            #             current_window=self.current_window,
+            #         )
 
-                # Log slash metrics to WandB
-                self.wandb.log(
-                    {
-                        f"validator/inactivity/{uid}/score_before": old_score,
-                        f"validator/inactivity/{uid}/score_after": new_score,
-                    },
-                    step=self.global_step,
-                )
+            #     # Log slash metrics to WandB
+            #     self.wandb.log(
+            #         {
+            #             f"validator/inactivity/{uid}/score_before": old_score,
+            #             f"validator/inactivity/{uid}/score_after": new_score,
+            #         },
+            #         step=self.global_step,
+            #     )
 
-                # Log slash metrics to InfluxDB with primitive types
-                self.metrics_logger.log(
-                    measurement="validator_inactivity",
-                    tags={
-                        "uid": str(uid),
-                        "window": int(current_window),
-                        "global_step": int(self.global_step),
-                    },
-                    fields={
-                        "score_before": float(old_score),
-                        "score_after": float(new_score),
-                    },
-                    with_system_metrics=True,
-                    with_gpu_metrics=True,
-                )
+            #     # Log slash metrics to InfluxDB with primitive types
+            #     self.metrics_logger.log(
+            #         measurement="validator_inactivity",
+            #         tags={
+            #             "uid": str(uid),
+            #             "window": int(current_window),
+            #             "global_step": int(self.global_step),
+            #         },
+            #         fields={
+            #             "score_before": float(old_score),
+            #             "score_after": float(new_score),
+            #         },
+            #         with_system_metrics=True,
+            #         with_gpu_metrics=True,
+            #     )
 
             # Calculate time window for this sync window
 
@@ -1674,126 +1685,127 @@ class Validator(BaseNode, Trainer):
             # elapsed time for full peer-evaluation loop
             evaluation_time = tplr.T() - eval_start
 
-            self.update_openskill_ratings()
-            self.update_weights()
-            # Log scores and metrics for evaluated UIDs as a table
-            headers = [
-                "UID",
-                "Last eval window",
-                "Gradient Score",
-                "Binary Indicator",
-                "Binary Moving Avg",
-                "Final Score",
-                "Sync score",
-                "Weight",
-                "OpenSkill",
-            ]
-            table = [headers]
-            for uid in sorted(self.evaluated_uids):
-                openscore_info = "N/A"
-                if uid in self.openskill_ratings:
-                    rating = self.openskill_ratings[uid]
-                    openscore_info = f"{rating.ordinal():.2f} (μ={rating.mu:.1f}, σ={rating.sigma:.1f})"
-                row = [
-                    str(uid),
-                    f"{self.peers_last_eval_window[uid]}",
-                    f"{self.gradient_scores[uid]:.6f}",
-                    f"{self.binary_indicator_scores[uid]:.4f}",
-                    f"{self.binary_moving_averages[uid]:.4f}",
-                    f"{self.final_scores[uid]:.4f}",
-                    f"{self.sync_scores[uid]:.4f}",
-                    f"{self.weights[uid]:.4f}",
-                    openscore_info,
-                ]
-                table.append(row)
+            _ = self.update_and_log_evals()               
+            # self.update_openskill_ratings()
+            # self.update_weights()
+            # # Log scores and metrics for evaluated UIDs as a table
+            # headers = [
+            #     "UID",
+            #     "Last eval window",
+            #     "Gradient Score",
+            #     "Binary Indicator",
+            #     "Binary Moving Avg",
+            #     "Final Score",
+            #     "Sync score",
+            #     "Weight",
+            #     "OpenSkill",
+            # ]
+            # table = [headers]
+            # for uid in sorted(self.evaluated_uids):
+            #     openscore_info = "N/A"
+            #     if uid in self.openskill_ratings:
+            #         rating = self.openskill_ratings[uid]
+            #         openscore_info = f"{rating.ordinal():.2f} (μ={rating.mu:.1f}, σ={rating.sigma:.1f})"
+            #     row = [
+            #         str(uid),
+            #         f"{self.peers_last_eval_window[uid]}",
+            #         f"{self.gradient_scores[uid]:.6f}",
+            #         f"{self.binary_indicator_scores[uid]:.4f}",
+            #         f"{self.binary_moving_averages[uid]:.4f}",
+            #         f"{self.final_scores[uid]:.4f}",
+            #         f"{self.sync_scores[uid]:.4f}",
+            #         f"{self.weights[uid]:.4f}",
+            #         openscore_info,
+            #     ]
+            #     table.append(row)
 
-            try:
-                try:
-                    width = os.get_terminal_size().columns
-                except Exception:
-                    width = 0
-                os.environ["COLUMNS"] = str(max(200, width))
+            # try:
+            #     try:
+            #         width = os.get_terminal_size().columns
+            #     except Exception:
+            #         width = 0
+            #     os.environ["COLUMNS"] = str(max(200, width))
 
-                rich_table = Table(title="Updated scores for evaluated UIDs")
-                for header in headers:
-                    rich_table.add_column(header)
-                for row in table[1:]:
-                    rich_table.add_row(*row)
-                sio = StringIO()
-                console = Console(file=sio, width=int(os.environ["COLUMNS"]))
-                console.print(rich_table)
-                table_str = sio.getvalue()
-            except ImportError:
-                tplr.log_with_context(
-                    level="warning",
-                    message="rich module not found; falling back to basic formatting.",
-                    sync_window=self.sync_window,
-                    current_window=self.current_window,
-                )
-                col_widths = [
-                    max(len(row[i]) for row in table) for i in range(len(headers))
-                ]
-                lines = []
-                for i, row in enumerate(table):
-                    line = " | ".join(
-                        row[j].ljust(col_widths[j]) for j in range(len(row))
-                    )
-                    lines.append(line)
-                    if i == 0:
-                        separator = "-+-".join(
-                            "-" * col_widths[j] for j in range(len(headers))
-                        )
-                        lines.append(separator)
-                table_str = "\n".join(lines)
+            #     rich_table = Table(title="Updated scores for evaluated UIDs")
+            #     for header in headers:
+            #         rich_table.add_column(header)
+            #     for row in table[1:]:
+            #         rich_table.add_row(*row)
+            #     sio = StringIO()
+            #     console = Console(file=sio, width=int(os.environ["COLUMNS"]))
+            #     console.print(rich_table)
+            #     table_str = sio.getvalue()
+            # except ImportError:
+            #     tplr.log_with_context(
+            #         level="warning",
+            #         message="rich module not found; falling back to basic formatting.",
+            #         sync_window=self.sync_window,
+            #         current_window=self.current_window,
+            #     )
+            #     col_widths = [
+            #         max(len(row[i]) for row in table) for i in range(len(headers))
+            #     ]
+            #     lines = []
+            #     for i, row in enumerate(table):
+            #         line = " | ".join(
+            #             row[j].ljust(col_widths[j]) for j in range(len(row))
+            #         )
+            #         lines.append(line)
+            #         if i == 0:
+            #             separator = "-+-".join(
+            #                 "-" * col_widths[j] for j in range(len(headers))
+            #             )
+            #             lines.append(separator)
+            #     table_str = "\n".join(lines)
 
-            tplr.log_with_context(
-                level="info",
-                message="Updated scores for evaluated UIDs:\n" + table_str,
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
+            # tplr.log_with_context(
+            #     level="info",
+            #     message="Updated scores for evaluated UIDs:\n" + table_str,
+            #     sync_window=self.sync_window,
+            #     current_window=self.current_window,
+            # )
 
-            should_downsample = len(self.evaluated_uids) > 8
-            for uid in sorted(self.evaluated_uids):
-                # Extract primitive values from tensors for WandB
-                gradient_score = float(self.gradient_scores[uid].item())
-                binary_indicator = float(self.binary_indicator_scores[uid].item())
-                binary_moving_avg = float(self.binary_moving_averages[uid].item())
-                sync_score = float(self.sync_scores[uid].item())
-                final_score = float(self.final_scores[uid].item())
-                weight = float(self.weights[uid].item())
+            # should_downsample = len(self.evaluated_uids) > 8
+            # for uid in sorted(self.evaluated_uids):
+            #     # Extract primitive values from tensors for WandB
+            #     gradient_score = float(self.gradient_scores[uid].item())
+            #     binary_indicator = float(self.binary_indicator_scores[uid].item())
+            #     binary_moving_avg = float(self.binary_moving_averages[uid].item())
+            #     sync_score = float(self.sync_scores[uid].item())
+            #     final_score = float(self.final_scores[uid].item())
+            #     weight = float(self.weights[uid].item())
 
-                self.wandb.log(
-                    {
-                        f"validator/gradient_scores/{uid}": gradient_score,
-                        f"validator/binary_indicators/{uid}": binary_indicator,
-                        f"validator/binary_moving_averages/{uid}": binary_moving_avg,
-                        f"validator/final_scores/{uid}": final_score,
-                        f"validator/sync_score/{uid}": sync_score,
-                        f"validator/weights/{uid}": weight,
-                    },
-                    step=self.global_step,
-                )
+            #     self.wandb.log(
+            #         {
+            #             f"validator/gradient_scores/{uid}": gradient_score,
+            #             f"validator/binary_indicators/{uid}": binary_indicator,
+            #             f"validator/binary_moving_averages/{uid}": binary_moving_avg,
+            #             f"validator/final_scores/{uid}": final_score,
+            #             f"validator/sync_score/{uid}": sync_score,
+            #             f"validator/weights/{uid}": weight,
+            #         },
+            #         step=self.global_step,
+            #     )
 
-                self.metrics_logger.log(
-                    measurement="validator_scores",
-                    tags={
-                        "eval_uid": str(uid),
-                        "window": int(self.sync_window),
-                        "global_step": int(self.global_step),
-                    },
-                    fields={
-                        "gradient_score": gradient_score,
-                        "binary_indicator": binary_indicator,
-                        "binary_moving_avg": binary_moving_avg,
-                        "sync_score": sync_score,
-                        "final_score": final_score,
-                        "weight": weight,
-                    },
-                    with_system_metrics=True,
-                    with_gpu_metrics=True,
-                    sample_rate=0.8 if should_downsample else 1.0,
-                )
+            #     self.metrics_logger.log(
+            #         measurement="validator_scores",
+            #         tags={
+            #             "eval_uid": str(uid),
+            #             "window": int(self.sync_window),
+            #             "global_step": int(self.global_step),
+            #         },
+            #         fields={
+            #             "gradient_score": gradient_score,
+            #             "binary_indicator": binary_indicator,
+            #             "binary_moving_avg": binary_moving_avg,
+            #             "sync_score": sync_score,
+            #             "final_score": final_score,
+            #             "weight": weight,
+            #         },
+            #         with_system_metrics=True,
+            #         with_gpu_metrics=True,
+            #         sample_rate=0.8 if should_downsample else 1.0,
+            #     )
 
             # 17. Set weights periodically
 
@@ -2322,6 +2334,116 @@ class Validator(BaseNode, Trainer):
         )
 
         return gather_peers, reserve_peers
+    
+    async def create_and_post_peers(self) -> None:
+        initial_selection = False
+        if (
+            self.last_peer_update_window is None
+            or self.sync_window - self.last_peer_update_window
+            >= self.hparams.peer_replacement_frequency
+        ):
+            reason = (
+                f"{self.last_peer_update_window=}"
+                if self.last_peer_update_window is None
+                else f"{self.sync_window=}>="
+                f"{self.last_peer_update_window}+"
+                f"{self.hparams.peer_replacement_frequency}="
+                "self.last_peer_update_window+"
+                "self.hparams.peer_replacement_frequency"
+            )
+
+            tplr.log_with_context(
+                level="info",
+                message=f"Time to create and post a new peer list because {reason}",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            if self.last_peer_update_window is None:
+                selected_peers = self.select_initial_peers()
+                initial_selection = True
+            else:
+                selected_peers = self.select_next_peers()
+            if selected_peers is not None:
+                self.last_peer_update_window = self.sync_window
+                gather_peers, reserve_peers = selected_peers
+                await self.comms.post_peer_list(
+                    peers=gather_peers,
+                    reserve_peers=reserve_peers,
+                    first_effective_window=self.current_window
+                    + self.hparams.peer_list_window_margin,
+                    sync_window=self.sync_window,
+                    initial_selection=initial_selection,
+                )
+        return
+    
+    def penalize_inactive_peers(self) -> None:
+        for uid, (inactive_since, _) in list(self.inactive_scores.items()):
+            # If peer became active again, remove from inactive tracking
+            if uid in self.eval_peers.keys():
+                del self.inactive_scores[uid]
+                tplr.log_with_context(
+                    level="info",
+                    message=f"UID {uid} became active again",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+                continue
+
+            if (
+                self.current_window - inactive_since
+                > self.hparams.reset_inactivity_windows
+            ):
+                self.reset_peer(uid)
+                tplr.log_with_context(
+                    level="info",
+                    message=f"UID {uid} fully reset after extended inactivity",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+                continue
+
+            # Apply flat 25% penalty instead of exponential decay
+            old_score = self.final_scores[uid].item()
+            new_score = old_score  # Initialize new_score with old_score value
+            if self.final_scores[uid] > 0:
+                self.final_scores[uid] *= (
+                    0.75  # Apply flat 25% reduction for positive scores only
+                )
+
+                new_score = self.final_scores[uid].item()
+
+                tplr.log_with_context(
+                    level="info",
+                    message=f"UID {uid} penalized for inactivity: {old_score:.4f} -> {new_score:.4f}",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+
+            # Log slash metrics to WandB
+            self.wandb.log(
+                {
+                    f"validator/inactivity/{uid}/score_before": old_score,
+                    f"validator/inactivity/{uid}/score_after": new_score,
+                },
+                step=self.global_step,
+            )
+
+            # Log slash metrics to InfluxDB with primitive types
+            self.metrics_logger.log(
+                measurement="validator_inactivity",
+                tags={
+                    "uid": str(uid),
+                    "window": int(current_window),
+                    "global_step": int(self.global_step),
+                },
+                fields={
+                    "score_before": float(old_score),
+                    "score_after": float(new_score),
+                },
+                with_system_metrics=True,
+                with_gpu_metrics=True,
+            )
+        return 
 
     async def evaluate_miner_sync(
         self, eval_uid: int
@@ -2389,6 +2511,129 @@ class Validator(BaseNode, Trainer):
         result = {**comparison_metrics, "sync_score": sync_score}
 
         return result
+    
+    def update_and_log_evals(self) -> None:
+        self.update_openskill_ratings()
+        self.update_weights()
+        # Log scores and metrics for evaluated UIDs as a table
+        headers = [
+            "UID",
+            "Last eval window",
+            "Gradient Score",
+            "Binary Indicator",
+            "Binary Moving Avg",
+            "Final Score",
+            "Sync score",
+            "Weight",
+            "OpenSkill",
+        ]
+        table = [headers]
+        for uid in sorted(self.evaluated_uids):
+            openscore_info = "N/A"
+            if uid in self.openskill_ratings:
+                rating = self.openskill_ratings[uid]
+                openscore_info = f"{rating.ordinal():.2f} (μ={rating.mu:.1f}, σ={rating.sigma:.1f})"
+            row = [
+                str(uid),
+                f"{self.peers_last_eval_window[uid]}",
+                f"{self.gradient_scores[uid]:.6f}",
+                f"{self.binary_indicator_scores[uid]:.4f}",
+                f"{self.binary_moving_averages[uid]:.4f}",
+                f"{self.final_scores[uid]:.4f}",
+                f"{self.sync_scores[uid]:.4f}",
+                f"{self.weights[uid]:.4f}",
+                openscore_info,
+            ]
+            table.append(row)
+
+        try:
+            try:
+                width = os.get_terminal_size().columns
+            except Exception:
+                width = 0
+            os.environ["COLUMNS"] = str(max(200, width))
+
+            rich_table = Table(title="Updated scores for evaluated UIDs")
+            for header in headers:
+                rich_table.add_column(header)
+            for row in table[1:]:
+                rich_table.add_row(*row)
+            sio = StringIO()
+            console = Console(file=sio, width=int(os.environ["COLUMNS"]))
+            console.print(rich_table)
+            table_str = sio.getvalue()
+        except ImportError:
+            tplr.log_with_context(
+                level="warning",
+                message="rich module not found; falling back to basic formatting.",
+                sync_window=self.sync_window,
+                current_window=self.current_window,
+            )
+            col_widths = [
+                max(len(row[i]) for row in table) for i in range(len(headers))
+            ]
+            lines = []
+            for i, row in enumerate(table):
+                line = " | ".join(
+                    row[j].ljust(col_widths[j]) for j in range(len(row))
+                )
+                lines.append(line)
+                if i == 0:
+                    separator = "-+-".join(
+                        "-" * col_widths[j] for j in range(len(headers))
+                    )
+                    lines.append(separator)
+            table_str = "\n".join(lines)
+
+        tplr.log_with_context(
+            level="info",
+            message="Updated scores for evaluated UIDs:\n" + table_str,
+            sync_window=self.sync_window,
+            current_window=self.current_window,
+        )
+
+        should_downsample = len(self.evaluated_uids) > 8
+        for uid in sorted(self.evaluated_uids):
+            # Extract primitive values from tensors for WandB
+            gradient_score = float(self.gradient_scores[uid].item())
+            binary_indicator = float(self.binary_indicator_scores[uid].item())
+            binary_moving_avg = float(self.binary_moving_averages[uid].item())
+            sync_score = float(self.sync_scores[uid].item())
+            final_score = float(self.final_scores[uid].item())
+            weight = float(self.weights[uid].item())
+
+            self.wandb.log(
+                {
+                    f"validator/gradient_scores/{uid}": gradient_score,
+                    f"validator/binary_indicators/{uid}": binary_indicator,
+                    f"validator/binary_moving_averages/{uid}": binary_moving_avg,
+                    f"validator/final_scores/{uid}": final_score,
+                    f"validator/sync_score/{uid}": sync_score,
+                    f"validator/weights/{uid}": weight,
+                },
+                step=self.global_step,
+            )
+
+            self.metrics_logger.log(
+                measurement="validator_scores",
+                tags={
+                    "eval_uid": str(uid),
+                    "window": int(self.sync_window),
+                    "global_step": int(self.global_step),
+                },
+                fields={
+                    "gradient_score": gradient_score,
+                    "binary_indicator": binary_indicator,
+                    "binary_moving_avg": binary_moving_avg,
+                    "sync_score": sync_score,
+                    "final_score": final_score,
+                    "weight": weight,
+                },
+                with_system_metrics=True,
+                with_gpu_metrics=True,
+                sample_rate=0.8 if should_downsample else 1.0,
+            )
+        return 
 
     def update_model_with_gradient(
         self, model: torch.nn.Module, eval_uid: int, eval_state_dict: dict
@@ -2598,6 +2843,50 @@ class Validator(BaseNode, Trainer):
             )
         except Exception as e:
             tplr.logger.warning(f"Failed to restore OpenSkill ratings: {e}")
+            
+    async def load_checkpoint(self) -> None:
+        checkpoint_window_buffer = 5
+        has_new_checkpoint = (
+            self.global_step
+            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
+        )
+        # Proceed to load checkpoint
+        (
+            success,
+            loaded_checkpoint_window,
+        ) = await self.comms.load_checkpoint(
+            model=self.model,
+            current_window=self.current_window,
+            device=cast(str, self.config.device),
+            init_version=tplr.__version__
+            if has_new_checkpoint
+            else self.bootstrap_version,
+        )
+        if success:
+            tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
+            # Only catch up if we're behind
+            for _ in range(
+                self.start_window,
+                (loaded_checkpoint_window + 1) * self.hparams.inner_steps,
+            ):
+                self.inner_scheduler.step()
+            if (
+                loaded_checkpoint_window < self.current_window
+                and self.global_step > checkpoint_window_buffer
+            ):
+                tplr.logger.info(
+                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
+                )
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, max(loaded_checkpoint_window, self.start_window)
+                )
+            else:
+                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
+
+        else:
+            tplr.logger.info("Starting from scratch")
+            self.model.to(self.config.device)  # type: ignore
+        return 
 
     def bin_evaluation_peers(self, num_bins: int) -> dict[int, list[int]]:
         """

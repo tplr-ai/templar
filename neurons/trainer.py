@@ -477,3 +477,104 @@ class Trainer:
 
         dist.all_reduce(tensor, op=op)
         return float(tensor.item())
+    def set_dataloader(self, validator: bool = False) -> None:
+        # put here for now...
+        self.dataset = self.dataset_manager.active_dataset
+
+        shared_args = dict(
+            dataset=self.dataset,
+            uid=self.uid,
+            window=self.current_window,
+            steps_per_window=self.hparams.inner_steps,
+            micro_bs=self.hparams.micro_batch_size,
+            rank=self.rank,
+            world_size=self.world_size,
+        )
+
+        if validator:
+            SamplerClass = tplr.EvalSampler
+            kwargs = shared_args | dict(
+                batch_size=self.hparams.target_batch_size,
+                validation_bs=self.hparams.validator_sample_micro_bs
+                * self.hparams.micro_batch_size,
+            )
+        else:
+            SamplerClass = tplr.MinerSampler
+            kwargs = shared_args | dict(
+                micro_bs=self.hparams.micro_batch_size,
+                batch_size=self.hparams.batch_size,
+                target_batch_size=self.hparams.target_batch_size,
+            )
+
+        self.sampler = SamplerClass(**kwargs)
+
+        self.loader = torch.utils.data.DataLoader(
+            dataset=self.dataset,
+            sampler=self.sampler,
+            batch_size=self.hparams.micro_batch_size,
+            num_workers=10,
+            pin_memory=True,
+            prefetch_factor=2,
+        )
+        tplr.logger.info("[Run] dataset + sampler ready")
+        return
+
+    def get_expected_params(self) -> set[str]:
+        """
+        Creates a set of expected names for validation
+
+            Returns: The names of all expected keys from a miner
+        """
+        expected_compressed_params = set()
+        for param_name, _ in self.model.named_parameters():
+            expected_compressed_params.add(param_name + "idxs")
+            expected_compressed_params.add(param_name + "vals")
+            expected_compressed_params.add(param_name + "quant_params")
+
+        return expected_compressed_params
+    
+
+    async def load_checkpoint(self) -> None:
+        """Load the latest checkpoint"""
+        checkpoint_window_buffer = 5
+        has_new_checkpoint = (
+            self.global_step
+            >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
+        )
+        # Proceed to load checkpoint
+        (
+            success,
+            loaded_checkpoint_window,
+        ) = await self.comms.load_checkpoint(
+            model=self.model,
+            current_window=self.current_window,
+            device=cast(str, self.config.device),
+            init_version=tplr.__version__
+            if has_new_checkpoint
+            else self.bootstrap_version,
+        )
+        if success:
+            tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
+            # Only catch up if we're behind
+            for _ in range(
+                self.start_window,
+                (loaded_checkpoint_window + 1) * self.hparams.inner_steps,
+            ):
+                self.inner_scheduler.step()
+            if (
+                loaded_checkpoint_window < self.current_window
+                and self.global_step > checkpoint_window_buffer
+            ):
+                tplr.logger.info(
+                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
+                )
+                await tplr.neurons.catchup_with_aggregation_server(
+                    self, max(loaded_checkpoint_window, self.start_window)
+                )
+            else:
+                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
+
+        else:
+            tplr.logger.info("Starting from scratch")
+            self.model.to(self.config.device)  # type: ignore
+        return

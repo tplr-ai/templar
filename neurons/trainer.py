@@ -34,6 +34,7 @@ from torchtitan.components.loss import cross_entropy_loss
 import tplr
 from neurons.base_node import CPU_COUNT
 from tplr import model_factory
+from typing import cast
 
 
 class Trainer:

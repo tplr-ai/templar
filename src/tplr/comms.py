@@ -2058,40 +2058,32 @@ class Comms(ChainManager):
                     f"[{param_name}] Index {bad} out of bounds (totalk = {totalk})"
                 )
 
-        # Handle different index formats
+        # Handle 12-bit packed index format only
         if isinstance(idxs, torch.Tensor):
-            if idxs.dtype == torch.uint8:
-                # 12-bit packed format - need vals to deduce shape
-                if vals is None:
-                    raise ValueError(
-                        f"[{param_name}] Values tensor required to validate 12-bit packed indices"
-                    )
-                if idxs.numel() == 0:
-                    raise ValueError(f"[{param_name}] Empty packed indices tensor")
+            if idxs.dtype != torch.uint8:
+                raise ValueError(
+                    f"[{param_name}] Expected uint8 for 12-bit packed indices, got {idxs.dtype}"
+                )
+            # 12-bit packed format is the only supported format
+            if vals is None:
+                raise ValueError(
+                    f"[{param_name}] Values tensor required to validate 12-bit packed indices"
+                )
+            if idxs.numel() == 0:
+                raise ValueError(f"[{param_name}] Empty packed indices tensor")
 
-                # Unpack using the values shape
-                try:
-                    unpacked = unpack_12bit_indices(idxs, vals.shape)
-                    # Validate that the last dimension matches allowed_topk
-                    if unpacked.shape[-1] != allowed_topk:
-                        raise ValueError(
-                            f"[{param_name}] Invalid topk dimension: "
-                            f"shape[-1]={unpacked.shape[-1]} but expected {allowed_topk}"
-                        )
-                    _bounds_check(unpacked)
-                except Exception as e:
-                    raise ValueError(
-                        f"[{param_name}] Failed to unpack 12-bit indices: {e}"
-                    )
-            else:
-                # Legacy int16/int64 format
+            # Unpack using the values shape
+            try:
+                unpacked = unpack_12bit_indices(idxs, vals.shape)
                 # Validate that the last dimension matches allowed_topk
-                if idxs.shape[-1] != allowed_topk:
+                if unpacked.shape[-1] != allowed_topk:
                     raise ValueError(
                         f"[{param_name}] Invalid topk dimension: "
-                        f"shape[-1]={idxs.shape[-1]} but expected {allowed_topk}"
+                        f"shape[-1]={unpacked.shape[-1]} but expected {allowed_topk}"
                     )
-                _bounds_check(idxs)
+                _bounds_check(unpacked)
+            except Exception as e:
+                raise ValueError(f"[{param_name}] Failed to unpack 12-bit indices: {e}")
         else:
             raise ValueError(f"[{param_name}] Expected tensor but got {type(idxs)}")
 

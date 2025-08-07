@@ -1574,8 +1574,9 @@ def test_invalid_not_packed_format():
     # Test with regular tensor (not packed) - should fail because it's not uint8
     invalid_tensor = torch.tensor([0, 1, 2, 3], dtype=torch.long)
     vals = torch.randn(4, dtype=torch.float32)
-    # This should pass the legacy format check since it's not uint8
-    dummy_comms.check_compressed_indices("param", invalid_tensor, totalk, vals=vals)
+    # This should fail since only uint8 12-bit packed format is supported
+    with pytest.raises(ValueError, match="Expected uint8 for 12-bit packed indices"):
+        dummy_comms.check_compressed_indices("param", invalid_tensor, totalk, vals=vals)
 
     # Test with list (not a tensor)
     invalid_list = [0, 1, 2, 3]
@@ -1590,11 +1591,12 @@ def test_invalid_wrong_dtype():
     dummy_comms = DummyComms()
     totalk = 20
 
-    # int32 tensor is not uint8, so it will be treated as legacy format
+    # int32 tensor is not uint8, so it should fail
     fake_packed = torch.tensor([0, 1, 2, 3], dtype=torch.int32)
     vals = torch.randn(4, dtype=torch.float32)
-    # Should work as legacy format
-    dummy_comms.check_compressed_indices("param", fake_packed, totalk, vals=vals)
+    # Should fail since only uint8 format is supported
+    with pytest.raises(ValueError, match="Expected uint8 for 12-bit packed indices"):
+        dummy_comms.check_compressed_indices("param", fake_packed, totalk, vals=vals)
 
 
 def test_invalid_12bit_packed_wrong_topk():

@@ -347,13 +347,17 @@ class TopKCompressor(Generic[Q]):
         if len(xshape) > 2:  # 2D weights
             x = rearrange(x, "y x h w -> y x (h w)")
 
-        # Unpack 12-bit indices using val shape
+        # Unpack 12-bit indices using val shape (if needed)
         if idx.dtype == torch.uint8:
-            # 12-bit packed format - unpack using values shape
+            # 12-bit packed format - unpack it
             idx_int64 = unpack_12bit_indices(idx, val.shape)
+        elif idx.dtype in (torch.int64, torch.long):
+            # Already unpacked (from batch_decompress)
+            idx_int64 = idx
         else:
-            # Legacy int16 format - cast back to int64
-            idx_int64 = idx.to(torch.int64)
+            raise ValueError(
+                f"Expected uint8 (packed) or int64 (unpacked) indices, got {idx.dtype}"
+            )
         x.scatter_reduce_(
             dim=-1, index=idx_int64, src=val, reduce="mean", include_self=False
         ).reshape(xshape)
@@ -431,13 +435,13 @@ class TopKCompressor(Generic[Q]):
         idx_list = idx if isinstance(idx, Sequence) else [idx]
 
         for i, i_data in enumerate(idx_list):
-            if i_data.dtype == torch.uint8:
-                # Unpack 12-bit format using corresponding values shape
-                v_data = val_list[i]
-                idx_unpacked = unpack_12bit_indices(i_data.to(p.device), v_data.shape)
-            else:
-                # Legacy format
-                idx_unpacked = i_data.to(p.device)
+            if i_data.dtype != torch.uint8:
+                raise ValueError(
+                    f"Expected uint8 for 12-bit packed indices, got {i_data.dtype}"
+                )
+            # Unpack 12-bit format using corresponding values shape
+            v_data = val_list[i]
+            idx_unpacked = unpack_12bit_indices(i_data.to(p.device), v_data.shape)
             unpacked_indices.append(idx_unpacked)
 
         idx_concat = torch.cat(unpacked_indices, dim=-1)

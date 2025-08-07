@@ -182,8 +182,7 @@ def outer_step(
 
                 if idxs is None or vals is None:
                     tplr.logger.info(f"Gradient data missing for {n}, skipping.")
-                    if getattr(gather_result.state_dict, tn + "idxs", None):
-                        tplr.logger.info(f"Try regular model not bare")
+                    tplr.logger.info(', '.join([tn for tn, _ in model.named_parameters()]))
                     continue
 
                 # normalise container types

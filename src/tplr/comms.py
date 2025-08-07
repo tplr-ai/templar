@@ -1210,10 +1210,6 @@ class Comms(ChainManager):
                         tplr.logger.warning(
                             f"UID {uid} missing compressed parameters: {missing_params}, skipping UID."
                         )
-                        tplr.logger.warning(
-                            f"UID {uid} present compressed parameters: {received_compressed_params - expected_compressed_params}, skipping UID."
-"
-                        )
                         valid_response = False
 
                     # If any check failed, skip this UID entirely

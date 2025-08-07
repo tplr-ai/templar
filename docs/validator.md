@@ -146,8 +146,8 @@ This guide will help you set up and run a validator for **τemplar**. Validators
    # Network Configuration
    NETWORK=finney
    NETUID=3
-   # GPU Configuration
-   CUDA_DEVICE=cuda:0
+   # GPU Configuration (automatically handled by Docker)
+   # Validator service uses GPUs 0, 1, and 2 from the host
    # Node Type
    NODE_TYPE=validator
    # Additional Settings
@@ -210,7 +210,7 @@ You should see a container named `templar-validator-<WALLET_HOTKEY>`.
    export NODE_TYPE=your_node_type
    export WALLET_NAME=your_wallet_name
    export WALLET_HOTKEY=your_wallet_hotkey
-   export CUDA_DEVICE=your_cuda_device
+   # GPU is automatically assigned by Docker (GPUs 0,1,2 for validator)
    export NETWORK=your_network
    export NETUID=your_netuid
    export DEBUG=your_debug_setting
@@ -314,8 +314,8 @@ WALLET_HOTKEY=your_validator_hotkey_name
 NETWORK=finney
 NETUID=3
 
-# GPU Configuration
-CUDA_DEVICE=cuda:0
+# GPU Configuration (automatically handled by Docker)
+# Validator service uses GPUs 0, 1, and 2 from the host
 
 # Node Type
 NODE_TYPE=validator

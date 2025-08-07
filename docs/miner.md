@@ -150,7 +150,7 @@ This guide will help you set up and run a miner for **τemplar**. We'll cover bo
    export NODE_TYPE=your_node_type
    export WALLET_NAME=your_wallet_name
    export WALLET_HOTKEY=your_wallet_hotkey
-   export CUDA_DEVICE=your_cuda_device
+   # GPU is automatically assigned by Docker (GPUs 0,1,2 for miner)
    export NETWORK=your_network
    export NETUID=your_netuid
    export DEBUG=your_debug_setting
@@ -238,8 +238,8 @@ WALLET_HOTKEY=your_miner_hotkey_name
 NETWORK=finney
 NETUID=3
 
-# GPU Configuration
-CUDA_DEVICE=cuda:0
+# GPU Configuration (automatically handled by Docker)
+# Miner service uses GPUs 0, 1, and 2 from the host
 
 # Additional Settings
 DEBUG=false

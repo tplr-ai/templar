@@ -503,11 +503,19 @@ class Evaluator:
             global_step,
         ) = await self.load_latest_model()
 
-        if not success:
+        if not success and self.last_eval_window > 0:
+            # We've already evaluated something and no new checkpoint is available
             tplr.logger.info(
                 f"No new checkpoint to evaluate (last evaluated window: {self.last_eval_window})"
             )
             return global_step
+        elif not success and self.last_eval_window == 0:
+            # First run with no checkpoint - use initialized model
+            tplr.logger.info(
+                "Using initialized model for evaluation (no checkpoint available)"
+            )
+            checkpoint_window = 0
+            global_step = 0
 
         tplr.logger.info(
             f"Starting benchmark run at global step {global_step} (checkpoint window: {checkpoint_window})"
@@ -866,6 +874,8 @@ class Evaluator:
         try:
             self.comms.start_commitment_fetcher()
             self.comms.start_background_tasks()
+
+            await self._evaluate()
 
             while not self.stop_event.is_set():
                 await self.update_state()

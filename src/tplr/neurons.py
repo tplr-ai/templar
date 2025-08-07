@@ -165,7 +165,7 @@ def outer_step(
     """
     Synchronize gradients (if DDP) and apply optimizer step
     """
-    bare_model = getattr(model, "module", model)
+    bare_model = model # getattr(model, "module", model)
 
     if is_master:
         min_median_norm = float("inf")
@@ -175,14 +175,14 @@ def outer_step(
         optimizer.zero_grad()
 
         if gather_result is not None and gather_result.state_dict is not None:
-            for (n, p), (tn, tp) in zip(bare_model.named_parameters(), model.named_parameters()):
+            for n, p in bare_model.named_parameters():
                 idxs = getattr(gather_result.state_dict, n + "idxs", None)
                 vals = getattr(gather_result.state_dict, n + "vals", None)
                 qps = getattr(gather_result.state_dict, n + "quant_params", None)
 
                 if idxs is None or vals is None:
                     tplr.logger.info(f"Gradient data missing for {n}, skipping.")
-                    tplr.logger.info(', '.join([tn for tn, _ in model.named_parameters()]))
+                    # tplr.logger.info(', '.join([tn for tn, _ in model.named_parameters()]))
                     continue
 
                 # normalise container types

@@ -2719,7 +2719,7 @@ class Validator(BaseNode, Trainer):
         return
 
     def merge_gathered_gradients(
-        self, gather_result: dict, evaluated_peers: int
+        self, gather_result: SimpleNamespace, evaluated_peers: int
     ) -> float:
         """
         Take validated gradients from peers and integrate them into the model

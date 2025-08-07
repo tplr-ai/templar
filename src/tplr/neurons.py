@@ -182,7 +182,8 @@ def outer_step(
 
                 if idxs is None or vals is None:
                     tplr.logger.info(f"Gradient data missing for {n}, skipping.")
-                    tplr.logger.info(", ".join([n for n, p in gather_result.state_dict.items()]))
+                    tplr.logger.info(f"{list(filter(lambda i: '__' not in i, dir(gather_result.state_dict)))}")
+                    # tplr.logger.info(gath)
                     continue
 
                 # normalise container types

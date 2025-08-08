@@ -147,6 +147,7 @@ async def main() -> None:
     Raises:
         ValueError: If sequence_length is invalid
     """
+
     parser = argparse.ArgumentParser(
         description="Create sample_ids.bin for each .npy shard",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -207,6 +208,7 @@ async def main() -> None:
     print(f"  • Shards path: {args.r2_prefix}")
     print(f"  • Sequence length: {args.seq_len}")
     print(f"  • Token dtype: {args.token_dtype}")
+    print(f"  • Skip Validation: {args.skip_validation}")
     print()
 
     success = await run_preprocessing(args, args.seq_len, token_dtype)

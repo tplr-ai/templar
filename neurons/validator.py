@@ -31,28 +31,22 @@ from datetime import datetime, timedelta, timezone
 from io import StringIO
 from time import perf_counter
 from types import SimpleNamespace
-from typing import Iterable, cast
+from typing import cast
 
 import bittensor as bt
 import numpy as np
 
 # Third party
 import torch
+import torch.distributed as dist
 import uvloop
 from openskill.models import PlackettLuce
 from rich.console import Console
 from rich.table import Table
-from torch import autocast
-from torch.optim import SGD
-from transformers.models.llama import LlamaForCausalLM
 
 import tplr
-
-# Local
-from neurons import BaseNode
-
-CPU_COUNT = os.cpu_count() or 4
-CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
+from neurons import BaseNode, Trainer
+from neurons.base_node import CPU_COUNT
 
 # GPU optimizations.
 torch.manual_seed(42)
@@ -79,7 +73,7 @@ def timer(name: str, wandb_obj=None, step=None, metrics_logger=None):
         )
 
 
-class Validator(BaseNode):
+class Validator(BaseNode, Trainer):
     @staticmethod
     def validator_config():
         parser = argparse.ArgumentParser(description="Validator script")
@@ -109,6 +103,19 @@ class Validator(BaseNode):
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        parser.add_argument(
+            "--profile-iters",
+            type=int,
+            default=0,
+            help="Active iterations per Torch‑Profiler trace (0 = disable)",
+        )
+        parser.add_argument(
+            "--profile-dir",
+            type=str,
+            default="./log/profiler",
+            help="Directory to save profiler traces",
+        )
+
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -125,6 +132,32 @@ class Validator(BaseNode):
 
         # Init config and load hparams
         self.config = Validator.validator_config()
+
+        # ────────────────────────────────────────────────────────────────
+        # Distributed initialisation ─ exactly the same pattern as *miner*
+        # ────────────────────────────────────────────────────────────────
+        self.rank = int(os.getenv("RANK", 0))
+        self.world_size = int(os.getenv("WORLD_SIZE", 1))
+        self.local_rank = int(os.getenv("LOCAL_RANK", 0))
+
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend="nccl" if torch.cuda.is_available() else "gloo",
+                init_method="env://",
+                rank=self.rank,
+                world_size=self.world_size,
+                timeout=timedelta(minutes=30),
+            )
+
+        if torch.cuda.is_available():
+            torch.cuda.set_device(self.local_rank)
+
+        self.is_master = self.rank == 0
+        tplr.logger.info(
+            f"[Init] rank={self.rank}, world_size={self.world_size}, "
+            f"local_rank={self.local_rank}, master={self.is_master}"
+        )
+
         self.hparams = tplr.load_hparams(
             use_local_run_hparams=cast(bool, self.config.local)
         )
@@ -152,66 +185,23 @@ class Validator(BaseNode):
         except Exception as e:
             tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
-        # Init model with hparams config
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.config.device)  # type: ignore
-        compile_mode = "default"  # or "max-autotune" / "reduce-overhead"
-        self.model = cast(
-            LlamaForCausalLM, torch.compile(self.model, mode=compile_mode)
-        )
+        self.device = torch.device(self.config.device)
+        self.init_model(validator=True)
+        self.expected_compressed_params = self.get_expected_params()
         self.tokenizer = self.hparams.tokenizer
 
         # Init compression
-        self.transformer = tplr.compress.TransformDCT(
+        self.transformer = tplr.compress.ChunkingTransformer(
             self.model, target_chunk=self.hparams.target_chunk
         )
-        self.compressor = tplr.compress.CompressDCT(
+        self.compressor = tplr.compress.TopKCompressor(
             use_quantization=True,
             quantization_bins=self.hparams.quantization_bins,
             quantization_range=self.hparams.quantization_range,
         )
 
         # Init optimizer
-        self.lr = float(self.hparams.outer_learning_rate)
-        self.outer_optimizer = SGD(self.model.parameters(), lr=self.lr)
-
-        # inner scheduler and dummy optimizer for logging purposes
-
-        _dummy_param = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
-        # Any optimiser will do; SGD is the simplest and has no extra state.
-        self.inner_optimizer = torch.optim.SGD(
-            [_dummy_param],
-            lr=self.hparams.inner_learning_rate,
-        )
-        inner_steps_before_outer_step = self.hparams.inner_steps * (
-            self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
-        )
-
-        init_scheduler = torch.optim.lr_scheduler.LinearLR(
-            self.inner_optimizer,
-            start_factor=0.1,
-            end_factor=0.1,
-            total_iters=inner_steps_before_outer_step,
-        )
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            self.inner_optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=self.hparams.warmup_steps,
-        )
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.inner_optimizer,
-            T_max=self.hparams.t_max,
-            eta_min=self.hparams.inner_learning_rate * 0.1,
-        )
-        self.inner_scheduler = torch.optim.lr_scheduler.SequentialLR(
-            self.inner_optimizer,
-            schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
-            milestones=[
-                inner_steps_before_outer_step,
-                inner_steps_before_outer_step + self.hparams.warmup_steps,
-            ],
-        )
+        self.init_optimizers_schedulers(validator=True)
 
         self.xshapes = {}
         self.totalks = {}
@@ -361,12 +351,9 @@ class Validator(BaseNode):
         self.binary_moving_averages[uid] = 0.0
         self.binary_indicator_scores[uid] = 0.0
         self.sync_scores[uid] = 0.0
-        if uid in self.openskill_ratings:
-            del self.openskill_ratings[uid]
-        if uid in self.eval_peers:
-            del self.eval_peers[uid]
-        del self.inactive_scores[uid]
-
+        self.openskill_ratings.pop(uid, None)
+        self.eval_peers.pop(uid, None)
+        self.inactive_scores.pop(uid, None)
         return
 
     def log_sync_score(
@@ -670,48 +657,6 @@ class Validator(BaseNode):
         else:
             # fall‑back: allocate all non‑burn weight to burn_uid
             self.weights[self.burn_uid] = 1.0
-
-    async def evaluate_model(
-        self,
-        model: torch.nn.Module,
-        loader: Iterable[torch.Tensor],
-    ) -> tuple[float, int]:
-        device: torch.device = next(model.parameters()).device
-        total_loss = 0.0
-        n_batches = 0
-
-        with torch.no_grad():
-            model.eval()
-            with autocast(device_type=device.type, dtype=torch.bfloat16):
-                for i, batch in enumerate(loader):
-                    if batch is None or len(batch) == 0:
-                        tplr.log_with_context(
-                            level="warning",
-                            message=f"Empty batch at index {i}, skipping",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                        )
-                        continue
-
-                    if isinstance(batch, torch.Tensor):
-                        input_ids = batch.to(
-                            device, dtype=torch.long, non_blocking=True
-                        )
-                    else:
-                        input_ids = torch.tensor(batch, dtype=torch.long, device=device)
-                    labels = input_ids.clone()
-                    labels = torch.where(
-                        labels == self.tokenizer.pad_token_id, -100, labels
-                    )
-                    outputs = model(input_ids=input_ids, labels=labels)
-                    total_loss += outputs.loss.item()
-                    n_batches += 1
-                    del input_ids, labels, outputs
-                    torch.cuda.empty_cache()
-
-                    await asyncio.sleep(0)
-
-        return total_loss, n_batches
 
     async def run(self):
         # Start background block listener
@@ -1102,6 +1047,7 @@ class Validator(BaseNode):
                 compressor=self.compressor,
                 time_min=time_min,
                 time_max=time_max,
+                expected_compressed_params=self.expected_compressed_params,
             )
 
             if gather_result is None:
@@ -2159,6 +2105,9 @@ class Validator(BaseNode):
                 current_window=self.current_window,
             )
 
+            # ── profiler step (only master – validators are single‑rank) ─
+            if self._prof is not None:
+                self._prof.step()
             # 17. Create checkpoints periodically
             if (
                 self.global_step % self.hparams.checkpoint_frequency == 0
@@ -2456,8 +2405,12 @@ class Validator(BaseNode):
             quant_params = eval_state_dict.get(quant_key, None)
 
             if idxs is not None and vals is not None and quant_params is not None:
-                # Move tensors to device
-                idxs = idxs.to(self.config.device)
+                # Handle 12-bit packed format: (packed_tensor, original_shape)
+                if isinstance(idxs, tuple) and len(idxs) == 2:
+                    packed_data, original_shape = idxs
+                    # Move packed data to device
+                    packed_data = packed_data.to(self.config.device)
+                    idxs = (packed_data, original_shape)
                 vals = vals.to(self.config.device)
 
                 # Validate indices are within bounds
@@ -2479,6 +2432,7 @@ class Validator(BaseNode):
                     idxs,
                     self.totalks[n],
                     allowed_topk=self.hparams.topk_compression,
+                    vals=vals,
                 )
 
                 # Check for NaN or Inf values
@@ -2504,9 +2458,6 @@ class Validator(BaseNode):
             quant_params = eval_state_dict.get(quant_key, None)
 
             if idxs is not None and vals is not None and quant_params is not None:
-                idxs = idxs.to(self.config.device)
-                vals = vals.to(self.config.device)
-
                 grad = self.transformer.decode(
                     self.compressor.decompress(
                         p.to(self.config.device),
@@ -2980,48 +2931,6 @@ class Validator(BaseNode):
                     current_window=self.current_window,
                 )
 
-        return
-
-    def set_dataloader(self, validator: bool = False) -> None:
-        # put here for now...
-        self.dataset = self.dataset_manager.active_dataset
-
-        shared_args = dict(
-            dataset=self.dataset,
-            uid=self.uid,
-            window=self.current_window,
-            steps_per_window=self.hparams.inner_steps,
-            micro_bs=self.hparams.micro_batch_size,
-            rank=self.rank,
-            world_size=self.world_size,
-        )
-
-        if validator:
-            SamplerClass = tplr.EvalSampler
-            kwargs = shared_args | dict(
-                batch_size=self.hparams.target_batch_size,
-                validation_bs=self.hparams.validator_sample_micro_bs
-                * self.hparams.micro_batch_size,
-            )
-        else:
-            SamplerClass = tplr.MinerSampler
-            kwargs = shared_args | dict(
-                micro_bs=self.hparams.micro_batch_size,
-                batch_size=self.hparams.batch_size,
-                target_batch_size=self.hparams.target_batch_size,
-            )
-
-        self.sampler = SamplerClass(**kwargs)
-
-        self.loader = torch.utils.data.DataLoader(
-            dataset=self.dataset,
-            sampler=self.sampler,
-            batch_size=self.hparams.micro_batch_size,
-            num_workers=10,
-            pin_memory=True,
-            prefetch_factor=2,
-        )
-        tplr.logger.info("[Run] dataset + sampler ready")
         return
 
 

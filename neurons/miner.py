@@ -26,38 +26,21 @@ import os
 import random
 import sys
 import time
-from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import cast
 
 import bittensor as bt
 import numpy as np
 import torch
 import torch.distributed as dist
-
-# Third party
-import torch.nn.parallel
 import uvloop
-from torch import autocast
-from torch.distributed.optim import ZeroRedundancyOptimizer
-from torch.optim import SGD
-from torch.optim.lr_scheduler import (
-    CosineAnnealingLR,
-    LinearLR,
-    SequentialLR,
-)
-from torch.utils.data import DataLoader
-from transformers.models.llama import LlamaForCausalLM
+from torch.amp.grad_scaler import GradScaler
+from torch.distributed.tensor import DTensor as DT
 
 import tplr
-
-# Local
-from neurons import BaseNode
-
-# Local
-
-CPU_COUNT = os.cpu_count() or 4
-CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
+from neurons import BaseNode, Trainer
+from neurons.base_node import CPU_COUNT
 
 # GPU optimizations
 torch.manual_seed(42)
@@ -70,7 +53,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 
-class Miner(BaseNode):
+class Miner(BaseNode, Trainer):
     # Command line config items.
     @staticmethod
     def miner_config():
@@ -89,6 +72,12 @@ class Miner(BaseNode):
         )
         parser.add_argument(
             "--device", type=str, default="cuda", help="Device to use for training"
+        )
+        parser.add_argument(
+            "--amp-dtype",
+            choices=["bf16", "fp16"],
+            default="bf16",
+            help="Mixed-precision data type. Use «fp16» to enable GradScaler.",
         )
         parser.add_argument(
             "--local_rank", type=int, default=int(os.getenv("LOCAL_RANK", 0))
@@ -110,6 +99,18 @@ class Miner(BaseNode):
             action="store_true",
             help="Local run - use toy model, small enough for a laptop.",
         )
+        parser.add_argument(
+            "--profile-iters",
+            type=int,
+            default=0,
+            help="Active iterations per Torch‑Profiler trace (0 = disable)",
+        )
+        parser.add_argument(
+            "--profile-dir",
+            type=str,
+            default="./log/profiler",
+            help="Directory to save profiler traces",
+        )
         bt.subtensor.add_args(parser)
         bt.logging.add_args(parser)
         bt.wallet.add_args(parser)
@@ -129,32 +130,6 @@ class Miner(BaseNode):
         flag_tensor = torch.tensor([int(local_has_batch)], device=device)
         dist.all_reduce(flag_tensor, op=dist.ReduceOp.MIN)
         return bool(flag_tensor.item())
-
-    def _is_distributed(self) -> bool:
-        """True iff torch.distributed is initialised and world_size > 1."""
-        return dist.is_available() and dist.is_initialized() and self.world_size > 1
-
-    def _ddp_reduce(
-        self,
-        value: int | float | torch.Tensor,
-        op: dist.ReduceOp.RedOpType = dist.ReduceOp.SUM,
-    ) -> float:
-        """
-        Reduce ``value`` across all ranks and return a **python float**.
-        Use ``op=dist.ReduceOp.AVG`` for mean; default is SUM.
-        """
-        # single-GPU fast path
-        if not self._is_distributed():
-            return float(value.item() if isinstance(value, torch.Tensor) else value)
-
-        # convert to tensor on the right device
-        if not isinstance(value, torch.Tensor):
-            tensor = torch.tensor(float(value), device=self.device)
-        else:
-            tensor = value.to(self.device)
-
-        dist.all_reduce(tensor, op=op)
-        return float(tensor.item())
 
     def __init__(self):
         tplr.logger.debug("Starting initialization...")
@@ -187,6 +162,17 @@ class Miner(BaseNode):
         self.device = torch.device(self.config.device)
         tplr.logger.info(f"[Init] device set → {self.device}")
 
+        # Mixed precision setup
+        self.amp_dtype = (
+            torch.bfloat16 if self.config.amp_dtype == "bf16" else torch.float16
+        )
+        self.scaler = GradScaler(
+            enabled=(self.amp_dtype is torch.float16 and self.device.type == "cuda")
+        )
+        tplr.logger.info(
+            f"[Init] Using {self.config.amp_dtype}. GradScaler enabled: {self.scaler.is_enabled()}"
+        )
+
         # Convenience flags
         self.is_master = self.rank == 0
         self.config.local = cast(bool, self.config.local)
@@ -211,34 +197,22 @@ class Miner(BaseNode):
         self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         super().__init__()
 
-        # Init model with hparams config
-        self.model = LlamaForCausalLM(self.hparams.model_config)
-        self.model.to(self.device)  # type: ignore[reportArgumentType]
-        if self.world_size < 4:
-            self.model.gradient_checkpointing_enable()
-        tplr.logger.info("[Init] Llama model instantiated & on device")
-
-        compile_mode = "default"
-        self.model = cast(
-            LlamaForCausalLM, torch.compile(self.model, mode=compile_mode)
-        )
-
-        if self.world_size > 1:
-            self.model = torch.nn.parallel.DistributedDataParallel(
-                self.model,
-                device_ids=[self.local_rank],
-                output_device=self.local_rank,
-                gradient_as_bucket_view=True,
-            )
-            tplr.logger.info("[Init] wrapped model with DistributedDataParallel")
+        self.init_model()
         self.bare_model = getattr(self.model, "module", self.model)
-        self.tokenizer = self.hparams.tokenizer
+
+        # Store parallelization parameters for later use
+        tt = getattr(self.hparams, "torchtitan", SimpleNamespace())
+        self.tp_degree = int(getattr(tt, "tp_degree", 1))
+        self.pp_degree = int(getattr(tt, "pp_degree", 1))
+        self.cp_degree = int(getattr(tt, "cp_degree", 1))
+        self.dp_replicate = int(getattr(tt, "dp_replicate", 1))
+        self.dp_shard = int(getattr(tt, "dp_shard", 1))
 
         # Init compression
-        self.transformer = tplr.compress.TransformDCT(
+        self.transformer = tplr.compress.ChunkingTransformer(
             self.model, target_chunk=self.hparams.target_chunk
         )
-        self.compressor = tplr.compress.CompressDCT(
+        self.compressor = tplr.compress.TopKCompressor(
             use_quantization=True,
             quantization_bins=self.hparams.quantization_bins,
             quantization_range=self.hparams.quantization_range,
@@ -246,68 +220,58 @@ class Miner(BaseNode):
         tplr.logger.info("[Init] compression pipeline ready")
 
         # Init optimizer and momentum
+        self.init_optimizers_schedulers()
+
         self.error_feedback = {}
         self.owned_params = set()
-
-        self.outer_optimizer = SGD(
-            self.model.parameters(), lr=self.hparams.outer_learning_rate
-        )
-        self.inner_optimizer = ZeroRedundancyOptimizer(
-            self.model.parameters(),
-            optimizer_class=torch.optim.AdamW,
-            lr=self.hparams.inner_learning_rate,
-            weight_decay=self.hparams.weight_decay,
-            betas=(0.9, 0.95),
-            parameters_as_bucket_view=True,
-            overlap_with_ddp=False,
-        )
-        inner_steps_before_outer_step = self.hparams.inner_steps * (
-            self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
-        )
-        init_scheduler = LinearLR(
-            self.inner_optimizer,
-            start_factor=0.1,
-            end_factor=0.1,
-            total_iters=inner_steps_before_outer_step,
-        )
-        warmup_scheduler = LinearLR(
-            self.inner_optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=self.hparams.warmup_steps,
-        )
-        cosine_scheduler = CosineAnnealingLR(
-            self.inner_optimizer,
-            T_max=self.hparams.t_max,
-            eta_min=self.hparams.inner_learning_rate * 0.1,
-        )
-        self.inner_scheduler = SequentialLR(
-            self.inner_optimizer,
-            schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
-            milestones=[
-                inner_steps_before_outer_step,
-                inner_steps_before_outer_step + self.hparams.warmup_steps,
-            ],
-        )
-        tplr.logger.info("[Init] optimizers & schedulers constructed")
 
         self.xshapes = {}
         self.totalks = {}
         model_iterator = self.bare_model.named_parameters()
+        param_info = {}  # Store parameter info for second pass
 
         for idx, (n, p) in enumerate(model_iterator):
+            # Handle DTensor - use full tensor shape for DCT registration
+            # since we're not supporting TP and will use full tensors for compression
+            if isinstance(p, DT):
+                full_p = p.full_tensor()
+                # Ensure the dummy tensor is on the correct device
+                dummy = torch.zeros_like(full_p, device=self.device)
+                tplr.logger.debug(
+                    f"DTensor {n}: full_p.device={full_p.device}, dummy.device={dummy.device}, self.device={self.device}"
+                )
+            else:
+                dummy = torch.zeros_like(p, device=self.device)
+
+            # Store info for second pass
+            param_info[n] = {
+                "dummy": dummy,
+                "idx": idx,
+            }
             if idx % self.world_size == self.rank:
-                # this rank “owns” the parameter
+                # this rank "owns" the parameter
                 self.owned_params.add(n)
-                self.error_feedback[n] = torch.zeros_like(p, device=self.device)
+                # For DTensors, create error feedback based on full tensor since TP is not supported
+                self.error_feedback[n] = dummy
+
+        # Second pass: now encode all tensors (DCT shapes should be registered)
+        for n, info in param_info.items():
+            dummy = info["dummy"]
+
+            enc = self.transformer.encode(dummy, use_dct=self.hparams.use_dct)
+            tplr.logger.debug(
+                f"[Init] Successfully applied DCT to {n} with shape {dummy.shape}"
+            )
             _, _, xshape, totalk, _ = self.compressor.compress(
-                self.transformer.encode(
-                    torch.zeros_like(p), use_dct=self.hparams.use_dct
-                ),
+                enc,
                 self.hparams.topk_compression,
             )
             self.xshapes[n] = xshape
             self.totalks[n] = totalk
+
+        tplr.logger.info(
+            f"[Init] DCT compression initialized for {len(param_info)} parameters"
+        )
 
         self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
         tplr.logger.info(
@@ -491,7 +455,7 @@ class Miner(BaseNode):
 
             # 1) parameters & buffers
             for tensor in self.bare_model.state_dict().values():
-                if torch.is_tensor(tensor):
+                if torch.is_tensor(tensor) and not isinstance(tensor, DT):
                     dist.broadcast(tensor.data, src=0)
 
             bcast_time = tplr.T() - bcast_start
@@ -696,6 +660,7 @@ class Miner(BaseNode):
                     compressor=self.compressor,
                     time_min=time_min,
                     time_max=time_max,
+                    expected_compressed_params=self.expected_compressed_params,
                 )
                 tplr.logger.info("Gather task completed!")
                 gather_time = tplr.T() - gather_start
@@ -720,19 +685,8 @@ class Miner(BaseNode):
 
             # 8. Apply gathered gradients
             update_start = tplr.T()
-            tplr.neurons.outer_step(
-                self.model,
-                self.outer_optimizer,
-                gather_result=gather_result,
-                transformer=self.transformer,
-                compressor=self.compressor,
-                xshapes=self.xshapes,
-                totalks=self.totalks,
-                device=str(self.device),
-                is_master=self.is_master,
-                world_size=self.world_size,
-                use_dct=self.hparams.use_dct,
-            )
+            _ = self.outer_step(gather_result)
+
             model_update_time = tplr.T() - update_start
             tplr.logger.info(f"{tplr.P(step_window, model_update_time)} Updated model")
 
@@ -742,12 +696,19 @@ class Miner(BaseNode):
 
                 # Add model parameters debug info
                 for name, param in self.bare_model.named_parameters():
-                    if (
-                        param is not None and param.numel() >= 2
-                    ):  # Check if tensor has at least 2 elements
-                        debug_dict[name + "_debug"] = (
-                            param.flatten()[10:12].detach().cpu().tolist()
-                        )
+                    if param is not None:
+                        # Handle DTensor vs regular tensor
+                        if isinstance(param, DT):
+                            local_param = param.to_local()
+                            if local_param.numel() >= 2:
+                                debug_dict[name + "_debug"] = (
+                                    local_param.flatten()[10:12].detach().cpu().tolist()
+                                )
+                        else:
+                            if param.numel() >= 2:
+                                debug_dict[name + "_debug"] = (
+                                    param.flatten()[10:12].detach().cpu().tolist()
+                                )
 
                 # Add successful peers information
                 if gather_result is not None:
@@ -793,9 +754,7 @@ class Miner(BaseNode):
             # Log metrics to WandB
             if self.is_master:
                 # Calculate common metrics values
-                momentum_norms: list[float] = [
-                    v for sublist in gathered_mom for v in sublist
-                ]
+                momentum_norms: list[float] = sum(gathered_mom, [])
                 mean_grad_norm = sum(grad_norms) / len(grad_norms) if grad_norms else 0
                 grad_norm_std = (
                     torch.tensor(grad_norms).std().item() if grad_norms else 0
@@ -886,204 +845,39 @@ class Miner(BaseNode):
                 del processed_state_dict, gradient
 
             await self.cleanup_window()
+
+            # ── profiler step (only master) ─────────────────────────────
+            if self.is_master and self._prof is not None:
+                self._prof.step()
+
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
             await self.wait_until_window(step_window + 1)
 
-    async def inner_steps(
-        self,
-        loader: DataLoader,
-        step_window: int,
-    ) -> dict:
-        """
-        One inner-loop optimisation pass that is gradient-accumulation aware and
-        synchronised across distributed ranks.
-
-        Returns
-        -------
-        dict
-            Keys: total_loss (float), batch_count (int), batch_tokens (int)
-        """
-        self.inner_optimizer.zero_grad()
-
-        total_loss: float = 0.0
-        batch_count: int = 0
-        batch_tokens: int = 0  # local counter
-        accum_batch_size: int = 0
-        window_entry_loss: float = 0.0
-        global_tokens: int = 0  # after cross-rank reduction
-        global_loss_sum: float = 0.0
-        local_tokens_sum: int = 0  # local running totals
-        local_loss_sum: float = 0.0
-
-        params_offloaded = self._get_offloaded_param()
-
-        inner_step_count: int = 0
-        loader_iter = iter(loader)
-
-        while not self.stop_event.is_set():
-            # ------------------------------------------------------------------ #
-            # 1. Fetch a batch (or detect EOS) on *each* rank
-            # ------------------------------------------------------------------ #
-            try:
-                batch = await self.loop.run_in_executor(None, next, loader_iter)
-                local_has_batch = True
-            except StopIteration:
-                local_has_batch = False
-                batch = None
-
-            # Decide collectively whether we should continue
-            if self.world_size > 1:
-                cont = self.should_continue(local_has_batch, self.device)
-                if not cont:
-                    if self.is_master:
-                        tplr.logger.info(
-                            "Stopping batch loop: at least one rank exhausted."
-                        )
-                    break
-                if not local_has_batch:  # exhausted only on this rank
-                    continue
-
-            # ------------------------------------------------------------------ #
-            # 2. Prepare inputs
-            # ------------------------------------------------------------------ #
-            if isinstance(batch, torch.Tensor):
-                input_ids = batch.to(self.device, dtype=torch.long, non_blocking=True)
-            else:
-                input_ids = torch.tensor(batch, dtype=torch.long, device=self.device)
-
-            local_bs = len(batch)  # type: ignore
-            accum_batch_size += local_bs
-
-            tokens_this_batch = input_ids.numel()
-            batch_tokens += tokens_this_batch
-            local_tokens_sum += tokens_this_batch
-
-            labels = input_ids.clone()
-            labels = torch.where(labels == self.tokenizer.pad_token_id, -100, labels)
-
-            # ------------------------------------------------------------------ #
-            # 3. Forward + backward
-            # ------------------------------------------------------------------ #
-            with autocast(device_type=self.device.type, dtype=torch.bfloat16):
-                outputs = self.model(input_ids=input_ids, labels=labels)
-
-            loss = outputs.loss / self.sampler.grad_accum_steps
-            loss_item = outputs.loss.detach().item()
-
-            # -------------------------------------------------------------- #
-            # 3-a.  Back-prop with no_sync() on non-final micro-batches
-            # -------------------------------------------------------------- #
-            final_micro_batch = (batch_count + 1) % self.sampler.grad_accum_steps == 0
-            if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) and (
-                self.world_size > 1 and not final_micro_batch
-            ):
-                sync_ctx = self.model.no_sync()
-            else:
-                sync_ctx = nullcontext()
-            with sync_ctx:
-                loss.backward()
-            total_loss += loss_item
-            local_loss_sum += loss_item  # defer collective
-
-            batch_count += 1
-            window_changed = self.current_window != step_window
-
-            # ------------------------------------------------------------------ #
-            # 4. Decide *together* whether to take an optimiser step
-            # ------------------------------------------------------------------ #
-            step_now = final_micro_batch or window_changed
-            if self.world_size > 1:
-                flag = torch.tensor([int(step_now)], device=self.device)
-                dist.all_reduce(flag, op=dist.ReduceOp.MAX)  # 1-byte sync
-                step_now = bool(flag.item())  # identical on all ranks
-
-            if step_now:
-                # ── one collective for scalar stats per inner step ───────────
-                global_tokens_step = int(self._ddp_reduce(local_tokens_sum))
-                global_loss_step = self._ddp_reduce(local_loss_sum)
-                global_tokens += global_tokens_step
-                global_loss_sum += global_loss_step
-
-                # mean loss of this accumulation step for logging
-                log_loss = self._ddp_reduce(loss_item, op=dist.ReduceOp.AVG)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-
-                self.inner_optimizer.step()
-                self.inner_scheduler.step()
-                self.inner_optimizer.zero_grad(set_to_none=True)
-
-                inner_step_count += 1
-
-                # reset local accumulators BEFORE the next micro-batch
-                local_tokens_sum = 0
-                local_loss_sum = 0
-
-                accum_batch_size = int(self._ddp_reduce(accum_batch_size))
-                if self.is_master:
-                    tplr.logger.info(
-                        f"Inner Step {inner_step_count}, "
-                        f"Batch {batch_count}, loss: {log_loss:.4f}, "
-                        f"accum: {accum_batch_size}/{self.hparams.batch_size}"
-                    )
-                if window_entry_loss == 0.0:
-                    total_batches_first_step = int(self._ddp_reduce(batch_count))
-                    window_entry_loss = global_loss_sum / total_batches_first_step
-                accum_batch_size = 0  # reset on *all* ranks
-
-            # ------------------------------------------------------------------ #
-            # 5. Outer-loop window control
-            # ------------------------------------------------------------------ #
-            need_sync = window_changed or inner_step_count == self.hparams.inner_steps
-            local_done = torch.tensor(
-                [need_sync],
-                dtype=torch.uint8,
-                device=self.device,
-            )
-
-            if self.world_size > 1:
-                dist.all_reduce(local_done, op=dist.ReduceOp.MAX)
-            global_done = bool(local_done.item())
-
-            if global_done:
-                if self.is_master:
-                    tplr.logger.info("<Exhausted window: exiting synchronously>")
-                for _ in range(inner_step_count, self.hparams.inner_steps):
-                    self.inner_scheduler.step()
-                break
-
-        await asyncio.sleep(0)
-
-        # ------------------------------------------------------------------ #
-        # 6. parameter offloading logic
-        # ------------------------------------------------------------------ #
-        with torch.no_grad():
-            for saved_param, p in zip(params_offloaded, self.bare_model.parameters()):
-                saved_param = saved_param.to(p.device, non_blocking=True)
-
-                # (a) pseudo-gradient for outer step
-                p.grad = saved_param - p.data
-
-                # (b) ***in-place*** restore original weights
-                p.data.copy_(saved_param)
-
-        # ---------------------------------------------------------------------- #
-        # 7. Return aggregated metrics
-        # ---------------------------------------------------------------------- #
-        batch_count = int(self._ddp_reduce(batch_count))
-        return {
-            "total_loss": global_loss_sum,  # cross-rank sum
-            "window_entry_loss": window_entry_loss,
-            "batch_count": batch_count,  # cross-rank sum
-            "batch_tokens": global_tokens,  # cross-rank sum
-        }
-
     def _get_offloaded_param(self):
         """Get a copy of current parameters and offload them to CPU"""
-        return [
-            param.data.detach().clone().to("cpu")
-            for param in self.bare_model.parameters()
-        ]
+        params_offloaded = []
+        param_info = []  # Store DTensor info for restoration
+
+        for param in self.bare_model.parameters():
+            if isinstance(param, DT):
+                # Get the local TP shard and store the spec
+                local_param = param.to_local()
+                params_offloaded.append(local_param.detach().clone().to("cpu"))
+                param_info.append(
+                    {  # Store the DTensor placement info
+                        "is_dtensor": True,
+                        "device_mesh": param.device_mesh,
+                        "placements": param.placements,
+                        "local_shape": local_param.shape,
+                    }
+                )
+            else:
+                # For regular tensors
+                params_offloaded.append(param.data.detach().clone().to("cpu"))
+                param_info.append({"is_dtensor": False})
+
+        return params_offloaded, param_info
 
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""
@@ -1102,48 +896,6 @@ class Miner(BaseNode):
         tplr.logger.info(
             f"After cleanup - GPU reserved: {torch.cuda.memory_reserved(self.device) / 1024**3:.2f} GB"
         )
-
-    def set_dataloader(self, validator: bool = False) -> None:
-        # put here for now...
-        self.dataset = self.dataset_manager.active_dataset
-
-        shared_args = dict(
-            dataset=self.dataset,
-            uid=self.uid,
-            window=self.current_window,
-            steps_per_window=self.hparams.inner_steps,
-            micro_bs=self.hparams.micro_batch_size,
-            rank=self.rank,
-            world_size=self.world_size,
-        )
-
-        if validator:
-            SamplerClass = tplr.EvalSampler
-            kwargs = shared_args | dict(
-                batch_size=self.hparams.target_batch_size,
-                validation_bs=self.hparams.validator_sample_micro_bs
-                * self.hparams.micro_batch_size,
-            )
-        else:
-            SamplerClass = tplr.MinerSampler
-            kwargs = shared_args | dict(
-                micro_bs=self.hparams.micro_batch_size,
-                batch_size=self.hparams.batch_size,
-                target_batch_size=self.hparams.target_batch_size,
-            )
-
-        self.sampler = SamplerClass(**kwargs)
-
-        self.loader = torch.utils.data.DataLoader(
-            dataset=self.dataset,
-            sampler=self.sampler,
-            batch_size=self.hparams.micro_batch_size,
-            num_workers=10,
-            pin_memory=True,
-            prefetch_factor=2,
-        )
-        tplr.logger.info("[Run] dataset + sampler ready")
-        return
 
 
 # Start miner.

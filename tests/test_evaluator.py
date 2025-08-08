@@ -29,12 +29,12 @@ def setup_evaluator_with_mocks():
         patch("tplr.load_hparams"),
         patch("bittensor.wallet"),
         patch("transformers.models.llama.LlamaForCausalLM"),
-        patch("tplr.compress.CompressDCT"),
+        patch("tplr.compress.TopKCompressor"),
         patch("torch.optim.SGD"),
         patch("torch.optim.lr_scheduler.LinearLR"),
         patch("torch.optim.lr_scheduler.CosineAnnealingWarmRestarts"),
         patch("torch.optim.lr_scheduler.SequentialLR"),
-        patch("tplr.compress.TransformDCT"),
+        patch("tplr.compress.ChunkingTransformer"),
         patch("tplr.comms.Comms"),
     ):
         evaluator = Evaluator.__new__(Evaluator)

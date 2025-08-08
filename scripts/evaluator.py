@@ -45,16 +45,16 @@ import json
 import os
 import shutil
 import time
-import typing
 from pathlib import Path
-from typing import Optional, Tuple
 
 import bittensor as bt
 import torch
 from torch.utils.data import DataLoader
-from transformers.models.llama import LlamaForCausalLM
+from torchtitan.components.loss import cross_entropy_loss
+from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 
 import tplr
+from tplr.model_factory import initialize_torchtitan_model
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"
@@ -156,7 +156,7 @@ class Evaluator:
     Attributes:
         config (bt.Config): Configuration object containing CLI arguments
         netuid (int): Network UID for the subnet
-        model (LlamaForCausalLM): The language model being evaluated
+        model (TitanLlama): The TorchTitan language model being evaluated
         metrics_logger (MetricsLogger): Logger for InfluxDB metrics
         wandb_run: Weights & Biases run instance
         last_eval_window (int): Last evaluated window number
@@ -189,11 +189,13 @@ class Evaluator:
         # Mock for the comms class
         self.uid = 1
 
-        self.model = LlamaForCausalLM(config=self.hparams.model_config)
-        self.model = typing.cast(
-            LlamaForCausalLM, torch.compile(self.model, mode="default")
+        # Initialize TorchTitan model using model factory
+        self.model = initialize_torchtitan_model(
+            hparams=self.hparams,
+            role="evaluator",
+            device="cpu",
+            world_size=1,
         )
-        self.model.to("cpu")
 
         self.tokenizer = self.hparams.tokenizer
         self.comms = tplr.comms.Comms(
@@ -230,7 +232,7 @@ class Evaluator:
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
         self.buckets = self.comms.get_all_buckets()
 
-    async def load_latest_model(self) -> Tuple[bool, dict, int, int]:
+    async def load_latest_model(self) -> tuple[bool, dict, int, int]:
         """Load and prepare the latest model checkpoint for evaluation.
 
         This method:
@@ -253,10 +255,14 @@ class Evaluator:
             )
             return (False, {}, 0, 0)
 
-        tplr.logger.info(f"[DEBUG] get_latest_checkpoint() result: {result}")
+        tplr.logger.debug(f"get_latest_checkpoint() result: {result}")
 
         checkpoint_data, _ = result
-        tplr.logger.info(f"[DEBUG] Checkpoint data: {checkpoint_data}")
+        tplr.logger.debug(f"Checkpoint data: {checkpoint_data}")
+
+        if not isinstance(checkpoint_data, dict):
+            tplr.logger.error("Checkpoint data is not a dictionary")
+            return (False, {}, 0, 0)
 
         checkpoint_start_window = checkpoint_data.get("start_window")
         checkpoint_current_window = checkpoint_data.get("current_window", None)
@@ -278,20 +284,28 @@ class Evaluator:
 
         # Debug: Check checkpoint model dimensions
         if "model_state_dict" in checkpoint_data:
-            k_proj_key = "_orig_mod.model.layers.0.self_attn.k_proj.weight"
-            if k_proj_key in checkpoint_data["model_state_dict"]:
-                k_proj_shape = checkpoint_data["model_state_dict"][k_proj_key].shape
-                tplr.logger.info(f"[DEBUG] Checkpoint k_proj shape: {k_proj_shape}")
-                tplr.logger.info(
-                    f"[DEBUG] Expected k_proj shape: {self.model.model.layers[0].self_attn.k_proj.weight.shape}"
-                )
+            model_state = checkpoint_data["model_state_dict"]
+            if isinstance(model_state, dict):
+                # TorchTitan uses different key names: layers.0.attention.wk
+                k_proj_key = "_orig_mod.layers.0.attention.wk.weight"
+                if k_proj_key in model_state:
+                    k_proj_shape = model_state[k_proj_key].shape
+                    tplr.logger.debug(f"Checkpoint k_proj shape: {k_proj_shape}")
+                    # TorchTitan model structure
+                    expected_shape = next(
+                        (
+                            v.shape
+                            for k, v in self.model.state_dict().items()
+                            if "layers.0.attention.wk" in k
+                        ),
+                        None,
+                    )
+                    if expected_shape:
+                        tplr.logger.debug(f"Expected k_proj shape: {expected_shape}")
 
-        self.model.load_state_dict(
-            {
-                k: v.to("cpu")
-                for k, v in checkpoint_data["model_state_dict"].items()  # type: ignore
-            }
-        )
+                self.model.load_state_dict(
+                    {k: v.to("cpu") for k, v in model_state.items()}
+                )
         self.model.to("cpu")  # type: ignore
 
         global_step = int(checkpoint_current_window) - int(checkpoint_start_window)
@@ -462,7 +476,7 @@ class Evaluator:
             f"Reported summary for global step {global_step} (block: {block_number}, window: {checkpoint_window})"
         )
 
-    async def _evaluate(self) -> Optional[int]:
+    async def _evaluate(self) -> int | None:
         """Execute benchmark evaluation on the current model.
 
         Workflow:
@@ -473,7 +487,7 @@ class Evaluator:
         5. Clean up temporary files
 
         Returns:
-            Optional[int]: Global step number if successful, None on failure
+            int | None: Global step number if successful, None on failure
         """
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
@@ -484,16 +498,24 @@ class Evaluator:
 
         (
             success,
-            checkpoint_data,
+            _,
             checkpoint_window,
             global_step,
         ) = await self.load_latest_model()
 
-        if not success:
+        if not success and self.last_eval_window > 0:
+            # We've already evaluated something and no new checkpoint is available
             tplr.logger.info(
                 f"No new checkpoint to evaluate (last evaluated window: {self.last_eval_window})"
             )
             return global_step
+        elif not success and self.last_eval_window == 0:
+            # First run with no checkpoint - use initialized model
+            tplr.logger.info(
+                "Using initialized model for evaluation (no checkpoint available)"
+            )
+            checkpoint_window = 0
+            global_step = 0
 
         tplr.logger.info(
             f"Starting benchmark run at global step {global_step} (checkpoint window: {checkpoint_window})"
@@ -507,7 +529,11 @@ class Evaluator:
         )
 
         os.makedirs(MODEL_PATH, exist_ok=True)
-        self.model.save_pretrained(MODEL_PATH)
+
+        # Save TorchTitan model for lm-eval
+        # Since TorchTitan doesn't have save_pretrained, we save the state dict
+        # and create a simple wrapper for lm-eval compatibility
+        self._save_model_for_lm_eval(MODEL_PATH)
         self.hparams.tokenizer.save_pretrained(MODEL_PATH)
 
         results_dir = os.path.join(MODEL_PATH, "results")
@@ -584,6 +610,138 @@ class Evaluator:
         )
         return global_step
 
+    def _save_model_for_lm_eval(self, save_path: str) -> None:
+        """Save TorchTitan model in a format compatible with lm-eval.
+
+        Since TorchTitan doesn't have save_pretrained(), we convert the model
+        to HuggingFace format temporarily for lm-eval compatibility.
+        """
+        try:
+            # Create HuggingFace config from our hparams
+            # Get the actual intermediate size from the model instead of hparams
+            # TorchTitan calculates this as a multiple of 256
+            titan_state_dict = self.model.state_dict()
+            actual_intermediate_size = None
+            for key in [
+                "_orig_mod.layers.0.feed_forward.w1.weight",
+                "layers.0.feed_forward.w1.weight",
+            ]:
+                if key in titan_state_dict:
+                    actual_intermediate_size = titan_state_dict[key].shape[0]
+                    break
+
+            if actual_intermediate_size is None:
+                # Fallback to hparams if we can't determine from model
+                actual_intermediate_size = self.hparams.model_config.intermediate_size
+                tplr.logger.warning(
+                    f"Could not determine intermediate_size from model, using hparams value: {actual_intermediate_size}"
+                )
+            else:
+                tplr.logger.info(
+                    f"Using actual intermediate_size from model: {actual_intermediate_size}"
+                )
+
+            hf_config = LlamaConfig(
+                vocab_size=self.hparams.model_config.vocab_size,
+                hidden_size=self.hparams.model_config.hidden_size,
+                intermediate_size=actual_intermediate_size,
+                num_hidden_layers=self.hparams.model_config.num_hidden_layers,
+                num_attention_heads=self.hparams.model_config.num_attention_heads,
+                num_key_value_heads=getattr(
+                    self.hparams.model_config,
+                    "num_key_value_heads",
+                    self.hparams.model_config.num_attention_heads,
+                ),
+                hidden_act=self.hparams.model_config.hidden_act,
+                max_position_embeddings=self.hparams.sequence_length,
+                initializer_range=self.hparams.model_config.initializer_range,
+                rms_norm_eps=self.hparams.model_config.rms_norm_eps,
+                use_cache=False,
+                rope_theta=getattr(self.hparams.model_config, "rope_theta", 10000.0),
+                rope_scaling=None,
+                attention_bias=False,
+                attention_dropout=0.0,
+                pretraining_tp=1,
+            )
+
+            # Create a temporary HuggingFace model
+            temp_hf_model = LlamaForCausalLM(hf_config)
+
+            # Get TorchTitan state dict
+            titan_state_dict = self.model.state_dict()
+
+            # Map TorchTitan keys to HuggingFace keys
+            # TorchTitan uses slightly different naming conventions
+            hf_state_dict = {}
+            for key, value in titan_state_dict.items():
+                # Remove any compilation prefixes
+                new_key = key.replace("_orig_mod.", "")
+
+                # Map TorchTitan layer names to HuggingFace format
+                # TorchTitan: layers.0.attention.wq -> HuggingFace: model.layers.0.self_attn.q_proj
+                if "layers." in new_key:
+                    # Handle attention layers
+                    new_key = new_key.replace("attention.wq", "self_attn.q_proj")
+                    new_key = new_key.replace("attention.wk", "self_attn.k_proj")
+                    new_key = new_key.replace("attention.wv", "self_attn.v_proj")
+                    new_key = new_key.replace("attention.wo", "self_attn.o_proj")
+
+                    # Handle FFN layers
+                    new_key = new_key.replace("feed_forward.w1", "mlp.gate_proj")
+                    new_key = new_key.replace("feed_forward.w2", "mlp.down_proj")
+                    new_key = new_key.replace("feed_forward.w3", "mlp.up_proj")
+
+                    # Handle norm layers
+                    new_key = new_key.replace("attention_norm", "input_layernorm")
+                    new_key = new_key.replace("ffn_norm", "post_attention_layernorm")
+
+                    # Add model. prefix for layers
+                    new_key = "model." + new_key
+
+                # Handle embeddings
+                new_key = new_key.replace("tok_embeddings", "model.embed_tokens")
+
+                # Handle final norm
+                new_key = new_key.replace("norm", "model.norm")
+
+                # Handle output projection
+                new_key = new_key.replace("output", "lm_head")
+
+                hf_state_dict[new_key] = value.cpu()
+
+            # Load the mapped state dict into HuggingFace model
+            # Use strict=False to ignore missing keys in case of minor differences
+            temp_hf_model.load_state_dict(hf_state_dict, strict=False)
+
+            # Save the HuggingFace model
+            temp_hf_model.save_pretrained(save_path)
+
+            tplr.logger.info(
+                f"Successfully saved TorchTitan model in HuggingFace format to {save_path}"
+            )
+
+        except Exception as e:
+            tplr.logger.warning(f"Could not convert to HuggingFace format: {e}")
+            tplr.logger.info("Falling back to saving raw checkpoint...")
+
+            # Fallback: Save raw state dict and config
+            import json
+
+            torch.save(
+                self.model.state_dict(), os.path.join(save_path, "pytorch_model.bin")
+            )
+
+            # Save minimal config for reference
+            config_dict = {
+                "model_type": "llama",
+                "vocab_size": self.hparams.model_config.vocab_size,
+                "hidden_size": self.hparams.model_config.hidden_size,
+                "num_hidden_layers": self.hparams.model_config.num_hidden_layers,
+                "num_attention_heads": self.hparams.model_config.num_attention_heads,
+            }
+            with open(os.path.join(save_path, "config.json"), "w") as f:
+                json.dump(config_dict, f, indent=2)
+
     async def _evaluate_custom(
         self, global_step: int, checkpoint_window: int, block_number: int
     ) -> None:
@@ -647,11 +805,20 @@ class Evaluator:
                         self.config.device, dtype=torch.long, non_blocking=True
                     )
                     labels = input_ids.clone()
+                    labels[:, :-1] = input_ids[:, 1:]  # shift left by one
+                    labels[:, -1] = self.tokenizer.pad_token_id
+                    labels = torch.where(
+                        labels == self.tokenizer.pad_token_id, -100, labels
+                    )
+                    # Get device from model parameters (more robust for TorchTitan)
+                    model_device = next(self.model.parameters()).device
                     with torch.autocast(
-                        device_type=self.model.device.type, dtype=torch.bfloat16
+                        device_type=model_device.type, dtype=torch.bfloat16
                     ):
-                        outputs = self.model(input_ids=input_ids, labels=labels)
-                    loss = outputs.loss
+                        # TorchTitan model returns logits directly
+                        logits = self.model(input_ids)
+                    # Calculate loss using cross_entropy_loss from TorchTitan
+                    loss = cross_entropy_loss(logits, labels)
 
                     # Accumulate loss, weighted by the number of tokens
                     num_tokens = (labels != -100).sum().item()
@@ -707,6 +874,8 @@ class Evaluator:
         try:
             self.comms.start_commitment_fetcher()
             self.comms.start_background_tasks()
+
+            await self._evaluate()
 
             while not self.stop_event.is_set():
                 await self.update_state()

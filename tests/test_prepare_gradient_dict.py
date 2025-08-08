@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from tplr.compress import pack_12bit_indices
 from tplr.neurons import prepare_gradient_dict
 
 
@@ -15,7 +16,10 @@ class DummyHparams:
 
 class DummyCompressor:
     def compress(self, encoded_tensor, topk):
-        dummy_idxs = "dummy_idxs"
+        # Create 12-bit packed format for dummy indices
+        indices = torch.tensor([0, 1], dtype=torch.long)  # Even count
+        packed_data = pack_12bit_indices(indices)
+        dummy_idxs = packed_data
         dummy_vals = "dummy_vals"
         dummy_xshape = "dummy_xshape"
         dummy_totalk = "dummy_totalk"
@@ -88,6 +92,13 @@ def test_return_structure_and_types(caplog):
     assert "weightidxs" in gradient
     assert "weightvals" in gradient
     assert "weightquant_params" in gradient
+    # Verify that weightidxs is in 12-bit packed format (uint8 tensor)
+    assert isinstance(gradient["weightidxs"], torch.Tensor), (
+        "weightidxs should be a tensor for 12-bit packed format"
+    )
+    assert gradient["weightidxs"].dtype == torch.uint8, (
+        "weightidxs should be uint8 for 12-bit packed format"
+    )
     # Verify that the metadata key exists
     assert "metadata" in gradient
     # Check that metadata equals the expected dictionary.
@@ -139,7 +150,16 @@ def test_error_feedback_decay_and_gradient_accumulation():
         """compress() returns placeholders; decompress() returns zeros."""
 
         def compress(self, encoded_tensor, topk):
-            return [], [], (), 0, None  # idxs, vals, xshape, totalk, quant
+            # Return empty 12-bit packed format
+            empty_packed = torch.zeros(0, dtype=torch.uint8)
+            empty_shape = torch.Size([0])
+            return (
+                (empty_packed, empty_shape),
+                [],
+                (),
+                0,
+                None,
+            )  # idxs, vals, xshape, totalk, quant
 
         def decompress(self, p, idxs, vals, xshape, totalk, quant_params):
             return torch.zeros_like(p)
@@ -218,8 +238,11 @@ def test_compressor_and_transformer_calls():
 
         def compress(self, encoded_tensor, topk):
             self.called_args = (encoded_tensor.clone(), topk)
+            # Create 12-bit packed format for recording
+            indices = torch.tensor([0, 1], dtype=torch.long)
+            packed_data = pack_12bit_indices(indices)
             return (
-                "recorded_dummy_idxs",
+                packed_data,  # 12-bit packed format
                 "recorded_dummy_vals",
                 "recorded_dummy_xshape",
                 "recorded_dummy_totalk",
@@ -303,7 +326,13 @@ def test_compressor_and_transformer_calls():
     )
 
     # 3. Dummy compressor return values appear in the output dictionaries
-    assert gradient["weightidxs"] == "recorded_dummy_idxs"
+    # Check that weightidxs is in 12-bit packed format (uint8 tensor)
+    assert isinstance(gradient["weightidxs"], torch.Tensor), (
+        "weightidxs should be a tensor for 12-bit packed format"
+    )
+    assert gradient["weightidxs"].dtype == torch.uint8, (
+        "weightidxs should be uint8 for 12-bit packed format"
+    )
     assert gradient["weightvals"] == "recorded_dummy_vals"
     assert xshapes["weight"] == "recorded_dummy_xshape"
     assert totalks["weight"] == "recorded_dummy_totalk"

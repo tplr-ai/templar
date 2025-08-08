@@ -48,5 +48,31 @@
     "quantization_bins": 16,
     "quantization_range": 6,
     "burn_rate": 0.8,
-    "idx_overlap_threshold": 0.5
+    "idx_overlap_threshold": 0.4,
+  "torchtitan": {
+    "tp_degree": 1,
+    "pp_degree": 1,
+    "cp_degree": 1,
+
+    "dp_replicate": 8,
+    "dp_shard": 1,
+
+    "compile": false,
+    "enable_cpu_offload": false,
+
+    "mixed_precision_param": "float32",
+    "mixed_precision_reduce": "float32",
+
+    "enable_async_tensor_parallel": false,
+    "disable_loss_parallel": true,
+    "fsdp_reshard_after_forward": "default",
+    "enable_compiled_autograd": false,
+
+    "float8_recipe_name": null,
+
+    "activation_checkpoint": {
+      "mode": "selective",
+      "option": "op"
+    }
+  }
 }

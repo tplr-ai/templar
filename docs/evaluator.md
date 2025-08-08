@@ -42,6 +42,45 @@ The evaluator requires:
 
 ## Installation
 
+### Option 1: Docker (Recommended)
+
+Run the evaluator using Docker Compose:
+
+1. **Configure environment variables** in your `.env` file:
+   ```bash
+   # Required variables
+   WALLET_NAME=your_wallet_name
+   WALLET_HOTKEY=your_hotkey
+   WANDB_API_KEY=your_wandb_key
+   NETUID=268  # or your target netuid
+   
+   # R2 Dataset Access (required)
+   R2_DATASET_ACCOUNT_ID=your_account_id
+   R2_DATASET_BUCKET_NAME=your_bucket_name
+   R2_DATASET_READ_ACCESS_KEY_ID=your_access_key
+   R2_DATASET_READ_SECRET_ACCESS_KEY=your_secret_key
+   
+   # Optional evaluator-specific variables
+   EVALUATOR_GPU_ID=7  # GPU device ID (default: 7)
+   INFLUXDB_TOKEN=your_influxdb_token  # For metrics logging
+   CUSTOM_EVAL_PATH=eval_dataset  # Custom evaluation dataset path
+   EVAL_INTERVAL=600  # Seconds between evaluations (default: 10 min)
+   EVAL_BATCH_SIZE=8  # Batch size for evaluation
+   EVAL_TASKS=arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu
+   ```
+
+2. **Start the evaluator service**:
+   ```bash
+   docker compose -f docker/compose.yml up -d evaluator
+   ```
+
+3. **Monitor logs**:
+   ```bash
+   docker compose -f docker/compose.yml logs -f evaluator
+   ```
+
+### Option 2: Local Installation
+
 1. **Install dependencies**:
    ```bash
    # Install uv if not already installed
@@ -60,14 +99,29 @@ The evaluator requires:
 
 ## Usage
 
-### Basic Execution
+### Docker Usage
+
+When using Docker, the evaluator runs automatically based on your configuration. To modify behavior:
+
+```bash
+# Stop the evaluator
+docker compose -f docker/compose.yml stop evaluator
+
+# Update .env file with new configuration
+# Then restart
+docker compose -f docker/compose.yml up -d evaluator
+```
+
+### Local Usage
+
+#### Basic Execution
 
 Run the evaluator with default settings:
 ```bash
 uv run ./scripts/evaluator.py
 ```
 
-### Custom Configuration
+#### Custom Configuration
 
 Run with specific parameters:
 ```bash
@@ -77,6 +131,17 @@ uv run scripts/evaluator.py \
   --tasks "arc_challenge,winogrande,piqa" \
   --eval_interval 300 \
   --actual_batch_size 16
+```
+
+#### Custom Evaluation Dataset
+
+Run with a custom evaluation dataset for loss and perplexity calculation:
+```bash
+uv run scripts/evaluator.py \
+  --netuid 3 \
+  --device cuda:0 \
+  --custom_eval_path eval_dataset \
+  --eval_interval 600
 ```
 
 ### Command-Line Arguments
@@ -91,6 +156,7 @@ uv run scripts/evaluator.py \
 | `--checkpoint_path` | checkpoints/ | Directory for checkpoint storage |
 | `--uid` | None | Override the wallet's UID |
 | `--skip-gaps` | False | Skip gaps in the evaluation process |
+| `--custom_eval_path` | None | Relative path to custom evaluation dataset bins for loss and perplexity calculation |
 
 ### Evaluation Tasks
 

@@ -1,6 +1,8 @@
 import abc
 import asyncio
+import contextlib
 import functools
+import os
 import signal
 import threading
 import time
@@ -10,13 +12,17 @@ from typing import Any, cast
 
 import bittensor as bt
 import torch.distributed as dist
+import torch.profiler as tp
 import websockets.exceptions  # ensure import before threads start
 from bittensor.core.subtensor import ScaleObj
 
 import tplr
 
+CPU_COUNT = os.cpu_count() or 4
+CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
-class BaseNode:
+
+class BaseNode(abc.ABC):
     # ――― attributes that subclasses will overwrite ―――
     executor: ThreadPoolExecutor
     world_size: int = 1
@@ -48,6 +54,9 @@ class BaseNode:
         self.current_window = 0
         self.subtensor_rpc: bt.Subtensor | None = None
         self.subtensor_client: bt.Subtensor | None = None
+
+        # ── optional torch profiler (initialised in main) ────────────────
+        self._prof = None
         # self.config, self.world_size …  come from the concrete node
 
     async def main(self):
@@ -63,9 +72,30 @@ class BaseNode:
         t.start()
         self._threads.append(t)
 
+        # ── profiler setup (enabled only when flag > 0) ─────────────────
+        prof_ctx = contextlib.nullcontext()
+        prof_iters = int(getattr(self.config, "profile_iters", 0))
+        if prof_iters > 0 and getattr(self, "is_master", True):
+            profile_dir = getattr(self.config, "profile_dir", "./log/profiler")
+            os.makedirs(profile_dir, exist_ok=True)
+
+            self._prof = tp.profile(
+                activities=[tp.ProfilerActivity.CPU, tp.ProfilerActivity.CUDA],
+                schedule=tp.schedule(wait=0, warmup=1, active=prof_iters, repeat=1),
+                on_trace_ready=tp.tensorboard_trace_handler(profile_dir),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+            )
+            prof_ctx = self._prof  # context‑manager
+
         # subclasses do their normal work here ----------------------------
         try:
-            await self.run()
+            with prof_ctx:
+                await self.run()
+        except Exception:
+            # Catch and log the unhandled exception before shutting down.
+            tplr.logger.error("Unhandled exception in run()", exc_info=True)
         finally:
             # ensure we exit cleanly even if run() returns without CTRL-C
             if not self.stop_event.is_set():

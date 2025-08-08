@@ -9,10 +9,9 @@ import boto3
 import dotenv
 import numpy as np
 from botocore import config
+from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer
-
-from datasets import load_dataset
 
 dotenv.load_dotenv()
 

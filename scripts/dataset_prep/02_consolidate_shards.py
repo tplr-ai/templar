@@ -1,154 +1,156 @@
 import argparse
-import gc
+import asyncio
 import hashlib
+import io
 import os
 import struct
 import time
-from pathlib import Path
 
+import boto3
 import numpy as np
+from tqdm.auto import tqdm
 
-EXPECTED = {
-    "tokens": {
-        "sha256": "4c53d81b27b059e83b0cde7f97fc9877572cf5081eb0a2ebec9b0fc00e79a931",
-        "elements": 161061273600,
-    },
-    "sample_ids": {
-        "sha256": "95dcefad84cae66784a09e938d5136dcb32b326243b67389d7ca82fc3cce3f3f",
-        "elements": 78643200,
-    },
-}
+import tplr
+from neurons import miner
+from tplr import comms, hparams, sharded_dataset
 
 
-def run_preprocessing(
-    data_root: str, seq_len: int, token_dtype: np.dtype, skip_validation: bool
-) -> bool:
+def tokens_handler(x: np.ndarray) -> int:
     """
-    Consolidates .npy shards into single 'tokens.bin' and 'sample_ids.bin'.
-    Also prints a SHA-256 digest and element count for sample_ids.bin.
+    Takes the incoming numpy array and creates the sample_id
+    corresponding to that array
+
+    Args:
+        x: A numpy array representing a data slice where
+           len == seq_len
+
+    Returns:
+        The hashed representation of this slice
+    """
+    x = x.tobytes()
+    x = hashlib.blake2b(x, digest_size=8).digest()
+    x = struct.unpack("<Q", x)[0]
+    return x
+
+
+async def run_preprocessing(
+    args, seq_len: int = 2048, token_dtype: np.dtype = np.uint16
+) -> None:
+    """
+    Gathers .npy shards and creates 'sample_ids.bin' to represent the hash
+
+    Since this is now a Templar internal responsibility, no sha256 checking
     """
 
-    shards_dir = Path(data_root)
-    files = sorted(shards_dir.glob("train_*.npy"))
-    if not files:
-        raise FileNotFoundError(f"No train_*.npy shards found in {shards_dir}")
+    config = miner.Miner.miner_config()
+    comms_ = comms.Comms(
+        wallet=None,
+        config=config,
+        neuid=config.netuid,
+        hparams=hparams.load_hparams(),
+    )
+    bucket = comms_.get_own_bucket("dataset", "read")
+    tokens_file, ids_file = sharded_dataset.SharedShardedDataset.locate_shards(0)
+    if not os.path.exists(tokens_file):
+        try:
+            print("Downloading first shard")
 
-    # ── 1. Size calculation ─────────────────────────────────────────────
-    print("Calculating total size of the dataset …")
-    total_tokens = sum(np.load(f, mmap_mode="r").shape[0] for f in files)
-    total_samples = total_tokens // seq_len
-    print(f"  » tokens  : {total_tokens:,}")
-    print(f"  » samples : {total_samples:,}")
+            _ = await asyncio.create_task(
+                comms_.s3_get_object(
+                    tokens_file,
+                    bucket,
+                    load_data=False,
+                )
+            )
+            tplr.logging.info("Shard downloaded")
+        except Exception as e:
+            tplr.logger.error(e)
 
-    # Output paths
-    tokens_file = shards_dir / "tokens.bin"
-    ids_file = shards_dir / "sample_ids.bin"
-
-    # ── 2. Concatenate shards into tokens.bin ───────────────────────────
-    print(f"\n[1/2] Writing {tokens_file} …")
-    t0 = time.perf_counter()
-    tokens_mmap = np.memmap(
-        tokens_file, dtype=token_dtype, mode="w+", shape=(total_tokens,)
+    args.r2_endpoint_url = f"https://{args.r2_endpoint_url}.r2.cloudflarestorage.com"
+    session = boto3.session.Session()
+    s3_client = session.client(
+        "s3",
+        endpoint_url=args.r2_endpoint_url,
+        aws_access_key_id=args.r2_access_key_id,
+        aws_secret_access_key=args.r2_secret_access_key,
+        region_name="auto",
     )
 
-    cursor = 0
-    for i, f_path in enumerate(files, start=1):
-        shard = np.load(f_path)
-        n = shard.shape[0]
-        print(f"  • shard {i:>3}/{len(files)}  ({n:,} tokens)  → offset {cursor:,}")
-        tokens_mmap[cursor : cursor + n] = shard
-        cursor += n
-        del shard
-        gc.collect()
+    # Check existing shards in R2
+    try:
+        response = s3_client.list_objects_v2(
+            Bucket=args.r2_bucket, Prefix=os.path.join(args.r2_prefix, "train_")
+        )
+        contents = response.get("Contents", [])
+        shards = list(filter(lambda c: c["Key"].endswith(".npy"), contents))
+        shards = len(shards)
+        print(f"Shards found: {shards}")
+    except Exception as e:
+        print(f"Could not list objects in R2 bucket: {e}")
+        shards = 0
 
-    tokens_mmap.flush()
-    del tokens_mmap
-    print(f"tokens.bin written in {time.perf_counter() - t0:.1f}s")
+    file_getter = asyncio.create_task(asyncio.sleep(0))
+    for i in range(shards):
+        await file_getter
 
-    # ── 3. Compute sample IDs ───────────────────────────────────────────
-    print(f"\n[2/2] Generating {ids_file} …")
-    t1 = time.perf_counter()
+        t1 = time.perf_counter()
 
-    tokens_view = np.memmap(tokens_file, dtype=token_dtype, mode="r")
-    tok_u32 = tokens_view.view(np.uint32)  # reinterpret for 4-byte hashing
+        new_tokens_file, new_ids_file = None, None
+        if i + 1 < shards:
+            new_tokens_file, new_ids_file = (
+                sharded_dataset.SharedShardedDataset.locate_shards(i + 1)
+            )
+            file_getter = asyncio.create_task(
+                comms_.s3_get_object(
+                    new_tokens_file,
+                    bucket,
+                    load_data=False,
+                )
+            )
 
-    sample_ids = np.empty(total_samples, dtype=np.uint64)
+        tokens_view = np.memmap(tokens_file, dtype=token_dtype, mode="r")
+        tok_u32 = tokens_view.view(np.uint32)  # reinterpret for 4-byte hashing
 
-    for i in range(total_samples):
-        start = i * seq_len
-        end = start + seq_len
-        h = hashlib.blake2b(tok_u32[start:end].tobytes(), digest_size=8)
-        sample_ids[i] = struct.unpack("<Q", h.digest())[0]
+        raw_idx = np.arange(0, tok_u32.shape[0] + 1, seq_len)
+        starts = raw_idx[:-1]
+        ends = raw_idx[1:]
 
-        # Simple progress ticker every 1 % (optional)
-        if (i + 1) % max(1, total_samples // 100) == 0:
-            pct = (i + 1) / total_samples * 100
-            print(f"\r  • {pct:6.2f}% ", end="", flush=True)
+        bits = [
+            tokens_handler(tok_u32[start:end])
+            for start, end in tqdm(zip(starts, ends), total=len(starts))
+        ]
+        sample_ids = np.stack(bits).view(np.uint64)
 
-    print()  # newline after progress bar
-    sample_ids.tofile(ids_file)
-    del tokens_view, sample_ids
+        buffer = io.BytesIO()
+        np.save(buffer, sample_ids)
+        buffer.seek(0)
+
+        filename = ids_file.split("/")[-1]
+        key = os.path.join(args.r2_prefix, filename)
+        s3_client.upload_fileobj(buffer, args.r2_bucket, key)
+        tqdm.write(f"Uploaded sample_ids {i} to R2: s3://{args.r2_bucket}/{key} ")
+
+        del tokens_view, sample_ids
+        os.remove(tokens_file)
+        tokens_file = new_tokens_file
+        ids_file = new_ids_file
+
     print(f"sample_ids.bin written in {time.perf_counter() - t1:.1f}s")
 
-    # ── 4. Integrity summary and validation ─────────────────────────────
-    if not skip_validation:
-        print("\n🔍  Verifying output files …")
-
-        def sha256_file(path: Path, chunk_bytes: int = 64 << 20) -> str:
-            h = hashlib.sha256()
-            with open(path, "rb") as f:
-                while chunk := f.read(chunk_bytes):
-                    h.update(chunk)
-            return h.hexdigest()
-
-        # Calculate checksums and counts
-        t_sha = sha256_file(tokens_file)
-        t_count = os.path.getsize(tokens_file) // np.dtype(token_dtype).itemsize
-        i_sha = sha256_file(ids_file)
-        i_count = os.path.getsize(ids_file) // np.dtype(np.uint64).itemsize
-
-        print(f"tokens.bin SHA-256     : {t_sha}  ({t_count:,} elems)")
-        print(f"sample_ids.bin SHA-256 : {i_sha}  ({i_count:,} elems)")
-
-        # Validation checks
-        checks = [
-            (t_sha, EXPECTED["tokens"]["sha256"], "tokens.bin sha256"),
-            (t_count, EXPECTED["tokens"]["elements"], "tokens.bin count"),
-            (i_sha, EXPECTED["sample_ids"]["sha256"], "sample_ids.bin sha256"),
-            (i_count, EXPECTED["sample_ids"]["elements"], "sample_ids.bin count"),
-        ]
-
-        all_ok = True
-        for actual, expect, label in checks:
-            ok = actual == expect
-            all_ok &= ok
-            print(f"{label:25}: {'PASS' if ok else 'FAIL'}")
-            if not ok:
-                print(f"  expected: {expect}")
-                print(f"  actual  : {actual}")
-
-        if all_ok:
-            print("\n✅  Preprocessing complete!")
-        else:
-            print("\n❌  Preprocessing failed validation!")
-
-        return all_ok
-    else:
-        print("✅ Skipping final validation for test run.")
-        return True
+    return
 
 
-def main():
+async def main() -> None:
+    """
+    Run the process that hashes the sample_ids
+
+    Raises:
+        ValueError: If sequence_length is invalid
+    """
+
     parser = argparse.ArgumentParser(
-        description="Consolidate .npy shards into tokens.bin and sample_ids.bin",
+        description="Create sample_ids.bin for each .npy shard",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-
-    parser.add_argument(
-        "--data_root",
-        type=str,
-        default="/home/shadeform/datasets/smalldclm",
-        help="Directory containing train_*.npy shards",
     )
 
     parser.add_argument(
@@ -166,10 +168,31 @@ def main():
         help="Data type used in the shards",
     )
 
+    # R2 arguments
     parser.add_argument(
-        "--skip_validation",
-        action="store_true",
-        help="Skip the final SHA-256 and count validation. Only for testing purposes.",
+        "--r2_bucket",
+        default=os.getenv("R2_DATASET_BUCKET_NAME"),
+        help="R2 bucket name",
+    )
+    parser.add_argument(
+        "--r2_prefix",
+        default="remote/tokenized/",
+        help="R2 prefix for shards",
+    )
+    parser.add_argument(
+        "--r2_endpoint_url",
+        default=os.getenv("R2_DATASET_ACCOUNT_ID"),
+        help="R2 endpoint URL",
+    )
+    parser.add_argument(
+        "--r2_access_key_id",
+        default=os.getenv("R2_DATASET_WRITE_ACCESS_KEY_ID"),
+        help="R2 access key ID",
+    )
+    parser.add_argument(
+        "--r2_secret_access_key",
+        default=os.getenv("R2_DATASET_WRITE_SECRET_ACCESS_KEY"),
+        help="R2 secret access key",
     )
 
     args = parser.parse_args()
@@ -178,26 +201,21 @@ def main():
     token_dtype = getattr(np, args.token_dtype)
 
     # Validate inputs
-    if not Path(args.data_root).exists():
-        raise FileNotFoundError(f"Shards directory does not exist: {args.data_root}")
-
     if args.seq_len <= 0:
         raise ValueError("Sequence length must be positive")
 
     print("Configuration:")
-    print(f"  • Shards path: {args.data_root}")
+    print(f"  • Shards path: {args.r2_prefix}")
     print(f"  • Sequence length: {args.seq_len}")
     print(f"  • Token dtype: {args.token_dtype}")
     print(f"  • Skip Validation: {args.skip_validation}")
     print()
 
-    success = run_preprocessing(
-        args.data_root, args.seq_len, token_dtype, args.skip_validation
-    )
+    success = await run_preprocessing(args, args.seq_len, token_dtype)
 
     if not success:
         exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

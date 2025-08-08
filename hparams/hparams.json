@@ -80,7 +80,7 @@
     "dp_replicate": 8,
     "dp_shard": 1,
 
-    "compile": false,
+    "compile": true,
     "enable_cpu_offload": false,
 
     "mixed_precision_param": "float32",

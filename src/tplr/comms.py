@@ -29,7 +29,8 @@ from functools import partial
 
 # from .hparams import HParams
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional
+from urllib.parse import urlparse
 
 import aiofiles
 import bittensor as bt
@@ -54,6 +55,10 @@ LOCAL_TMP_DIR = "/tmp/local_store"
 PEERS_FILE_PREFIX = "peers_"
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
+
+SAFE_BUCKET_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+# Allow path-like keys. Tighten if you need to.
+SAFE_KEY_RE = re.compile(r"^[a-zA-Z0-9._/-]+$")
 
 
 class Comms(ChainManager):
@@ -381,8 +386,10 @@ class Comms(ChainManager):
         """Download object from S3 using asynchronous streaming."""
         import uuid
 
+        # Replace forward slashes in key to avoid creating subdirectories
+        safe_key = key.replace("/", "_")
         temp_file_path = os.path.join(
-            self.temp_dir, f"temp_{key}_{uuid.uuid4().hex}.pt"
+            self.temp_dir, f"temp_{safe_key}_{uuid.uuid4().hex}.pt"
         )
         s3_client = await self._get_s3_client(bucket)
         try:
@@ -431,8 +438,8 @@ class Comms(ChainManager):
 
             file_size = response["ContentLength"]  # type: ignore
 
-            # Download the object
-            if file_size <= 4 * 1024 * 1024 * 1024:  # 4GB
+            # Download the object - choose method based on file size
+            if file_size <= 1 * 1024 * 1024 * 1024:  # 1GB - use simple download
                 response = await asyncio.wait_for(
                     s3_client.get_object(Bucket=bucket.name, Key=key),
                     timeout=timeout,
@@ -443,13 +450,38 @@ class Comms(ChainManager):
                         await f.write(data)
                 success = True
             else:
-                success = await self.download_large_file(
-                    s3_client=s3_client,
-                    bucket=bucket,
-                    key=key,
-                    file_size=file_size,
-                    temp_file_path=temp_file_path,
-                )
+                # For very large files, try OS-level tools first for better performance
+                file_size_gb = file_size / (1024 * 1024 * 1024)
+                if file_size_gb > 50:  # For files > 50GB, try OS-level first
+                    tplr.logger.info(
+                        f"Large file detected ({file_size_gb:.1f}GB), trying OS-level download"
+                    )
+                    success = await self._try_os_level_download(
+                        bucket, key, temp_file_path
+                    )
+                    if success:
+                        tplr.logger.info("OS-level download completed successfully")
+                    else:
+                        tplr.logger.info(
+                            "OS-level download failed, falling back to Python implementation"
+                        )
+                        success = await self.download_large_file(
+                            s3_client=s3_client,
+                            bucket=bucket,
+                            key=key,
+                            file_size=file_size,
+                            temp_file_path=temp_file_path,
+                        )
+                else:
+                    # Use our optimized Python implementation
+                    success = await self.download_large_file(
+                        s3_client=s3_client,
+                        bucket=bucket,
+                        key=key,
+                        file_size=file_size,
+                        temp_file_path=temp_file_path,
+                    )
+
                 if not success:
                     return None
 
@@ -602,59 +634,70 @@ class Comms(ChainManager):
     async def download_large_file(
         self, s3_client, bucket: Bucket, key: str, file_size: int, temp_file_path: str
     ):
-        """Download large file using multipart download with concurrent chunks."""
+        """Download large file using optimized streaming with resume capability."""
         try:
-            # Determine optimal chunk size and concurrency
-            gpu_available = torch.cuda.is_available()
-            if gpu_available:
-                gpu_mem = torch.cuda.get_device_properties(0).total_memory
-                max_workers = min(torch.cuda.device_count() * 4, 16)
-                chunk_size = min(
-                    max(
-                        5 * 1024 * 1024,  # Minimum 5MB for S3 multipart
-                        gpu_mem // (max_workers * 4),
-                    ),
-                    5 * 1024 * 1024 * 1024,  # Maximum 5GB
-                )
-            else:
-                cpu_count = os.cpu_count() or 1
-                max_workers = min(cpu_count * 4, 16)
-                chunk_size = min(
-                    max(
-                        5 * 1024 * 1024,
-                        file_size // (max_workers * 2),
-                    ),
-                    5 * 1024 * 1024 * 1024,
+            # Centralised parameter selection (no logic duplication)
+            params = self._calc_download_params(
+                file_size, os.getenv("DOWNLOAD_MAX_WORKERS")
+            )
+            chunk_size = params["chunk_size"]
+            max_workers = params["max_workers"]
+            total_chunks = params["total_chunks"]
+            file_size_gb = params["file_size_gb"]
+
+            tplr.logger.info(
+                f"Downloading {file_size_gb:.1f}GB file with {chunk_size // (1024 * 1024)}MB chunks, {max_workers} workers"
+            )
+
+            # Resume capability - check for existing partial file
+            resume_info = await self._get_download_resume_info(
+                temp_file_path, total_chunks, chunk_size, file_size
+            )
+            downloaded_chunks = resume_info["completed_chunks"]
+            remaining_chunks = resume_info["remaining_chunks"]
+
+            if downloaded_chunks:
+                tplr.logger.info(
+                    f"Resuming download: {len(downloaded_chunks)}/{total_chunks} chunks already completed"
                 )
 
-            total_chunks = math.ceil(file_size / chunk_size)
-            max_workers = min(max_workers, total_chunks)
-            semaphore = asyncio.Semaphore(max_workers)
-
-            # Create the file with the correct size
+            # Create directory if needed
             target_directory = os.path.dirname(temp_file_path)
             if target_directory:
                 os.makedirs(target_directory, exist_ok=True)
 
-            async with aiofiles.open(temp_file_path, "wb") as f:
-                await f.truncate(file_size)
+            # Use a memory-efficient approach - don't pre-allocate the entire file
+            # Instead, create sparse file or extend as needed
+            if not os.path.exists(temp_file_path):
+                # Create file
+                async with aiofiles.open(temp_file_path, "wb") as f:
+                    pass  # Just create the file
 
             # Create progress bar
+            already_downloaded = sum(
+                chunk["size"] for chunk in downloaded_chunks.values()
+            )
             pbar = std_tqdm(
                 total=file_size,
+                initial=already_downloaded,
                 unit="B",
                 unit_scale=True,
                 desc=f"Downloading {key} ({max_workers} workers)",
             )
 
-            downloaded_chunks = {}
+            # Memory-controlled semaphore to prevent excessive memory usage
+            download_semaphore = asyncio.Semaphore(max_workers)
 
-            async def download_chunk(chunk_number: int, max_retries: int = 3):
-                """Download a specific chunk with retries."""
+            async def download_chunk_streaming(chunk_number: int, max_retries: int = 3):
+                """Download chunk directly to file using streaming (no data loss, no over-read)."""
+                if chunk_number in downloaded_chunks:
+                    return chunk_number
+
                 for attempt in range(max_retries):
-                    async with semaphore:
+                    async with download_semaphore:
                         start = chunk_number * chunk_size
                         end = min(start + chunk_size, file_size) - 1
+                        expected_len = end - start + 1
 
                         try:
                             response = await s3_client.get_object(
@@ -663,46 +706,87 @@ class Comms(ChainManager):
                                 Range=f"bytes={start}-{end}",
                             )
 
-                            async with response["Body"] as stream:  # type: ignore
-                                chunk_data = await stream.read()
+                            bytes_written = 0
+                            buffer_size = min(8 * 1024 * 1024, expected_len)  # ≤ 8MB
 
-                            # Verify chunk size matches expected
-                            chunk_len = len(chunk_data)
-                            expected_len = end - start + 1
-                            if chunk_len != expected_len:
+                            async with aiofiles.open(temp_file_path, "rb+") as f:
+                                await f.seek(start)
+                                stream = response[
+                                    "Body"
+                                ]  # aiobotocore AIOStreamingBody
+                                try:
+                                    while bytes_written < expected_len:
+                                        to_read = min(
+                                            buffer_size, expected_len - bytes_written
+                                        )
+                                        chunk = await stream.read(to_read)
+                                        if not chunk:
+                                            raise Exception(
+                                                f"Unexpected EOF in range {start}-{end}; "
+                                                f"wrote {bytes_written} of {expected_len}"
+                                            )
+                                        await f.write(chunk)
+                                        bytes_written += len(chunk)
+                                finally:
+                                    # Return connection to pool properly
+                                    if hasattr(stream, "release_conn"):
+                                        try:
+                                            await stream.release_conn()
+                                        except TypeError:
+                                            # some versions define it sync
+                                            stream.release_conn()
+                                    else:
+                                        # fallback: sync close
+                                        try:
+                                            stream.close()
+                                        except Exception:
+                                            pass
+
+                            if bytes_written != expected_len:
                                 raise Exception(
-                                    f"Chunk size mismatch: got {chunk_len}, expected {expected_len}"
+                                    f"Chunk write mismatch: wrote {bytes_written}, expected {expected_len}"
                                 )
+                            pbar.update(expected_len)
 
-                            async with aiofiles.open(temp_file_path, "rb+") as f2:
-                                await f2.seek(start)
-                                await f2.write(chunk_data)
-
-                            pbar.update(chunk_len)
                             downloaded_chunks[chunk_number] = {
                                 "start": start,
                                 "end": end + 1,
-                                "size": chunk_len,
+                                "size": bytes_written,
                             }
-
                             return chunk_number
 
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as e:
                             tplr.logger.error(
                                 f"Error downloading chunk {chunk_number} (attempt {attempt + 1}/{max_retries}): {e}"
                             )
-                            if attempt == max_retries - 1:  # Last attempt
+                            if attempt == max_retries - 1:
                                 raise
-                            await asyncio.sleep(
-                                1 * (attempt + 1)
-                            )  # Exponential backoff
+                            await asyncio.sleep((2**attempt) + random.uniform(0, 1))
 
             try:
-                tasks = [
-                    asyncio.create_task(download_chunk(i)) for i in range(total_chunks)
-                ]
-                await asyncio.gather(*tasks)
+                # Download remaining chunks
+                if remaining_chunks:
+                    tasks = [
+                        asyncio.create_task(download_chunk_streaming(c))
+                        for c in remaining_chunks
+                    ]
+                    try:
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        # propagate first real error (skip CancelledError/None)
+                        for r in results:
+                            if isinstance(r, Exception) and not isinstance(
+                                r, asyncio.CancelledError
+                            ):
+                                raise r
+                    finally:
+                        # ➌ make sure **all** tasks are finished before we return
+                        for t in tasks:
+                            t.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
 
+                # Final verification
                 if len(downloaded_chunks) != total_chunks:
                     missing_chunks = set(range(total_chunks)) - set(
                         downloaded_chunks.keys()
@@ -717,6 +801,14 @@ class Comms(ChainManager):
                         f"Downloaded size ({downloaded_size}) != expected size ({file_size})"
                     )
 
+                # Verify file integrity
+                actual_file_size = os.path.getsize(temp_file_path)
+                if actual_file_size != file_size:
+                    raise Exception(
+                        f"File size mismatch: {actual_file_size} != {file_size}"
+                    )
+
+                tplr.logger.info(f"Successfully downloaded {file_size_gb:.1f}GB file")
                 return True
 
             finally:
@@ -727,6 +819,218 @@ class Comms(ChainManager):
         except Exception as e:
             tplr.logger.error(f"Error in download_large_file for {key}: {e}")
             return False
+
+    async def _get_download_resume_info(
+        self, temp_file_path: str, total_chunks: int, chunk_size: int, file_size: int
+    ):
+        """Check existing partial file and determine which chunks need to be downloaded."""
+        completed_chunks = {}
+        remaining_chunks = list(range(total_chunks))
+
+        if not os.path.exists(temp_file_path):
+            return {
+                "completed_chunks": completed_chunks,
+                "remaining_chunks": remaining_chunks,
+            }
+
+        try:
+            current_file_size = os.path.getsize(temp_file_path)
+            if current_file_size == 0:
+                return {
+                    "completed_chunks": completed_chunks,
+                    "remaining_chunks": remaining_chunks,
+                }
+
+            # For resume capability, we need to verify which chunks are complete
+            # We'll do a basic verification by checking file size and assuming
+            # sequential chunks are complete up to the current size
+            completed_bytes = min(current_file_size, file_size)
+            completed_full_chunks = completed_bytes // chunk_size
+
+            # Mark completed chunks
+            for chunk_num in range(min(completed_full_chunks, total_chunks)):
+                start = chunk_num * chunk_size
+                end = min(start + chunk_size, file_size)
+                completed_chunks[chunk_num] = {
+                    "start": start,
+                    "end": end,
+                    "size": end - start,
+                }
+                if chunk_num in remaining_chunks:
+                    remaining_chunks.remove(chunk_num)
+
+            # If there's a partial chunk at the end, we'll re-download it
+            # This is safer than trying to resume from the middle of a chunk
+
+            tplr.logger.debug(
+                f"Resume analysis: {len(completed_chunks)}/{total_chunks} chunks verified complete"
+            )
+
+        except Exception as e:
+            tplr.logger.warning(
+                f"Error analyzing partial file for resume: {e}. Starting fresh download."
+            )
+            # If we can't analyze the partial file, start fresh
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+            completed_chunks = {}
+            remaining_chunks = list(range(total_chunks))
+
+        return {
+            "completed_chunks": completed_chunks,
+            "remaining_chunks": remaining_chunks,
+        }
+
+    async def _try_os_level_download(
+        self, bucket: Bucket, key: str, temp_file_path: str
+    ) -> bool:
+        """
+        AWS CLI S3 download:
+        - Validates inputs with strict regex.
+        - Uses create_subprocess_exec (no shell).
+        - Passes a minimal environment (limits credential leakage).
+        - Periodic progress logs; truncated error output.
+        """
+        try:
+            aws_path = shutil.which("aws")
+            if not aws_path:
+                tplr.logger.debug("AWS CLI not found in PATH.")
+                return False
+
+            if not SAFE_BUCKET_RE.fullmatch(bucket.name):
+                tplr.logger.warning("Unsafe bucket name rejected.")
+                return False
+
+            if not SAFE_KEY_RE.fullmatch(key):
+                tplr.logger.warning("Unsafe object key rejected.")
+                return False
+
+            endpoint_url = self.get_base_url(bucket.account_id)
+            parsed = urlparse(endpoint_url)
+            if parsed.scheme not in ("http", "https"):
+                tplr.logger.warning("Unsafe endpoint_url scheme rejected.")
+                return False
+
+            cmd = [
+                aws_path,
+                "s3",
+                "cp",
+                f"s3://{bucket.name}/{key}",
+                temp_file_path,
+                "--endpoint-url",
+                endpoint_url,
+                "--region",
+                CF_REGION_NAME,
+                "--cli-read-timeout",
+                "300",
+                "--cli-connect-timeout",
+                "60",
+                "--no-progress",
+                "--only-show-errors",
+            ]
+
+            # Minimal env to avoid leaking host env; include PATH for invoked binary deps if needed.
+            env = {
+                "AWS_ACCESS_KEY_ID": bucket.access_key_id,
+                "AWS_SECRET_ACCESS_KEY": bucket.secret_access_key,
+                "AWS_REGION": CF_REGION_NAME,
+                "AWS_DEFAULT_REGION": CF_REGION_NAME,
+                "AWS_EC2_METADATA_DISABLED": "true",
+                "PATH": os.environ.get("PATH", ""),
+            }
+            session_token = getattr(bucket, "session_token", None)
+            if session_token:
+                env["AWS_SESSION_TOKEN"] = session_token
+
+            tplr.logger.info("Starting AWS CLI download")
+            start_time = time.time()
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            async def _periodic_log():
+                while True:
+                    await asyncio.sleep(60)
+                    if process.returncode is not None:
+                        break
+                    elapsed_min = (time.time() - start_time) / 60.0
+                    tplr.logger.info(
+                        f"AWS CLI download in progress... {elapsed_min:.1f} minutes elapsed"
+                    )
+
+            monitor_task = asyncio.create_task(_periodic_log())
+
+            try:
+                _, stderr = await process.communicate()
+            finally:
+                monitor_task.cancel()
+
+            elapsed_min = (time.time() - start_time) / 60.0
+
+            if process.returncode == 0:
+                tplr.logger.info(
+                    f"AWS CLI download completed successfully in {elapsed_min:.1f} minutes"
+                )
+                return True
+
+            err = (stderr or b"").decode("utf-8", "ignore").strip()
+            if err:
+                tplr.logger.warning(f"AWS CLI error (truncated): {err[-512:]}")
+            tplr.logger.warning(
+                f"AWS CLI download failed after {elapsed_min:.1f} minutes"
+            )
+            return False
+        except asyncio.CancelledError:
+            process.kill()
+            await process.wait()
+            monitor_task.cancel()
+            return False
+
+    @staticmethod
+    def _calc_download_params(
+        file_size: int, custom_workers: str | None = None
+    ) -> dict[str, float | int]:
+        """
+        Decide chunk size & worker count according to file size, with an
+        optional explicit override (DOWNLOAD_MAX_WORKERS).
+        """
+        file_size_gb = file_size / (1024 * 1024 * 1024)
+
+        if file_size_gb > 100:  # ≥100 GB
+            chunk_size = 512 * 1024 * 1024  # 512 MB
+            max_workers = min(16, max(8, (os.cpu_count() or 4)))
+        elif file_size_gb > 10:  # 10–100 GB
+            chunk_size = 256 * 1024 * 1024  # 256 MB
+            max_workers = min(16, max(8, (os.cpu_count() or 4)))
+        else:  # <10 GB
+            chunk_size = 64 * 1024 * 1024  # 64 MB
+            max_workers = min(12, max(6, (os.cpu_count() or 4) * 2))
+
+        # Optional override
+        if custom_workers:
+            try:
+                max_workers = int(custom_workers)
+            except ValueError:
+                pass
+
+        total_chunks = math.ceil(file_size / chunk_size)
+        max_workers = min(max_workers, total_chunks)
+
+        return {
+            "chunk_size": chunk_size,
+            "max_workers": max_workers,
+            "total_chunks": total_chunks,
+            "file_size_gb": file_size_gb,
+        }
+
+    @staticmethod
+    def _should_try_os_level(file_size_gb: float) -> bool:
+        """Return **True** when we should attempt an OS‑level download."""
+        return file_size_gb > 50
 
     async def put(
         self,

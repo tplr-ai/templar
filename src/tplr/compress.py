@@ -173,7 +173,7 @@ class ChunkingTransformer:
             return torch.einsum("...ij, jb -> ...ib", x, b)
         else:
             # Note: b-c axis output is transposed to chunk DCT in 2D
-            return torch.einsum("...ijkl, jb, ld -> ...ikbd", x, b, d)
+            return torch.einsum("...ijkl, kb, ld -> ...ijbd", x, b, d)
 
     @torch.no_grad()
     def einsum_2d_t(self, x, b, d=None) -> torch.Tensor:
@@ -181,7 +181,7 @@ class ChunkingTransformer:
             return torch.einsum("...ij, jb -> ...ib", x, b)
         else:
             # Note: b-c axis output is transposed to chunk DCT in 2D
-            return torch.einsum("...ijkl, kb, ld -> ...ibjd", x, b, d)
+            return torch.einsum("...ijbd, bk, dl -> ...ijkl", x, b, d)
 
     @torch.no_grad()
     def encode(self, x: torch.Tensor, *, use_dct: bool = False) -> torch.Tensor:
@@ -193,7 +193,7 @@ class ChunkingTransformer:
             self.f_dict[n1] = n1w
             self.f_dict[n2] = n2w
 
-            x = rearrange(x, "(y h) (x w) -> y h x w", h=n1, w=n2)
+            x = rearrange(x, "(y h) (x w) -> y x h w", h=n1, w=n2)
             if use_dct:
                 x = self.einsum_2d(x, n1w, n2w)
 
@@ -220,7 +220,7 @@ class ChunkingTransformer:
                 self.b_dict[n2] = n2w
 
                 x = self.einsum_2d_t(x, n1w, n2w)
-            x = rearrange(x, "y h x w -> (y h) (x w)")
+            x = rearrange(x, "y x h w -> (y h) (x w)")
 
         else:  # 1D weights
             if use_dct:

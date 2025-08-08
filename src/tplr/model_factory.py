@@ -26,7 +26,7 @@ from typing import Literal
 
 import torch
 import torch.nn as nn
-from torchtitan.config_manager import (
+from torchtitan.config import (
     ActivationCheckpoint,
     Float8,
     JobConfig,
@@ -35,9 +35,10 @@ from torchtitan.config_manager import (
     Training,
 )
 from torchtitan.distributed import ParallelDims
+from torchtitan.models.llama3 import Llama3StateDictAdapter, TransformerModelArgs
 from torchtitan.models.llama3 import Transformer as TitanLlama
-from torchtitan.models.llama3 import TransformerModelArgs
 from torchtitan.models.llama3.infra.parallelize import parallelize_llama
+from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 
 import tplr
 
@@ -294,3 +295,124 @@ def initialize_torchtitan_model(
         tplr.logger.info(f"[Model Factory] Initialized {role} model on {device}")
 
     return model
+
+
+def _get_actual_intermediate_size(
+    titan_state_dict: dict, hparams: SimpleNamespace
+) -> int:
+    """Extract actual intermediate size from model state dict.
+
+    Args:
+        titan_state_dict: TorchTitan model state dict
+        hparams: Hyperparameters object
+
+    Returns:
+        Actual intermediate size from model or hparams fallback
+    """
+    for key in [
+        "_orig_mod.layers.0.feed_forward.w1.weight",
+        "layers.0.feed_forward.w1.weight",
+    ]:
+        if key in titan_state_dict:
+            return titan_state_dict[key].shape[0]
+
+    # Fallback to hparams
+    tplr.logger.warning(
+        f"Could not determine intermediate_size from model, using hparams value: {hparams.model_config.intermediate_size}"
+    )
+    return hparams.model_config.intermediate_size
+
+
+def convert_titan_to_hf(
+    titan_model: nn.Module,
+    hparams: SimpleNamespace,
+    save_path: str | None = None,
+) -> LlamaForCausalLM:
+    """Convert TorchTitan model to HuggingFace format.
+
+    This function converts a TorchTitan Llama model to HuggingFace format,
+    handling state dict conversion and proper configuration mapping.
+
+    Args:
+        titan_model: TorchTitan model to convert
+        hparams: Hyperparameters object containing model configuration
+        save_path: Optional path to save the converted HuggingFace model
+
+    Returns:
+        LlamaForCausalLM: Converted HuggingFace model
+
+    Raises:
+        ValueError: If conversion fails
+    """
+    try:
+        # Get TorchTitan state dict
+        titan_state_dict = titan_model.state_dict()
+
+        # Determine actual intermediate size from model weights
+        actual_intermediate_size = _get_actual_intermediate_size(
+            titan_state_dict, hparams
+        )
+        tplr.logger.info(f"Using intermediate_size: {actual_intermediate_size}")
+
+        # Create HuggingFace config
+        hf_config = LlamaConfig(
+            vocab_size=hparams.model_config.vocab_size,
+            hidden_size=hparams.model_config.hidden_size,
+            intermediate_size=actual_intermediate_size,
+            num_hidden_layers=hparams.model_config.num_hidden_layers,
+            num_attention_heads=hparams.model_config.num_attention_heads,
+            num_key_value_heads=getattr(
+                hparams.model_config,
+                "num_key_value_heads",
+                hparams.model_config.num_attention_heads,
+            ),
+            hidden_act=getattr(hparams.model_config, "hidden_act", "silu"),
+            max_position_embeddings=hparams.sequence_length,
+            initializer_range=getattr(hparams.model_config, "initializer_range", 0.02),
+            rms_norm_eps=getattr(hparams.model_config, "rms_norm_eps", 1e-5),
+            use_cache=False,
+            rope_theta=getattr(hparams.model_config, "rope_theta", 10000.0),
+            rope_scaling=None,
+            attention_bias=False,
+            attention_dropout=0.0,
+            pretraining_tp=1,
+            tie_word_embeddings=False,
+        )
+
+        # Create HuggingFace model
+        hf_model = LlamaForCausalLM(hf_config)
+
+        # Clean state dict (remove prefixes and special keys)
+        cleaned = {}
+        for k, v in titan_state_dict.items():
+            if "freqs_cis" in k:
+                continue
+            nk = k.replace("_orig_mod.", "").replace("module.", "")
+            cleaned[nk] = v
+
+        # Reuse existing function to create TorchTitan args
+        titan_args = create_titan_model_args(
+            hparams.model_config, hparams.sequence_length
+        )
+
+        # Use official adapter for state dict conversion
+        adapter = Llama3StateDictAdapter(titan_args)
+        hf_state_dict = adapter.to_hf(cleaned)
+
+        # Load converted state dict into HuggingFace model
+        hf_model.load_state_dict(hf_state_dict, strict=True)
+
+        # Save if path provided
+        if save_path:
+            hf_model.save_pretrained(save_path)
+            tplr.logger.info(
+                f"Successfully saved TorchTitan model in HuggingFace format to {save_path}"
+            )
+
+        return hf_model
+
+    except Exception as e:
+        tplr.logger.error(f"HF conversion failed: {e}", exc_info=True)
+        raise ValueError(
+            f"Failed to convert TorchTitan model to HuggingFace format: {e}"
+        )

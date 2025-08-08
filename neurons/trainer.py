@@ -33,7 +33,7 @@ from torchtitan.components.loss import cross_entropy_loss
 
 import tplr
 from neurons.base_node import CPU_COUNT
-from tplr import model_factory
+from tplr import model_factory, muon
 
 
 class Trainer:
@@ -163,15 +163,133 @@ class Trainer:
                 lr=self.hparams.inner_learning_rate,
             )
         else:
-            inner_optimizer = ZeroRedundancyOptimizer(
-                self.model.parameters(),
-                optimizer_class=torch.optim.AdamW,
-                lr=self.hparams.inner_learning_rate,
-                weight_decay=self.hparams.weight_decay,
-                betas=(0.9, 0.95),
-                parameters_as_bucket_view=True,
-                overlap_with_ddp=False,
-            )
+            # Get optimizer config from hparams
+            optimizer_config = getattr(self.hparams, "optimizer", {})
+            optimizer_type = optimizer_config.get("type", "adamw").lower()
+
+            if optimizer_type == "adamw":
+                # Use AdamW with ZeroRedundancyOptimizer for distributed training
+                adamw_config = optimizer_config.get("adamw", {})
+                inner_optimizer = ZeroRedundancyOptimizer(
+                    self.model.parameters(),
+                    optimizer_class=torch.optim.AdamW,
+                    lr=self.hparams.inner_learning_rate,
+                    weight_decay=adamw_config.get(
+                        "weight_decay", self.hparams.weight_decay
+                    ),
+                    betas=tuple(adamw_config.get("betas", [0.9, 0.95])),
+                    eps=adamw_config.get("eps", 1e-8),
+                    parameters_as_bucket_view=True,
+                    overlap_with_ddp=False,
+                )
+                tplr.logger.info(
+                    f"[Init] Using AdamW inner optimizer with lr={self.hparams.inner_learning_rate}, "
+                    f"weight_decay={adamw_config.get('weight_decay', self.hparams.weight_decay)}, "
+                    f"betas={adamw_config.get('betas', [0.9, 0.95])}"
+                )
+            elif optimizer_type == "muon":
+                # Get bare model for parameter grouping
+                bare_model = getattr(self.model, "module", self.model)
+
+                # Get Muon-specific config
+                muon_config = optimizer_config.get("muon", {})
+
+                # Separate parameters for Muon (2D matrices) and Adam (embeddings, scalars, head)
+                hidden_2d_params = []
+                embed_params = []
+                scalar_params = []
+                head_params = []
+
+                for name, param in bare_model.named_parameters():
+                    if not param.requires_grad:
+                        continue
+
+                    if (
+                        param.ndim >= 2
+                        and "embed" not in name
+                        and "lm_head" not in name
+                    ):
+                        hidden_2d_params.append(param)
+                    elif "embed" in name:
+                        embed_params.append(param)
+                    elif "lm_head" in name:
+                        head_params.append(param)
+                    else:
+                        scalar_params.append(param)
+
+                # Create parameter groups
+                adam_groups = []
+                if head_params:
+                    adam_groups.append(
+                        dict(
+                            params=head_params,
+                            lr=self.hparams.inner_learning_rate
+                            * muon_config.get("head_lr_scale", 0.5),
+                            weight_decay=self.hparams.weight_decay,
+                        )
+                    )
+                if embed_params:
+                    adam_groups.append(
+                        dict(
+                            params=embed_params,
+                            lr=self.hparams.inner_learning_rate
+                            * muon_config.get("embed_lr_scale", 0.5),
+                            weight_decay=self.hparams.weight_decay,
+                        )
+                    )
+                if scalar_params:
+                    adam_groups.append(
+                        dict(
+                            params=scalar_params,
+                            lr=self.hparams.inner_learning_rate
+                            * muon_config.get("scalar_lr_scale", 0.2),
+                            weight_decay=self.hparams.weight_decay,
+                        )
+                    )
+
+                adam_groups = [
+                    dict(**g, betas=(0.9, 0.95), eps=1e-8, use_muon=False)
+                    for g in adam_groups
+                ]
+
+                if not hidden_2d_params:
+                    tplr.logger.error(
+                        "No hidden 2D parameters found for Muon optimizer"
+                    )
+                    raise ValueError("Model must have 2D weight matrices for Muon")
+
+                muon_group = dict(
+                    params=hidden_2d_params,
+                    lr=self.hparams.inner_learning_rate,
+                    momentum=muon_config.get("momentum", 0.95),
+                    weight_decay=muon_config.get("weight_decay", 0.01),
+                    use_muon=True,
+                )
+
+                param_groups = adam_groups + [muon_group]
+                # Use ZeroRedundancyOptimizer wrapper for distributed training
+                inner_optimizer = ZeroRedundancyOptimizer(
+                    params=param_groups,
+                    optimizer_class=muon.SingleDeviceMuonWithAuxAdam,
+                    parameters_as_bucket_view=True,
+                    overlap_with_ddp=False,
+                )
+
+                tplr.logger.info(
+                    f"[Init] Using Muon inner optimizer with lr={self.hparams.inner_learning_rate}, "
+                    f"momentum={muon_config.get('momentum', 0.95)}, weight_decay={muon_config.get('weight_decay', 0.0)}"
+                )
+                tplr.logger.info(
+                    f"  - Hidden matrix params: {len(hidden_2d_params)} (Muon)"
+                )
+                tplr.logger.info(f"  - Embedding params: {len(embed_params)} (Adam)")
+                tplr.logger.info(f"  - Scalar params: {len(scalar_params)} (Adam)")
+                tplr.logger.info(f"  - Head params: {len(head_params)} (Adam)")
+            else:
+                raise ValueError(
+                    f"Unknown optimizer type: {optimizer_type}. Supported: 'adamw', 'muon'"
+                )
+
         return inner_optimizer
 
     async def evaluate_model(

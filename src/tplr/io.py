@@ -136,72 +136,71 @@ class S3Manager:
         if key in self._s3_clients:
             del self._s3_clients[key]
 
+    @async_s3_exception_catcher
     async def cleanup_s3_data(
         self, uid: str, current_window: int, stale_retention: int
     ):
         """Clean up stale S3 data for a given uid."""
-        try:
-            min_allowed_window = current_window - stale_retention
+        min_allowed_window = current_window - stale_retention
 
-            # Regex pattern to match filenames of the form:
-            # gradient-<window>-<uid>-v<version>.pt
-            pattern = re.compile(
-                rf"^gradient-(\d+)-{uid}-v{re.escape(tplr.__version__)}.pt$"
-            )
+        # Regex pattern to match filenames of the form:
+        # gradient-<window>-<uid>-v<version>.pt
+        pattern = re.compile(
+            rf"^gradient-(\d+)-{uid}-v{re.escape(tplr.__version__)}.pt$"
+        )
 
-            prefix = "gradient"
+        prefix = "gradient"
 
-            # so we get the same credentials as `self.bucket`
-            s3_client = await self._get_s3_client(self.bucket)
+        # so we get the same credentials as `self.bucket`
+        s3_client = await self._get_s3_client(self.bucket)
 
-            continuation_token = None
-            while True:
-                list_args = {
-                    "Bucket": self.bucket.name,
-                    "Prefix": prefix,
-                    "MaxKeys": 1000,
-                }
-                if continuation_token:
-                    list_args["ContinuationToken"] = continuation_token
+        continuation_token = None
+        while True:
+            list_args = {
+                "Bucket": self.bucket.name,
+                "Prefix": prefix,
+                "MaxKeys": 1000,
+            }
+            if continuation_token:
+                list_args["ContinuationToken"] = continuation_token
 
-                response = await s3_client.list_objects_v2(**list_args)
-                contents = response.get("Contents", [])
+            response = await s3_client.list_objects_v2(**list_args)
+            contents = response.get("Contents", [])
 
-                # Identify stale objects to delete
-                stale_objects = []
-                for obj in contents:
-                    key = obj["Key"]
+            # Identify stale objects to delete
+            stale_objects = []
+            for obj in contents:
+                key = obj["Key"]
 
-                    # Attempt to match our known filename pattern
-                    match = pattern.match(key)
-                    if match is None:
-                        continue
+                # Attempt to match our known filename pattern
+                match = pattern.match(key)
+                if match is None:
+                    continue
 
-                    try:
-                        file_window = int(match.group(1))
-                    except ValueError:
-                        continue
+                try:
+                    file_window = int(match.group(1))
+                except ValueError:
+                    continue
 
-                    if file_window < min_allowed_window:
-                        stale_objects.append({"Key": key})
+                if file_window < min_allowed_window:
+                    stale_objects.append({"Key": key})
 
-                # Batch delete stale objects
-                if len(stale_objects) > 0:
-                    tplr.logger.debug(
-                        f"Removing stale S3 objects for {uid}: {stale_objects}"
-                    )
-                    await s3_client.delete_objects(
-                        Bucket=self.bucket.name,
-                        Delete={"Objects": stale_objects},
-                    )
+            # Batch delete stale objects
+            if len(stale_objects) > 0:
+                tplr.logger.debug(
+                    f"Removing stale S3 objects for {uid}: {stale_objects}"
+                )
+                await s3_client.delete_objects(
+                    Bucket=self.bucket.name,
+                    Delete={"Objects": stale_objects},
+                )
 
-                if response.get("IsTruncated"):
-                    continuation_token = response.get("NextContinuationToken")
-                else:
-                    break
-        except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(self.bucket)
-
+            if response.get("IsTruncated"):
+                continuation_token = response.get("NextContinuationToken")
+            else:
+                break
+    
+    @async_s3_exception_catcher
     async def s3_put_object(
         self,
         key: str,
@@ -216,43 +215,37 @@ class S3Manager:
             file_path (str, optional): The local file path to upload
             bucket (Bucket, optional): The bucket to use. Defaults to self.bucket
         """
-        try:
-            if bucket is None:
-                bucket = self.bucket
+        if bucket is None:
+            bucket = self.bucket
 
-            s3_client = await self._get_s3_client(bucket)
+        s3_client = await self._get_s3_client(bucket)
 
-            # Handle JSON files
-            if key.endswith(".json") or "start_window" in key:
-                if file_path:
-                    async with aiofiles.open(file_path, "r") as f:
-                        data = await f.read()
-                        data_bytes = data.encode("utf-8")
-                else:
-                    raise ValueError(f"file_path required for JSON file: {key}")
-
-                await s3_client.put_object(Bucket=bucket.name, Key=key, Body=data_bytes)
-                return
-
-            # Otherwise, likely PyTorch files
-            file_size = os.path.getsize(file_path)
-            multipart_threshold = 100 * 1024 * 1024  # 100MB
-
-            if file_size <= multipart_threshold:
-                # Simple upload for small files
-                async with aiofiles.open(file_path, "rb") as f:
+        # Handle JSON files
+        if key.endswith(".json") or "start_window" in key:
+            if file_path:
+                async with aiofiles.open(file_path, "r") as f:
                     data = await f.read()
-                    await s3_client.put_object(Bucket=bucket.name, Key=key, Body=data)
+                    data_bytes = data.encode("utf-8")
             else:
-                # Multipart upload for large files
-                await self.upload_large_file(file_path, key, s3_client, bucket)
+                raise ValueError(f"file_path required for JSON file: {key}")
 
-        except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(bucket)
-        except Exception as e:
-            tplr.logger.error(f"Error uploading {key} to S3: {e}")
-            raise
+            await s3_client.put_object(Bucket=bucket.name, Key=key, Body=data_bytes)
+            return
 
+        # Otherwise, likely PyTorch files
+        file_size = os.path.getsize(file_path)
+        multipart_threshold = 100 * 1024 * 1024  # 100MB
+
+        if file_size <= multipart_threshold:
+            # Simple upload for small files
+            async with aiofiles.open(file_path, "rb") as f:
+                data = await f.read()
+                await s3_client.put_object(Bucket=bucket.name, Key=key, Body=data)
+        else:
+            # Multipart upload for large files
+            await self.upload_large_file(file_path, key, s3_client, bucket)
+
+    @async_s3_exception_catcher
     async def s3_get_object(
         self,
         key: str,
@@ -366,17 +359,12 @@ class S3Manager:
                     )
 
             return loaded_data
-
-        except asyncio.TimeoutError:
-            tplr.logger.debug(f"Timeout downloading {key}")
-            return None
-        except Exception as e:
-            tplr.logger.error(f"Error in s3_get_object for {key}: {e}")
-            return None
-        finally:
+        
+        finally:  # Except handled in deco
             cleanup_temp_dir(temp_dir)
 
     #  Large File Operations
+    @async_s3_exception_catcher
     async def upload_large_file(
         self, file_path: str, key: str, s3_client, bucket: Bucket | None = None
     ):
@@ -471,8 +459,6 @@ class S3Manager:
                             raise
                         await asyncio.sleep(2**attempt)
 
-        except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(bucket)
         except Exception as e:
             tplr.logger.error(f"Error during multipart upload of {key}: {e}")
             if upload_id:
@@ -484,134 +470,128 @@ class S3Manager:
                     tplr.logger.error(f"Failed to abort multipart upload: {abort_e}")
             raise
 
+    @async_s3_exception_catcher(on_error_return=False)
     async def download_large_file(
         self, s3_client, bucket: Bucket, key: str, file_size: int, temp_file_path: str
     ):
         """Download large file using multipart download with concurrent chunks."""
-        try:
-            # Determine optimal chunk size and concurrency
-            gpu_available = torch.cuda.is_available()
-            if gpu_available:
-                gpu_mem = torch.cuda.get_device_properties(0).total_memory
-                max_workers = min(torch.cuda.device_count() * 4, 16)
-                chunk_size = min(
-                    max(
-                        5 * 1024 * 1024,  # Minimum 5MB for S3 multipart
-                        gpu_mem // (max_workers * 4),
-                    ),
-                    5 * 1024 * 1024 * 1024,  # Maximum 5GB
-                )
-            else:
-                cpu_count = os.cpu_count() or 1
-                max_workers = min(cpu_count * 4, 16)
-                chunk_size = min(
-                    max(
-                        5 * 1024 * 1024,
-                        file_size // (max_workers * 2),
-                    ),
-                    5 * 1024 * 1024 * 1024,
-                )
-
-            total_chunks = math.ceil(file_size / chunk_size)
-            max_workers = min(max_workers, total_chunks)
-            semaphore = asyncio.Semaphore(max_workers)
-
-            # Create the file with the correct size
-            target_directory = os.path.dirname(temp_file_path)
-            if target_directory:
-                os.makedirs(target_directory, exist_ok=True)
-
-            async with aiofiles.open(temp_file_path, "wb") as f:
-                await f.truncate(file_size)
-
-            # Create progress bar
-            pbar = std_tqdm(
-                total=file_size,
-                unit="B",
-                unit_scale=True,
-                desc=f"Downloading {key} ({max_workers} workers)",
+        # Determine optimal chunk size and concurrency
+        gpu_available = torch.cuda.is_available()
+        if gpu_available:
+            gpu_mem = torch.cuda.get_device_properties(0).total_memory
+            max_workers = min(torch.cuda.device_count() * 4, 16)
+            chunk_size = min(
+                max(
+                    5 * 1024 * 1024,  # Minimum 5MB for S3 multipart
+                    gpu_mem // (max_workers * 4),
+                ),
+                5 * 1024 * 1024 * 1024,  # Maximum 5GB
+            )
+        else:
+            cpu_count = os.cpu_count() or 1
+            max_workers = min(cpu_count * 4, 16)
+            chunk_size = min(
+                max(
+                    5 * 1024 * 1024,
+                    file_size // (max_workers * 2),
+                ),
+                5 * 1024 * 1024 * 1024,
             )
 
-            downloaded_chunks = {}
+        total_chunks = math.ceil(file_size / chunk_size)
+        max_workers = min(max_workers, total_chunks)
+        semaphore = asyncio.Semaphore(max_workers)
 
-            async def download_chunk(chunk_number: int, max_retries: int = 3):
-                """Download a specific chunk with retries."""
-                for attempt in range(max_retries):
-                    async with semaphore:
-                        start = chunk_number * chunk_size
-                        end = min(start + chunk_size, file_size) - 1
+        # Create the file with the correct size
+        target_directory = os.path.dirname(temp_file_path)
+        if target_directory:
+            os.makedirs(target_directory, exist_ok=True)
 
-                        try:
-                            response = await s3_client.get_object(
-                                Bucket=bucket.name,
-                                Key=key,
-                                Range=f"bytes={start}-{end}",
+        async with aiofiles.open(temp_file_path, "wb") as f:
+            await f.truncate(file_size)
+
+        # Create progress bar
+        pbar = std_tqdm(
+            total=file_size,
+            unit="B",
+            unit_scale=True,
+            desc=f"Downloading {key} ({max_workers} workers)",
+        )
+
+        downloaded_chunks = {}
+
+        async def download_chunk(chunk_number: int, max_retries: int = 3):
+            """Download a specific chunk with retries."""
+            for attempt in range(max_retries):
+                async with semaphore:
+                    start = chunk_number * chunk_size
+                    end = min(start + chunk_size, file_size) - 1
+
+                    try:
+                        response = await s3_client.get_object(
+                            Bucket=bucket.name,
+                            Key=key,
+                            Range=f"bytes={start}-{end}",
+                        )
+
+                        async with response["Body"] as stream:  # type: ignore
+                            chunk_data = await stream.read()
+
+                        # Verify chunk size matches expected
+                        chunk_len = len(chunk_data)
+                        expected_len = end - start + 1
+                        if chunk_len != expected_len:
+                            raise Exception(
+                                f"Chunk size mismatch: got {chunk_len}, expected {expected_len}"
                             )
 
-                            async with response["Body"] as stream:  # type: ignore
-                                chunk_data = await stream.read()
+                        async with aiofiles.open(temp_file_path, "rb+") as f2:
+                            await f2.seek(start)
+                            await f2.write(chunk_data)
 
-                            # Verify chunk size matches expected
-                            chunk_len = len(chunk_data)
-                            expected_len = end - start + 1
-                            if chunk_len != expected_len:
-                                raise Exception(
-                                    f"Chunk size mismatch: got {chunk_len}, expected {expected_len}"
-                                )
+                        pbar.update(chunk_len)
+                        downloaded_chunks[chunk_number] = {
+                            "start": start,
+                            "end": end + 1,
+                            "size": chunk_len,
+                        }
 
-                            async with aiofiles.open(temp_file_path, "rb+") as f2:
-                                await f2.seek(start)
-                                await f2.write(chunk_data)
+                        return chunk_number
 
-                            pbar.update(chunk_len)
-                            downloaded_chunks[chunk_number] = {
-                                "start": start,
-                                "end": end + 1,
-                                "size": chunk_len,
-                            }
+                    except Exception as e:
+                        tplr.logger.error(
+                            f"Error downloading chunk {chunk_number} (attempt {attempt + 1}/{max_retries}): {e}"
+                        )
+                        if attempt == max_retries - 1:  # Last attempt
+                            raise
+                        await asyncio.sleep(
+                            1 * (attempt + 1)
+                        )  # Exponential backoff
 
-                            return chunk_number
+        try:
+            tasks = [
+                asyncio.create_task(download_chunk(i)) for i in range(total_chunks)
+            ]
+            await asyncio.gather(*tasks)
 
-                        except Exception as e:
-                            tplr.logger.error(
-                                f"Error downloading chunk {chunk_number} (attempt {attempt + 1}/{max_retries}): {e}"
-                            )
-                            if attempt == max_retries - 1:  # Last attempt
-                                raise
-                            await asyncio.sleep(
-                                1 * (attempt + 1)
-                            )  # Exponential backoff
-
-            try:
-                tasks = [
-                    asyncio.create_task(download_chunk(i)) for i in range(total_chunks)
-                ]
-                await asyncio.gather(*tasks)
-
-                if len(downloaded_chunks) != total_chunks:
-                    missing_chunks = set(range(total_chunks)) - set(
-                        downloaded_chunks.keys()
-                    )
-                    raise Exception(f"Missing chunks: {missing_chunks}")
-
-                downloaded_size = sum(
-                    chunk["size"] for chunk in downloaded_chunks.values()
+            if len(downloaded_chunks) != total_chunks:
+                missing_chunks = set(range(total_chunks)) - set(
+                    downloaded_chunks.keys()
                 )
-                if downloaded_size != file_size:
-                    raise Exception(
-                        f"Downloaded size ({downloaded_size}) != expected size ({file_size})"
-                    )
+                raise Exception(f"Missing chunks: {missing_chunks}")
 
-                return True
+            downloaded_size = sum(
+                chunk["size"] for chunk in downloaded_chunks.values()
+            )
+            if downloaded_size != file_size:
+                raise Exception(
+                    f"Downloaded size ({downloaded_size}) != expected size ({file_size})"
+                )
 
-            finally:
-                pbar.close()
+            return True
 
-        except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(bucket)
-        except Exception as e:
-            tplr.logger.error(f"Error in download_large_file for {key}: {e}")
-            return False
+        finally:
+            pbar.close()
 
     async def put(
         self,
@@ -701,101 +681,72 @@ class S3Manager:
         tplr.logger.info(f"{tplr.P(window, put_end - put_start)} PUT {filename} <--")
         return put_end - put_start
 
+    @async_s3_exception_catcher
     async def cleanup_old_checkpoints(self, keep_last: int = 3):
         """
         Removes old checkpoints from storage, keeping only the most recent ones.
         """
-        try:
-            s3_client = await self._get_s3_client(self.bucket)
+        s3_client = await self._get_s3_client(self.bucket)
 
-            paginator = s3_client.get_paginator("list_objects_v2")
-            checkpoint_files = []
+        paginator = s3_client.get_paginator("list_objects_v2")
+        checkpoint_files = []
 
-            async for page in paginator.paginate(
-                Bucket=self.bucket.name, Prefix="checkpoint"
-            ):
-                for obj in page.get("Contents", []):
-                    if obj["Key"].startswith("checkpoint"):
-                        checkpoint_files.append(obj)
+        async for page in paginator.paginate(
+            Bucket=self.bucket.name, Prefix="checkpoint"
+        ):
+            for obj in page.get("Contents", []):
+                if obj["Key"].startswith("checkpoint"):
+                    checkpoint_files.append(obj)
 
-            checkpoint_files.sort(key=lambda x: x["LastModified"], reverse=True)
+        checkpoint_files.sort(key=lambda x: x["LastModified"], reverse=True)
 
-            if len(checkpoint_files) > keep_last:
-                to_delete = checkpoint_files[keep_last:]
-                await s3_client.delete_objects(
-                    Bucket=self.bucket.name,
-                    Delete={"Objects": [{"Key": obj["Key"]} for obj in to_delete]},
-                )
-                tplr.logger.info(f"Deleted {len(to_delete)} old checkpoints")
+        if len(checkpoint_files) > keep_last:
+            to_delete = checkpoint_files[keep_last:]
+            await s3_client.delete_objects(
+                Bucket=self.bucket.name,
+                Delete={"Objects": [{"Key": obj["Key"]} for obj in to_delete]},
+            )
+            tplr.logger.info(f"Deleted {len(to_delete)} old checkpoints")
 
-        except (ConnectionClosedError, ClientError):
-            await self._purge_s3_client(self.bucket)
-        except Exception as e:
-            tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
-
+    @async_s3_exception_catcher
     async def s3_get_object_size(self, bucket: Bucket, key: str) -> Optional[int]:
         """Get the size of an S3 object without downloading it using HEAD request."""
-        try:
-            s3_client = await self._get_s3_client(bucket)
+        s3_client = await self._get_s3_client(bucket)
 
-            response = await s3_client.head_object(Bucket=bucket.name, Key=key)
-            file_size = response["ContentLength"]
+        response = await s3_client.head_object(Bucket=bucket.name, Key=key)
+        file_size = response["ContentLength"]
 
-            tplr.logger.debug(f"Object {key} size: {file_size} bytes")
-            return file_size
+        tplr.logger.debug(f"Object {key} size: {file_size} bytes")
+        return file_size
 
-        except (ConnectionClosedError, ClientError) as e:
-            await self._purge_s3_client(bucket)
-            if "404" in str(e):
-                tplr.logger.debug(f"Object {key} not found in bucket {bucket.name}")
-                return None
-            tplr.logger.error(f"Error getting object size for {key}: {e}")
-            return None
-        except Exception as e:
-            tplr.logger.error(f"Error getting object size for {key}: {e}")
-            return None
-
+    @async_s3_exception_catcher
     async def s3_get_object_range(
         self, bucket: Bucket, key: str, start: int, end: int, timeout: int = 30
     ) -> Optional[bytes]:
         """Download a specific byte range from S3 object."""
-        try:
-            s3_client = await self._get_s3_client(bucket)
+        s3_client = await self._get_s3_client(bucket)
 
-            response = await asyncio.wait_for(
-                s3_client.get_object(
-                    Bucket=bucket.name, Key=key, Range=f"bytes={start}-{end}"
-                ),
-                timeout=timeout,
+        response = await asyncio.wait_for(
+            s3_client.get_object(
+                Bucket=bucket.name, Key=key, Range=f"bytes={start}-{end}"
+            ),
+            timeout=timeout,
+        )
+
+        # Read the chunk data
+        async with response["Body"] as stream:
+            chunk_data = await asyncio.wait_for(stream.read(), timeout=timeout)
+
+        # Verify chunk size
+        expected_size = end - start + 1
+        if len(chunk_data) != expected_size:
+            raise Exception(
+                f"Chunk size mismatch: got {len(chunk_data)}, expected {expected_size}"
             )
 
-            # Read the chunk data
-            async with response["Body"] as stream:
-                chunk_data = await asyncio.wait_for(stream.read(), timeout=timeout)
+        return chunk_data
 
-            # Verify chunk size
-            expected_size = end - start + 1
-            if len(chunk_data) != expected_size:
-                raise Exception(
-                    f"Chunk size mismatch: got {len(chunk_data)}, expected {expected_size}"
-                )
-
-            return chunk_data
-
-        except asyncio.TimeoutError:
-            tplr.logger.error(f"Timeout downloading range {start}-{end} for {key}")
-            return None
-        except (ConnectionClosedError, ClientError) as e:
-            await self._purge_s3_client(bucket)
-            tplr.logger.error(
-                f"Client error downloading range {start}-{end} for {key}: {e}"
-            )
-            return None
-        except Exception as e:
-            tplr.logger.error(f"Error downloading range {start}-{end} for {key}: {e}")
-            return None
-
-    def get_base_url(self, account_id):
+    def get_base_url(self, account_id: str) -> str:
         """Constructs the base URL for the R2 storage endpoint."""
         return f"https://{account_id}.r2.cloudflarestorage.com"
 
@@ -821,7 +772,6 @@ class S3Manager:
                         tplr.logger.debug(
                             f"Error removing stale directory {old_path}: {e}"
                         )
-
 
 def get_own_bucket(
     bucket_type: Literal["gradients", "dataset", "aggregator"],
@@ -891,60 +841,76 @@ def delete_local_directory(path: str) -> None:
     return
 
 
+@s3_exception_catcher
 def cleanup_temp_dir(directory: str | os.PathLike) -> None:
     """Remove dir at the path specified"""
-    try:
-        shutil.rmtree(directory)
-    except Exception as e:
-        tplr.logger.exception(e)
+    shutil.rmtree(directory)
     return
+            
 
-
-def handle_s3_exceptions(e):
+def handle_s3_exceptions(e, func_name) -> bool:
     """A centralized helper function to log and handle exceptions."""
+    purge = False
+
+    base_message = f"Function '{func_name} failed:"
     if isinstance(e, exceptions.ClientError):
-        error_code = e.response.get("Error", {}).get("Code")
+        error_code = e.response.get('Error', {}).get('Code')
+        error_message = e.response.get('Error', {}).get('Message')
         tplr.logger.exception(
-            f"S3 ClientError caught: {e.response['Error']['Message']} (Code: {error_code})"
-        )
+            f"{base_message} {error_message} (Code: {error_code})")
+        purge = True
+    elif isinstance(e, exceptions.ConnectionClosedError):
+        tplr.logger.exception(f"{base_message} Connection Closed Error: {e}")
+        purge = True
     elif isinstance(e, exceptions.NoCredentialsError):
-        tplr.logger.exception(
-            "No AWS credentials found. Please configure your credentials."
-        )
+        tplr.logger.exception(f"{base_message} No AWS credentials found. Please configure your credentials.")
     elif isinstance(e, exceptions.ParamValidationError):
-        tplr.logger.exception(f"Parameter Validation Error: {e}")
+        tplr.logger.exception(f"{base_message} Parameter Validation Error: {e}")
+    elif isinstance(e, asyncio.TimeoutError):
+        tplr.logger.exception(f"{base_message} ")
     else:
-        tplr.logger.exception(f"An unexpected error occurred: {e}")
-    return None
+        tplr.logger.exception(f"{base_message} An unexpected error occurred: {e}")
+    return purge
 
 
-def s3_exception_catcher(func):
+def s3_exception_catcher(on_error_return=None):
     """
     A decorator for synchronous functions that wraps the function
     in a try...except block and uses the centralized exception handler.
     """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                purge = handle_s3_exceptions(e, func.__name__)
+                if purge: 
+                    raise NotImplementedError(
+                        "Purge is async; not supported for sync wrapper"
+                    ) from e
+                return on_error_return
+        return wrapper
+    return decorator
 
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            return handle_s3_exceptions(e)
 
-    return wrapper
-
-
-def async_s3_exception_catcher(func):
+def async_s3_exception_catcher(on_error_return=None):
     """
     A decorator for asynchronous functions that wraps the function
     in a try...except block and uses the centralized exception handler.
     """
-
-    @functools.wraps(func)
-    async def wrapper(*args, **kwargs):
-        try:
-            return await func(*args, **kwargs)
-        except Exception as e:
-            return handle_s3_exceptions(e)
-
-    return wrapper
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                purge = handle_s3_exceptions(e, func.__name__)
+                if purge and isinstance(args[0], S3Manager):
+                    self = args[0]
+                    await self._purge_s3_client(self.bucket)
+                elif purge:
+                    raise
+                return on_error_return
+        return wrapper
+    return decorator

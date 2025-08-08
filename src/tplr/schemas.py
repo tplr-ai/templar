@@ -16,13 +16,9 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Global imports
-from pydantic import BaseModel, Field
+from typing import Any, Dict, Literal, Optional
 
-# Pydantic v2: ConfigDict replaces inner `class Config`
-try:  # v2
-    from pydantic import ConfigDict
-except ImportError:  # v1 fallback – noqa: D401
-    ConfigDict = dict  # type: ignore
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Bucket(BaseModel):
@@ -49,3 +45,22 @@ class Bucket(BaseModel):
     model_config = ConfigDict(
         str_strip_whitespace=True,
     )
+
+
+class CommsGetResult(BaseModel):
+    """A standard return type for the `get` function."""
+
+    data: Optional[Dict[str, Any]] = Field(
+        None, description="The data retrieved by the get function."
+    )
+    global_step: Optional[int] = Field(
+        None, description="The global step associated with the data."
+    )
+    status: Literal["OK", "TOO_EARLY", "TOO_LATE", "NOT_FOUND", "ERROR"] = Field(
+        "OK", description="The status of the get operation."
+    )
+
+    @property
+    def success(self) -> bool:
+        """Returns True if the operation was successful and returned data."""
+        return self.status == "OK" and self.data is not None

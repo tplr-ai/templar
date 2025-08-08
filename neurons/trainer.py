@@ -313,7 +313,8 @@ class Trainer:
             # -------------------------------------------------------------- #
             # 3-a.  Back-prop with no_sync() on non-final micro-batches
             # -------------------------------------------------------------- #
-            final_micro_batch = (batch_count + 1) % self.sampler.grad_accum_steps == 0
+            corrected_accum_steps = max(self.sampler.grad_accum_steps, 1)
+            final_micro_batch = (batch_count + 1) % corrected_accum_steps == 0
             if (
                 hasattr(self.model, "no_sync")
                 and self.world_size > 1

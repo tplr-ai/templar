@@ -51,10 +51,9 @@ import bittensor as bt
 import torch
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss
-from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 
 import tplr
-from tplr.model_factory import initialize_torchtitan_model
+from tplr.model_factory import convert_titan_to_hf, initialize_torchtitan_model
 
 CHECKPOINT_DEFAULT_DIR: str = "checkpoints/"
 MODEL_PATH: str = "models/eval"
@@ -70,7 +69,6 @@ def config() -> bt.Config:
         description="Evaluator script. Use --help to display options.",
         add_help=True,
     )
-    # Removed wandb project argument
     parser.add_argument(
         "--netuid",
         type=int,
@@ -136,13 +134,13 @@ class Evaluator:
 
     The Evaluator is responsible for automated benchmark evaluation of model checkpoints.
     It continuously monitors for new checkpoints by window number, downloads them, runs a
-    comprehensive suite of language model evaluations, and logs results to both InfluxDB and W&B.
+    comprehensive suite of language model evaluations, and logs results to InfluxDB.
 
     Key Features:
         - Automatic checkpoint detection by window number
         - Multi-task model evaluation
         - Distributed metrics logging
-        - Progress tracking via W&B
+        - Progress tracking via grafana
         - Resource cleanup and management
 
     Evaluation Flow:
@@ -158,7 +156,6 @@ class Evaluator:
         netuid (int): Network UID for the subnet
         model (TitanLlama): The TorchTitan language model being evaluated
         metrics_logger (MetricsLogger): Logger for InfluxDB metrics
-        wandb_run: Weights & Biases run instance
         last_eval_window (int): Last evaluated window number
         last_block_number (int): Last processed block number
     """
@@ -198,6 +195,10 @@ class Evaluator:
         )
 
         self.tokenizer = self.hparams.tokenizer
+        # Ensure a pad token exists for loss masking/perplexity
+        if getattr(self.tokenizer, "pad_token_id", None) is None:
+            # LLaMA tokenizers typically don't have PAD; use EOS
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",
@@ -483,7 +484,7 @@ class Evaluator:
         1. Save model to temporary location
         2. Run lm-eval benchmark suite
         3. Parse results for each task
-        4. Log metrics to InfluxDB and W&B
+        4. Log metrics to InfluxDB
         5. Clean up temporary files
 
         Returns:
@@ -530,11 +531,19 @@ class Evaluator:
 
         os.makedirs(MODEL_PATH, exist_ok=True)
 
-        # Save TorchTitan model for lm-eval
-        # Since TorchTitan doesn't have save_pretrained, we save the state dict
-        # and create a simple wrapper for lm-eval compatibility
-        self._save_model_for_lm_eval(MODEL_PATH)
-        self.hparams.tokenizer.save_pretrained(MODEL_PATH)
+        # Convert TorchTitan model to HuggingFace format for lm-eval
+        try:
+            convert_titan_to_hf(
+                titan_model=self.model,
+                hparams=self.hparams,
+                save_path=MODEL_PATH,
+            )
+            self.hparams.tokenizer.save_pretrained(MODEL_PATH)
+        except Exception as e:
+            tplr.logger.error(
+                f"Failed to convert model at step {global_step}: {e}. Skipping evaluation cycle."
+            )
+            return global_step
 
         results_dir = os.path.join(MODEL_PATH, "results")
         os.makedirs(results_dir, exist_ok=True)
@@ -609,138 +618,6 @@ class Evaluator:
             f"global_step: {global_step}, block: {block_number})"
         )
         return global_step
-
-    def _save_model_for_lm_eval(self, save_path: str) -> None:
-        """Save TorchTitan model in a format compatible with lm-eval.
-
-        Since TorchTitan doesn't have save_pretrained(), we convert the model
-        to HuggingFace format temporarily for lm-eval compatibility.
-        """
-        try:
-            # Create HuggingFace config from our hparams
-            # Get the actual intermediate size from the model instead of hparams
-            # TorchTitan calculates this as a multiple of 256
-            titan_state_dict = self.model.state_dict()
-            actual_intermediate_size = None
-            for key in [
-                "_orig_mod.layers.0.feed_forward.w1.weight",
-                "layers.0.feed_forward.w1.weight",
-            ]:
-                if key in titan_state_dict:
-                    actual_intermediate_size = titan_state_dict[key].shape[0]
-                    break
-
-            if actual_intermediate_size is None:
-                # Fallback to hparams if we can't determine from model
-                actual_intermediate_size = self.hparams.model_config.intermediate_size
-                tplr.logger.warning(
-                    f"Could not determine intermediate_size from model, using hparams value: {actual_intermediate_size}"
-                )
-            else:
-                tplr.logger.info(
-                    f"Using actual intermediate_size from model: {actual_intermediate_size}"
-                )
-
-            hf_config = LlamaConfig(
-                vocab_size=self.hparams.model_config.vocab_size,
-                hidden_size=self.hparams.model_config.hidden_size,
-                intermediate_size=actual_intermediate_size,
-                num_hidden_layers=self.hparams.model_config.num_hidden_layers,
-                num_attention_heads=self.hparams.model_config.num_attention_heads,
-                num_key_value_heads=getattr(
-                    self.hparams.model_config,
-                    "num_key_value_heads",
-                    self.hparams.model_config.num_attention_heads,
-                ),
-                hidden_act=self.hparams.model_config.hidden_act,
-                max_position_embeddings=self.hparams.sequence_length,
-                initializer_range=self.hparams.model_config.initializer_range,
-                rms_norm_eps=self.hparams.model_config.rms_norm_eps,
-                use_cache=False,
-                rope_theta=getattr(self.hparams.model_config, "rope_theta", 10000.0),
-                rope_scaling=None,
-                attention_bias=False,
-                attention_dropout=0.0,
-                pretraining_tp=1,
-            )
-
-            # Create a temporary HuggingFace model
-            temp_hf_model = LlamaForCausalLM(hf_config)
-
-            # Get TorchTitan state dict
-            titan_state_dict = self.model.state_dict()
-
-            # Map TorchTitan keys to HuggingFace keys
-            # TorchTitan uses slightly different naming conventions
-            hf_state_dict = {}
-            for key, value in titan_state_dict.items():
-                # Remove any compilation prefixes
-                new_key = key.replace("_orig_mod.", "")
-
-                # Map TorchTitan layer names to HuggingFace format
-                # TorchTitan: layers.0.attention.wq -> HuggingFace: model.layers.0.self_attn.q_proj
-                if "layers." in new_key:
-                    # Handle attention layers
-                    new_key = new_key.replace("attention.wq", "self_attn.q_proj")
-                    new_key = new_key.replace("attention.wk", "self_attn.k_proj")
-                    new_key = new_key.replace("attention.wv", "self_attn.v_proj")
-                    new_key = new_key.replace("attention.wo", "self_attn.o_proj")
-
-                    # Handle FFN layers
-                    new_key = new_key.replace("feed_forward.w1", "mlp.gate_proj")
-                    new_key = new_key.replace("feed_forward.w2", "mlp.down_proj")
-                    new_key = new_key.replace("feed_forward.w3", "mlp.up_proj")
-
-                    # Handle norm layers
-                    new_key = new_key.replace("attention_norm", "input_layernorm")
-                    new_key = new_key.replace("ffn_norm", "post_attention_layernorm")
-
-                    # Add model. prefix for layers
-                    new_key = "model." + new_key
-
-                # Handle embeddings
-                new_key = new_key.replace("tok_embeddings", "model.embed_tokens")
-
-                # Handle final norm
-                new_key = new_key.replace("norm", "model.norm")
-
-                # Handle output projection
-                new_key = new_key.replace("output", "lm_head")
-
-                hf_state_dict[new_key] = value.cpu()
-
-            # Load the mapped state dict into HuggingFace model
-            # Use strict=False to ignore missing keys in case of minor differences
-            temp_hf_model.load_state_dict(hf_state_dict, strict=False)
-
-            # Save the HuggingFace model
-            temp_hf_model.save_pretrained(save_path)
-
-            tplr.logger.info(
-                f"Successfully saved TorchTitan model in HuggingFace format to {save_path}"
-            )
-
-        except Exception as e:
-            tplr.logger.warning(f"Could not convert to HuggingFace format: {e}")
-            tplr.logger.info("Falling back to saving raw checkpoint...")
-
-            # Fallback: Save raw state dict and config
-            import json
-
-            torch.save(
-                self.model.state_dict(), os.path.join(save_path, "pytorch_model.bin")
-            )
-
-            # Save minimal config for reference
-            config_dict = {
-                "model_type": "llama",
-                "vocab_size": self.hparams.model_config.vocab_size,
-                "hidden_size": self.hparams.model_config.hidden_size,
-                "num_hidden_layers": self.hparams.model_config.num_hidden_layers,
-                "num_attention_heads": self.hparams.model_config.num_attention_heads,
-            }
-            with open(os.path.join(save_path, "config.json"), "w") as f:
-                json.dump(config_dict, f, indent=2)
 
     async def _evaluate_custom(
         self, global_step: int, checkpoint_window: int, block_number: int

@@ -2433,7 +2433,7 @@ class Validator(BaseNode, Trainer):
                 measurement="validator_inactivity",
                 tags={
                     "uid": str(uid),
-                    "window": int(current_window),
+                    "window": int(self.current_window),
                     "global_step": int(self.global_step),
                 },
                 fields={

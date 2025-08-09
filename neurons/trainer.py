@@ -123,10 +123,33 @@ class Trainer:
         self.outer_optimizer = SGD(self.model.parameters(), lr=self.lr)
 
         self.inner_optimizer = self.get_inner_optimizer(validator)
+        self.inner_scheduler = self.get_inner_scheduler()
+
+        tplr.logger.info("[Init] optimizers & schedulers constructed")
+        return
+
+    def get_inner_scheduler(self):
+        # Get optimizer configuration
+        optimizer_config = getattr(self.hparams, "optimizer", {})
+        optimizer_type = optimizer_config.get("type", "muon").lower()
+
+        # Get optimizer-specific config (includes learning_rate and scheduler)
+        opt_specific_config = optimizer_config.get(optimizer_type, {})
+        scheduler_config = opt_specific_config.get("scheduler", {})
+
+        # Get the effective learning rate used by the optimizer
+        # Default based on optimizer type
+        default_lr = 2e-4 if optimizer_type == "adamw" else 0.02
+        effective_lr = opt_specific_config.get("learning_rate", default_lr)
 
         inner_steps_before_outer_step = self.hparams.inner_steps * (
             self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
         )
+
+        # Get scheduler parameters with optimizer-specific overrides
+        warmup_steps = scheduler_config.get("warmup_steps", 750)
+        t_max = scheduler_config.get("t_max", 20000)
+        eta_min_factor = scheduler_config.get("eta_min_factor", 0.1)
 
         init_scheduler = lr_scheduler.LinearLR(
             self.inner_optimizer,
@@ -138,53 +161,64 @@ class Trainer:
             self.inner_optimizer,
             start_factor=0.1,
             end_factor=1.0,
-            total_iters=self.hparams.warmup_steps,
+            total_iters=warmup_steps,
         )
         cosine_scheduler = lr_scheduler.CosineAnnealingLR(
             self.inner_optimizer,
-            T_max=self.hparams.t_max,
-            eta_min=self.hparams.inner_learning_rate * 0.1,
+            T_max=t_max,
+            eta_min=effective_lr * eta_min_factor,
         )
-        self.inner_scheduler = lr_scheduler.SequentialLR(
+        inner_scheduler = lr_scheduler.SequentialLR(
             self.inner_optimizer,
             schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
-            milestones=[inner_steps_before_outer_step, self.hparams.warmup_steps],
+            milestones=[inner_steps_before_outer_step, warmup_steps],
         )
-        tplr.logger.info("[Init] optimizers & schedulers constructed")
-        return
+
+        tplr.logger.info(
+            f"[Init] Constructed {optimizer_type} scheduler with lr={effective_lr}, "
+            f"warmup_steps={warmup_steps}, t_max={t_max}, eta_min_factor={eta_min_factor}"
+        )
+
+        return inner_scheduler
 
     def get_inner_optimizer(self, validator: bool):
+        # Get optimizer config from hparams
+        optimizer_config = getattr(self.hparams, "optimizer", {})
+        optimizer_type = optimizer_config.get("type", "muon").lower()
+
         if validator:
             # inner scheduler and dummy optimizer for logging purposes
             _dummy_param = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
             # Any optimiser will do; SGD is the simplest and has no extra state.
+            # Get the learning rate from the configured optimizer
+            opt_specific_config = optimizer_config.get(optimizer_type, {})
+            # Default based on optimizer type
+            default_lr = 2e-4 if optimizer_type == "adamw" else 0.02
+            lr = opt_specific_config.get("learning_rate", default_lr)
             inner_optimizer = torch.optim.SGD(
                 [_dummy_param],
-                lr=self.hparams.inner_learning_rate,
+                lr=lr,
             )
         else:
-            # Get optimizer config from hparams
-            optimizer_config = getattr(self.hparams, "optimizer", {})
-            optimizer_type = optimizer_config.get("type", "adamw").lower()
-
             if optimizer_type == "adamw":
                 # Use AdamW with ZeroRedundancyOptimizer for distributed training
                 adamw_config = optimizer_config.get("adamw", {})
+                # Use optimizer-specific learning rate if provided
+                adamw_lr = adamw_config.get("learning_rate", 2e-4)
+                adamw_weight_decay = adamw_config.get("weight_decay", 0.1)
                 inner_optimizer = ZeroRedundancyOptimizer(
                     self.model.parameters(),
                     optimizer_class=torch.optim.AdamW,
-                    lr=self.hparams.inner_learning_rate,
-                    weight_decay=adamw_config.get(
-                        "weight_decay", self.hparams.weight_decay
-                    ),
+                    lr=adamw_lr,
+                    weight_decay=adamw_weight_decay,
                     betas=tuple(adamw_config.get("betas", [0.9, 0.95])),
                     eps=adamw_config.get("eps", 1e-8),
                     parameters_as_bucket_view=True,
                     overlap_with_ddp=False,
                 )
                 tplr.logger.info(
-                    f"[Init] Using AdamW inner optimizer with lr={self.hparams.inner_learning_rate}, "
-                    f"weight_decay={adamw_config.get('weight_decay', self.hparams.weight_decay)}, "
+                    f"[Init] Using AdamW inner optimizer with lr={adamw_lr}, "
+                    f"weight_decay={adamw_weight_decay}, "
                     f"betas={adamw_config.get('betas', [0.9, 0.95])}"
                 )
             elif optimizer_type == "muon":
@@ -193,6 +227,8 @@ class Trainer:
 
                 # Get Muon-specific config
                 muon_config = optimizer_config.get("muon", {})
+                # Use optimizer-specific learning rate if provided
+                muon_lr = muon_config.get("learning_rate", 0.02)
 
                 # Separate parameters for Muon (2D matrices) and Adam (embeddings, scalars, head)
                 hidden_2d_params = []
@@ -223,8 +259,7 @@ class Trainer:
                     adam_groups.append(
                         dict(
                             params=head_params,
-                            lr=self.hparams.inner_learning_rate
-                            * muon_config.get("head_lr_scale", 0.5),
+                            lr=muon_lr * muon_config.get("head_lr_scale", 0.5),
                             weight_decay=self.hparams.weight_decay,
                         )
                     )
@@ -232,8 +267,7 @@ class Trainer:
                     adam_groups.append(
                         dict(
                             params=embed_params,
-                            lr=self.hparams.inner_learning_rate
-                            * muon_config.get("embed_lr_scale", 0.5),
+                            lr=muon_lr * muon_config.get("embed_lr_scale", 0.5),
                             weight_decay=self.hparams.weight_decay,
                         )
                     )
@@ -241,8 +275,7 @@ class Trainer:
                     adam_groups.append(
                         dict(
                             params=scalar_params,
-                            lr=self.hparams.inner_learning_rate
-                            * muon_config.get("scalar_lr_scale", 0.2),
+                            lr=muon_lr * muon_config.get("scalar_lr_scale", 0.2),
                             weight_decay=self.hparams.weight_decay,
                         )
                     )
@@ -260,7 +293,7 @@ class Trainer:
 
                 muon_group = dict(
                     params=hidden_2d_params,
-                    lr=self.hparams.inner_learning_rate,
+                    lr=muon_lr,
                     momentum=muon_config.get("momentum", 0.95),
                     weight_decay=muon_config.get("weight_decay", 0.01),
                     use_muon=True,
@@ -276,8 +309,8 @@ class Trainer:
                 )
 
                 tplr.logger.info(
-                    f"[Init] Using Muon inner optimizer with lr={self.hparams.inner_learning_rate}, "
-                    f"momentum={muon_config.get('momentum', 0.95)}, weight_decay={muon_config.get('weight_decay', 0.0)}"
+                    f"[Init] Using Muon inner optimizer with lr={muon_lr}, "
+                    f"momentum={muon_config.get('momentum', 0.95)}, weight_decay={muon_config.get('weight_decay', 0.01)}"
                 )
                 tplr.logger.info(
                     f"  - Hidden matrix params: {len(hidden_2d_params)} (Muon)"

@@ -300,8 +300,14 @@ class Trainer:
                 )
 
                 param_groups = adam_groups + [muon_group]
-                # Don't need collective communication for inner optimizer
-                inner_optimizer = muon.SingleDeviceMuonWithAuxAdam(param_groups)
+                # Use ZeroRedundancyOptimizer wrapper for distributed training
+                inner_optimizer = ZeroRedundancyOptimizer(
+                    self.model.parameters(),
+                    optimizer_class=muon.SingleDeviceMuonWithAuxAdam,
+                    param_groups=param_groups,
+                    parameters_as_bucket_view=True,
+                    overlap_with_ddp=False,
+                )
 
                 tplr.logger.info(
                     f"[Init] Using Muon inner optimizer with lr={muon_lr}, "

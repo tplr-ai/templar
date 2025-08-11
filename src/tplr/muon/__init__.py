@@ -15,25 +15,7 @@
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-# ruff: noqa
-# pylint: disable=all
-# mypy: ignore-errors
-# type: ignore
 
-__version__ = "1.0.16"
+from .muon import SingleDeviceMuonWithAuxAdam
 
-# Import package.
-from .chain import *
-from .comms import *
-from .compress import *
-from .dataset import *
-from .neurons import *
-from .hparams import *
-from .logging import *
-from .schemas import *
-from .wandb import initialize_wandb
-from .metrics import *
-from .shard_index import ShardIndex
-from .sharded_dataset import SharedShardedDataset
-from .sharded_sampler import EvalSampler, MinerSampler
-from . import muon
+__all__ = ["SingleDeviceMuonWithAuxAdam"]

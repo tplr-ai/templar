@@ -288,7 +288,7 @@ class Evaluator:
             model_state = checkpoint_data["model_state_dict"]
             if isinstance(model_state, dict):
                 # TorchTitan uses different key names: layers.0.attention.wk
-                k_proj_key = "_orig_mod.layers.0.attention.wk.weight"
+                k_proj_key = "layers.0._orig_mod.attention.wk.weight"
                 if k_proj_key in model_state:
                     k_proj_shape = model_state[k_proj_key].shape
                     tplr.logger.debug(f"Checkpoint k_proj shape: {k_proj_shape}")

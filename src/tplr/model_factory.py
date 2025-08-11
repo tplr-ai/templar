@@ -310,7 +310,7 @@ def _get_actual_intermediate_size(
         Actual intermediate size from model or hparams fallback
     """
     for key in [
-        "_orig_mod.layers.0.feed_forward.w1.weight",
+        "layers.0._orig_mod.feed_forward.w1.weight",
         "layers.0.feed_forward.w1.weight",
     ]:
         if key in titan_state_dict:

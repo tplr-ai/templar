@@ -25,7 +25,6 @@ from typing import Iterable
 import torch
 import torch.distributed as dist
 from torch import autocast
-from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.distributed.tensor import DTensor as DT
 from torch.optim import SGD, lr_scheduler
 from torch.utils.data import DataLoader
@@ -201,20 +200,16 @@ class Trainer:
             )
         else:
             if optimizer_type == "adamw":
-                # Use AdamW with ZeroRedundancyOptimizer for distributed training
                 adamw_config = optimizer_config.get("adamw", {})
                 # Use optimizer-specific learning rate if provided
                 adamw_lr = adamw_config.get("learning_rate", 2e-4)
                 adamw_weight_decay = adamw_config.get("weight_decay", 0.1)
-                inner_optimizer = ZeroRedundancyOptimizer(
+                inner_optimizer = torch.optim.AdamW(
                     self.model.parameters(),
-                    optimizer_class=torch.optim.AdamW,
                     lr=adamw_lr,
                     weight_decay=adamw_weight_decay,
                     betas=tuple(adamw_config.get("betas", [0.9, 0.95])),
                     eps=adamw_config.get("eps", 1e-8),
-                    parameters_as_bucket_view=True,
-                    overlap_with_ddp=False,
                 )
                 tplr.logger.info(
                     f"[Init] Using AdamW inner optimizer with lr={adamw_lr}, "
@@ -300,13 +295,7 @@ class Trainer:
                 )
 
                 param_groups = adam_groups + [muon_group]
-                # Use ZeroRedundancyOptimizer wrapper for distributed training
-                inner_optimizer = ZeroRedundancyOptimizer(
-                    params=param_groups,
-                    optimizer_class=muon.SingleDeviceMuonWithAuxAdam,
-                    parameters_as_bucket_view=True,
-                    overlap_with_ddp=False,
-                )
+                inner_optimizer = muon.SingleDeviceMuonWithAuxAdam(param_groups)
 
                 tplr.logger.info(
                     f"[Init] Using Muon inner optimizer with lr={muon_lr}, "

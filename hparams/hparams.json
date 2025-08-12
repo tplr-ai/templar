@@ -36,7 +36,7 @@
     "time_window_delta_seconds": 18,
     "reset_inactivity_windows": 10,
     "sync_max_steps_behind": 3,
-    "eval_lr_factor": 0.3,
+    "eval_lr_factor": 0.2,
     "openskill_beta": 7,
     "openskill_tau": 0.1,
     "checkpoint_init_version": null,
@@ -64,7 +64,7 @@
       "head_lr_scale": 0.5,
       "embed_lr_scale": 1.0,
       "scalar_lr_scale": 0.2,
-      "learning_rate": 0.02,
+      "learning_rate": 1e-3,
       "scheduler": {
         "warmup_steps": 750,
         "t_max": 20000,

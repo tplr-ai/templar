@@ -410,11 +410,9 @@ class Miner(BaseNode, Trainer):
 
         ckpt_ok = False
         ckpt_sync_win = self.start_window
+        # 1) Only rank-0 (or single GPU) loads the checkpoint
         if self.world_size == 1 or self.is_master:
-            (
-                ckpt_ok,
-                ckpt_sync_win,
-            ) = await self.comms.load_checkpoint(
+            ckpt_ok, ckpt_sync_win = await self.comms.load_checkpoint(
                 model=self.bare_model,
                 current_window=self.current_window,
                 device=str(self.device),
@@ -422,25 +420,31 @@ class Miner(BaseNode, Trainer):
                 if has_new_checkpoint
                 else self.bootstrap_version,
             )
-
             if ckpt_ok:
                 tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
-                # catch-up only if the checkpoint lags behind
-                if (
-                    ckpt_sync_win < self.current_window
-                    and self.global_step > checkpoint_window_buffer
-                ):
-                    await tplr.neurons.catchup_with_aggregation_server(
-                        self, max(ckpt_sync_win, self.start_window)
-                    )
-
             else:
                 tplr.logger.info("No checkpoint found – starting from scratch")
 
-                # still perform the full catch-up from the very first window
-                await tplr.neurons.catchup_with_aggregation_server(
-                    self, self.start_window
-                )
+        # 2) Broadcast (ckpt_ok, ckpt_sync_win) to all ranks so they can participate in catch-up
+        if self.world_size > 1:
+            obj = [(bool(ckpt_ok), int(ckpt_sync_win))] if self.is_master else [None]
+            dist.broadcast_object_list(obj, src=0)
+            ckpt_ok, ckpt_sync_win = obj[0]
+            dist.barrier(device_ids=[self.local_rank])
+
+        # 3) Decide catch-up windows and run catch-up on ALL ranks (avoids DTensor collective hangs)
+        need_catchup = (not ckpt_ok) or (
+            ckpt_ok
+            and ckpt_sync_win < self.current_window
+            and self.global_step > checkpoint_window_buffer
+        )
+        if need_catchup:
+            start_from = (
+                self.start_window
+                if not ckpt_ok
+                else max(ckpt_sync_win, self.start_window)
+            )
+            await tplr.neurons.catchup_with_aggregation_server(self, start_from)
 
         if ckpt_ok:
             steps_to_replay = (
@@ -664,7 +668,11 @@ class Miner(BaseNode, Trainer):
                 )
                 tplr.logger.info("Gather task completed!")
                 gather_time = tplr.T() - gather_start
+            # Broadcast the gather result (as Python object) to all ranks
             if self.world_size > 1:
+                obj_list = [gather_result if self.is_master else None]
+                dist.broadcast_object_list(obj_list, src=0)
+                gather_result = obj_list[0]
                 dist.barrier(device_ids=[self.local_rank])
 
             # 5. Calculate and log metrics

@@ -349,7 +349,7 @@ def outer_step(
 
             # decode to a full gradient
             if _is_dt(p):
-                ref = p.to_local()
+                ref = p.full_tensor()
                 full_grad = transformer.decode(
                     compressor.batch_decompress(
                         ref,

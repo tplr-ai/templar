@@ -1216,13 +1216,14 @@ class Comms(ChainManager):
             if result.success:
                 return result.data, result.global_step
 
-            if result.status == "TOO_LATE":
+            if result.status in ["TOO_LATE", "TOO_EARLY"]:
+                formatted_status = result.status.lower().split("_")
                 tplr.logger.info(
-                    f"Gradient for UID {uid}, window {window} exists but was uploaded too late. Skipping."
+                    f"Gradient for UID {uid}, window {window} exists but was uploaded {formatted_status}. Skipping."
                 )
                 return None
 
-            # For NOT_FOUND, ERROR, or TOO_EARLY, we retry.
+            # For NOT_FOUND or ERROR, we retry.
             # Short delay before retrying
             await asyncio.sleep(0.5)
 

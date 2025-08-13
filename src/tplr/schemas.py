@@ -30,18 +30,11 @@ class Bucket(BaseModel):
             (self.name, self.account_id, self.access_key_id, self.secret_access_key)
         )
 
-    def __eq__(self, other):
-        # Compare all fields to determine equality
-        if isinstance(other, Bucket):
-            return self.dict() == other.dict()
-        return False
-
     name: str = Field(..., min_length=1)
     account_id: str = Field(..., min_length=1)
     access_key_id: str = Field(..., min_length=1)
     secret_access_key: str = Field(..., min_length=1)
 
-    # v2 style; silently ignored by v1
     model_config = ConfigDict(
         str_strip_whitespace=True,
     )

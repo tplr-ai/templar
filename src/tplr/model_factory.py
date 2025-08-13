@@ -25,7 +25,12 @@ from types import SimpleNamespace
 from typing import Literal
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    set_model_state_dict,
+)
 from torchtitan.config import (
     ActivationCheckpoint,
     Float8,
@@ -251,19 +256,19 @@ def initialize_torchtitan_model(
     hf_cfg = hparams.model_config
     titan_args = create_titan_model_args(hf_cfg, hparams.sequence_length)
 
-    # Create model on meta device
-    with torch.device("meta"):
-        model = TitanLlama(titan_args)
-
     # Create parallelization dimensions
     pdims = create_parallel_dims(world_size, hparams, role)
 
     # Create job config
     job_config = create_job_config(hparams, role)
 
-    # Build mesh if needed (for miner)
-    if role == "miner" and world_size > 1:
+    if world_size > 1 and dist.is_available() and dist.is_initialized():
+        # Only build a mesh when distributed is initialized (avoids single-proc errors)
         _ = pdims.build_mesh()
+
+    # Create model on meta device
+    with torch.device("meta"):
+        model = TitanLlama(titan_args)
 
     # Parallelize the model
     model = parallelize_llama(
@@ -272,15 +277,61 @@ def initialize_torchtitan_model(
         job_config=job_config,
     )
 
-    # Initialize model weights on the target device
-    if role == "evaluator":
-        # Evaluator initializes on CPU
-        model.to_empty(device="cpu")
-        model.init_weights()  # type: ignore
+    # Initialize weights via rank‑0 broadcast of a single full FP32 state (FSDP2/DCP)
+    target_device = "cpu" if role == "evaluator" else device
+    model.to_empty(device=target_device)
+    if dist.is_available() and dist.is_initialized() and world_size > 1:
+        rank = dist.get_rank()
+        if rank == 0:
+            with torch.device("meta"):
+                ref = TitanLlama(titan_args)  # unsharded reference
+            ref.to_empty(device="cpu")
+            torch.manual_seed(42)
+            with torch.no_grad():
+                ref.init_weights()
+            full_sd = {
+                k: (
+                    v.detach().float().cpu()
+                    if v.is_floating_point()
+                    else v.detach().cpu()
+                )
+                for k, v in ref.state_dict().items()
+            }
+        else:
+            full_sd = {}
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(
+                full_state_dict=True, broadcast_from_rank0=True, strict=True
+            ),
+        )
+        dist.barrier()
     else:
-        # Validator and miner initialize on GPU
-        model.to_empty(device=device)
-        model.init_weights()  # type: ignore
+        # Single‑process path (e.g., 1‑GPU validator / CPU evaluator)
+        with torch.device("meta"):
+            ref = TitanLlama(titan_args)
+        ref.to_empty(device="cpu")
+        torch.manual_seed(42)
+        with torch.no_grad():
+            ref.init_weights()
+        full_sd = {
+            k: (v.detach().float().cpu() if v.is_floating_point() else v.detach().cpu())
+            for k, v in ref.state_dict().items()
+        }
+        # move to target device and load
+        full_sd = {
+            k: (t.to(target_device) if t.is_floating_point() else t)
+            for k, t in full_sd.items()
+        }
+        missing, unexpected = set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(full_state_dict=True, strict=True),
+        )
+        assert not missing and not unexpected, (
+            f"Missing {missing}, unexpected {unexpected}"
+        )
 
     # Log initialization details
     if role == "miner":

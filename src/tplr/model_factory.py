@@ -29,6 +29,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
+    get_model_state_dict,
     set_model_state_dict,
 )
 from torchtitan.config import (
@@ -289,14 +290,9 @@ def initialize_torchtitan_model(
             torch.manual_seed(42)
             with torch.no_grad():
                 ref.init_weights()
-            full_sd = {
-                k: (
-                    v.detach().float().cpu()
-                    if v.is_floating_point()
-                    else v.detach().cpu()
-                )
-                for k, v in ref.state_dict().items()
-            }
+            full_sd = get_model_state_dict(
+                ref, options=StateDictOptions(full_state_dict=True)
+            )
         else:
             full_sd = {}
         set_model_state_dict(
@@ -315,15 +311,9 @@ def initialize_torchtitan_model(
         torch.manual_seed(42)
         with torch.no_grad():
             ref.init_weights()
-        full_sd = {
-            k: (v.detach().float().cpu() if v.is_floating_point() else v.detach().cpu())
-            for k, v in ref.state_dict().items()
-        }
-        # move to target device and load
-        full_sd = {
-            k: (t.to(target_device) if t.is_floating_point() else t)
-            for k, t in full_sd.items()
-        }
+        full_sd = get_model_state_dict(
+            ref, options=StateDictOptions(full_state_dict=True)
+        )
         missing, unexpected = set_model_state_dict(
             model,
             full_sd,

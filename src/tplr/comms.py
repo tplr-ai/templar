@@ -35,9 +35,12 @@ import aiofiles
 import bittensor as bt
 import botocore
 import torch
+import torch.distributed as dist
 from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
 from botocore.exceptions import ClientError, ConnectionClosedError
+from torch.distributed.tensor import DTensor as DT
+from torch.distributed.tensor import distribute_tensor
 from tqdm import tqdm as std_tqdm
 
 import tplr as tplr
@@ -1044,6 +1047,9 @@ class Comms(ChainManager):
         skipped_uids = []  # Retain UIDs that are skipped.
         global_steps = []
 
+        # Ensure deterministic order across processes/ranks
+        uids = sorted(uids)
+
         async with self.gather_semaphore:
             batch_tasks = [
                 self.get_with_retry(
@@ -1668,59 +1674,141 @@ class Comms(ChainManager):
             await self._purge_s3_client(bucket)
             return None
 
+    def _seed_dt_param_from_rank0(
+        self, p: torch.Tensor, w_global: torch.Tensor | None, device: str
+    ) -> None:
+        """Fan-out a DTensor param/buffer from rank-0; others pass a placeholder."""
+        logical = (
+            w_global.to(dtype=p.dtype, device=device)
+            if w_global is not None
+            else torch.empty(p.shape, dtype=p.dtype, device=device)
+        )
+        dt = distribute_tensor(
+            logical,
+            device_mesh=p.device_mesh,
+            placements=p.placements,
+            src_data_rank=0,  # rank-0 is the source of truth
+        )
+        p.to_local().copy_(dt.to_local())
+        del dt
+
+    def _seed_plain_from_rank0(
+        self, t: torch.Tensor, w_global: torch.Tensor | None, is_master: bool
+    ) -> None:
+        """Copy on rank-0 then broadcast in-place for replicated (non-DT) tensors."""
+        if w_global is not None and is_master:
+            t.data.copy_(w_global.to(dtype=t.dtype, device=t.device))
+        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+            dist.broadcast(t.data, src=0)
+
+    def _apply_state_all_ranks(
+        self,
+        bare: torch.nn.Module,
+        sd: dict[str, torch.Tensor] | None,
+        device: str,
+        is_master: bool,
+        present: set[str],
+    ) -> None:
+        """Single-pass loader that covers parameters and buffers."""
+        with torch.no_grad():
+            # --- parameters ---
+            for name, p in bare.named_parameters():
+                if name not in present:
+                    continue
+                w = sd.get(name) if (sd is not None) else None
+                if isinstance(p, DT):
+                    self._seed_dt_param_from_rank0(p, w, device)
+                else:
+                    self._seed_plain_from_rank0(p, w, is_master)
+            # --- buffers (optional if you checkpointed them) ---
+            for name, b in bare.named_buffers():
+                if name not in present:
+                    continue
+                w = sd.get(name) if (sd is not None) else None
+                if isinstance(b, DT):
+                    self._seed_dt_param_from_rank0(b, w, device)
+                else:
+                    self._seed_plain_from_rank0(b, w, is_master)
+
     async def load_checkpoint(
         self,
         model,
         current_window: int,
         device: str,
-        init_version: Optional[str] = None,
+        init_version: str | None = None,
+        is_master: bool = True,
     ) -> tuple[bool, int]:
         """
-        Loads the latest checkpoint. No catchup or step simulation happens here.
-        Returns:
-            tuple: (success: bool, checkpoint_current_window: int)
+        Rank-0 downloads; all ranks fan-out once.
+        Returns (success, checkpoint_sync_window) identically on all ranks.
         """
-        init_version = init_version if init_version is not None else __version__
-        result = await self.get_latest_checkpoint(init_version)
-        if not result:
-            tplr.logger.info("No valid checkpoints found")
+        bare = getattr(model, "module", model)
+
+        # --------- rank-0 fetch + minimal metadata ----------
+        ok, sync_win, sd, present = False, 0, None, set()
+        if is_master:
+            try:
+                init_version = init_version or __version__
+            except NameError:
+                pass
+            result = await self.get_latest_checkpoint(init_version)
+            if result:
+                try:
+                    checkpoint_data, _ = result
+                    sd = checkpoint_data["model_state_dict"]
+                    present = {k for k in sd.keys()}
+
+                    # Prefer sync_window; fall back to current_window if older ckpt
+                    sw = checkpoint_data.get("sync_window")
+                    cw = checkpoint_data.get("current_window")
+                    sync_win = int(
+                        sw if sw is not None else cw if cw is not None else 0
+                    )
+                    ok = True
+
+                    tplr.logger.info(
+                        f"Checkpoint loaded on rank-0: "
+                        f"start={checkpoint_data.get('start_window')}, "
+                        f"current={checkpoint_data.get('current_window')}, "
+                        f"sync={sync_win}, local_current={current_window}"
+                    )
+                except Exception as e:
+                    tplr.logger.error(f"[ckpt] parse/load failed on rank-0: {e}")
+                    ok, sync_win, sd, present = False, 0, None, set()
+            else:
+                tplr.logger.info("No valid checkpoints found on rank-0")
+
+        # --------- broadcast tiny meta-object to all ranks ----------
+        if dist.is_available() and dist.is_initialized():
+            obj = [(bool(ok), int(sync_win), list(present))] if is_master else [None]
+            dist.broadcast_object_list(obj, src=0)
+            ok, sync_win, present_list = obj[0]
+            present = set(present_list or [])
+        if not ok:
             return False, 0
 
-        checkpoint_data, checkpoint_window = result
-        try:
-            # 1) Load model and optimizer state
-            model.load_state_dict(
-                {
-                    k: v.to(device)
-                    for k, v in checkpoint_data["model_state_dict"].items()
-                }
-            )
-            model.to(device)
+        # --------- single fan-out of weights/buffers ----------
+        self._apply_state_all_ranks(
+            bare=bare,
+            sd=sd if is_master else None,  # only rank-0 holds actual tensors
+            device=device,
+            is_master=is_master,
+            present=present,
+        )
 
-            checkpoint_start_window = checkpoint_data.get("start_window")
-            checkpoint_current_window = checkpoint_data.get("current_window")
-            checkpoint_sync_window = checkpoint_data.get("sync_window")
-            if checkpoint_start_window is None or checkpoint_current_window is None:
-                tplr.logger.warning(
-                    "Checkpoint missing start_window or current_window info"
-                )
-                return False, 0
+        # Optional: bring module to device (safe if already there)
+        model.to(device)
 
-            tplr.logger.info(
-                f"Checkpoint loaded. start_window={checkpoint_start_window}, "
-                f"checkpoint_current_window={checkpoint_current_window}, "
-                f"checkpoint_sync_window={checkpoint_sync_window}, "
-                f"local_current_window={current_window}"
-            )
+        # Barrier for cleanliness
+        if dist.is_available() and dist.is_initialized():
+            # Get the current device for this rank
+            if torch.cuda.is_available():
+                device_id = torch.cuda.current_device()
+                dist.barrier(device_ids=[device_id])
+            else:
+                dist.barrier()
 
-            return True, checkpoint_sync_window
-
-        except KeyError as e:
-            tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
-            return False, 0
-        except Exception as e:
-            tplr.logger.error(f"Failed to load checkpoint: {e}")
-            return False, 0
+        return True, int(sync_win)
 
     async def post_peer_list(
         self,
@@ -1989,50 +2077,6 @@ class Comms(ChainManager):
         )
 
         return True
-
-    async def _gather_window_batch(
-        self,
-        batch_windows: List[int],
-        uid: str,
-        peers: List[int],
-        device: str,
-        totalks: dict,
-        global_step: int,
-    ) -> Dict[int, SimpleNamespace]:
-        """Gather gradients for multiple windows in parallel."""
-        try:
-            gather_tasks = [
-                self.gather(
-                    my_uid=uid,
-                    uids=peers,
-                    window=w,
-                    key="gradient",
-                    timeout=30,
-                    device=device,
-                    totalks=totalks,
-                    local=False,
-                    stale_retention=100,
-                )
-                for w in batch_windows
-            ]
-            # Wait for all gather tasks to complete
-            batch_results = await asyncio.gather(*gather_tasks, return_exceptions=True)
-
-            # Filter out exceptions and create window->result mapping
-            result_dict = {w: None for w in batch_windows}  # Initialize with None
-            for window, result in zip(batch_windows, batch_results):
-                if not isinstance(result, Exception) and result is not None:
-                    result_dict[window] = result
-
-            return result_dict
-
-        except Exception as e:
-            tplr.logger.error(
-                f"Failed to gather window batch {batch_windows}: {str(e)}"
-            )
-            return {
-                w: None for w in batch_windows
-            }  # Return dict with None values on failure
 
     def check_compressed_indices(
         self,

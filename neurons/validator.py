@@ -1130,11 +1130,7 @@ class Validator(BaseNode, Trainer):
                     time_max=time_max,
                     time_min=time_min,
                 )
-                if (
-                    eval_result is None
-                    or not isinstance(eval_result[0], dict)
-                    or eval_result[0].get("__status") in ["TOO_LATE", "TOO_EARLY"]
-                ):
+                if not eval_result.success:
                     tplr.log_with_context(
                         level="info",
                         message=f"No gradient received from UID {eval_uid}. Slashing moving average score by {1 - self.missing_gradient_slash_rate:.2%}",
@@ -1198,7 +1194,7 @@ class Validator(BaseNode, Trainer):
                     )
                     continue
 
-                state_dict, _ = eval_result
+                state_dict = eval_result.data
 
                 meta = state_dict.get("metadata", {})
                 self.log_digest_match(eval_uid, meta)
@@ -2206,14 +2202,14 @@ class Validator(BaseNode, Trainer):
         )
 
         # Check if we got a valid result
-        if debug_result is None:
+        if not debug_result.success:
             return {
                 "success": False,
                 "error": "Failed to retrieve debug dictionary",
                 "sync_score": 0.0,
             }
 
-        miner_debug_dict = cast(dict, debug_result[0])
+        miner_debug_dict = cast(dict, debug_result.data)
 
         # Validate debug dictionary format
         if miner_debug_dict is None or not isinstance(miner_debug_dict, dict):

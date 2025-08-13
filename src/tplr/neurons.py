@@ -439,8 +439,8 @@ async def catchup_with_aggregation_server(
         )
 
         # ── A. aggregated object exists → normal path ────────────────────
-        if fetch is not None and fetch[0] is not None and "state_dict" in fetch[0]:
-            payload, _ = fetch
+        if fetch.success and fetch.data and "state_dict" in fetch.data:
+            payload = fetch.data
 
             # ------------------------------------------------------------------
             # Re‑create the SimpleNamespace expected by `outer_step`.
@@ -539,8 +539,8 @@ async def catchup_with_aggregation_server(
                 stale_retention=10,
             )
 
-            if debug_fetch is not None and isinstance(debug_fetch[0], dict):
-                debug_dict = debug_fetch[0]  # validator's payload
+            if debug_fetch.success:
+                debug_dict = debug_fetch.data  # validator's payload
 
                 # --- update EMA of parameter‑slice changes ------------------
                 bare_model = getattr(instance.model, "module", instance.model)

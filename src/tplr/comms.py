@@ -1218,6 +1218,7 @@ class Comms(ChainManager):
 
             if result.status in ["TOO_LATE", "TOO_EARLY"]:
                 formatted_status = result.status.lower().split("_")
+                formatted_status = " ".join(formatted_status)
                 tplr.logger.info(
                     f"Gradient for UID {uid}, window {window} exists but was uploaded {formatted_status}. Skipping."
                 )

@@ -16,7 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Global imports
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -29,6 +29,12 @@ class Bucket(BaseModel):
         return hash(
             (self.name, self.account_id, self.access_key_id, self.secret_access_key)
         )
+
+    def __eq__(self, other):
+        # Compare all fields to determine equality
+        if isinstance(other, Bucket):
+            return self.model_dump() == other.model_dump()
+        return False
 
     name: str = Field(..., min_length=1)
     account_id: str = Field(..., min_length=1)
@@ -43,10 +49,10 @@ class Bucket(BaseModel):
 class CommsGetResult(BaseModel):
     """A standard return type for the `get` function."""
 
-    data: Optional[Dict[str, Any]] = Field(
+    data: None | dict[str, Any] = Field(
         None, description="The data retrieved by the get function."
     )
-    global_step: Optional[int] = Field(
+    global_step: None | int = Field(
         None, description="The global step associated with the data."
     )
     status: Literal["OK", "TOO_EARLY", "TOO_LATE", "NOT_FOUND", "ERROR"] = Field(

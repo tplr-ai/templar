@@ -1085,6 +1085,7 @@ class Comms(ChainManager):
                         continue
 
                     try:
+                        # This is where get response uses the step
                         state_dict_resp, global_step_resp = response
                         tplr.logger.debug(
                             f"Received state dict and global step {global_step_resp} from UID {uid}"

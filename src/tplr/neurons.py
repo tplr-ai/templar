@@ -175,14 +175,16 @@ def outer_step(
         model.train()
         optimizer.zero_grad()
 
-        if gather_result is not None and gather_result.state_dict is not None:
-            for n, p in bare_model.named_parameters():
+        if gather_result is not None and gather_result.state_dict is not None and gather_result.state_dict != SimpleNamespace():
+            for i, (n, p) in enumerate(bare_model.named_parameters()):
                 idxs = getattr(gather_result.state_dict, n + "idxs", None)
                 vals = getattr(gather_result.state_dict, n + "vals", None)
                 qps = getattr(gather_result.state_dict, n + "quant_params", None)
 
                 if idxs is None or vals is None:
                     tplr.logger.info(f"Gradient data missing for {n}, skipping.")
+                    tplr.logger.info(f"{type(gather_result)=}")
+                    tplr.logger.info(list(gather_result.state_dict.__dict__.keys())[i])
                     continue
 
                 # normalise container types

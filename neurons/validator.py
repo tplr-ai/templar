@@ -101,7 +101,7 @@ class Validator(BaseNode, Trainer):
         parser.add_argument(
             "--local",
             action="store_true",
-            help="Local run - use toy model, small enough for a laptop.",
+            help="Local run - use toy model, small enough for a laptop."
         )
         parser.add_argument(
             "--profile-iters",
@@ -1094,7 +1094,9 @@ class Validator(BaseNode, Trainer):
             )
 
             # Use the gather result to calculate norms across UIDs
-            clip_norm_dict = self.compute_peer_val_norms(gather_result, self.compressor)
+            clip_norm_dict = self.compute_peer_val_norms(
+                gather_result, self.compressor
+            )
 
             # Process each UID with sliding window loading
             for eval_uid in evaluation_uids:
@@ -2460,6 +2462,7 @@ class Validator(BaseNode, Trainer):
                         f"Invalid gradient data from peer {eval_uid}: NaN or Inf values in {vals_key}"
                     )
 
+        clip_norm = True  # Always true in the repo 8/13/2025
         # If all validations pass, apply the gradients
         for n, p in model.named_parameters():
             idxs_key = n + "idxs"
@@ -2468,6 +2471,22 @@ class Validator(BaseNode, Trainer):
             idxs = eval_state_dict.get(idxs_key, None)
             vals = eval_state_dict.get(vals_key, None)
             quant_params = eval_state_dict.get(quant_key, None)
+
+
+            if clip_norm:
+                vals_f32 = self.compressor.maybe_dequantize_values(vals, quant_params, p.device)
+                vals_f32 = vals_f32[0] # comes back as a list, but only 1 element
+
+                clip_norm_val = clip_norm_dict.get(vals_key, None)
+                eval_norm = torch.norm(vals, p=2)
+
+                clip_factor = (
+                    torch.clamp(clip_norm_val / (eval_norm + 1e-8))
+                    if clip_norm_val is not None
+                    else None
+                )
+
+                vals = vals_f32 * clip_factor if clip_factor is not None else vals_f32
 
             if idxs is not None and vals is not None and quant_params is not None:
                 grad = self.transformer.decode(
@@ -2525,7 +2544,7 @@ class Validator(BaseNode, Trainer):
 
             if vals is None:
                 continue
-
+            
             vals_f32 = compressor.maybe_dequantize_values(vals, quant_params, p.device)
 
             norms = torch.stack([torch.norm(v, p=2) for v in vals_f32]).to(p.device)

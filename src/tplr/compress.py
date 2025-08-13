@@ -279,6 +279,7 @@ class TopKCompressor(Generic[Q]):
                 quantization_range  # Quantization range in standard deviations
             )
 
+    # @staticmethod
     def _clamp_topk(self, x, topk) -> int:
         topk = min(topk, x.shape[-1])
         topk = max(topk, 2)
@@ -406,8 +407,7 @@ class TopKCompressor(Generic[Q]):
                 norms = torch.stack(
                     [torch.norm(sparse_vals, p=2) for sparse_vals in vals_for_norm]
                 )
-            median_norm = torch.median(norms)
-            clip_norm_val = torch.clamp(median_norm, min=1, max=10)
+            clip_norm_val = torch.median(norms)
 
         vals = dequant_vals if dequant_vals is not None else val
         for i, v in enumerate(vals):
@@ -487,6 +487,7 @@ class TopKCompressor(Generic[Q]):
         return qval, qparams
 
     @torch.no_grad()
+    # @staticmethod
     def _dequantize_values(
         self, val: torch.Tensor, qparams: QuantParamsT
     ) -> torch.Tensor:

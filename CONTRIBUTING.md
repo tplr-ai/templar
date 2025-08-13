@@ -48,6 +48,7 @@ Kind         | Explanation
 `maintenance`| Used when updating third-party packages
 `refactor`   | Used when refactoring code
 `tests`      | Used when adding or changing tests
+`deprecate`  | Used when removing unused functionality
 
 Examples:
 ```

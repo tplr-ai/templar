@@ -43,8 +43,6 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     set_model_state_dict,
 )
-from torch.distributed.tensor import DTensor as DT
-from torch.distributed.tensor import distribute_tensor
 from tqdm import tqdm as std_tqdm
 
 import tplr as tplr
@@ -1690,7 +1688,7 @@ class Comms(ChainManager):
         Returns (success, checkpoint_sync_window) identically on all ranks.
         """
         # --------- rank-0 fetch + minimal metadata ----------
-        ok, sync_win, sd, present = False, 0, None, set()
+        ok, sync_win, full_sd, present = False, 0, {}, set()
         if is_master:
             try:
                 init_version = init_version or __version__
@@ -1719,11 +1717,9 @@ class Comms(ChainManager):
                     )
                 except Exception as e:
                     tplr.logger.error(f"[ckpt] parse/load failed on rank-0: {e}")
-                    ok, sync_win, sd, present = False, 0, None, set()
+                    ok, sync_win, full_sd, present = False, 0, {}, set()
             else:
                 tplr.logger.info("No valid checkpoints found on rank-0")
-        else:
-            full_sd = {}
 
         # --------- broadcast tiny meta-object to all ranks ----------
         if dist.is_available() and dist.is_initialized():

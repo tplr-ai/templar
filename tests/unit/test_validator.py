@@ -24,9 +24,7 @@ def validator():
             self.model = torch.nn.Linear(2, 2)
 
         def compute_peer_val_norms(self, gather_result):
-            return Validator.compute_peer_val_norms(
-                self, gather_result, self.compressor
-            )
+            return Validator.compute_peer_val_norms(self, gather_result)
 
     return MockValidator()
 
@@ -56,8 +54,8 @@ def test_compute_peer_val_norms_simple(validator):
     assert torch.allclose(val_norms["biasvals"], expected_bias_norm)
 
 
-def test_compute_peer_val_norms_empty_contribs(validator):
-    gather_result = SimpleNamespace(contribs={}, state_dict=SimpleNamespace())
+def test_compute_peer_val_norms_none_state_dict(validator):
+    gather_result = SimpleNamespace(contribs={}, state_dict=None)
     with pytest.raises(
         ValueError, match="Must have gather_result.state_dict to compute norms"
     ):

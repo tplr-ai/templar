@@ -178,7 +178,7 @@ def outer_step(
         if (
             gather_result is not None
             and gather_result.state_dict is not None
-            and gather_result.state_dict != SimpleNamespace()
+            and bool(vars(gather_result.state_dict))
         ):
             for n, p in bare_model.named_parameters():
                 idxs = getattr(gather_result.state_dict, n + "idxs", None)

@@ -1094,7 +1094,7 @@ class Validator(BaseNode, Trainer):
             )
 
             # Use the gather result to calculate norms across UIDs
-            clip_norm_dict = self.compute_peer_val_norms(gather_result, self.compressor)
+            clip_norm_dict = self.compute_peer_val_norms(gather_result)
 
             # Process each UID with sliding window loading
             for eval_uid in evaluation_uids:
@@ -2509,7 +2509,6 @@ class Validator(BaseNode, Trainer):
     def compute_peer_val_norms(
         self,
         gather_result: SimpleNamespace,
-        compressor: tplr.compress.TopKCompressor,
     ) -> dict[str, torch.Tensor]:
         # clip_norm is basically always true in the repo 8/13/2025
         # In this case, leave it to refactor later
@@ -2517,7 +2516,7 @@ class Validator(BaseNode, Trainer):
 
         clip_norm_dict = {}
         state_dict = gather_result.state_dict
-        if not state_dict or state_dict == SimpleNamespace():
+        if not state_dict:
             raise ValueError("Must have gather_result.state_dict to compute norms")
 
         for n, p in self.model.named_parameters():
@@ -2530,7 +2529,9 @@ class Validator(BaseNode, Trainer):
             if vals is None:
                 continue
 
-            vals_f32 = compressor.maybe_dequantize_values(vals, quant_params, p.device)
+            vals_f32 = self.compressor.maybe_dequantize_values(
+                vals, quant_params, p.device
+            )
 
             norms = torch.stack([torch.norm(v, p=2) for v in vals_f32]).to(p.device)
             clip_norm_dict[vals_key] = torch.median(norms)

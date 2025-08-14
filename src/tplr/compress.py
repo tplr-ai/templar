@@ -548,7 +548,7 @@ class TopKCompressor(Generic[Q]):
                         v = v / l2_norm
             elif clip_norm and norms is not None and clip_norm_val is not None:
                 current_norm = norms[i]
-                clip_factor = clip_norm_val / (current_norm + 1e-8)
+                clip_factor = torch.clamp(clip_norm_val / (current_norm + 1e-8), max=1)
                 v = v * clip_factor
             processed_vals.append(v)
 

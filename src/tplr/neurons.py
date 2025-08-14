@@ -175,7 +175,11 @@ def outer_step(
         model.train()
         optimizer.zero_grad()
 
-        if gather_result is not None and gather_result.state_dict is not None and gather_result.state_dict != SimpleNamespace():
+        if (
+            gather_result is not None
+            and gather_result.state_dict is not None
+            and gather_result.state_dict != SimpleNamespace()
+        ):
             for i, (n, p) in enumerate(bare_model.named_parameters()):
                 idxs = getattr(gather_result.state_dict, n + "idxs", None)
                 vals = getattr(gather_result.state_dict, n + "vals", None)

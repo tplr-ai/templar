@@ -519,7 +519,16 @@ class TopKCompressor(Generic[Q]):
                     tplr.logger.warning(f"Missing quant_params for vals[{i}]]; skip.")
                     raise ValueError(f"Missing quant_params for vals[{i}]")
                 qp = qparams[i]  # if isinstance(qparams, (list, tuple)) else qparams
-                v = self._dequantize_values(v, qp).to(device)
+                try:
+                    v = self._dequantize_values(v, qp).to(device)
+                except IndexError as e:
+                    raise e
+                except TypeError as e:
+                    tplr.logger.exception("Probably iterate over 0d tensor")
+                    tplr.logger.info(f"{qp=}")
+                    raise e
+                except ValueError as e:
+                    raise e
             vals_f32.append(v)
 
         if len(vals_f32) != len(vals):  # some decode failed

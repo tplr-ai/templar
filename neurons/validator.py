@@ -1267,63 +1267,65 @@ class Validator(BaseNode, Trainer):
                         clip_norm_dict,
                     )
                 except Exception as e:
-                    old_score = self.final_scores[eval_uid].item()
+                    raise e 
+                
+                    # old_score = self.final_scores[eval_uid].item()
 
-                    if old_score > 0:
-                        # Reset positive scores to zero explicitly
-                        self.final_scores[eval_uid] = 0.0
-                        tplr.log_with_context(
-                            level="warning",
-                            message=f"Set positive score of UID {eval_uid} from {old_score:.4f} to 0.0 - invalid gradient data",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
-                    else:
-                        # Negative score is worse than zero; keep it as-is.
-                        tplr.log_with_context(
-                            level="warning",
-                            message=f"UID {eval_uid} had negative score {old_score:.4f}; retaining due to invalid gradient data",
-                            sync_window=self.sync_window,
-                            current_window=self.current_window,
-                            eval_uid=eval_uid,
-                        )
+                    # if old_score > 0:
+                    #     # Reset positive scores to zero explicitly
+                    #     self.final_scores[eval_uid] = 0.0
+                    #     tplr.log_with_context(
+                    #         level="warning",
+                    #         message=f"Set positive score of UID {eval_uid} from {old_score:.4f} to 0.0 - invalid gradient data",
+                    #         sync_window=self.sync_window,
+                    #         current_window=self.current_window,
+                    #         eval_uid=eval_uid,
+                    #     )
+                    # else:
+                    #     # Negative score is worse than zero; keep it as-is.
+                    #     tplr.log_with_context(
+                    #         level="warning",
+                    #         message=f"UID {eval_uid} had negative score {old_score:.4f}; retaining due to invalid gradient data",
+                    #         sync_window=self.sync_window,
+                    #         current_window=self.current_window,
+                    #         eval_uid=eval_uid,
+                    #     )
 
-                    # Include in evaluated UIDs so it gets logged in metrics
-                    self.evaluated_uids.add(eval_uid)
+                    # # Include in evaluated UIDs so it gets logged in metrics
+                    # self.evaluated_uids.add(eval_uid)
 
-                    # Log to WandB
-                    self.wandb.log(
-                        {
-                            f"validator/slash/{eval_uid}/score_before": old_score,
-                            f"validator/slash/{eval_uid}/score_after": self.final_scores[
-                                eval_uid
-                            ].item(),
-                            f"validator/slash/{eval_uid}/reason": str(e),
-                        },
-                        step=self.global_step,
-                    )
+                    # # Log to WandB
+                    # self.wandb.log(
+                    #     {
+                    #         f"validator/slash/{eval_uid}/score_before": old_score,
+                    #         f"validator/slash/{eval_uid}/score_after": self.final_scores[
+                    #             eval_uid
+                    #         ].item(),
+                    #         f"validator/slash/{eval_uid}/reason": str(e),
+                    #     },
+                    #     step=self.global_step,
+                    # )
 
-                    # Log to InfluxDB metrics with primitive types
-                    self.metrics_logger.log(
-                        measurement="validator_slash",
-                        tags={
-                            "eval_uid": str(eval_uid),
-                            "window": int(self.sync_window),
-                            "global_step": int(self.global_step),
-                            "reason_code": "invalid_gradient",
-                        },
-                        fields={
-                            "score_before": float(old_score),
-                            "score_after": float(self.final_scores[eval_uid].item()),
-                            "reason": str(e)[:255],  # Truncate long error messages
-                        },
-                        with_system_metrics=True,
-                        with_gpu_metrics=True,
-                    )
+                    # # Log to InfluxDB metrics with primitive types
+                    # self.metrics_logger.log(
+                    #     measurement="validator_slash",
+                    #     tags={
+                    #         "eval_uid": str(eval_uid),
+                    #         "window": int(self.sync_window),
+                    #         "global_step": int(self.global_step),
+                    #         "reason_code": "invalid_gradient",
+                    #     },
+                    #     fields={
+                    #         "score_before": float(old_score),
+                    #         "score_after": float(self.final_scores[eval_uid].item()),
+                    #         "reason": str(e)[:255],  # Truncate long error messages
+                    #     },
+                    #     with_system_metrics=True,
+                    #     with_gpu_metrics=True,
+                    # )
 
-                    # Skip the rest of processing for this peer
-                    continue
+                    # # Skip the rest of processing for this peer
+                    # continue
 
                 # 10. Compute loss after gradient application on own data
                 self.outer_optimizer.zero_grad()
@@ -2396,10 +2398,9 @@ class Validator(BaseNode, Trainer):
                 vals_f32 = self.compressor.maybe_dequantize_values(
                     vals, quant_params, p.device
                 )
-                vals_f32 = vals_f32[0]  # comes back as a list, but only 1 element
+                eval_norm = torch.stack([torch.norm(v, p=2) for v in vals_f32]).to(p.device)
 
                 clip_norm_val = clip_norm_dict.get(vals_key, None)
-                eval_norm = torch.norm(vals, p=2)
 
                 clip_factor = (
                     torch.clamp(clip_norm_val / (eval_norm + 1e-8))

@@ -1990,50 +1990,6 @@ class Comms(ChainManager):
 
         return True
 
-    async def _gather_window_batch(
-        self,
-        batch_windows: List[int],
-        uid: str,
-        peers: List[int],
-        device: str,
-        totalks: dict,
-        global_step: int,
-    ) -> Dict[int, SimpleNamespace]:
-        """Gather gradients for multiple windows in parallel."""
-        try:
-            gather_tasks = [
-                self.gather(
-                    my_uid=uid,
-                    uids=peers,
-                    window=w,
-                    key="gradient",
-                    timeout=30,
-                    device=device,
-                    totalks=totalks,
-                    local=False,
-                    stale_retention=100,
-                )
-                for w in batch_windows
-            ]
-            # Wait for all gather tasks to complete
-            batch_results = await asyncio.gather(*gather_tasks, return_exceptions=True)
-
-            # Filter out exceptions and create window->result mapping
-            result_dict = {w: None for w in batch_windows}  # Initialize with None
-            for window, result in zip(batch_windows, batch_results):
-                if not isinstance(result, Exception) and result is not None:
-                    result_dict[window] = result
-
-            return result_dict
-
-        except Exception as e:
-            tplr.logger.error(
-                f"Failed to gather window batch {batch_windows}: {str(e)}"
-            )
-            return {
-                w: None for w in batch_windows
-            }  # Return dict with None values on failure
-
     def check_compressed_indices(
         self,
         param_name: str,

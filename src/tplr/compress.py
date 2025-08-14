@@ -28,6 +28,8 @@ import torch.fft
 from einops import rearrange
 from torch.distributed.tensor import DTensor as DT
 
+import tplr
+
 # ─────────── type aliases ────────────────────────────────────────────────
 # primitive shapes
 ShapeT: TypeAlias = tuple[int, ...]  # original dense tensor shape
@@ -492,11 +494,13 @@ class TopKCompressor(Generic[Q]):
         lookup = lookup.to(val.device) if isinstance(lookup, torch.Tensor) else lookup
         deq = lookup[val.long()] + shift
         return deq.to(orig_dtype)
-    
-    def maybe_dequantize_values(
-        self, vals: list[torch.Tensor], qparams: QuantParamsT, device: torch.device,
-    ) -> list[torch.Tensor]:
 
+    def maybe_dequantize_values(
+        self,
+        vals: list[torch.Tensor],
+        qparams: QuantParamsT,
+        device: torch.device,
+    ) -> list[torch.Tensor]:
         if not isinstance(vals, (list, tuple)):
             vals = [vals]
 

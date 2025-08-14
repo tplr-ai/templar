@@ -1094,9 +1094,7 @@ class Validator(BaseNode, Trainer):
             )
 
             # Use the gather result to calculate norms across UIDs
-            clip_norm_dict = self.compute_peer_val_norms(
-                gather_result, self.compressor
-            )
+            clip_norm_dict = self.compute_peer_val_norms(gather_result, self.compressor)
 
             # Process each UID with sliding window loading
             for eval_uid in evaluation_uids:
@@ -1263,7 +1261,10 @@ class Validator(BaseNode, Trainer):
                 # 9. Apply gradient and compute loss after
                 try:
                     self.update_model_with_gradient(
-                        model_after_update, eval_uid, state_dict, clip_norm_dict,
+                        model_after_update,
+                        eval_uid,
+                        state_dict,
+                        clip_norm_dict,
                     )
                 except Exception as e:
                     old_score = self.final_scores[eval_uid].item()
@@ -2373,8 +2374,11 @@ class Validator(BaseNode, Trainer):
         return
 
     def update_model_with_gradient(
-        self, model: torch.nn.Module, eval_uid: int, eval_state_dict: dict, clip_norm_dict: dict[str, torch.Tensor],
-
+        self,
+        model: torch.nn.Module,
+        eval_uid: int,
+        eval_state_dict: dict,
+        clip_norm_dict: dict[str, torch.Tensor],
     ) -> None:
         model.zero_grad()
 
@@ -2389,8 +2393,10 @@ class Validator(BaseNode, Trainer):
 
             clip_norm = True
             if clip_norm:
-                vals_f32 = self.compressor.maybe_dequantize_values(vals, quant_params, p.device)
-                vals_f32 = vals_f32[0] # comes back as a list, but only 1 element
+                vals_f32 = self.compressor.maybe_dequantize_values(
+                    vals, quant_params, p.device
+                )
+                vals_f32 = vals_f32[0]  # comes back as a list, but only 1 element
 
                 clip_norm_val = clip_norm_dict.get(vals_key, None)
                 eval_norm = torch.norm(vals, p=2)

@@ -18,7 +18,6 @@
 
 import asyncio
 import math
-import typing
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -27,7 +26,8 @@ from typing import TYPE_CHECKING, TypeVar
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed.tensor import DTensor as DT, distribute_tensor
+from torch.distributed.tensor import DTensor as DT
+from torch.distributed.tensor import distribute_tensor
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from wandb.sdk.wandb_run import Run
@@ -40,49 +40,6 @@ if TYPE_CHECKING:
     from neurons.validator import Validator
 
 NeuronT = TypeVar("NeuronT", "Miner", "Validator")
-
-
-def _bcast_gather_namespace_from_master(
-    gather_ns: SimpleNamespace | None, *, src: int = 0
-) -> SimpleNamespace | None:
-    """
-    Rank-0 sends the aggregated gradients payload to all ranks as a Python object
-    (tensors on CPU). Returns a SimpleNamespace with .state_dict on every rank
-    (or None if master had None).
-    """
-    import torch
-    import torch.distributed as dist
-
-    if not (dist.is_available() and dist.is_initialized()):
-        return gather_ns
-
-    rank = dist.get_rank()
-    if rank == src:
-        payload = None
-        if gather_ns is not None and getattr(gather_ns, "state_dict", None) is not None:
-            sd = gather_ns.state_dict.__dict__
-            payload = {
-                "state_dict": {
-                    k: (v.cpu() if torch.is_tensor(v) else v) for k, v in sd.items()
-                },
-                "uids": getattr(gather_ns, "uids", []),
-                "skipped_uids": getattr(gather_ns, "skipped_uids", []),
-                "success_rate": getattr(gather_ns, "success_rate", 0.0),
-            }
-    else:
-        payload = None
-
-    obj_list = [payload]
-    dist.broadcast_object_list(obj_list, src=src)
-    payload = obj_list[0]
-    if payload is None:
-        return None
-    return SimpleNamespace(
-        state_dict=SimpleNamespace(**payload["state_dict"]),
-        uids=payload.get("uids", []),
-        skipped_uids=payload.get("skipped_uids", []),
-        success_rate=payload.get("success_rate", 0.0),
-    )
 
 
 def prepare_gradient_dict(miner: "Miner", step_window: int):
@@ -183,6 +140,7 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
 
         # --- 5) Decompress reference (owner only) ---
         if p_is_dt:
+            assert full_p is not None
             decompressed = miner.compressor.decompress(
                 full_p, idxs, vals, xshape, totalk, quant_params
             )
@@ -230,173 +188,127 @@ def outer_step(
     global_step: int | None = None,
 ) -> None:
     """
-    Apply aggregated gradients on ALL ranks (prevents DTensor collective hangs),
-    then step the optimizer. Rank-0 optionally logs and broadcasts non-DT buffers.
+    Decode Top‑K ONCE on the master (rank 0), then:
+      - DTensor params: scatter shards via distribute_tensor(src_data_rank=0).
+      - Replicated params: broadcast the dense grad once.
     """
-
-    # ---- helpers ----
-    def _is_dt(x):
-        return type(x).__name__ in {"DTensor", "DistributedTensor", "DT"}
-
-    def _rank():
-        try:
-            return (
-                dist.get_rank() if dist.is_available() and dist.is_initialized() else 0
-            )
-        except Exception:
-            return 0
-
-    def _distribute_full_like_param(full_grad, p):
-        return distribute_tensor(
-            full_grad, device_mesh=p.device_mesh, placements=p.placements
-        )
-
-    def _local_slice_from_full(
-        full_grad, p_shape, rank, world_size, shard_dim: int = 0
-    ):
-        per = full_grad.shape[shard_dim] // world_size
-        assert full_grad.shape[shard_dim] % world_size == 0, (
-            "full_grad not evenly divisible"
-        )
-        assert per == p_shape[shard_dim], (
-            f"expected shard={p_shape[shard_dim]}, got {per}"
-        )
-        slc = [slice(None)] * full_grad.dim()
-        slc[shard_dim] = slice(rank * per, (rank + 1) * per)
-        return full_grad[tuple(slc)]
-
-    def _match_grad_to_param_layout(
-        p, new_grad, *, rank: int, world_size: int, device: str
-    ):
-        # plain->plain (same shape)
-        if (
-            (not _is_dt(p))
-            and (not _is_dt(new_grad))
-            and tuple(new_grad.shape) == tuple(p.shape)
-        ):
-            return new_grad.to(device)
-
-        # param is DTensor
-        if _is_dt(p):
-            if _is_dt(new_grad):
-                same_mesh = getattr(new_grad, "device_mesh", None) is getattr(
-                    p, "device_mesh", None
-                )
-                same_place = getattr(new_grad, "placements", None) == getattr(
-                    p, "placements", None
-                )
-                if same_mesh and same_place:
-                    return new_grad
-                full = new_grad.full_tensor()
-                return _distribute_full_like_param(full.to(device), p)
-            else:
-                return _distribute_full_like_param(new_grad.to(device), p)
-
-        # param is plain; grad is DT -> take local shard
-        if _is_dt(new_grad):
-            return new_grad.to_local().to(device)
-
-        # both plain but shapes differ -> slice full to local shard
-        if tuple(new_grad.shape) != tuple(p.shape):
-            return _local_slice_from_full(
-                new_grad, p.shape, rank, world_size, shard_dim=0
-            ).to(device)
-
-        return new_grad.to(device)
-
     bare_model = getattr(model, "module", model)
+    bare_model.train()
+    optimizer.zero_grad()
 
-    # stats for optional logging
+    ddp = world_size > 1 and dist.is_available() and dist.is_initialized()
+    src_rank = 0
+    on_src = is_master or not ddp
+
+    # Only master reads aggregated payload
+    src_sd: dict | None = None
+    if (
+        on_src
+        and gather_result is not None
+        and getattr(gather_result, "state_dict", None) is not None
+    ):
+        src_sd = gather_result.state_dict
+        if isinstance(src_sd, SimpleNamespace):
+            src_sd = vars(src_sd).copy()
+
+    # compact flag broadcast
+    def _bcast_flag(v: int) -> int:
+        t = torch.tensor([v], device=device, dtype=torch.int32)
+        if ddp:
+            dist.broadcast(t, src_rank)
+        return int(t.item())
+
+    # optional stats
     min_median_norm = float("inf")
     max_median_norm = float("-inf")
 
-    # ALL ranks apply (keeps DT collectives aligned)
-    model.train()
-    optimizer.zero_grad()
+    for name, p in bare_model.named_parameters():
+        # ---- master decides if this param has an update; others receive a flag ----
+        has_update = 0
+        payload = None
+        if on_src and src_sd is not None:
+            idxs = src_sd.get(name + "idxs")
+            vals = src_sd.get(name + "vals")
+            qps = src_sd.get(name + "quant_params")
+            if idxs is not None and vals is not None:
+                if not isinstance(idxs, (list, tuple)):
+                    idxs = [idxs]
+                if not isinstance(vals, (list, tuple)):
+                    vals = [vals]
+                # dequantize once on master
+                vals_f32 = []
+                ok = True
+                for i, v in enumerate(vals):
+                    v = torch.as_tensor(v, device=device)
+                    if v.dtype == torch.uint8:
+                        if qps is None:
+                            ok = False
+                            break
+                        qp = qps[i] if isinstance(qps, (list, tuple)) else qps
+                        v = compressor._dequantize_values(v, qp).to(device)
+                    vals_f32.append(v.to(torch.float32))
+                if ok and vals_f32:
+                    payload = (idxs, vals_f32)
+                    has_update = 1
 
-    if (gather_result is not None) and (
-        getattr(gather_result, "state_dict", None) is not None
-    ):
-        sd = gather_result.state_dict
-        for n, p in bare_model.named_parameters():
-            idxs = getattr(sd, n + "idxs", None)
-            vals = getattr(sd, n + "vals", None)
-            qps = getattr(sd, n + "quant_params", None)
-            if idxs is None or vals is None:
-                continue
+        flag_result = _bcast_flag(has_update)
+        if flag_result == 0:
+            continue
 
-            if not isinstance(idxs, (list, tuple)):
-                idxs = [idxs]
-            if not isinstance(vals, (list, tuple)):
-                vals = [vals]
-
-            # dequant / device
-            vals_f32 = []
-            ok = True
-            for i, v in enumerate(vals):
-                v = v.to(device)
-                if v.dtype == torch.uint8:
-                    if qps is None:
-                        ok = False
-                        break
-                    qp = qps[i] if isinstance(qps, (list, tuple)) else qps
-                    v = compressor._dequantize_values(v, qp).to(device)
-                vals_f32.append(v)
-            if not ok or not vals_f32:
-                continue
-
+        # ---- master builds full dense grad; others do nothing ----
+        if on_src:
+            idxs, vals_f32 = payload  # type: ignore[misc]
             block_norms = torch.stack([torch.norm(v, p=2) for v in vals_f32])
-
-            # decode to a full gradient
-            if _is_dt(p):
-                ref = p.full_tensor()
-                full_grad = transformer.decode(
-                    compressor.batch_decompress(
-                        ref,
-                        typing.cast(list[torch.Tensor], idxs),
-                        typing.cast(list[torch.Tensor], vals_f32),
-                        xshapes[n],
-                        totalks[n],
-                        quantize_params=None,
-                        block_norms=block_norms,
-                        normalise=False,
-                        clip_norm=True,
-                    ),
-                    use_dct=use_dct,
-                )
-            else:
-                ref = p.to(device)
-                full_grad = transformer.decode(
-                    compressor.batch_decompress(
-                        ref,
-                        typing.cast(list[torch.Tensor], idxs),
-                        typing.cast(list[torch.Tensor], vals_f32),
-                        xshapes[n],
-                        totalks[n],
-                        quantize_params=None,
-                        block_norms=block_norms,
-                        normalise=False,
-                        clip_norm=True,
-                    ),
-                    use_dct=use_dct,
-                )
-
-            # match layout to parameter
-            new_grad = _match_grad_to_param_layout(
-                p, full_grad, rank=_rank(), world_size=world_size, device=device
-            )
-
-            # validate
-            local = new_grad.to_local() if _is_dt(new_grad) else new_grad
-            if not torch.isfinite(local).all() or (local.abs().max() > 1e3):
-                continue
-
-            # stats (master only later)
-            med = torch.median(block_norms).item()
+            # stats
+            med = float(torch.median(block_norms).item())
             min_median_norm = min(min_median_norm, med)
             max_median_norm = max(max_median_norm, med)
 
-            # assign
+            # shape/dtype reference for decode
+            ref = (
+                torch.empty(p.shape, device=device, dtype=p.dtype)
+                if isinstance(p, DT)
+                else p.detach().to(device)
+            )
+            decompressed = compressor.batch_decompress(
+                ref,
+                idxs,
+                vals_f32,
+                xshapes[name],
+                totalks[name],
+                quantize_params=None,
+                block_norms=block_norms,
+                normalise=False,
+                clip_norm=True,
+            )
+            full_grad_src = (
+                transformer.decode(
+                    decompressed,
+                    use_dct=use_dct,
+                )
+                .to(p.dtype)
+                .to(device)
+            )
+        else:
+            full_grad_src = torch.empty(1)
+
+        # ---- distribute to match param layout ----
+        if isinstance(p, DT):
+            # DTensor: scatter shards from master; others pass shape‑only placeholder
+            src_tensor = (
+                full_grad_src
+                if on_src
+                else torch.empty(p.shape, device=p.device, dtype=p.dtype)
+            )
+            new_grad = distribute_tensor(
+                src_tensor,
+                device_mesh=p.device_mesh,
+                placements=p.placements,
+                src_data_rank=src_rank,
+            )
+            local_view = new_grad.to_local()
+            if not torch.isfinite(local_view).all():
+                continue
             if p.grad is None:
                 p.grad = new_grad
             else:
@@ -404,13 +316,33 @@ def outer_step(
                     p.grad.copy_(new_grad)
                 except Exception:
                     p.grad = new_grad
+        else:
+            # Replicated param: broadcast dense grad once
+            if ddp:
+                dense = (
+                    full_grad_src
+                    if on_src
+                    else torch.empty_like(p, device=p.device, dtype=p.dtype)
+                )
+                dist.broadcast(dense, src_rank)  # type: ignore[arg-type]
+            else:
+                dense = full_grad_src  # type: ignore[assignment]
+            if not torch.isfinite(dense).all():  # type: ignore[arg-type]
+                continue
+            if p.grad is None:
+                p.grad = dense  # type: ignore[assignment]
+            else:
+                try:
+                    p.grad.copy_(dense)  # type: ignore[arg-type]
+                except Exception:
+                    p.grad = dense  # type: ignore[assignment]
 
-    # optional W&B logging on master
+    # optional W&B (master only)
     if (
-        is_master
-        and (wandb_run is not None)
-        and (global_step is not None)
-        and (max_median_norm > float("-inf"))
+        on_src
+        and wandb_run is not None
+        and global_step is not None
+        and max_median_norm > float("-inf")
     ):
         wandb_run.log(
             {
@@ -420,20 +352,8 @@ def outer_step(
             step=global_step,
         )
 
-    # ALL ranks step
     optimizer.step()
     torch.cuda.empty_cache()
-
-    # Post-step: sync non-DTensor state (master broadcasts, others receive)
-    if world_size > 1:
-        if is_master:
-            for _, tensor in bare_model.state_dict().items():
-                if torch.is_tensor(tensor) and not _is_dt(tensor):
-                    dist.broadcast(tensor.data, src=0)
-        else:
-            for _, tensor in bare_model.state_dict().items():
-                if torch.is_tensor(tensor) and not _is_dt(tensor):
-                    dist.broadcast(tensor.data, src=0)
 
 
 async def update_peers(instance: NeuronT, window: int, peer_start: float) -> None:
@@ -549,6 +469,47 @@ async def catchup_with_aggregation_server(
     target_w = instance.current_window
     tplr.logger.info(f"Replaying windows {start_w} ... {target_w - 1}")
 
+    # Verify checkpoint loaded correctly before applying any gradients
+    if checkpoint_current_window > 0 and instance.is_master:
+        tplr.logger.info(
+            f"Verifying checkpoint state at window {checkpoint_current_window}"
+        )
+        debug_fetch = await instance.comms.get(
+            uid=str(leader_uid),
+            window=checkpoint_current_window,
+            key="debug",
+            local=False,
+            stale_retention=10,
+        )
+
+        if debug_fetch is not None and isinstance(debug_fetch[0], dict):
+            debug_dict = debug_fetch[0]  # validator's payload
+
+            cmp = await compare_model_with_debug_dict(
+                instance.model,
+                debug_dict,
+                param_avg_change={},  # Empty since we haven't started tracking yet
+                learning_rate=instance.hparams.learning_rate,
+            )
+            if cmp["success"]:
+                tplr.logger.info(
+                    f"✓ Checkpoint verification: model matches window {checkpoint_current_window} "
+                    f"(l2_norm={cmp['l2_norm']:.4f}, avg_steps_behind={cmp['avg_steps_behind']:.3f})"
+                )
+                if cmp["l2_norm"] > 0.1:  # Threshold for acceptable difference
+                    tplr.logger.warning(
+                        f"⚠️ Large L2 norm difference detected: {cmp['l2_norm']:.4f}. "
+                        f"Checkpoint may not have loaded correctly."
+                    )
+            else:
+                tplr.logger.warning(
+                    f"⚠️ Could not verify checkpoint state for window {checkpoint_current_window}"
+                )
+        else:
+            tplr.logger.info(
+                f"No debug dict available for window {checkpoint_current_window}, skipping verification"
+            )
+
     prev_param_state: dict[str, torch.Tensor] = {}
     param_avg_change: dict[str, torch.Tensor] = {}
     alpha: float = 0.20
@@ -560,91 +521,96 @@ async def catchup_with_aggregation_server(
         # ------------------------------------------------------------------
         # 1) Fetch the aggregated object dumped by the leader validator.
         # ------------------------------------------------------------------
-        fetch = await instance.comms.get(
-            uid=str(leader_uid),
-            window=start_w,
-            key="aggregator",
-            timeout=60,
-            local=False,
-            stale_retention=10,
-        )
-
-        # ── A. aggregated object exists → normal path ────────────────────
-        if fetch is not None and fetch[0] is not None and "state_dict" in fetch[0]:
-            payload, _ = fetch
-
-            # ------------------------------------------------------------------
-            # Re‑create the SimpleNamespace expected by `outer_step`.
-            # ------------------------------------------------------------------
-            gather_ns = SimpleNamespace(
-                state_dict=SimpleNamespace(**payload["state_dict"]),
-                uids=payload.get("uids", []),
-                skipped_uids=payload.get("skipped_uids", []),
-                success_rate=payload.get("success_rate", 0.0),
-            )
-
-        # ── B. aggregated object *missing* or *malformed* ────────────────
-        else:
-            is_last_window = start_w == target_w - 1
-            tplr.logger.warning(
-                "    ↳ %s – %s",
-                "not available" if fetch is None else "malformed payload",
-                "attempting gather‑fallback" if is_last_window else "skipping",
-            )
-
-            if not is_last_window:
-                start_w += 1
-                continue
-
-            sync_block = (start_w + 1) * instance.hparams.blocks_per_window
-            ts_value = await instance.loop.run_in_executor(
-                None, instance.query_block_timestamp, sync_block
-            )
-            if ts_value is None:
-                tplr.logger.warning(
-                    f"Could not get timestamp for sync block {sync_block}.",
-                )
-                time_min = time_max = None
-            else:
-                time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
-                time_max = time_min + timedelta(
-                    seconds=instance.hparams.time_window_delta_seconds
-                )
-
-            # ---- Gather fallback ----------------------------------------
-            gather_ns = await instance.comms.gather(
-                my_uid=instance.uid,
-                uids=instance.comms.peers,
+        if instance.is_master:
+            fetch = await instance.comms.get(
+                uid=str(leader_uid),
                 window=start_w,
-                key="gradient",
-                timeout=45,
-                device=str(instance.config.device),
+                key="aggregator",
+                timeout=60,
                 local=False,
                 stale_retention=10,
-                totalks=instance.totalks,
-                compressor=instance.compressor,
-                time_min=time_min,
-                time_max=time_max,
             )
 
-            if gather_ns is None:
-                tplr.logger.warning("    ↳ gather‑fallback failed – skipping")
-                start_w += 1
-                continue
+            # ── A. aggregated object exists → normal path ────────────────────
+            if fetch is not None and fetch[0] is not None and "state_dict" in fetch[0]:
+                payload, _ = fetch
 
-            tplr.logger.info("    ↳ gather‑fallback succeeded – applying")
+                # ------------------------------------------------------------------
+                # Re‑create the SimpleNamespace expected by `outer_step`.
+                # ------------------------------------------------------------------
+                gather_ns = SimpleNamespace(
+                    state_dict=SimpleNamespace(**payload["state_dict"]),
+                    uids=payload.get("uids", []),
+                    skipped_uids=payload.get("skipped_uids", []),
+                    success_rate=payload.get("success_rate", 0.0),
+                )
+
+            # ── B. aggregated object *missing* or *malformed* ────────────────
+            else:
+                is_last_window = start_w == target_w - 1
+                tplr.logger.warning(
+                    "    ↳ %s – %s",
+                    "not available" if fetch is None else "malformed payload",
+                    "attempting gather‑fallback" if is_last_window else "skipping",
+                )
+
+                if not is_last_window:
+                    start_w += 1
+                    continue
+
+                sync_block = (start_w + 1) * instance.hparams.blocks_per_window
+                ts_value = await instance.loop.run_in_executor(
+                    None, instance.query_block_timestamp, sync_block
+                )
+                if ts_value is None:
+                    tplr.logger.warning(
+                        f"Could not get timestamp for sync block {sync_block}.",
+                    )
+                    time_min = time_max = None
+                else:
+                    time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
+                    time_max = time_min + timedelta(
+                        seconds=instance.hparams.time_window_delta_seconds
+                    )
+
+                # ---- Gather fallback ----------------------------------------
+                gather_ns = await instance.comms.gather(
+                    my_uid=instance.uid,
+                    uids=instance.comms.peers,
+                    window=start_w,
+                    key="gradient",
+                    timeout=45,
+                    device=str(instance.config.device),
+                    local=False,
+                    stale_retention=10,
+                    totalks=instance.totalks,
+                    compressor=instance.compressor,
+                    time_min=time_min,
+                    time_max=time_max,
+                )
+
+                if gather_ns is None:
+                    tplr.logger.warning("    ↳ gather‑fallback failed – skipping")
+                    start_w += 1
+                    continue
+
+                tplr.logger.info("    ↳ gather‑fallback succeeded – applying")
+        else:
+            gather_ns = None
 
         # ------------------------------------------------------------------
         # 2) Broadcast aggregated payload → ALL ranks apply the update.
         # ------------------------------------------------------------------
-        gather_ns_local = _bcast_gather_namespace_from_master(gather_ns, src=0)
-        if instance.world_size > 1:
-            dist.barrier(device_ids=[instance.local_rank])
-
+        # Synchronize all ranks before applying the outer step to ensure
+        # they're processing the same window together
+        if dist.is_available() and dist.is_initialized():
+            device_id = torch.cuda.current_device()
+            dist.barrier(device_ids=[device_id])
+        
         outer_step(
             instance.model,
             instance.outer_optimizer,
-            gather_result=gather_ns_local,
+            gather_result=gather_ns,
             transformer=instance.transformer,
             compressor=instance.compressor,
             xshapes=instance.xshapes,
@@ -668,61 +634,66 @@ async def catchup_with_aggregation_server(
         # 3) Debug‑dict comparison to estimate “how many steps behind” we are
         # ──────────────────────────────────────────────────────────────────────
         try:
-            debug_fetch = await instance.comms.get(
-                uid=str(leader_uid),
-                window=start_w,
-                key="debug",
-                local=False,
-                stale_retention=10,
-            )
-
-            if debug_fetch is not None and isinstance(debug_fetch[0], dict):
-                debug_dict = debug_fetch[0]  # validator's payload
-
-                # --- update EMA of parameter‑slice changes ------------------
-                bare_model = getattr(instance.model, "module", instance.model)
-                for name, p in bare_model.named_parameters():
-                    if p.numel() < 2:
-                        continue
-
-                    # Handle DTensor parameters
-                    if isinstance(p, DT):
-                        curr_slice = p.to_local().detach().cpu().flatten()[slice_idx]
-                    else:
-                        curr_slice = p.detach().cpu().flatten()[slice_idx]
-
-                    if name in prev_param_state:
-                        delta = (curr_slice - prev_param_state[name]).abs()
-                        if name not in param_avg_change:
-                            param_avg_change[name] = delta.clone()
-                        else:
-                            param_avg_change[name].mul_(1 - alpha).add_(delta * alpha)
-                    prev_param_state[name] = curr_slice.clone()
-
-                # --- call shared comparison helper --------------------------
-                lr = instance.outer_optimizer.param_groups[0]["lr"]
-                cmp = await compare_model_with_debug_dict(
-                    model=instance.model,
-                    debug_dict=debug_dict,
-                    learning_rate=lr,
-                    index_range=(0, 2),
-                    param_avg_change=param_avg_change,
+            if instance.is_master:
+                debug_fetch = await instance.comms.get(
+                    uid=str(leader_uid),
+                    window=start_w,
+                    key="debug",
+                    local=False,
+                    stale_retention=10,
                 )
 
-                if cmp["success"]:
-                    tplr.logger.info(
-                        f"[catch‑up] window {start_w} "
-                        f"avg_steps_behind={cmp['avg_steps_behind']:.3f}, "
-                        f"l2_norm={cmp['l2_norm']:.4f}"
+                if debug_fetch is not None and isinstance(debug_fetch[0], dict):
+                    debug_dict = debug_fetch[0]  # validator's payload
+
+                    # --- update EMA of parameter‑slice changes ------------------
+                    bare_model = getattr(instance.model, "module", instance.model)
+                    for name, p in bare_model.named_parameters():
+                        if p.numel() < 2:
+                            continue
+
+                        # Handle DTensor parameters
+                        if isinstance(p, DT):
+                            curr_slice = (
+                                p.to_local().detach().cpu().flatten()[slice_idx]
+                            )
+                        else:
+                            curr_slice = p.detach().cpu().flatten()[slice_idx]
+
+                        if name in prev_param_state:
+                            delta = (curr_slice - prev_param_state[name]).abs()
+                            if name not in param_avg_change:
+                                param_avg_change[name] = delta.clone()
+                            else:
+                                param_avg_change[name].mul_(1 - alpha).add_(
+                                    delta * alpha
+                                )
+                        prev_param_state[name] = curr_slice.clone()
+
+                    # --- call shared comparison helper --------------------------
+                    lr = instance.outer_optimizer.param_groups[0]["lr"]
+                    cmp = await compare_model_with_debug_dict(
+                        model=instance.model,
+                        debug_dict=debug_dict,
+                        learning_rate=lr,
+                        index_range=(0, 2),
+                        param_avg_change=param_avg_change,
                     )
+
+                    if cmp["success"]:
+                        tplr.logger.info(
+                            f"[catch‑up] window {start_w} "
+                            f"avg_steps_behind={cmp['avg_steps_behind']:.3f}, "
+                            f"l2_norm={cmp['l2_norm']:.4f}"
+                        )
+                    else:
+                        tplr.logger.warning(
+                            f"[catch‑up] debug‑dict comparison failed for window {start_w}"
+                        )
                 else:
                     tplr.logger.warning(
-                        f"[catch‑up] debug‑dict comparison failed for window {start_w}"
+                        f"[catch‑up] no debug‑dict found for window {start_w}"
                     )
-            else:
-                tplr.logger.warning(
-                    f"[catch‑up] no debug‑dict found for window {start_w}"
-                )
         except Exception as exc:
             tplr.logger.warning(f"[catch‑up] debug‑dict processing error: {exc}")
 

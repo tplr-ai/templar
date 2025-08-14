@@ -606,7 +606,7 @@ async def catchup_with_aggregation_server(
         if dist.is_available() and dist.is_initialized():
             device_id = torch.cuda.current_device()
             dist.barrier(device_ids=[device_id])
-        
+
         outer_step(
             instance.model,
             instance.outer_optimizer,
@@ -699,6 +699,10 @@ async def catchup_with_aggregation_server(
 
         instance.global_step = start_w - instance.start_window
         start_w += 1
+
+        if dist.is_available() and dist.is_initialized():
+            device_id = torch.cuda.current_device()
+            dist.barrier(device_ids=[device_id])
 
         # If the chain progressed while we were busy, extend the target.
         if instance.current_window > target_w:

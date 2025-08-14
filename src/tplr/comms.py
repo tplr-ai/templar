@@ -29,7 +29,7 @@ from functools import partial
 
 # from .hparams import HParams
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional
+from typing import Literal, Optional
 
 import aiofiles
 import bittensor as bt
@@ -39,6 +39,10 @@ import torch.distributed as dist
 from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
 from botocore.exceptions import ClientError, ConnectionClosedError
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    set_model_state_dict,
+)
 from torch.distributed.tensor import DTensor as DT
 from torch.distributed.tensor import distribute_tensor
 from tqdm import tqdm as std_tqdm
@@ -1674,67 +1678,10 @@ class Comms(ChainManager):
             await self._purge_s3_client(bucket)
             return None
 
-    def _seed_dt_param_from_rank0(
-        self, p: torch.Tensor, w_global: torch.Tensor | None, device: str
-    ) -> None:
-        """Fan-out a DTensor param/buffer from rank-0; others pass a placeholder."""
-        logical = (
-            w_global.to(dtype=p.dtype, device=device)
-            if w_global is not None
-            else torch.empty(p.shape, dtype=p.dtype, device=device)
-        )
-        dt = distribute_tensor(
-            logical,
-            device_mesh=p.device_mesh,
-            placements=p.placements,
-            src_data_rank=0,  # rank-0 is the source of truth
-        )
-        p.to_local().copy_(dt.to_local())
-        del dt
-
-    def _seed_plain_from_rank0(
-        self, t: torch.Tensor, w_global: torch.Tensor | None, is_master: bool
-    ) -> None:
-        """Copy on rank-0 then broadcast in-place for replicated (non-DT) tensors."""
-        if w_global is not None and is_master:
-            t.data.copy_(w_global.to(dtype=t.dtype, device=t.device))
-        if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
-            dist.broadcast(t.data, src=0)
-
-    def _apply_state_all_ranks(
-        self,
-        bare: torch.nn.Module,
-        sd: dict[str, torch.Tensor] | None,
-        device: str,
-        is_master: bool,
-        present: set[str],
-    ) -> None:
-        """Single-pass loader that covers parameters and buffers."""
-        with torch.no_grad():
-            # --- parameters ---
-            for name, p in bare.named_parameters():
-                if name not in present:
-                    continue
-                w = sd.get(name) if (sd is not None) else None
-                if isinstance(p, DT):
-                    self._seed_dt_param_from_rank0(p, w, device)
-                else:
-                    self._seed_plain_from_rank0(p, w, is_master)
-            # --- buffers (optional if you checkpointed them) ---
-            for name, b in bare.named_buffers():
-                if name not in present:
-                    continue
-                w = sd.get(name) if (sd is not None) else None
-                if isinstance(b, DT):
-                    self._seed_dt_param_from_rank0(b, w, device)
-                else:
-                    self._seed_plain_from_rank0(b, w, is_master)
-
     async def load_checkpoint(
         self,
         model,
         current_window: int,
-        device: str,
         init_version: str | None = None,
         is_master: bool = True,
     ) -> tuple[bool, int]:
@@ -1742,8 +1689,6 @@ class Comms(ChainManager):
         Rank-0 downloads; all ranks fan-out once.
         Returns (success, checkpoint_sync_window) identically on all ranks.
         """
-        bare = getattr(model, "module", model)
-
         # --------- rank-0 fetch + minimal metadata ----------
         ok, sync_win, sd, present = False, 0, None, set()
         if is_master:
@@ -1755,8 +1700,8 @@ class Comms(ChainManager):
             if result:
                 try:
                     checkpoint_data, _ = result
-                    sd = checkpoint_data["model_state_dict"]
-                    present = {k for k in sd.keys()}
+                    full_sd = checkpoint_data["model_state_dict"]
+                    present = {k for k in full_sd.keys()}
 
                     # Prefer sync_window; fall back to current_window if older ckpt
                     sw = checkpoint_data.get("sync_window")
@@ -1777,6 +1722,8 @@ class Comms(ChainManager):
                     ok, sync_win, sd, present = False, 0, None, set()
             else:
                 tplr.logger.info("No valid checkpoints found on rank-0")
+        else:
+            full_sd = {}
 
         # --------- broadcast tiny meta-object to all ranks ----------
         if dist.is_available() and dist.is_initialized():
@@ -1788,16 +1735,13 @@ class Comms(ChainManager):
             return False, 0
 
         # --------- single fan-out of weights/buffers ----------
-        self._apply_state_all_ranks(
-            bare=bare,
-            sd=sd if is_master else None,  # only rank-0 holds actual tensors
-            device=device,
-            is_master=is_master,
-            present=present,
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(
+                full_state_dict=True, broadcast_from_rank0=True, strict=True
+            ),
         )
-
-        # Optional: bring module to device (safe if already there)
-        model.to(device)
 
         # Barrier for cleanliness
         if dist.is_available() and dist.is_initialized():

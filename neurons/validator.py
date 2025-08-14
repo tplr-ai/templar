@@ -880,7 +880,7 @@ class Validator(BaseNode, Trainer):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                all_uids = list(range(len(self.metagraph.S)))
+                all_uids = list(range(1, len(self.metagraph.S)))
                 self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
                 # For evaluation, also use all peers but track separately with equal initial weight
@@ -2395,6 +2395,11 @@ class Validator(BaseNode, Trainer):
 
             clip_norm = True
             if clip_norm:
+                if vals is None:
+                    raise ValueError("Vals is None")
+                if quant_params is None:
+                    raise ValueError("Quant params is None")
+
                 vals_f32 = self.compressor.maybe_dequantize_values(
                     vals, quant_params, p.device
                 )

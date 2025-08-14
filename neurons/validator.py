@@ -2400,9 +2400,13 @@ class Validator(BaseNode, Trainer):
                 if quant_params is None:
                     raise ValueError("Quant params is None")
 
-                vals_f32 = self.compressor.maybe_dequantize_values(
-                    vals, quant_params, p.device
-                )
+                # vals_f32 = self.compressor.maybe_dequantize_values(
+                #     vals, quant_params, p.device
+                # )
+                vals_f32 = vals
+                if not isinstance(vals, (list, tuple)):
+                    vals_f32 = [vals_f32]
+
                 eval_norm = torch.stack([torch.norm(v, p=2) for v in vals_f32]).to(p.device)
 
                 clip_norm_val = clip_norm_dict.get(vals_key, None)

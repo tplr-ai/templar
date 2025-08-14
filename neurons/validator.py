@@ -2473,6 +2473,9 @@ class Validator(BaseNode, Trainer):
                 vals = vals_f32 * clip_factor if clip_factor is not None else vals_f32
 
             if idxs is not None and vals is not None and quant_params is not None:
+                if clip_norm:
+                    quant_params = None  # Fast route for decompress
+
                 grad = self.transformer.decode(
                     self.compressor.decompress(
                         p.to(self.config.device),

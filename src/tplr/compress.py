@@ -630,10 +630,14 @@ class TopKCompressor(Generic[Q]):
         Returns:
             torch.Tensor: The dequantized values.
         """
-        shift, _, _, lookup, orig_dtype = qparams
-        lookup = lookup.to(val.device) if isinstance(lookup, torch.Tensor) else lookup
-        deq = lookup[val.long()] + shift
-        return deq.to(orig_dtype)
+        if val.dtype == torch.uint8:
+            shift, _, _, lookup, orig_dtype = qparams
+            lookup = (
+                lookup.to(val.device) if isinstance(lookup, torch.Tensor) else lookup
+            )
+            deq = lookup[val.long()] + shift
+            val = deq.to(orig_dtype)
+        return val
 
     def maybe_dequantize_values(
         self,

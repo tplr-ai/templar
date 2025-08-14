@@ -28,6 +28,8 @@ import torch.fft
 from einops import rearrange
 from torch.distributed.tensor import DTensor as DT
 
+import tplr
+
 # ─────────── type aliases ────────────────────────────────────────────────
 # primitive shapes
 ShapeT: TypeAlias = tuple[int, ...]  # original dense tensor shape
@@ -492,6 +494,36 @@ class TopKCompressor(Generic[Q]):
         lookup = lookup.to(val.device) if isinstance(lookup, torch.Tensor) else lookup
         deq = lookup[val.long()] + shift
         return deq.to(orig_dtype)
+
+    def maybe_dequantize_values(
+        self,
+        vals: list[torch.Tensor],
+        qparams: QuantParamsT,
+        device: torch.device,
+    ) -> list[torch.Tensor]:
+        if not isinstance(vals, (list, tuple)):
+            vals = [vals]
+
+        if qparams is None:
+            return vals
+
+        vals_f32: list[torch.Tensor] = []
+        for i, v in enumerate(vals):
+            v = v.to(device)
+            if v.dtype == torch.uint8:  # still quantised → decode
+                if qparams is None:
+                    tplr.logger.warning(f"Missing quant_params for vals[{i}]]; skip.")
+                    break
+                qp = qparams[i] if isinstance(qparams, (list, tuple)) else qparams
+                v = self._dequantize_values(v, qp).to(device)
+            vals_f32.append(v)
+
+        if len(vals_f32) != len(vals):  # some decode failed
+            raise IndexError(
+                f"Mismatch in val lengths: dequant({len(vals_f32)}) vs original({len(vals)})"
+            )
+
+        return vals_f32
 
 
 # Code modified and sourced from https://github.com/zh217/torch-dct

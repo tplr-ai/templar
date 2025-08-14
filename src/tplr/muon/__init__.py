@@ -17,5 +17,6 @@
 
 
 from .muon import SingleDeviceMuonWithAuxAdam
+from .muon_fsdp2 import Muon
 
-__all__ = ["SingleDeviceMuonWithAuxAdam"]
+__all__ = ["SingleDeviceMuonWithAuxAdam", "Muon"]

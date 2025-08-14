@@ -43,6 +43,10 @@ import uvloop
 from openskill.models import PlackettLuce
 from rich.console import Console
 from rich.table import Table
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_model_state_dict,
+)
 
 import tplr
 from neurons import BaseNode, Trainer
@@ -1890,10 +1894,11 @@ class Validator(BaseNode, Trainer):
 
         def _create_checkpoint():
             # This runs in a thread, not blocking the event loop
+
             return {
-                "model_state_dict": {
-                    k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                },
+                "model_state_dict": get_model_state_dict(
+                    self.model, options=StateDictOptions(full_state_dict=True)
+                ),
                 "start_window": self.start_window,
                 "current_window": self.current_window,
                 "sync_window": self.sync_window,
@@ -2589,10 +2594,10 @@ class Validator(BaseNode, Trainer):
         ) = await self.comms.load_checkpoint(
             model=self.model,
             current_window=self.current_window,
-            device=cast(str, self.config.device),
             init_version=tplr.__version__
             if has_new_checkpoint
             else self.bootstrap_version,
+            is_master=self.is_master
         )
         if success:
             tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")

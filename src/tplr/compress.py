@@ -498,11 +498,14 @@ class TopKCompressor(Generic[Q]):
     def maybe_dequantize_values(
         self,
         vals: list[torch.Tensor],
-        qparams: QuantParamsT,
+        qparams: list[QuantParamsT],
         device: torch.device,
     ) -> list[torch.Tensor]:
         if not isinstance(vals, (list, tuple)):
             vals = [vals]
+
+        if not isinstance(qparams, (list, tuple)):
+            qparams = [qparams]
 
         if qparams is None:
             return vals
@@ -514,7 +517,7 @@ class TopKCompressor(Generic[Q]):
                 if qparams is None:
                     tplr.logger.warning(f"Missing quant_params for vals[{i}]]; skip.")
                     break
-                qp = qparams[i] if isinstance(qparams, (list, tuple)) else qparams
+                qp = qparams[i] # if isinstance(qparams, (list, tuple)) else qparams
                 v = self._dequantize_values(v, qp).to(device)
             vals_f32.append(v)
 

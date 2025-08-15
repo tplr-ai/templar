@@ -24,12 +24,13 @@ import random
 import re
 import shutil
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 
 # from .hparams import HParams
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal, cast
 
 import aiofiles
 import bittensor as bt
@@ -46,7 +47,7 @@ from tplr.compress import TopKCompressor, unpack_12bit_indices
 from . import __version__
 from .chain import ChainManager
 from .config import BUCKET_SECRETS, client_config
-from .schemas import Bucket
+from .schemas import Bucket, CommsGetResult
 
 # Constants
 CF_REGION_NAME: str = "enam"
@@ -59,14 +60,14 @@ CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 class Comms(ChainManager):
     def __init__(
         self,
-        wallet: "bt.wallet | None",
+        wallet: bt.wallet | None,
         save_location: str = "/tmp",
         key_prefix: str = "model",
         config=None,
-        netuid=None,
+        netuid: int | None = None,
         metagraph=None,
         hparams=None,
-        uid=None,
+        uid: int | None = None,
         **kwargs,
     ):
         self.uid = uid
@@ -372,10 +373,10 @@ class Comms(ChainManager):
     async def s3_get_object(
         self,
         key: str,
-        bucket: Bucket = None,
+        bucket: Bucket | None = None,
         timeout: int = 30,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
         load_data: bool = True,
     ):
         """Download object from S3 using asynchronous streaming."""
@@ -730,7 +731,7 @@ class Comms(ChainManager):
 
     async def put(
         self,
-        state_dict: dict,
+        state_dict: dict[str, torch.Tensor],
         window: int,
         key: Literal["checkpoint", "debug", "gradient", "aggregator"],
         uid: str | None = None,
@@ -845,7 +846,7 @@ class Comms(ChainManager):
         timeout: int = 30,
         time_min: datetime = None,
         time_max: datetime = None,
-    ) -> Optional[tuple[dict, int]]:
+    ) -> CommsGetResult:
         """GET operation."""
         if key == "aggregator":
             filename = f"{key}-{window}-v{__version__}.pt"
@@ -855,7 +856,7 @@ class Comms(ChainManager):
 
         try:
             if local:
-                # Local storage logic remains unchanged
+                # Local storage logic
                 await self.cleanup_local_data(
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
@@ -864,13 +865,13 @@ class Comms(ChainManager):
                 )
                 if not os.path.exists(local_path):
                     tplr.logger.debug(f"Local file not found: {local_path}")
-                    return None
+                    return CommsGetResult(status="NOT_FOUND")
                 loaded_data = torch.load(local_path, weights_only=True)
                 if key == "checkpoint":
-                    return loaded_data, None
+                    return CommsGetResult(data=loaded_data)
                 state_dict = loaded_data.get("state_dict")
                 global_step = loaded_data.get("global_step", 0)
-                return state_dict, global_step
+                return CommsGetResult(data=state_dict, global_step=global_step)
 
             # Remote storage logic
             if key == "aggregator":
@@ -888,7 +889,7 @@ class Comms(ChainManager):
                 bucket = self.commitments.get(int(uid))
             tplr.logger.debug(f"Peer bucket : {bucket}")
             if not bucket:
-                return None
+                return CommsGetResult(status="NOT_FOUND")
 
             loaded_data = await self.s3_get_object(
                 key=filename,
@@ -899,7 +900,7 @@ class Comms(ChainManager):
             )
 
             if loaded_data is None:
-                return None
+                return CommsGetResult(status="NOT_FOUND")
 
             # Check for TOO_LATE/TOO_EARLY marker
             if isinstance(loaded_data, dict):
@@ -907,23 +908,23 @@ class Comms(ChainManager):
                     tplr.logger.info(
                         f"Object for UID {uid}, window {window}, key {key} was uploaded too late. Skipping."
                     )
-                    return {"__status": "TOO_LATE"}, global_step
+                    return CommsGetResult(status="TOO_LATE")
                 elif loaded_data.get("__status") == "TOO_EARLY":
                     tplr.logger.info(
                         f"Object for UID {uid}, window {window}, key {key} was uploaded too early. Skipping."
                     )
-                    return {"__status": "TOO_EARLY"}, global_step
+                    return CommsGetResult(status="TOO_EARLY")
 
             if key == "checkpoint":
-                return loaded_data, None
+                return CommsGetResult(data=loaded_data)
 
             state_dict = loaded_data.get("state_dict")
             global_step = loaded_data.get("global_step", 0)
-            return state_dict, global_step
+            return CommsGetResult(data=state_dict, global_step=global_step)
 
         except Exception as e:
             tplr.logger.debug(f"GET error {filename}: {e}")
-            return None
+            return CommsGetResult(status="ERROR")
         finally:
             tplr.logger.debug(f"GET {filename} <--")
 
@@ -935,9 +936,9 @@ class Comms(ChainManager):
         timeout: int,
         local: bool = True,
         stale_retention: int = 10,
-        time_min: datetime = None,
-        time_max: datetime = None,
-    ) -> Optional[dict]:
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
+    ) -> CommsGetResult | None:
         """GET with retry operation."""
         start_time = time.time()
         end_time = start_time + timeout
@@ -974,7 +975,7 @@ class Comms(ChainManager):
                 )
 
             # Make the request
-            state_dict = await self.get(
+            result = await self.get(
                 uid=uid,
                 window=window,
                 key=key,
@@ -984,23 +985,18 @@ class Comms(ChainManager):
                 time_max=time_max,
             )
 
-            # Check for TOO_LATE/TOO_EARLY markers
-            if isinstance(state_dict, dict):
-                if state_dict.get("__status") == "TOO_LATE":
-                    tplr.logger.info(
-                        f"Gradient for UID {uid}, window {window} exists but was uploaded too late. Skipping."
-                    )
-                    return None
-                elif state_dict.get("__status") == "TOO_EARLY":
-                    tplr.logger.info(
-                        f"Gradient for UID {uid}, window {window} exists but was uploaded too early. Skipping."
-                    )
-                    return None
+            if result.success:
+                return result
 
-            # If we got a result, return it
-            if state_dict is not None:
-                return state_dict
+            if result.status in ["TOO_LATE", "TOO_EARLY"]:
+                formatted_status = result.status.lower().split("_")
+                formatted_status = " ".join(formatted_status)
+                tplr.logger.info(
+                    f"Gradient for UID {uid}, window {window} exists but was uploaded {formatted_status}. Skipping."
+                )
+                return None
 
+            # For NOT_FOUND or ERROR, we retry.
             # Short delay before retrying
             await asyncio.sleep(0.5)
 
@@ -1012,7 +1008,7 @@ class Comms(ChainManager):
         key: str,
         timeout: int,
         device: str,
-        totalks: dict,
+        totalks: dict[str, torch.Tensor],
         compressor: TopKCompressor,
         expected_compressed_params: set[str] | None = None,
         local: bool = True,
@@ -1047,7 +1043,7 @@ class Comms(ChainManager):
         async with self.gather_semaphore:
             batch_tasks = [
                 self.get_with_retry(
-                    uid=uid,
+                    uid=str(uid),
                     window=window,
                     key=key,
                     timeout=timeout,
@@ -1086,7 +1082,8 @@ class Comms(ChainManager):
 
                     try:
                         # This is where get response uses the step
-                        state_dict_resp, global_step_resp = response
+                        response = cast(CommsGetResult, response)
+                        state_dict_resp, global_step_resp = response.data, response.global_step
                         tplr.logger.debug(
                             f"Received state dict and global step {global_step_resp} from UID {uid}"
                         )
@@ -1674,7 +1671,7 @@ class Comms(ChainManager):
         model,
         current_window: int,
         device: str,
-        init_version: Optional[str] = None,
+        init_version: str | None = None,
     ) -> tuple[bool, int]:
         """
         Loads the latest checkpoint. No catchup or step simulation happens here.
@@ -2044,7 +2041,7 @@ class Comms(ChainManager):
         else:
             raise ValueError(f"[{param_name}] Expected tensor but got {type(idxs)}")
 
-    async def s3_get_object_size(self, bucket: Bucket, key: str) -> Optional[int]:
+    async def s3_get_object_size(self, bucket: Bucket, key: str) -> int | None: 
         """Get the size of an S3 object without downloading it using HEAD request."""
         try:
             s3_client = await self._get_s3_client(bucket)
@@ -2068,7 +2065,7 @@ class Comms(ChainManager):
 
     async def s3_get_object_range(
         self, bucket: Bucket, key: str, start: int, end: int, timeout: int = 30
-    ) -> Optional[bytes]:
+    ) -> None | bytes:
         """Download a specific byte range from S3 object."""
         try:
             s3_client = await self._get_s3_client(bucket)

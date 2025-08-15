@@ -16,13 +16,9 @@
 # DEALINGS IN THE SOFTWARE.
 
 # Global imports
-from pydantic import BaseModel, Field
+from typing import Any, Literal
 
-# Pydantic v2: ConfigDict replaces inner `class Config`
-try:  # v2
-    from pydantic import ConfigDict
-except ImportError:  # v1 fallback – noqa: D401
-    ConfigDict = dict  # type: ignore
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Bucket(BaseModel):
@@ -37,7 +33,7 @@ class Bucket(BaseModel):
     def __eq__(self, other):
         # Compare all fields to determine equality
         if isinstance(other, Bucket):
-            return self.dict() == other.dict()
+            return self.model_dump() == other.model_dump()
         return False
 
     name: str = Field(..., min_length=1)
@@ -45,7 +41,25 @@ class Bucket(BaseModel):
     access_key_id: str = Field(..., min_length=1)
     secret_access_key: str = Field(..., min_length=1)
 
-    # v2 style; silently ignored by v1
     model_config = ConfigDict(
         str_strip_whitespace=True,
     )
+
+
+class CommsGetResult(BaseModel):
+    """A standard return type for the `get` function."""
+
+    data: None | dict[str, Any] = Field(
+        None, description="The data retrieved by the get function."
+    )
+    global_step: None | int = Field(
+        None, description="The global step associated with the data."
+    )
+    status: Literal["OK", "TOO_EARLY", "TOO_LATE", "NOT_FOUND", "ERROR"] = Field(
+        "OK", description="The status of the get operation."
+    )
+
+    @property
+    def success(self) -> bool:
+        """Returns True if the operation was successful and returned data."""
+        return self.status == "OK" and self.data is not None

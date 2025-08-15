@@ -36,7 +36,6 @@ import tplr
 from tplr.config import client_config
 from tplr.schemas import CommsGetResult
 
-
 CPU_COUNT = os.cpu_count() or 4
 
 

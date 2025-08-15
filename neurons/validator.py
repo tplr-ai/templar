@@ -880,7 +880,7 @@ class Validator(BaseNode, Trainer):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                all_uids = list(range(len(self.metagraph.S)))
+                all_uids = list(range(1, len(self.metagraph.S)))
                 self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
                 # For evaluation, also use all peers but track separately with equal initial weight
@@ -1093,6 +1093,9 @@ class Validator(BaseNode, Trainer):
                 current_window=self.current_window,
             )
 
+            # Use the gather result to calculate norms across UIDs
+            clip_norm_dict = self.compute_peer_val_norms(gather_result)
+
             # Process each UID with sliding window loading
             for eval_uid in evaluation_uids:
                 # Check if window has changed before starting evaluation
@@ -1258,7 +1261,10 @@ class Validator(BaseNode, Trainer):
                 # 9. Apply gradient and compute loss after
                 try:
                     self.update_model_with_gradient(
-                        model_after_update, eval_uid, state_dict
+                        model_after_update,
+                        eval_uid,
+                        state_dict,
+                        clip_norm_dict,
                     )
                 except Exception as e:
                     old_score = self.final_scores[eval_uid].item()
@@ -2368,7 +2374,11 @@ class Validator(BaseNode, Trainer):
         return
 
     def update_model_with_gradient(
-        self, model: torch.nn.Module, eval_uid: int, eval_state_dict: dict
+        self,
+        model: torch.nn.Module,
+        eval_uid: int,
+        eval_state_dict: dict,
+        clip_norm_dict: dict[str, torch.Tensor],
     ) -> None:
         model.zero_grad()
 
@@ -2425,6 +2435,7 @@ class Validator(BaseNode, Trainer):
                         f"Invalid gradient data from peer {eval_uid}: NaN or Inf values in {vals_key}"
                     )
 
+        clip_norm = True  # Always true in the repo 8/13/2025
         # If all validations pass, apply the gradients
         for n, p in model.named_parameters():
             idxs_key = n + "idxs"
@@ -2434,7 +2445,37 @@ class Validator(BaseNode, Trainer):
             vals = eval_state_dict.get(vals_key, None)
             quant_params = eval_state_dict.get(quant_key, None)
 
+            if clip_norm:
+                if vals is None:
+                    raise ValueError("Vals is None")
+                if quant_params is None:
+                    raise ValueError("Quant params is None")
+
+                # convert to lists since not a list of matrices for dequant
+                vals = [vals]
+                quant_params = [quant_params]
+
+                vals_f32 = self.compressor.maybe_dequantize_values(
+                    vals, quant_params, p.device
+                )
+                vals_f32 = vals_f32[0]  # Get the first (and only) tensor
+
+                eval_norm = torch.norm(vals_f32, p=2).to(p.device)
+
+                clip_norm_val = clip_norm_dict.get(vals_key, None)
+
+                clip_factor = (
+                    clip_norm_val / (eval_norm + 1e-8)
+                    if clip_norm_val is not None
+                    else None
+                )
+
+                vals = vals_f32 * clip_factor if clip_factor is not None else vals_f32
+
             if idxs is not None and vals is not None and quant_params is not None:
+                if clip_norm:
+                    quant_params = None  # Fast route for decompress
+
                 grad = self.transformer.decode(
                     self.compressor.decompress(
                         p.to(self.config.device),
@@ -2464,6 +2505,38 @@ class Validator(BaseNode, Trainer):
                     grad,
                     alpha=self.lr * self.hparams.eval_lr_factor,
                 )
+
+    def compute_peer_val_norms(
+        self,
+        gather_result: SimpleNamespace,
+    ) -> dict[str, torch.Tensor]:
+        # clip_norm is basically always true in the repo 8/13/2025
+        # In this case, leave it to refactor later
+        clip_norm = True
+
+        clip_norm_dict = {}
+        state_dict = gather_result.state_dict
+        if not state_dict:
+            raise ValueError("Must have gather_result.state_dict to compute norms")
+
+        for n, p in self.model.named_parameters():
+            vals_key = n + "vals"
+            quant_key = n + "quant_params"
+
+            vals = getattr(state_dict, vals_key, None)
+            quant_params = getattr(state_dict, quant_key, None)
+
+            if vals is None:
+                continue
+
+            vals_f32 = self.compressor.maybe_dequantize_values(
+                vals, quant_params, p.device
+            )
+
+            norms = torch.stack([torch.norm(v, p=2) for v in vals_f32]).to(p.device)
+            clip_norm_dict[vals_key] = torch.median(norms)
+
+        return clip_norm_dict
 
     # ------------- state helpers ----------------
     def _state_dict(self) -> dict:

@@ -127,14 +127,17 @@ class TestOuterStep(unittest.TestCase):
         self, mock_is_initialized, mock_get_world_size, mock_broadcast
     ):
         gather_result = SimpleNamespace(
+            uids=["peer1"],
+            global_steps=[1],
             state_dict=SimpleNamespace(
                 param1idxs=[torch.tensor([1, 2])],
                 param1vals=[torch.tensor([0.1, 0.2])],
-                param1quant_params=None,
+                param1quant_params=[None],
             )
         )
 
         self.compressor.batch_decompress.return_value = torch.rand(10)
+        self.compressor.maybe_dequantize_values.return_value = [torch.tensor([0.1, 0.2])]
         self.transformer.decode.return_value = torch.rand(10)
 
         outer_step(
@@ -250,6 +253,9 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.instance.hparams.use_dct = False
         self.instance.hparams.inner_steps = 10
         self.instance.hparams.time_window_delta_seconds = 10
+        self.instance.loop = MagicMock()
+        self.instance.loop.run_in_executor = AsyncMock(return_value=12345)
+        self.instance.query_block_timestamp = MagicMock(return_value=12345)
 
     @patch("tplr.neurons.outer_step")
     @patch("tplr.neurons.compare_model_with_debug_dict")
@@ -282,7 +288,6 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
                 state_dict=SimpleNamespace(param1=torch.rand(10))
             )
         )
-        self.instance.query_block_timestamp = MagicMock(return_value=12345)
 
         # Act
         asyncio.run(catchup_with_aggregation_server(self.instance, 0))
@@ -299,7 +304,6 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         mock_get = AsyncMock(return_value=MagicMock(success=False, data=None))
         self.instance.comms.get = mock_get
         self.instance.comms.gather = AsyncMock(return_value=None)  # Gather fails
-        self.instance.query_block_timestamp = MagicMock(return_value=12345)
 
         # Act
         asyncio.run(catchup_with_aggregation_server(self.instance, 0))
@@ -386,3 +390,41 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCheckUidIndexOverlap(unittest.TestCase):
+    async def test_no_overlap(self):
+        uids = [1, 2, 3]
+        uid_to_indices = {1: {1, 2}, 2: {3, 4}, 3: {5, 6}}
+        result = await check_uid_index_overlap(uids, uid_to_indices, window=0)
+        self.assertEqual(result, {})
+
+    async def test_single_overlap(self):
+        uids = [1, 2, 3]
+        uid_to_indices = {1: {1, 2}, 2: {2, 3}, 3: {4, 5}}
+        result = await check_uid_index_overlap(uids, uid_to_indices, window=0)
+        self.assertEqual(result, {(1, 2): {2}})
+
+    async def test_multiple_overlaps(self):
+        uids = [1, 2, 3, 4]
+        uid_to_indices = {
+            1: {1, 2, 3},
+            2: {3, 4, 5},
+            3: {5, 6, 7},
+            4: {1, 7, 8},
+        }
+        result = await check_uid_index_overlap(uids, uid_to_indices, window=0)
+        self.assertEqual(
+            result,
+            {(1, 2): {3}, (1, 4): {1}, (2, 3): {5}, (3, 4): {7}},
+        )
+
+    async def test_empty_input(self):
+        result = await check_uid_index_overlap([], {}, window=0)
+        self.assertEqual(result, {})
+
+    async def test_uids_not_in_dict(self):
+        uids = [1, 2, 3]
+        uid_to_indices = {1: {1, 2}}
+        with self.assertRaises(KeyError):
+            await check_uid_index_overlap(uids, uid_to_indices, window=0)

@@ -826,10 +826,6 @@ class Miner(BaseNode, Trainer):
 
             await self.cleanup_window()
 
-            # ── profiler step (only master) ─────────────────────────────
-            if self.is_master and self._prof is not None:
-                self._prof.step()
-
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
             await self.wait_until_window(step_window + 1)

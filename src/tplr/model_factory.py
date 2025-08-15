@@ -99,7 +99,6 @@ def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
         norm_eps=getattr(hparams.model_config, "rms_norm_eps", 1e-5),
         rope_theta=getattr(hparams.model_config, "rope_theta", 10000.0),
         max_seq_len=sequence_length,
-        rope_scaling=None,
     )
     
     # Calculate ffn_dim_multiplier to match the intermediate_size from hparams

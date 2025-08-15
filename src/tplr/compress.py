@@ -28,6 +28,8 @@ import torch.fft
 from einops import rearrange
 from torch.distributed.tensor import DTensor as DT
 
+import tplr
+
 # ─────────── type aliases ────────────────────────────────────────────────
 # primitive shapes
 ShapeT: TypeAlias = tuple[int, ...]  # original dense tensor shape
@@ -141,10 +143,24 @@ def unpack_12bit_indices(packed: torch.Tensor, values_shape: ShapeT) -> torch.Te
 
 
 class ChunkingTransformer:
-    """Tensor chunking transformer for efficient gradient processing."""
+    """
+    A transformer for chunking tensors to enable more efficient gradient processing.
+
+    This class handles the chunking of tensors into smaller blocks, which can be
+    processed more efficiently. It pre-calculates Discrete Cosine Transform (DCT)
+    basis matrices for various tensor sizes to speed up the transformation process.
+    """
 
     @torch.no_grad()
     def __init__(self, model, target_chunk, norm="ortho"):
+        """
+        Initialise the ChunkingTransformer.
+
+        Args:
+            model: The model whose parameters will be processed.
+            target_chunk (int): The target size for tensor chunks.
+            norm (str): The normalization to be used for DCT ('ortho' or None).
+        """
         self.target_chunk = target_chunk
 
         self.shape_dict = dict()
@@ -169,6 +185,17 @@ class ChunkingTransformer:
 
     @torch.no_grad()
     def einsum_2d(self, x, b, d=None) -> torch.Tensor:
+        """
+        Apply a 2D einsum operation for encoding.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+            b (torch.Tensor): The first basis matrix.
+            d (torch.Tensor, optional): The second basis matrix. Defaults to None.
+
+        Returns:
+            torch.Tensor: The transformed tensor.
+        """
         if d is None:
             return torch.einsum("...ij, jb -> ...ib", x, b)
         else:
@@ -177,6 +204,17 @@ class ChunkingTransformer:
 
     @torch.no_grad()
     def einsum_2d_t(self, x, b, d=None) -> torch.Tensor:
+        """
+        Apply a 2D einsum operation for decoding (transpose).
+
+        Args:
+            x (torch.Tensor): The input tensor.
+            b (torch.Tensor): The first basis matrix.
+            d (torch.Tensor, optional): The second basis matrix. Defaults to None.
+
+        Returns:
+            torch.Tensor: The transformed tensor.
+        """
         if d is None:
             return torch.einsum("...ij, jb -> ...ib", x, b)
         else:
@@ -185,6 +223,16 @@ class ChunkingTransformer:
 
     @torch.no_grad()
     def encode(self, x: torch.Tensor, *, use_dct: bool = False) -> torch.Tensor:
+        """
+        Encode a tensor by chunking and optionally applying DCT.
+
+        Args:
+            x (torch.Tensor): The input tensor to encode.
+            use_dct (bool): Whether to apply the Discrete Cosine Transform.
+
+        Returns:
+            torch.Tensor: The encoded tensor.
+        """
         if len(x.shape) > 1:  # 2D weights
             n1 = self.shape_dict[x.shape[0]]
             n2 = self.shape_dict[x.shape[1]]
@@ -210,6 +258,16 @@ class ChunkingTransformer:
 
     @torch.no_grad()
     def decode(self, x: torch.Tensor, *, use_dct: bool = False) -> torch.Tensor:
+        """
+        Decode a tensor by un-chunking and optionally applying inverse DCT.
+
+        Args:
+            x (torch.Tensor): The input tensor to decode.
+            use_dct (bool): Whether to apply the inverse Discrete Cosine Transform.
+
+        Returns:
+            torch.Tensor: The decoded tensor.
+        """
         if len(x.shape) > 2:  # 2D weights
             if use_dct:
                 n1 = x.shape[2]
@@ -235,7 +293,13 @@ class ChunkingTransformer:
 
 
 class TopKCompressor(Generic[Q]):
-    """Top-k gradient sparsifier/compressor with optional quantization."""
+    """
+    A gradient sparsifier/compressor that uses Top-K selection and optional quantization.
+
+    This class can be used to compress gradients by selecting the top-k largest values
+    and optionally quantizing them to 8-bit integers for further size reduction.
+    It supports both 1D and 2D tensors.
+    """
 
     use_quantization: Q
     n_bins: int
@@ -270,6 +334,14 @@ class TopKCompressor(Generic[Q]):
         quantization_bins: int = 256,
         quantization_range: int = 6,
     ) -> None:
+        """
+        Initialise the TopKCompressor.
+
+        Args:
+            use_quantization (bool): Whether to use 8-bit quantization.
+            quantization_bins (int): The number of bins for quantization.
+            quantization_range (int): The quantization range in standard deviations.
+        """
         self.use_quantization = cast(Q, use_quantization)
         if self.use_quantization:
             self.n_bins = quantization_bins
@@ -278,6 +350,16 @@ class TopKCompressor(Generic[Q]):
             )
 
     def _clamp_topk(self, x, topk) -> int:
+        """
+        Clamp the top-k value to be within the valid range and ensure it's even.
+
+        Args:
+            x (torch.Tensor): The input tensor.
+            topk (int): The desired top-k value.
+
+        Returns:
+            int: The clamped and even top-k value.
+        """
         topk = min(topk, x.shape[-1])
         topk = max(topk, 2)
         # Ensure topk is even for 12-bit packing efficiency
@@ -302,6 +384,17 @@ class TopKCompressor(Generic[Q]):
 
     @torch.no_grad()
     def compress(self, x: torch.Tensor, topk: int):  # type: ignore[override]
+        """
+        Compress a tensor using top-k selection and optional quantization.
+
+        Args:
+            x (torch.Tensor): The input tensor to compress.
+            topk (int): The number of top values to select.
+
+        Returns:
+            A tuple containing the compressed data. The format depends on whether
+            quantization is used.
+        """
         if isinstance(x, DT):  # check for dtensors
             x = x.to_local()
         xshape = x.shape
@@ -339,6 +432,20 @@ class TopKCompressor(Generic[Q]):
         totalk: int,
         quantize_params: QuantParamsT | None = None,
     ) -> torch.Tensor:
+        """
+        Decompress a tensor from its sparse representation.
+
+        Args:
+            p (torch.Tensor): A tensor with the target shape and device.
+            idx (torch.Tensor): The indices of the non-zero values.
+            val (torch.Tensor): The non-zero values.
+            xshape (ShapeT): The original shape of the tensor.
+            totalk (int): The total number of elements in the original tensor's last dim.
+            quantize_params (QuantParamsT, optional): Quantization parameters. Defaults to None.
+
+        Returns:
+            torch.Tensor: The decompressed tensor.
+        """
         if self.use_quantization and quantize_params is not None:
             val = self._dequantize_values(val, quantize_params)
 
@@ -383,6 +490,23 @@ class TopKCompressor(Generic[Q]):
         normalise: bool = False,
         clip_norm: bool = True,
     ) -> torch.Tensor:
+        """
+        Decompress a batch of sparse tensors and combine them.
+
+        Args:
+            p (torch.Tensor): A tensor with the target shape and device.
+            idx (torch.Tensor | Sequence[torch.Tensor]): A sequence of indices for each tensor in the batch.
+            val (torch.Tensor | Sequence[torch.Tensor]): A sequence of values for each tensor in the batch.
+            xshape (ShapeT): The original shape of the tensors.
+            totalk (int): The total number of elements in the original tensor's last dim.
+            quantize_params (Sequence[QuantParamsT], optional): A sequence of quantization parameters. Defaults to None.
+            block_norms (torch.Tensor, optional): Pre-computed norms for each block. Defaults to None.
+            normalise (bool): Whether to normalise the values. Defaults to False.
+            clip_norm (bool): Whether to clip the norms of the values. Defaults to True.
+
+        Returns:
+            torch.Tensor: The combined, decompressed tensor.
+        """
         if quantize_params is not None and not isinstance(quantize_params, list):
             quantize_params = [quantize_params] * len(val)  # type: ignore[list-item]
 
@@ -404,8 +528,7 @@ class TopKCompressor(Generic[Q]):
                 norms = torch.stack(
                     [torch.norm(sparse_vals, p=2) for sparse_vals in vals_for_norm]
                 )
-            median_norm = torch.median(norms)
-            clip_norm_val = torch.clamp(median_norm, min=1, max=10)
+            clip_norm_val = torch.median(norms)
 
         vals = dequant_vals if dequant_vals is not None else val
         for i, v in enumerate(vals):
@@ -454,6 +577,15 @@ class TopKCompressor(Generic[Q]):
 
     @torch.no_grad()
     def _quantize_values(self, val: torch.Tensor) -> tuple[torch.Tensor, QuantParamsT]:
+        """
+        Quantize tensor values to 8-bit integers.
+
+        Args:
+            val (torch.Tensor): The tensor values to quantize.
+
+        Returns:
+            A tuple containing the quantized values (uint8) and the quantization parameters.
+        """
         offset = self.n_bins // 2  # 128 for 8-bit
         shift = val.mean()
         centered = val - shift
@@ -488,18 +620,86 @@ class TopKCompressor(Generic[Q]):
     def _dequantize_values(
         self, val: torch.Tensor, qparams: QuantParamsT
     ) -> torch.Tensor:
-        shift, _, _, lookup, orig_dtype = qparams
-        lookup = lookup.to(val.device) if isinstance(lookup, torch.Tensor) else lookup
-        deq = lookup[val.long()] + shift
-        return deq.to(orig_dtype)
+        """
+        Dequantize tensor values from 8-bit integers back to their original dtype.
+
+        Args:
+            val (torch.Tensor): The quantized values (uint8).
+            qparams (QuantParamsT): The quantization parameters.
+
+        Returns:
+            torch.Tensor: The dequantized values.
+        """
+        if val.dtype == torch.uint8:
+            shift, _, _, lookup, orig_dtype = qparams
+            lookup = (
+                lookup.to(val.device) if isinstance(lookup, torch.Tensor) else lookup
+            )
+            deq = lookup[val.long()] + shift
+            val = deq.to(orig_dtype)
+        return val
+
+    def maybe_dequantize_values(
+        self,
+        vals: list[torch.Tensor],
+        qparams: list[QuantParamsT],
+        device: torch.device,
+    ) -> list[torch.Tensor]:
+        """
+        Dequantize a list of values if they are quantized.
+
+        Args:
+            vals (list[torch.Tensor]): A list of tensors that may be quantized.
+            qparams (list[QuantParamsT]): A list of quantization parameters.
+            device (torch.device): The device to move the tensors to.
+
+        Returns:
+            list[torch.Tensor]: A list of dequantized tensors.
+        """
+        if not isinstance(vals, (list, tuple)):
+            vals = [vals]
+
+        needs_dequantized = all([v.dtype == torch.uint8 for v in vals])
+        if qparams is None or not needs_dequantized:
+            return vals
+
+        if (
+            isinstance(qparams, tuple)
+            and len(qparams) == 5  # potentially single or already 5 elements
+            and not all([len(q) == 5 for q in qparams])  # already correctly formatted
+        ):
+            qparams = [qparams]
+
+        if not isinstance(qparams, list):
+            qparams = [qparams]
+
+        vals_f32: list[torch.Tensor] = []
+        for i, v in enumerate(vals):
+            v = v.to(device)
+            if v.dtype == torch.uint8:  # still quantised → decode
+                if qparams[i] is None:
+                    tplr.logger.warning(f"Missing quant_params for vals[{i}]]; skip.")
+                    break
+                qp = qparams[i]
+                v = self._dequantize_values(v, qp).to(device)
+            vals_f32.append(v)
+
+        if len(vals_f32) != len(vals):  # some decode failed
+            raise IndexError(
+                f"Mismatch in val lengths: dequant({len(vals_f32)}) vs original({len(vals)})"
+            )
+
+        return vals_f32
 
 
 # Code modified and sourced from https://github.com/zh217/torch-dct
 def _dct_fft_impl(v) -> torch.Tensor:
+    """FFT-based implementation of the DCT."""
     return torch.view_as_real(torch.fft.fft(v, dim=1))
 
 
 def _idct_irfft_impl(V) -> torch.Tensor:
+    """IRFFT-based implementation of the IDCT."""
     return torch.fft.irfft(torch.view_as_complex(V), n=V.shape[1], dim=1)
 
 
@@ -585,6 +785,15 @@ def _idct(X, norm=None) -> torch.Tensor:
 
 
 def _get_prime_divisors(n: int) -> list[int]:
+    """
+    Get the prime divisors of a number.
+
+    Args:
+        n (int): The number to factorize.
+
+    Returns:
+        list[int]: A list of prime divisors.
+    """
     divisors = []
     while n % 2 == 0:
         divisors.append(2)
@@ -605,6 +814,15 @@ def _get_prime_divisors(n: int) -> list[int]:
 
 
 def _get_divisors(n: int) -> list[int]:
+    """
+    Get all divisors of a number.
+
+    Args:
+        n (int): The number to get divisors for.
+
+    Returns:
+        list[int]: A sorted list of divisors.
+    """
     divisors = []
     if n == 1:
         divisors.append(1)
@@ -629,6 +847,16 @@ def _get_divisors(n: int) -> list[int]:
 
 
 def _get_smaller_split(n: int, close_to: int) -> int:
+    """
+    Find the largest divisor of n that is less than or equal to close_to.
+
+    Args:
+        n (int): The number to find a divisor for.
+        close_to (int): The target value to be close to.
+
+    Returns:
+        int: The largest divisor of n that is <= close_to.
+    """
     all_divisors = _get_divisors(n)
     for ix, val in enumerate(all_divisors):
         if val == close_to:

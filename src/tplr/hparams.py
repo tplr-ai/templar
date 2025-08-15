@@ -154,18 +154,26 @@ def load_hparams(
             f"CRITICAL: 'model_size' must be defined in {base_hparams_file}"
         )
 
-    model_hparams_file = hparams_dir_path / f"{model_size}.json"
-    try:
-        with open(model_hparams_file, "r") as f:
-            model_specific_hparams = json.load(f)
-            hparams.update(model_specific_hparams)
-        logger.info(f"Loaded model-specific config from {model_hparams_file}")
-    except FileNotFoundError:
-        logger.error(f"Model-specific config file not found: {model_hparams_file}")
-        raise ValueError(f"Could not find hparams for model_size '{model_size}'")
-    except Exception as e:
-        logger.error(f"Error loading {model_hparams_file}: {e}")
-        raise
+    # Check if this is a standard TorchTitan model size
+    from torchtitan.models.llama3 import llama3_configs
+    
+    if model_size in llama3_configs:
+        # For TorchTitan sizes, we don't need a model-specific JSON file
+        logger.info(f"Using TorchTitan predefined config for {model_size}")
+    else:
+        # For custom sizes (150M, 1B, etc.), load the model-specific JSON file
+        model_hparams_file = hparams_dir_path / f"{model_size}.json"
+        try:
+            with open(model_hparams_file, "r") as f:
+                model_specific_hparams = json.load(f)
+                hparams.update(model_specific_hparams)
+            logger.info(f"Loaded model-specific config from {model_hparams_file}")
+        except FileNotFoundError:
+            logger.error(f"Model-specific config file not found: {model_hparams_file}")
+            raise ValueError(f"Could not find hparams for model_size '{model_size}'")
+        except Exception as e:
+            logger.error(f"Error loading {model_hparams_file}: {e}")
+            raise
 
     # 3. (Optional) Load and merge local run overrides
     if use_local_run_hparams:

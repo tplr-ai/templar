@@ -30,7 +30,7 @@ from functools import partial
 
 # from .hparams import HParams
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal, cast
 
 import aiofiles
 import bittensor as bt
@@ -60,14 +60,14 @@ CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 class Comms(ChainManager):
     def __init__(
         self,
-        wallet: "bt.wallet | None",
+        wallet: bt.wallet | None,
         save_location: str = "/tmp",
         key_prefix: str = "model",
         config=None,
-        netuid=None,
+        netuid: int | None = None,
         metagraph=None,
         hparams=None,
-        uid=None,
+        uid: int | None = None,
         **kwargs,
     ):
         self.uid = uid
@@ -373,10 +373,10 @@ class Comms(ChainManager):
     async def s3_get_object(
         self,
         key: str,
-        bucket: Bucket = None,
+        bucket: Bucket | None = None,
         timeout: int = 30,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
         load_data: bool = True,
     ):
         """Download object from S3 using asynchronous streaming."""
@@ -731,7 +731,7 @@ class Comms(ChainManager):
 
     async def put(
         self,
-        state_dict: dict,
+        state_dict: dict[str, torch.Tensor],
         window: int,
         key: Literal["checkpoint", "debug", "gradient", "aggregator"],
         uid: str | None = None,
@@ -936,9 +936,9 @@ class Comms(ChainManager):
         timeout: int,
         local: bool = True,
         stale_retention: int = 10,
-        time_min: datetime = None,
-        time_max: datetime = None,
-    ) -> None | tuple[dict, int]:
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
+    ) -> CommsGetResult | None:
         """GET with retry operation."""
         start_time = time.time()
         end_time = start_time + timeout
@@ -986,7 +986,7 @@ class Comms(ChainManager):
             )
 
             if result.success:
-                return result.data, result.global_step
+                return result
 
             if result.status in ["TOO_LATE", "TOO_EARLY"]:
                 formatted_status = result.status.lower().split("_")
@@ -1008,7 +1008,7 @@ class Comms(ChainManager):
         key: str,
         timeout: int,
         device: str,
-        totalks: dict,
+        totalks: dict[str, torch.Tensor],
         compressor: TopKCompressor,
         expected_compressed_params: set[str] | None = None,
         local: bool = True,
@@ -1043,7 +1043,7 @@ class Comms(ChainManager):
         async with self.gather_semaphore:
             batch_tasks = [
                 self.get_with_retry(
-                    uid=uid,
+                    uid=str(uid),
                     window=window,
                     key=key,
                     timeout=timeout,
@@ -1082,7 +1082,8 @@ class Comms(ChainManager):
 
                     try:
                         # This is where get response uses the step
-                        state_dict_resp, global_step_resp = response
+                        response = cast(CommsGetResult, response)
+                        state_dict_resp, global_step_resp = response.data, response.global_step
                         tplr.logger.debug(
                             f"Received state dict and global step {global_step_resp} from UID {uid}"
                         )
@@ -1670,7 +1671,7 @@ class Comms(ChainManager):
         model,
         current_window: int,
         device: str,
-        init_version: Optional[str] = None,
+        init_version: str | None = None,
     ) -> tuple[bool, int]:
         """
         Loads the latest checkpoint. No catchup or step simulation happens here.
@@ -2040,7 +2041,7 @@ class Comms(ChainManager):
         else:
             raise ValueError(f"[{param_name}] Expected tensor but got {type(idxs)}")
 
-    async def s3_get_object_size(self, bucket: Bucket, key: str) -> Optional[int]:
+    async def s3_get_object_size(self, bucket: Bucket, key: str) -> int | None: 
         """Get the size of an S3 object without downloading it using HEAD request."""
         try:
             s3_client = await self._get_s3_client(bucket)
@@ -2064,7 +2065,7 @@ class Comms(ChainManager):
 
     async def s3_get_object_range(
         self, bucket: Bucket, key: str, start: int, end: int, timeout: int = 30
-    ) -> Optional[bytes]:
+    ) -> None | bytes:
         """Download a specific byte range from S3 object."""
         try:
             s3_client = await self._get_s3_client(bucket)

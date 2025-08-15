@@ -175,7 +175,11 @@ def outer_step(
         model.train()
         optimizer.zero_grad()
 
-        if gather_result is not None and gather_result.state_dict is not None:
+        if (
+            gather_result is not None
+            and gather_result.state_dict is not None
+            and bool(vars(gather_result.state_dict))
+        ):
             for n, p in bare_model.named_parameters():
                 idxs = getattr(gather_result.state_dict, n + "idxs", None)
                 vals = getattr(gather_result.state_dict, n + "vals", None)
@@ -194,19 +198,7 @@ def outer_step(
                 # ------------------------------------------------------------------
                 # 1️⃣  Ensure every vals tensor is fp32/fp16 (de-quant if needed)
                 # ------------------------------------------------------------------
-                vals_f32: list[torch.Tensor] = []
-                for i, v in enumerate(vals):
-                    v = v.to(device)
-                    if v.dtype == torch.uint8:  # still quantised → decode
-                        if qps is None:
-                            tplr.logger.warning(f"Missing quant_params for {n}; skip.")
-                            break
-                        qp = qps[i] if isinstance(qps, (list, tuple)) else qps
-                        v = compressor._dequantize_values(v, qp).to(device)
-                    vals_f32.append(v)
-
-                if len(vals_f32) != len(vals):  # some decode failed
-                    continue
+                vals_f32 = compressor.maybe_dequantize_values(vals, qps, device)
 
                 block_norms = torch.stack([torch.norm(v, p=2) for v in vals_f32])
 

@@ -225,12 +225,18 @@ def create_parallel_dims(
             world_size=1,
         )
     elif role == "validator":
-        # Validator: data parallel replication, no sharding
+        # Validator: pipeline parallelism with data parallel replication
+        pp_degree = 2
+        if world_size % pp_degree != 0:
+            raise ValueError(
+                f"World size ({world_size}) must be divisible by "
+                f"pipeline-parallel degree ({pp_degree})"
+            )
         return ParallelDims(
-            dp_replicate=world_size,
+            dp_replicate=world_size // pp_degree,
             dp_shard=1,
             tp=1,
-            pp=1,
+            pp=pp_degree,
             cp=1,
             ep=1,
             world_size=world_size,

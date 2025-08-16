@@ -62,7 +62,7 @@ module.exports = {
       }
     },
     {
-      name            : "TM1",
+      name            : "TM3",
       exec_mode       : "fork",
       exec_interpreter: "none",
       script          : "torchrun",
@@ -86,7 +86,7 @@ module.exports = {
       }
     },
     {
-      name            : "TM2",
+      name            : "TM4",
       exec_mode       : "fork",
       exec_interpreter: "none",
       script          : "torchrun",
@@ -110,7 +110,7 @@ module.exports = {
       }
     },
     {
-      name            : "TM1",
+      name            : "TM5",
       exec_mode       : "fork",
       exec_interpreter: "none",
       script          : "torchrun",

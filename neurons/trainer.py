@@ -171,7 +171,10 @@ class Trainer:
         inner_scheduler = lr_scheduler.SequentialLR(
             self.inner_optimizer,
             schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
-            milestones=[inner_steps_before_outer_step, warmup_steps],
+            milestones=[
+                inner_steps_before_outer_step,
+                inner_steps_before_outer_step + warmup_steps,
+            ],
         )
 
         tplr.logger.info(

@@ -67,8 +67,12 @@ def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
     """
     model_size = hparams.model_size
     sequence_length = hparams.sequence_length
-    vocab_size = hparams.tokenizer.vocab_size if hasattr(hparams, "tokenizer") else hparams.model_config.vocab_size
-    
+    vocab_size = (
+        hparams.tokenizer.vocab_size
+        if hasattr(hparams, "tokenizer")
+        else hparams.model_config.vocab_size
+    )
+
     if model_size in llama3_configs:
         tplr.logger.info(f"Using predefined TorchTitan config for {model_size}")
         # Create a copy of the config to avoid modifying the original
@@ -79,10 +83,10 @@ def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
         args.vocab_size = vocab_size
         tplr.logger.info(f"Using vocab_size: {vocab_size}")
         return args
-    
+
     # Fall back to creating custom config from hparams for non-standard sizes (150M, 1B, etc.)
     tplr.logger.info(f"Creating custom TorchTitan config for {model_size} from hparams")
-    
+
     # Create custom TransformerModelArgs from hparams
     args = TransformerModelArgs(
         dim=hparams.model_config.hidden_size,
@@ -91,7 +95,7 @@ def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
         n_kv_heads=getattr(
             hparams.model_config,
             "num_key_value_heads",
-            hparams.model_config.num_attention_heads
+            hparams.model_config.num_attention_heads,
         ),
         vocab_size=vocab_size,
         ffn_dim_multiplier=None,  # Will calculate from intermediate_size
@@ -100,20 +104,20 @@ def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
         rope_theta=getattr(hparams.model_config, "rope_theta", 10000.0),
         max_seq_len=sequence_length,
     )
-    
+
     # Calculate ffn_dim_multiplier to match the intermediate_size from hparams
     # The formula in TorchTitan is: ffn_dim = int(8 * dim / 3 * ffn_dim_multiplier)
     # We need to reverse engineer ffn_dim_multiplier from intermediate_size
     target_intermediate_size = hparams.model_config.intermediate_size
     base_ffn = int(8 * args.dim / 3)
     args.ffn_dim_multiplier = target_intermediate_size / base_ffn
-    
+
     tplr.logger.info(
         f"Custom config: dim={args.dim}, n_layers={args.n_layers}, "
         f"n_heads={args.n_heads}, n_kv_heads={args.n_kv_heads}, "
         f"intermediate_size={target_intermediate_size}"
     )
-    
+
     return args
 
 

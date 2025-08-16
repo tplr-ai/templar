@@ -293,24 +293,28 @@ class Validator(BaseNode, Trainer):
         self.window_step = 0
         self.eval_count = 0
 
-        # Initialize WandB
-        self.wandb = tplr.initialize_wandb(
-            run_prefix="V",
-            uid=self.uid,
-            config=self.config,
-            group="validator",
-            job_type="validation",
-        )
+        # Initialize WandB and metrics logger only on the master rank
+        if self.is_master:
+            self.wandb = tplr.initialize_wandb(
+                run_prefix="V",
+                uid=self.uid,
+                config=self.config,
+                group="validator",
+                job_type="validation",
+            )
 
-        # Initialize metrics logger for InfluxDB
-        self.metrics_logger = tplr.metrics.MetricsLogger(
-            prefix="V",
-            uid=self.uid,
-            config=self.config,
-            role="validator",
-            group="validator",
-            job_type="validation",
-        )
+            self.metrics_logger = tplr.metrics.MetricsLogger(
+                prefix="V",
+                uid=self.uid,
+                config=self.config,
+                role="validator",
+                group="validator",
+                job_type="validation",
+            )
+        else:
+            self.wandb = None
+            self.metrics_logger = None
+
         # Weighted selection counters for fair picking of eval peers
         self.eval_peers = defaultdict(lambda: 1)
 
@@ -382,35 +386,36 @@ class Validator(BaseNode, Trainer):
             current_window=self.current_window,
             eval_uid=eval_uid,
         )
-        self.wandb.log(
-            {
-                f"validator/sync/l2_norm/{eval_uid}": l2_norm,
-                f"validator/sync/avg_l2_norm/{eval_uid}": avg_l2_norm,
-                f"validator/sync/avg_abs_diff/{eval_uid}": avg_abs_diff,
-                f"validator/sync/sync_max_diff/{eval_uid}": max_diff,
-                f"validator/sync/avg_steps_behind/{eval_uid}": avg_steps_behind,
-                f"validator/sync/max_steps_behind/{eval_uid}": max_steps_behind,
-            },
-            step=self.global_step,
-        )
-        self.metrics_logger.log(
-            measurement="validator_sync_score",
-            tags={
-                "uid": str(eval_uid),
-                "window": int(self.sync_window),
-                "global_step": int(self.global_step),
-            },
-            fields={
-                "l2_norm": l2_norm,
-                "avg_l2_norm": avg_l2_norm,
-                "avg_abs_diff": avg_abs_diff,
-                "max_diff": max_diff,
-                "avg_steps_behind": avg_steps_behind,
-                "max_steps_behind": max_steps_behind,
-            },
-            with_system_metrics=True,
-            with_gpu_metrics=True,
-        )
+        if self.is_master:
+            self.wandb.log(
+                {
+                    f"validator/sync/l2_norm/{eval_uid}": l2_norm,
+                    f"validator/sync/avg_l2_norm/{eval_uid}": avg_l2_norm,
+                    f"validator/sync/avg_abs_diff/{eval_uid}": avg_abs_diff,
+                    f"validator/sync/sync_max_diff/{eval_uid}": max_diff,
+                    f"validator/sync/avg_steps_behind/{eval_uid}": avg_steps_behind,
+                    f"validator/sync/max_steps_behind/{eval_uid}": max_steps_behind,
+                },
+                step=self.global_step,
+            )
+            self.metrics_logger.log(
+                measurement="validator_sync_score",
+                tags={
+                    "uid": str(eval_uid),
+                    "window": int(self.sync_window),
+                    "global_step": int(self.global_step),
+                },
+                fields={
+                    "l2_norm": l2_norm,
+                    "avg_l2_norm": avg_l2_norm,
+                    "avg_abs_diff": avg_abs_diff,
+                    "max_diff": max_diff,
+                    "avg_steps_behind": avg_steps_behind,
+                    "max_steps_behind": max_steps_behind,
+                },
+                with_system_metrics=True,
+                with_gpu_metrics=True,
+            )
 
     def update_openskill_ratings(self) -> None:
         """
@@ -486,29 +491,30 @@ class Validator(BaseNode, Trainer):
                 )
 
                 # Log to WandB
-                self.wandb.log(
-                    {
-                        f"validator/openskill/mu/{uid}": openskill_mu,
-                        f"validator/openskill/sigma/{uid}": openskill_sigma,
-                        f"validator/openskill/ordinal/{uid}": openskill_ordinal,
-                    },
-                    step=self.global_step,
-                )
+                if self.is_master:
+                    self.wandb.log(
+                        {
+                            f"validator/openskill/mu/{uid}": openskill_mu,
+                            f"validator/openskill/sigma/{uid}": openskill_sigma,
+                            f"validator/openskill/ordinal/{uid}": openskill_ordinal,
+                        },
+                        step=self.global_step,
+                    )
 
-                # Log to InfluxDB
-                self.metrics_logger.log(
-                    measurement="validator_openskill",
-                    tags={
-                        "eval_uid": str(uid),
-                        "window": int(self.sync_window),
-                        "global_step": int(self.global_step),
-                    },
-                    fields={
-                        "mu": openskill_mu,
-                        "sigma": openskill_sigma,
-                        "ordinal": openskill_ordinal,
-                    },
-                )
+                    # Log to InfluxDB
+                    self.metrics_logger.log(
+                        measurement="validator_openskill",
+                        tags={
+                            "eval_uid": str(uid),
+                            "window": int(self.sync_window),
+                            "global_step": int(self.global_step),
+                        },
+                        fields={
+                            "mu": openskill_mu,
+                            "sigma": openskill_sigma,
+                            "ordinal": openskill_ordinal,
+                        },
+                    )
 
             # Create a ranking table to display current match rankings
             try:
@@ -1186,17 +1192,18 @@ class Validator(BaseNode, Trainer):
                     tplr.logger.info(line)
 
                     # Optionally, log to WandB
-                    self.wandb.log(
-                        {
-                            f"validator/final_scores/{eval_uid}": self.final_scores[
-                                eval_uid
-                            ].item(),
-                            f"validator/weights/{eval_uid}": self.weights[
-                                eval_uid
-                            ].item(),
-                        },
-                        step=self.global_step,
-                    )
+                    if self.is_master:
+                        self.wandb.log(
+                            {
+                                f"validator/final_scores/{eval_uid}": self.final_scores[
+                                    eval_uid
+                                ].item(),
+                                f"validator/weights/{eval_uid}": self.weights[
+                                    eval_uid
+                                ].item(),
+                            },
+                            step=self.global_step,
+                        )
                     continue
 
                 state_dict, _ = eval_result
@@ -1291,34 +1298,37 @@ class Validator(BaseNode, Trainer):
                     self.evaluated_uids.add(eval_uid)
 
                     # Log to WandB
-                    self.wandb.log(
-                        {
-                            f"validator/slash/{eval_uid}/score_before": old_score,
-                            f"validator/slash/{eval_uid}/score_after": self.final_scores[
-                                eval_uid
-                            ].item(),
-                            f"validator/slash/{eval_uid}/reason": str(e),
-                        },
-                        step=self.global_step,
-                    )
+                    if self.is_master:
+                        self.wandb.log(
+                            {
+                                f"validator/slash/{eval_uid}/score_before": old_score,
+                                f"validator/slash/{eval_uid}/score_after": self.final_scores[
+                                    eval_uid
+                                ].item(),
+                                f"validator/slash/{eval_uid}/reason": str(e),
+                            },
+                            step=self.global_step,
+                        )
 
-                    # Log to InfluxDB metrics with primitive types
-                    self.metrics_logger.log(
-                        measurement="validator_slash",
-                        tags={
-                            "eval_uid": str(eval_uid),
-                            "window": int(self.sync_window),
-                            "global_step": int(self.global_step),
-                            "reason_code": "invalid_gradient",
-                        },
-                        fields={
-                            "score_before": float(old_score),
-                            "score_after": float(self.final_scores[eval_uid].item()),
-                            "reason": str(e)[:255],  # Truncate long error messages
-                        },
-                        with_system_metrics=True,
-                        with_gpu_metrics=True,
-                    )
+                        # Log to InfluxDB metrics with primitive types
+                        self.metrics_logger.log(
+                            measurement="validator_slash",
+                            tags={
+                                "eval_uid": str(eval_uid),
+                                "window": int(self.sync_window),
+                                "global_step": int(self.global_step),
+                                "reason_code": "invalid_gradient",
+                            },
+                            fields={
+                                "score_before": float(old_score),
+                                "score_after": float(
+                                    self.final_scores[eval_uid].item()
+                                ),
+                                "reason": str(e)[:255],  # Truncate long error messages
+                            },
+                            with_system_metrics=True,
+                            with_gpu_metrics=True,
+                        )
 
                     # Skip the rest of processing for this peer
                     continue
@@ -1646,38 +1656,39 @@ class Validator(BaseNode, Trainer):
             )
 
             # ↳ WandB
-            self.wandb.log(
-                {
-                    "gradient/mean_grad_norm": mean_grad_norm,
-                    "gradient/max_grad_norm": max_grad_norm,
-                    "gradient/min_grad_norm": min_grad_norm,
-                    "gradient/median_grad_norm": median_grad_norm,
-                    "gradient/grad_norm_std": grad_norm_std,
-                    "gradient/mean_weight_norm": mean_weight_norm,
-                    "gradient/grad_to_weight_ratio": grad_to_weight_ratio,
-                },
-                step=self.global_step,
-            )
+            if self.is_master:
+                self.wandb.log(
+                    {
+                        "gradient/mean_grad_norm": mean_grad_norm,
+                        "gradient/max_grad_norm": max_grad_norm,
+                        "gradient/min_grad_norm": min_grad_norm,
+                        "gradient/median_grad_norm": median_grad_norm,
+                        "gradient/grad_norm_std": grad_norm_std,
+                        "gradient/mean_weight_norm": mean_weight_norm,
+                        "gradient/grad_to_weight_ratio": grad_to_weight_ratio,
+                    },
+                    step=self.global_step,
+                )
 
-            # ↳ InfluxDB (metrics_logger)
-            self.metrics_logger.log(
-                measurement="validator_gradient_stats",
-                tags={
-                    "window": int(self.sync_window),
-                    "global_step": int(self.global_step),
-                },
-                fields={
-                    "mean_grad_norm": mean_grad_norm,
-                    "max_grad_norm": max_grad_norm,
-                    "min_grad_norm": min_grad_norm,
-                    "median_grad_norm": median_grad_norm,
-                    "grad_norm_std": grad_norm_std,
-                    "mean_weight_norm": mean_weight_norm,
-                    "grad_to_weight_ratio": grad_to_weight_ratio,
-                },
-                with_system_metrics=True,
-                with_gpu_metrics=True,
-            )
+                # ↳ InfluxDB (metrics_logger)
+                self.metrics_logger.log(
+                    measurement="validator_gradient_stats",
+                    tags={
+                        "window": int(self.sync_window),
+                        "global_step": int(self.global_step),
+                    },
+                    fields={
+                        "mean_grad_norm": mean_grad_norm,
+                        "max_grad_norm": max_grad_norm,
+                        "min_grad_norm": min_grad_norm,
+                        "median_grad_norm": median_grad_norm,
+                        "grad_norm_std": grad_norm_std,
+                        "mean_weight_norm": mean_weight_norm,
+                        "grad_to_weight_ratio": grad_to_weight_ratio,
+                    },
+                    with_system_metrics=True,
+                    with_gpu_metrics=True,
+                )
 
             with torch.no_grad():
                 slice_idx = slice(10, 12)  # indices published in miner debug dict
@@ -1803,48 +1814,51 @@ class Validator(BaseNode, Trainer):
                 "validator/gather/actual_mean_final": mean_final_actual,
                 "validator/gather/reserve_used": reserve_used,
             }
-            self.wandb.log(evaluation_metrics, step=self.global_step)
+            if self.is_master:
+                self.wandb.log(evaluation_metrics, step=self.global_step)
 
-            # Log metrics to InfluxDB in parallel using primitive types
-            gather_success_rate = float(success_rate * 100)
-            total_skipped = len(skipped_uids)
+                # Log metrics to InfluxDB in parallel using primitive types
+                gather_success_rate = float(success_rate * 100)
+                total_skipped = len(skipped_uids)
 
-            self.metrics_logger.log(
-                measurement="validator_window_v2",
-                tags={
-                    "window": int(self.sync_window),
-                    "global_step": int(self.global_step),
-                },
-                fields={
-                    "loss_own_before": float(avg_loss_before_per_batch_own),
-                    "loss_own_after": float(avg_loss_after_per_batch_own),
-                    "loss_random_before": float(avg_loss_before_per_batch_random),
-                    "loss_random_after": float(avg_loss_after_per_batch_random),
-                    "loss_own_improvement": float(self.relative_improvement_own),
-                    "loss_random_improvement": float(self.relative_improvement_random),
-                    "current_block": int(self.current_block),
-                    "evaluated_uids_count": int(len(self.evaluated_uids)),
-                    "outer_lr": float(self.lr),
-                    "inner_lr": float(current_inner_lr),
-                    "active_miners_count": int(len(self.valid_score_indices)),
-                    "gather_success_rate": gather_success_rate,
-                    "window_total_time": float(window_total_time),
-                    "peer_update_time": float(peer_update_time),
-                    "gather_time": float(gather_time),
-                    "evaluation_time": float(evaluation_time),
-                    "model_update_time": float(model_update_time),
-                    "total_peers": int(len(self.comms.peers)),
-                    "total_skipped": int(total_skipped),
-                },
-                with_system_metrics=True,
-                with_gpu_metrics=True,
-            )
-            tplr.log_with_context(
-                level="info",
-                message="Finished metrics logging call for validator",
-                sync_window=self.sync_window,
-                current_window=self.current_window,
-            )
+                self.metrics_logger.log(
+                    measurement="validator_window_v2",
+                    tags={
+                        "window": int(self.sync_window),
+                        "global_step": int(self.global_step),
+                    },
+                    fields={
+                        "loss_own_before": float(avg_loss_before_per_batch_own),
+                        "loss_own_after": float(avg_loss_after_per_batch_own),
+                        "loss_random_before": float(avg_loss_before_per_batch_random),
+                        "loss_random_after": float(avg_loss_after_per_batch_random),
+                        "loss_own_improvement": float(self.relative_improvement_own),
+                        "loss_random_improvement": float(
+                            self.relative_improvement_random
+                        ),
+                        "current_block": int(self.current_block),
+                        "evaluated_uids_count": int(len(self.evaluated_uids)),
+                        "outer_lr": float(self.lr),
+                        "inner_lr": float(current_inner_lr),
+                        "active_miners_count": int(len(self.valid_score_indices)),
+                        "gather_success_rate": gather_success_rate,
+                        "window_total_time": float(window_total_time),
+                        "peer_update_time": float(peer_update_time),
+                        "gather_time": float(gather_time),
+                        "evaluation_time": float(evaluation_time),
+                        "model_update_time": float(model_update_time),
+                        "total_peers": int(len(self.comms.peers)),
+                        "total_skipped": int(total_skipped),
+                    },
+                    with_system_metrics=True,
+                    with_gpu_metrics=True,
+                )
+                tplr.log_with_context(
+                    level="info",
+                    message="Finished metrics logging call for validator",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
             # Log total window time and metrics
             tplr.log_with_context(
                 level="info",
@@ -1860,6 +1874,7 @@ class Validator(BaseNode, Trainer):
             if (
                 self.global_step % self.hparams.checkpoint_frequency == 0
                 and self.global_step != 0
+                and self.is_master
             ):
                 tplr.log_with_context(
                     level="info",
@@ -2157,29 +2172,30 @@ class Validator(BaseNode, Trainer):
                 )
 
             # Log slash metrics to WandB
-            self.wandb.log(
-                {
-                    f"validator/inactivity/{uid}/score_before": old_score,
-                    f"validator/inactivity/{uid}/score_after": new_score,
-                },
-                step=self.global_step,
-            )
+            if self.is_master:
+                self.wandb.log(
+                    {
+                        f"validator/inactivity/{uid}/score_before": old_score,
+                        f"validator/inactivity/{uid}/score_after": new_score,
+                    },
+                    step=self.global_step,
+                )
 
-            # Log slash metrics to InfluxDB with primitive types
-            self.metrics_logger.log(
-                measurement="validator_inactivity",
-                tags={
-                    "uid": str(uid),
-                    "window": int(self.current_window),
-                    "global_step": int(self.global_step),
-                },
-                fields={
-                    "score_before": float(old_score),
-                    "score_after": float(new_score),
-                },
-                with_system_metrics=True,
-                with_gpu_metrics=True,
-            )
+                # Log slash metrics to InfluxDB with primitive types
+                self.metrics_logger.log(
+                    measurement="validator_inactivity",
+                    tags={
+                        "uid": str(uid),
+                        "window": int(self.current_window),
+                        "global_step": int(self.global_step),
+                    },
+                    fields={
+                        "score_before": float(old_score),
+                        "score_after": float(new_score),
+                    },
+                    with_system_metrics=True,
+                    with_gpu_metrics=True,
+                )
         return
 
     async def evaluate_miner_sync(
@@ -2339,37 +2355,38 @@ class Validator(BaseNode, Trainer):
             final_score = float(self.final_scores[uid].item())
             weight = float(self.weights[uid].item())
 
-            self.wandb.log(
-                {
-                    f"validator/gradient_scores/{uid}": gradient_score,
-                    f"validator/binary_indicators/{uid}": binary_indicator,
-                    f"validator/binary_moving_averages/{uid}": binary_moving_avg,
-                    f"validator/final_scores/{uid}": final_score,
-                    f"validator/sync_score/{uid}": sync_score,
-                    f"validator/weights/{uid}": weight,
-                },
-                step=self.global_step,
-            )
+            if self.is_master:
+                self.wandb.log(
+                    {
+                        f"validator/gradient_scores/{uid}": gradient_score,
+                        f"validator/binary_indicators/{uid}": binary_indicator,
+                        f"validator/binary_moving_averages/{uid}": binary_moving_avg,
+                        f"validator/final_scores/{uid}": final_score,
+                        f"validator/sync_score/{uid}": sync_score,
+                        f"validator/weights/{uid}": weight,
+                    },
+                    step=self.global_step,
+                )
 
-            self.metrics_logger.log(
-                measurement="validator_scores",
-                tags={
-                    "eval_uid": str(uid),
-                    "window": int(self.sync_window),
-                    "global_step": int(self.global_step),
-                },
-                fields={
-                    "gradient_score": gradient_score,
-                    "binary_indicator": binary_indicator,
-                    "binary_moving_avg": binary_moving_avg,
-                    "sync_score": sync_score,
-                    "final_score": final_score,
-                    "weight": weight,
-                },
-                with_system_metrics=True,
-                with_gpu_metrics=True,
-                sample_rate=0.8 if should_downsample else 1.0,
-            )
+                self.metrics_logger.log(
+                    measurement="validator_scores",
+                    tags={
+                        "eval_uid": str(uid),
+                        "window": int(self.sync_window),
+                        "global_step": int(self.global_step),
+                    },
+                    fields={
+                        "gradient_score": gradient_score,
+                        "binary_indicator": binary_indicator,
+                        "binary_moving_avg": binary_moving_avg,
+                        "sync_score": sync_score,
+                        "final_score": final_score,
+                        "weight": weight,
+                    },
+                    with_system_metrics=True,
+                    with_gpu_metrics=True,
+                    sample_rate=0.8 if should_downsample else 1.0,
+                )
         return
 
     def update_model_with_gradient(
@@ -2597,7 +2614,7 @@ class Validator(BaseNode, Trainer):
             init_version=tplr.__version__
             if has_new_checkpoint
             else self.bootstrap_version,
-            is_master=self.is_master
+            is_master=self.is_master,
         )
         if success:
             tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
@@ -2839,7 +2856,7 @@ class Validator(BaseNode, Trainer):
                 return {k: to_cpu(v) for k, v in obj.items()}
             return obj  # leave ints, floats, strings … untouched
 
-        if self.uid == self.metagraph.S.argmax().item():
+        if self.is_master and self.uid == self.metagraph.S.argmax().item():
             try:
                 raw_state = gather_result.state_dict
                 # Accept both SimpleNamespace and plain dict

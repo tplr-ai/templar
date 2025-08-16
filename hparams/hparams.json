@@ -15,7 +15,7 @@
     "use_dct": false,
     "binary_score_ma_alpha": 0.05,
     "moving_average_window": 5,
-    "model_size": "70B",
+    "model_size": "150M",
     "weight_decay": 0.1,
     "validator_offset": 1,
     "checkpoint_frequency": 20,

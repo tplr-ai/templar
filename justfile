@@ -19,6 +19,15 @@ test-run:
     ./scripts/start.sh
     git restore src/tplr/__init__.py
 
+test-dev:
+    sed -i "s/__version__ = .*/__version__ = \"dev-$(cat /dev/urandom \
+        | tr -dc 'a-z0-9' \
+        | fold -w 8 \
+        | head -n 1)\"/" \
+        src/tplr/__init__.py
+    ./scripts/start.sh ecosystemdev.config.js
+    git restore src/tplr/__init__.py
+
 dev:
     uv pip install --pre -e ".[dev]"
 
@@ -30,4 +39,3 @@ bistro:
 
 cov:
     uv run pytest tests/ -v --cov=src --cov-report=xml --cov-report=term
-

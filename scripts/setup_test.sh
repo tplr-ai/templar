@@ -23,6 +23,7 @@ npm install dotenv
 
 git config --global user.email "test@tplr.ai"
 git config --global user.name "remote testing"
+git config pull.rebase true
 
 python -c "import time; time.sleep(60*3)"
 

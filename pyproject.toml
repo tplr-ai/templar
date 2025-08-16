@@ -63,6 +63,11 @@ dev = [
 
 ]
 
+[dependency-groups]
+dev = [
+    "ruff>=0.12.8",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"

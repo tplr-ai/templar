@@ -24,14 +24,11 @@ import random
 import re
 import shutil
 import time
-from dataclasses import dataclass
+import uuid
 from datetime import datetime, timezone
 from functools import partial
-
-# from .hparams import HParams
 from types import SimpleNamespace
-from typing import Dict, List, Literal, Optional, cast
-from urllib.parse import urlparse
+from typing import Any, Literal, cast
 
 import aiofiles
 import bittensor as bt
@@ -41,15 +38,12 @@ from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
 from botocore.exceptions import ClientError, ConnectionClosedError
 from tqdm import tqdm as std_tqdm
-import uuid
 
-import tplr as tplr
+import tplr
+from tplr.chain import ChainManager
 from tplr.compress import TopKCompressor, unpack_12bit_indices
-
-from . import __version__
-from .chain import ChainManager
-from .config import BUCKET_SECRETS, client_config
-from .schemas import Bucket, CommsGetResult
+from tplr.config import BUCKET_SECRETS, client_config
+from tplr.schemas import Bucket, CommsGetResult
 
 # Constants
 CF_REGION_NAME: str = "enam"
@@ -775,7 +769,7 @@ class Comms(ChainManager):
             key (str): The S3 object key.
             file_size (int): The total size of the file in bytes.
             temp_file_path (str): The local path to save the downloaded file.
-        
+
         Returns:
             bool: True if the download was successful, False otherwise.
 
@@ -1103,7 +1097,7 @@ class Comms(ChainManager):
             float: The time taken for the save operation in seconds.
         """
         if key == "aggregator":
-            filename = f"{key}-{window}-v{__version__}.pt"
+            filename = f"{key}-{window}-v{tplr.__version__}.pt"
             bucket_config = BUCKET_SECRETS["aggregator"]
             credentials = bucket_config["credentials"]["write"]
 
@@ -1115,7 +1109,7 @@ class Comms(ChainManager):
                 secret_access_key=credentials["secret_access_key"],
             )
         else:
-            filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+            filename = f"{key}-{window}-{uid}-v{tplr.__version__}.pt"
             bucket = None
         tplr.logger.debug(f"PUT {filename} -->")
 
@@ -1234,9 +1228,9 @@ class Comms(ChainManager):
                 retrieved data if successful.
         """
         if key == "aggregator":
-            filename = f"{key}-{window}-v{__version__}.pt"
+            filename = f"{key}-{window}-v{tplr.__version__}.pt"
         else:
-            filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+            filename = f"{key}-{window}-{uid}-v{tplr.__version__}.pt"
         tplr.logger.debug(f"GET {filename} -->")
 
         try:
@@ -1934,7 +1928,7 @@ class Comms(ChainManager):
             if current_window is None:
                 return False
             for window in range(current_window - recent_windows, current_window + 1):
-                filename = f"gradient-{window}-{uid}-v{__version__}.pt"
+                filename = f"gradient-{window}-{uid}-v{tplr.__version__}.pt"
                 tplr.logger.debug(f"Checking for {filename} in {peer_bucket.name}")
                 try:
                     await s3_client.head_object(Bucket=peer_bucket.name, Key=filename)
@@ -2240,7 +2234,7 @@ class Comms(ChainManager):
             tuple[bool, int]: A tuple where the first element is a boolean indicating
             success, and the second is the window number of the loaded checkpoint.
         """
-        init_version = init_version if init_version is not None else __version__
+        init_version = init_version if init_version is not None else tplr.__version__
         result = await self.get_latest_checkpoint(init_version)
         if not result:
             tplr.logger.info("No valid checkpoints found")
@@ -2318,7 +2312,7 @@ class Comms(ChainManager):
                 selection of the run.
         """
 
-        key = f"{PEERS_FILE_PREFIX}{first_effective_window}_v{__version__}.json"
+        key = f"{PEERS_FILE_PREFIX}{first_effective_window}_v{tplr.__version__}.json"
         peers_and_weights = {
             "peers": peers,
             "reserve_peers": reserve_peers or [],
@@ -2353,7 +2347,7 @@ class Comms(ChainManager):
         Args:
             start_window (int): The window number to be set as the starting point.
         """
-        key = f"start_window_v{__version__}.json"
+        key = f"start_window_v{tplr.__version__}.json"
         start_window_data = {"start_window": start_window}
 
         # Create temporary JSON file
@@ -2409,7 +2403,7 @@ class Comms(ChainManager):
                 )
 
                 s3_client = await self._get_s3_client(validator_bucket)
-                pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{re.escape(__version__)}\.json$"
+                pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{re.escape(tplr.__version__)}\.json$"
                 keys = []
                 continuation_token = None
 
@@ -2534,7 +2528,8 @@ class Comms(ChainManager):
                 )
 
                 start_window_data = await self.s3_get_object(
-                    key=f"start_window_v{__version__}.json", bucket=validator_bucket
+                    key=f"start_window_v{tplr.__version__}.json",
+                    bucket=validator_bucket,
                 )
 
                 if start_window_data is not None:

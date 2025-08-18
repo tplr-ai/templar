@@ -231,36 +231,15 @@ class Miner(BaseNode, Trainer):
         param_info = {}  # Store parameter info for second pass
 
         for idx, (n, p) in enumerate(model_iterator):
-            # Handle DTensor - use full tensor shape for DCT registration
-            # since we're not supporting TP and will use full tensors for compression
-            if isinstance(p, DT):
-                full_p = p.full_tensor()
-                # Ensure the dummy tensor is on the correct device
-                dummy = torch.zeros_like(full_p, device=self.device)
-                tplr.logger.debug(
-                    f"DTensor {n}: full_p.device={full_p.device}, dummy.device={dummy.device}, self.device={self.device}"
-                )
-            else:
-                dummy = torch.zeros_like(p, device=self.device)
-
-            # Store info for second pass
-            param_info[n] = {
-                "dummy": dummy,
-                "idx": idx,
-            }
             if idx % self.world_size == self.rank:
                 # this rank "owns" the parameter
                 self.owned_params.add(n)
                 # For DTensors, create error feedback based on full tensor since TP is not supported
-                self.error_feedback[n] = dummy
+                self.error_feedback[n] = None
 
-        # Second pass: now encode all tensors (DCT shapes should be registered)
-        for n, info in param_info.items():
-            dummy = info["dummy"]
-
-            enc = self.transformer.encode(dummy, use_dct=self.hparams.use_dct)
-            tplr.logger.debug(
-                f"[Init] Successfully applied DCT to {n} with shape {dummy.shape}"
+            enc = self.transformer.encode(
+                torch.empty(p.shape, dtype=torch.float16, device=self.device),
+                use_dct=self.hparams.use_dct,
             )
             _, _, xshape, totalk, _ = self.compressor.compress(
                 enc,
@@ -270,7 +249,7 @@ class Miner(BaseNode, Trainer):
             self.totalks[n] = totalk
 
         tplr.logger.info(
-            f"[Init] DCT compression initialized for {len(param_info)} parameters"
+            f"[Init] Compression initialized for {len(self.xshapes)} parameters"
         )
 
         self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)

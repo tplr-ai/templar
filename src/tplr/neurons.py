@@ -125,14 +125,20 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
             continue
 
         # --- 3) Momentum buffer update (owner only) ---
-        if miner.error_feedback[n].device != p.device:
-            miner.error_feedback[n] = miner.error_feedback[n].to(p.device)
+        # Handle DTensor error feedback by creating new regular tensor if needed
+        error_feedback = miner.error_feedback[n]
+        if error_feedback is None:
+            error_feedback = torch.zeros_like(grad_full, device=p.device)
+            miner.error_feedback[n] = error_feedback
+        elif error_feedback.device != p.device:
+            error_feedback = error_feedback.to(p.device)
 
-        miner.error_feedback[n].mul_(miner.hparams.momentum_decay)
-        miner.error_feedback[n].add_(grad_full, alpha=lr)
+        error_feedback.mul_(miner.hparams.momentum_decay)
+        error_feedback.add_(grad_full, alpha=lr)
 
         # --- 4) Encode & compress (owner only) ---
-        encoded = miner.transformer.encode(miner.error_feedback[n], use_dct=use_dct)
+        encoded = miner.transformer.encode(error_feedback, use_dct=use_dct)
+
         idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
             encoded, topk
         )
@@ -152,8 +158,9 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
         # --- 6) Decode & error-feedback update (owner only) ---
         transmit_grad = miner.transformer.decode(decompressed, use_dct=use_dct)
         del decompressed
-        miner.error_feedback[n].sub_(transmit_grad)
-        del transmit_grad
+        error_feedback.sub_(transmit_grad)
+        miner.error_feedback[n] = error_feedback
+        del transmit_grad, error_feedback
         full_p = None
 
         # --- 7) Pack outputs (move compressed artifacts to CPU) ---

@@ -34,6 +34,7 @@ from botocore.exceptions import ClientError, ConnectionClosedError
 
 import tplr
 from tplr.config import client_config
+from tplr.schemas import CommsGetResult
 
 CPU_COUNT = os.cpu_count() or 4
 
@@ -153,7 +154,7 @@ class GradientCollector:
             try:
                 # 2. download from peer ------------------------------------------
                 download_start = time.time()
-                gradient = await self.comms.get_with_retry(
+                get_result = await self.comms.get_with_retry(
                     uid=str(uid),
                     window=target_window,
                     key="gradient",
@@ -163,6 +164,8 @@ class GradientCollector:
                 )
                 download_time = time.time() - download_start
 
+                get_result = cast(CommsGetResult, get_result)
+                gradient = get_result.data
                 if gradient is None:
                     tplr.logger.debug(f"UID {uid}: No gradient received")
                     return uid, False

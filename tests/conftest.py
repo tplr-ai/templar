@@ -33,6 +33,7 @@ os.environ.setdefault(
 )
 
 import pytest
+from unittest.mock import Mock, patch
 import torch
 import tplr.comms as comms_module
 import tplr.compress as compress
@@ -42,6 +43,7 @@ import sys
 import numpy as np
 import asyncio
 import logging
+from typing import Generator
 
 # Get the project root directory (one level up from tests/)
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -72,28 +74,78 @@ class DummyHParams:
     active_check_interval = 60
     recent_windows = 5
     topk_compression = 3  # Expected number of indices will be 3 (min(3, totalk))
+    target_chunk = 512
 
 
 class DummyMetagraph:
     pass
 
 
+@pytest.fixture(scope="session", autouse=True)
+def mock_config() -> Generator[None, None, None]:
+    """A session-wide fixture to mock the configuration for all tests."""
+    with patch(
+        "tplr.config.BUCKET_SECRETS",
+        {
+            "gradients": {
+                "account_id": "test_account",
+                "name": "test-bucket",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "test_read_key",
+                        "secret_access_key": "test_read_secret",
+                    },
+                    "write": {
+                        "access_key_id": "test_write_key",
+                        "secret_access_key": "test_write_secret",
+                    },
+                },
+            },
+            "dataset": {
+                "account_id": "test_account",
+                "name": "test-dataset-bucket",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "test_read_key",
+                        "secret_access_key": "test_read_secret",
+                    }
+                },
+            },
+            "aggregator": {
+                "account_id": "test_account",
+                "name": "test-aggregator-bucket",
+                "credentials": {
+                    "read": {
+                        "access_key_id": "test_read_key",
+                        "secret_access_key": "test_read_secret",
+                    },
+                    "write": {
+                        "access_key_id": "test_write_key",
+                        "secret_access_key": "test_write_secret",
+                    },
+                },
+            },
+        },
+    ):
+        yield
+
+
 @pytest.fixture
-def model():
+def model() -> torch.nn.Module:
     # Create a simple dummy model for testing.
     return torch.nn.Sequential(torch.nn.Linear(10, 10))
 
 
 # New fixture to supply totalks information for gradient compression.
 @pytest.fixture
-def totalks():
+def totalks() -> dict:
     # For a Linear layer: weight shape is (10, 10) so totalk = 10*10 = 100,
     # and bias shape is (10,) so totalk = 10.
     return {"0.weight": 100, "0.bias": 10}
 
 
 @pytest.fixture
-async def comms_instance():
+async def comms_instance() -> comms_module.Comms:
     wallet = DummyWallet()
     config = DummyConfig()
     hparams = DummyHParams()
@@ -138,13 +190,13 @@ def enable_tplr_logger_propagation():
 
 
 @pytest.fixture
-def num_non_zero_incentive():
+def num_non_zero_incentive() -> int:
     """Default fixture for number of non-zero incentive miners."""
     return 100  # Default value if not parameterized
 
 
 @pytest.fixture
-def num_active_miners(request):
+def num_active_miners(request) -> int:
     """Fixture for number of active miners.
     Returns parameterized value if available, otherwise returns default."""
     try:
@@ -154,7 +206,7 @@ def num_active_miners(request):
 
 
 @pytest.fixture
-def mock_metagraph(mocker, num_non_zero_incentive, num_miners=250):
+def mock_metagraph(mocker, num_non_zero_incentive, num_miners=250) -> Mock:
     """Fixture that creates a mock metagraph with a specified number of miners and incentive distribution."""
     metagraph = mocker.Mock()
 
@@ -174,9 +226,9 @@ def mock_metagraph(mocker, num_non_zero_incentive, num_miners=250):
 
 
 @pytest.fixture
-def mock_validator(mocker, mock_metagraph, num_active_miners):
+def mock_validator(mocker, mock_metagraph, num_active_miners) -> Validator:
     # Initialize validator without calling the constructor
-    validator = object.__new__(Validator)
+    validator: Validator = object.__new__(Validator)
 
     # Define necessary attributes
     validator.metagraph = mock_metagraph

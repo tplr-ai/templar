@@ -31,7 +31,7 @@ from .neurons import *
 from .hparams import *
 from .logging import *
 from .schemas import *
-from .wandb import initialize_wandb
+from .wandb_ops import initialize_wandb
 from .metrics import *
 from .sharded_dataset import SharedShardedDataset
 from .sharded_sampler import EvalSampler, MinerSampler

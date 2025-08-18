@@ -310,7 +310,6 @@ class Trainer:
                         nesterov=muon_config.get(
                             "nesterov", True
                         ),  # Add Nesterov option
-                        ns_steps=muon_config.get("ns_steps", 5),  # Add NS steps option
                     )
                     param_groups = adam_groups + [muon_group]
                     inner_optimizer = Muon(param_groups)

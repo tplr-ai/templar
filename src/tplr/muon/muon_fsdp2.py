@@ -25,54 +25,7 @@ import torch
 from torch.distributed import gather, scatter
 from torch.distributed.tensor import DTensor
 
-__version__ = "0.3.0"
-
-__all__ = ["Muon"]
-
-
-@torch.compile(fullgraph=True)
-def nsloop_torch(X: torch.Tensor, steps: int, *, a=3.4445, b=-4.7750, c=2.0315):
-    """
-    When compiled down, inductor produces the following steps:
-    1. A = matmul X with reinterpret_tensor(X)
-    2. (triton) read A -> write b*A and c*A
-    3. B = addmm(b*A, c*A, A)
-    4. (triton) read X -> write a*X (this is stupid)
-    5. X = addmm(a*X, B, X)
-    """
-    for _ in range(steps):
-        A = X @ X.mT
-        B = b * A + c * A @ A
-        X = a * X + B @ X
-    return X
-
-
-def zeropower_via_newtonschulz5(G, steps: int):
-    """
-    Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
-    quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
-    of minimizing steps, it turns out to be empirically effective to keep increasing the slope at
-    zero even beyond the point where the iteration no longer converges all the way to one everywhere
-    on the interval. This iteration therefore does not produce UV^T but rather something like US'V^T
-    where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
-    performance at all relative to UV^T, where USV^T = G is the SVD.
-    """
-    assert (
-        G.ndim >= 2
-    )  # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
-    a, b, c = (3.4445, -4.7750, 2.0315)
-    X = G.bfloat16()
-    if G.size(-2) > G.size(-1):
-        X = X.mT
-
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
-    # Perform the NS iterations
-    X = nsloop_torch(X, steps, a=a, b=b, c=c)
-
-    if G.size(-2) > G.size(-1):
-        X = X.mT
-    return X
+from .newton_schulz_triton import newton_schulz_triton
 
 
 def apply_momentum(grad, momentum, beta, nesterov):
@@ -102,13 +55,13 @@ def adam_update(grad, buf1, buf2, step, betas, eps):
     return buf1c / (buf2c.sqrt() + eps)
 
 
-def muon_update(grad, momentum, beta=0.95, nesterov=True, ns_steps=5, rms_scale=False):
+def muon_update(grad, momentum, beta=0.95, nesterov=True, rms_scale=False):
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if update.ndim == 4:  # for the case of conv filters
         update = update.view(len(update), -1)
-    # Use Newton-Schulz iteration for orthogonalization
-    update = zeropower_via_newtonschulz5(update, ns_steps)
+    # Use Microsoft's Newton-Schulz Triton kernel for orthogonalization
+    update = newton_schulz_triton(update, epsilon=1e-7)
     update = apply_scaling(update, rms_scale)
     return update
 
@@ -185,9 +138,8 @@ class Fsdp1dWork:
         gather_handle.wait()
         if rank == dest_rank:
             g_full_block = torch.cat(gather_lists, dim=0)
-            g_full_block.copy_(
-                zeropower_via_newtonschulz5(g_full_block, self.group["ns_steps"])
-            )
+            # Use Microsoft's Newton-Schulz Triton kernel
+            g_full_block.copy_(newton_schulz_triton(g_full_block, epsilon=1e-7))
             g_full_block = g_full_block.type_as(grad)
             chunks = list(g_full_block.chunk(chunks=world_size, dim=0))
             scatter(
@@ -267,7 +219,6 @@ class SingelDeviceWork:
             self.state["momentum_buffer"],
             self.group["momentum"],
             self.group["nesterov"],
-            self.group["ns_steps"],
             self.group["rms_scale"],
         )
         self.param.mul_(1 - self.group["lr"] * self.group["weight_decay"])
@@ -328,7 +279,6 @@ class Muon(torch.optim.Optimizer):
                 group["weight_decay"] = group.get("weight_decay", 0)
                 group["rms_scale"] = group.get("rms_scale", True)
                 group["nesterov"] = group.get("nesterov", True)
-                group["ns_steps"] = group.get("ns_steps", 5)
                 assert set(group.keys()) == set(
                     [
                         "params",
@@ -338,7 +288,6 @@ class Muon(torch.optim.Optimizer):
                         "use_muon",
                         "rms_scale",
                         "nesterov",
-                        "ns_steps",
                     ]
                 )
             else:

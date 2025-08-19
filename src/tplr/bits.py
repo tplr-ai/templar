@@ -195,23 +195,14 @@ def _encode_row_into(
     return bits_added, {"B": B, "lb": lb, "k": k, "bitmap_threshold": bitmap_threshold}
 
 
-def _calculate_row_bits_global(
-    indices: list[int],
-    C: int,
+def _calculate_row_bits_from_subs(
+    subs: list[list[int]],
     B: int,
+    lb: int,
     k: int,
-    bitmap_threshold: int | None = None,
+    bitmap_threshold: int,
 ) -> int:
-    """
-    Calculates the number of bits for a row with a fixed global B and k, without writing.
-    """
-    lb = math.ceil(math.log2(B))
-    idx_sorted = check_and_sort_values(B, C, indices)
-    subs = instantiate_subs(B, C, idx_sorted)
-
-    if bitmap_threshold is None:
-        bitmap_threshold = _derive_bitmap_threshold(B, lb)
-
+    """placeholder"""
     total_bits = 0
     use_bitmap = [len(sub_n) >= bitmap_threshold for sub_n in subs]
     for sub_n, use_bmap in zip(subs, use_bitmap):
@@ -220,8 +211,9 @@ def _calculate_row_bits_global(
         if s_j == 0:
             continue
         total_bits += B if use_bmap else s_j * lb
-
     return total_bits
+
+
 
 
 def _encode_row_global_into(
@@ -439,30 +431,37 @@ def _encode_batch_global(
     best_B = None
     best_k = None
 
-    bks = [
-        (B, k)
-        for B in candidate_Bs
-        for k in candidate_ks
-        if B is not None and k is not None
-    ]
-    for B, k in bks:
-        row_bits: list[int] = Parallel(n_jobs=20, prefer='threads')(
-            delayed(_calculate_row_bits_global)(r, C, B, k, bitmap_threshold)
+    for B in candidate_Bs:
+        if B is None:
+            continue
+        lb = math.ceil(math.log2(B))
+        if bitmap_threshold is None:
+            derived_bitmap_threshold = _derive_bitmap_threshold(B, lb)
+        else:
+            derived_bitmap_threshold = bitmap_threshold
+
+        # Pre-calculate subs for all rows for this B
+        subs_by_row = Parallel(n_jobs=20, prefer="threads")(
+            delayed(instantiate_subs)(B, C, check_and_sort_values(B, C, r))
             for r in row_list
         )
-        # tmp_total: int = np.sum(
-        #     [
-        #         _calculate_row_bits_global(
-        #             r, C=C, B=B, k=k, bitmap_threshold=bitmap_threshold
-        #         )
-        #         for r in row_list
-        #     ]
-        # )
-        tmp_total = np.sum(row_bits)
-        if (best_total_bits is None) or (tmp_total < best_total_bits):
-            best_total_bits = tmp_total
-            best_B = B
-            best_k = k
+
+        for k in candidate_ks:
+            if k is None:
+                continue
+
+            row_bits: list[int] = Parallel(n_jobs=20, prefer="threads")(
+                delayed(_calculate_row_bits_from_subs)(
+                    subs, B, lb, k, derived_bitmap_threshold
+                )
+                for subs in subs_by_row
+            )
+            tmp_total = np.sum(row_bits)
+
+            if (best_total_bits is None) or (tmp_total < best_total_bits):
+                best_total_bits = tmp_total
+                best_B = B
+                best_k = k
 
     if best_B is None or best_k is None:
         raise ValueError(f"Best of k or B is None: {best_B=} {best_k=}")

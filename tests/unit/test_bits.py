@@ -5,6 +5,7 @@ from src.tplr.bits import (
     BitWriter,
     EncodeMeta,
     _best_row_variant,
+    _calculate_row_bits_from_subs,
     _decode_batch_global,
     _decode_batch_per_row,
     _derive_bitmap_threshold,
@@ -14,13 +15,13 @@ from src.tplr.bits import (
     _encode_row_into,
     check_and_sort_values,
     decode_batch,
-    write_bytes_loop,
     encode_batch,
     gen_batch,
     instantiate_subs,
     rice_k_from_mean,
     rice_read,
     rice_write,
+    write_bytes_loop,
 )
 
 
@@ -394,6 +395,25 @@ def test_write_bytes_loop():
     assert br_locals.read_unary() == 2  # s_j = 2
     assert br_locals.read_bits(5) == 5
     assert br_locals.read_bits(5) == 10
+
+
+def test_calculate_row_bits_from_subs():
+    """Test the _calculate_row_bits_from_subs function."""
+    # B=32, lb=5, k=2, threshold=6
+    subs = [[0, 1, 2, 3, 4, 5], [10, 20]]  # one above, one below threshold
+    bits = _calculate_row_bits_from_subs(subs, B=32, lb=5, k=2, bitmap_threshold=6)
+    # s_j=6 -> rice_bits(6,2) = 1+1+2=4. use_bitmap=True -> 32 bits. Total = 36
+    # s_j=2 -> rice_bits(2,2) = 0+1+2=3. use_bitmap=False -> 2*5=10 bits. Total = 13
+    assert bits == 36 + 13
+
+    # Test with empty sub
+    subs_empty = [[], [1, 2, 3]]
+    bits_empty = _calculate_row_bits_from_subs(
+        subs_empty, B=32, lb=5, k=2, bitmap_threshold=6
+    )
+    # s_j=0 -> rice_bits(0,2) = 0+1+2=3.
+    # s_j=3 -> rice_bits(3,2) = 0+1+2=3. use_bitmap=False -> 3*5=15. Total = 18
+    assert bits_empty == 3 + 18
 
 
 def test_gen_batch():

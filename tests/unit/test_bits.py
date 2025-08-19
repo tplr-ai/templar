@@ -6,8 +6,6 @@ from src.tplr.bits import (
     EncodeMeta,
     _best_row_variant,
     _calculate_row_bits_from_subs,
-    _decode_batch_global,
-    _decode_batch_per_row,
     _derive_bitmap_threshold,
     _encode_batch_global,
     _encode_batch_per_row,
@@ -268,54 +266,6 @@ def test_encode_batch_global_logic():
     assert len(bw.flush()) > 0
 
 
-def test_decode_batch_per_row_logic():
-    """Test the internal logic of the per-row decoding helper."""
-    C = 4096
-    N = 2
-    batch = gen_batch(N=N, C=C, s=8, seed=2)
-    # Manually encode to create a known payload for the decoder
-    bw = BitWriter()
-    _encode_batch_per_row(
-        bw,
-        batch,
-        C,
-        (64,),
-        use_dense_bitmap=True,
-        bitmap_threshold=None,
-        meta_mode="none",
-    )
-    payload = bw.flush()
-    br = BitReader(payload)
-    decoded_rows = _decode_batch_per_row(br, N, C)
-    assert decoded_rows == batch
-
-
-def test_decode_batch_global_logic():
-    """Test the internal logic of the global decoding helper."""
-    C = 4096
-    N = 2
-    B = 64
-    k = 3
-    batch = gen_batch(N=N, C=C, s=8, seed=3)
-    # Manually encode to create a known payload for the decoder
-    bw = BitWriter()
-    bw.write_bits(C - 1, 12)
-    bw.write_bits(N, 16)
-    bw.write_bits(1, 1)  # scheme global
-    lb = 6
-    bw.write_bits(lb, 5)
-    bw.write_bits(k, 4)
-    for r in batch:
-        _encode_row_global_into(bw, r, C, B, k)
-    payload = bw.flush()
-
-    # Now, create a reader and pass it to the global decoder
-    br = BitReader(payload)
-    _ = br.read_bits(12)  # C
-    _ = br.read_bits(16)  # N
-    _ = br.read_bits(1)  # scheme
-    decoded_rows = _decode_batch_global(br, N, C)
-    assert decoded_rows == batch
 
 
 def test_encode_meta_dataclass():

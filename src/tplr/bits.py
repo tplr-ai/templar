@@ -1,6 +1,7 @@
 import math
 import random
 from dataclasses import dataclass
+from itertools import groupby
 from typing import Literal
 
 import numpy as np
@@ -21,8 +22,7 @@ class BitWriter:
         """placeholder"""
         if n <= 0:
             return
-        v = value & ((1 << n) - 1)
-        self.cur |= v << self.nbits
+        self.cur |= (value & ((1 << n) - 1)) << self.nbits
         self.nbits += n
         while self.nbits >= 8:
             self.buf.append(self.cur & 0xFF)
@@ -32,9 +32,9 @@ class BitWriter:
     def write_unary(self, q: int) -> None:
         """placeholder"""
         # q ones then a zero
-        while q >= 32:
-            self.write_bits((1 << 32) - 1, 32)
-            q -= 32
+        while q >= 64:
+            self.write_bits(0xFFFFFFFFFFFFFFFF, 64)
+            q -= 64
         if q > 0:
             self.write_bits((1 << q) - 1, q)
         self.write_bits(0, 1)
@@ -85,17 +85,27 @@ class BitReader:
         """placeholder"""
         q = 0
         while True:
-            self._fill(1)
+            self._fill(64)
             if self.nbits == 0:
                 raise EOFError("EOF while reading unary")
-            bit = self.cur & 1
-            self.cur >>= 1
-            self.nbits -= 1
-            if bit == 1:
-                q += 1
+
+            # Invert bits to find the first 0 (which becomes a 1)
+            inverted = ~self.cur
+            # Find position of the least significant bit that is 1
+            lsb_pos = (inverted & -inverted).bit_length() - 1
+
+            if lsb_pos < self.nbits:
+                # We found the terminating zero within the available bits
+                q += lsb_pos
+                self.nbits -= lsb_pos + 1
+                self.cur >>= lsb_pos + 1
+                return q
             else:
-                break
-        return q
+                # No zero in the current buffer, so all are ones. Consume all.
+                q += self.nbits
+                self.nbits = 0
+                self.cur = 0
+                # Loop to _fill more data
 
 
 # ---------- Rice coding ----------
@@ -285,10 +295,8 @@ def instantiate_subs(B: int, C: int, idx_sorted: list[int]) -> list[list[int]]:
     """placeholder"""
     n_sub = C // B
     subs: list[list[int]] = [[] for _ in range(n_sub)]
-
-    for v in idx_sorted:
-        j = v // B
-        subs[j].append(v % B)
+    for j, group in groupby(idx_sorted, key=lambda x: x // B):
+        subs[j].extend([v % B for v in group])
     return subs
 
 
@@ -440,28 +448,28 @@ def _encode_batch_global(
         else:
             derived_bitmap_threshold = bitmap_threshold
 
-        # Pre-calculate subs for all rows for this B
-        subs_by_row = Parallel(n_jobs=20, prefer="threads")(
-            delayed(instantiate_subs)(B, C, check_and_sort_values(B, C, r))
-            for r in row_list
-        )
-
-        for k in candidate_ks:
-            if k is None:
-                continue
-
-            row_bits: list[int] = Parallel(n_jobs=20, prefer="threads")(
-                delayed(_calculate_row_bits_from_subs)(
-                    subs, B, lb, k, derived_bitmap_threshold
-                )
-                for subs in subs_by_row
+        with Parallel(n_jobs=20, prefer="threads") as parallel:
+            # Pre-calculate subs for all rows for this B
+            subs_by_row = parallel(
+                delayed(instantiate_subs)(B, C, check_and_sort_values(B, C, r)) for r in row_list
             )
-            tmp_total = np.sum(row_bits)
 
-            if (best_total_bits is None) or (tmp_total < best_total_bits):
-                best_total_bits = tmp_total
-                best_B = B
-                best_k = k
+            for k in candidate_ks:
+                if k is None:
+                    continue
+
+                row_bits: list[int] = parallel(  # type: ignore
+                    delayed(_calculate_row_bits_from_subs)(
+                        subs, B, lb, k, derived_bitmap_threshold
+                    )
+                    for subs in subs_by_row
+                )
+                tmp_total = np.sum(row_bits)
+
+                if (best_total_bits is None) or (tmp_total < best_total_bits):
+                    best_total_bits = tmp_total
+                    best_B = B
+                    best_k = k
 
     if best_B is None or best_k is None:
         raise ValueError(f"Best of k or B is None: {best_B=} {best_k=}")
@@ -595,7 +603,6 @@ def _decode_batch_per_row(br: BitReader, N: int, C: int) -> list[list[int]]:
                 for _k in range(s_j):
                     loc = br.read_bits(lb)
                     row.append(j * B + loc)
-        row.sort()
         out.append(row)
     return out
 
@@ -629,7 +636,6 @@ def _decode_batch_global(br: BitReader, N: int, C: int) -> list[list[int]]:
                 for _k in range(s_j):
                     loc = br.read_bits(lb)
                     row.append(j * B + loc)
-        row.sort()
         out.append(row)
     return out
 

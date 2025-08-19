@@ -509,6 +509,7 @@ def decode_batch(payload: bytes) -> list[list[int]]:
                 s_j = rice_read(br, k)
                 if s_j == 0:
                     continue
+
                 if mode == 1:
                     bitmask = br.read_bits(B)
                     while bitmask:

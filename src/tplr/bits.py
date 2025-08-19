@@ -1,7 +1,8 @@
 import math
 import random
 from collections.abc import Sequence
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Any, Literal, Optional
 
 # ---------- Bit I/O ----------
 
@@ -147,7 +148,7 @@ def _encode_row_into(
            mode_bit (1=bitmap, 0=locals)
            if mode=0: s_j * lb bits (local indices)
            if mode=1: B bits bitmap
-    """    
+    """
     lb = math.ceil(math.log2(B))
     idx_sorted = check_and_sort_values(B, C, indices)
     subs = instantiate_subs(B, C, idx_sorted)
@@ -171,7 +172,12 @@ def _encode_row_into(
 
     # Payload
     bw = write_bytes_loop(
-        bw, k, subs, B, lb, use_bitmap,
+        bw,
+        k,
+        subs,
+        B,
+        lb,
+        use_bitmap,
     )
 
     bits_added = bw.bits_written() - start_bits
@@ -201,12 +207,17 @@ def _encode_row_global_into(
         bitmap_threshold = _derive_bitmap_threshold(B, lb)
 
     start_bits = bw.bits_written()
-    
+
     use_bitmap = [len(sub_n) >= bitmap_threshold for sub_n in subs]
-    
+
     # Payload
     bw = write_bytes_loop(
-        bw, k, subs, B, lb, use_bitmap,
+        bw,
+        k,
+        subs,
+        B,
+        lb,
+        use_bitmap,
     )
 
     return bw.bits_written() - start_bits
@@ -218,7 +229,7 @@ def write_bytes_loop(
     subs: list[list[int]],
     B: int,
     lb: int,
-    use_bitmap: list[bool], 
+    use_bitmap: list[bool],
 ) -> BitWriter:
     """placeholder"""
     for sub_n, use_bmap in zip(subs, use_bitmap):
@@ -291,6 +302,151 @@ def _derive_bitmap_threshold(B: int, lb: int) -> int:
     return max(1, math.floor(B / max(lb, 1)))
 
 
+@dataclass
+class EncodeMeta:
+    """Metadata for batch encoding."""
+
+    C: int
+    N: int
+    scheme: Literal["per_row", "global"]
+    # Global scheme fields
+    B: int | None = None
+    k: int | None = None
+    # Per-row scheme fields
+    B_choices: tuple[int, ...] | None = None
+    # Meta-mode dependent fields
+    total_bits: int | None = None
+    avg_bits_per_row: float | None = None
+    row_bits: list[int] | None = None
+    B_hist: dict[int, int] | None = None
+    row_b_codes: bytes | None = None
+    rows: list[dict[str, int]] | None = None
+
+
+def _encode_batch_per_row(
+    bw: BitWriter,
+    row_list: list[list[int]],
+    C: int,
+    B_choices: tuple[int, ...],
+    use_dense_bitmap: bool,
+    bitmap_threshold: int | None,
+    meta_mode: str,
+) -> EncodeMeta:
+    """Helper for per-row scheme."""
+    N = len(row_list)
+    per_row_meta: list[dict[str, int]] = []
+    b_hist: dict[int, int] = {}
+    b_choice_indices: list[int] = []
+    row_bits: list[int] = []
+
+    for r in row_list:
+        best_B, _, _ = _best_row_variant(r, C=C, B_choices=B_choices)
+        bits_added, meta_row = _encode_row_into(
+            bw,
+            r,
+            C=C,
+            B=best_B,
+            use_dense_bitmap=use_dense_bitmap,
+            bitmap_threshold=bitmap_threshold,
+        )
+        per_row_meta.append({"bits": bits_added, **meta_row})
+        row_bits.append(bits_added)
+        b_hist[best_B] = b_hist.get(best_B, 0) + 1
+        try:
+            b_choice_indices.append(B_choices.index(best_B))
+        except ValueError:
+            b_choice_indices.append(0)
+
+    payload = bw.flush()
+    total_payload_bits = len(payload) * 8
+    avg_bits_per_row = (sum(row_bits) / max(1, N)) if N else 0.0
+
+    meta = EncodeMeta(C=C, N=N, scheme="per_row", B_choices=B_choices)
+
+    if meta_mode == "summary":
+        meta.B_hist = b_hist
+        meta.total_bits = total_payload_bits
+        meta.avg_bits_per_row = avg_bits_per_row
+    elif meta_mode == "compact":
+        meta.row_b_codes = bytes(b_choice_indices)
+        meta.row_bits = row_bits
+    elif meta_mode == "full":
+        meta.rows = per_row_meta
+
+    return meta
+
+
+def _encode_batch_global(
+    bw: BitWriter,
+    row_list: list[list[int]],
+    C: int,
+    B_choices: tuple[int, ...],
+    bitmap_threshold: int | None,
+    B_fixed: int | None,
+    k_fixed: int | None,
+    meta_mode: str,
+) -> EncodeMeta:
+    """Helper for global scheme."""
+    N = len(row_list)
+    if B_fixed is not None and ((B_fixed & (B_fixed - 1)) != 0 or C % B_fixed != 0):
+        raise ValueError("B_fixed must be a power-of-two dividing C")
+
+    candidate_Bs = [B_fixed] if B_fixed is not None else list(B_choices)
+    candidate_ks = [k_fixed] if k_fixed is not None else list(range(0, 9))
+
+    best_total_bits = None
+    best_B = None
+    best_k = None
+
+    bks = [
+        (B, k)
+        for B in candidate_Bs
+        for k in candidate_ks
+        if B is not None and k is not None
+    ]
+    for B, k in bks:
+        tmp_total = 0
+        tmp_bw = BitWriter()
+        for r in row_list:
+            tmp_total += _encode_row_global_into(
+                tmp_bw, r, C=C, B=B, k=k, bitmap_threshold=bitmap_threshold
+            )
+        if (best_total_bits is None) or (tmp_total < best_total_bits):
+            best_total_bits = tmp_total
+            best_B = B
+            best_k = k
+
+    assert best_B is not None and best_k is not None
+
+    lb = math.ceil(math.log2(best_B))
+    bw.write_bits(lb, 5)
+    bw.write_bits(best_k, 4)
+
+    row_bits: list[int] = []
+    for r in row_list:
+        bits_added = _encode_row_global_into(
+            bw, r, C=C, B=best_B, k=best_k, bitmap_threshold=bitmap_threshold
+        )
+        row_bits.append(bits_added)
+
+    payload = bw.flush()
+    total_payload_bits = len(payload) * 8
+    avg_bits_per_row = (sum(row_bits) / max(1, N)) if N else 0.0
+
+    meta = EncodeMeta(
+        C=C,
+        N=N,
+        scheme="global",
+        B=best_B,
+        k=best_k,
+    )
+    if meta_mode in ("summary", "compact", "full"):
+        meta.total_bits = total_payload_bits
+        meta.avg_bits_per_row = avg_bits_per_row
+        meta.row_bits = row_bits
+    return meta
+
+
 def encode_batch(
     rows: Sequence[Sequence[int]],
     C: int = 4096,
@@ -302,7 +458,7 @@ def encode_batch(
     B_fixed: int | None = None,
     k_fixed: int | None = None,
     meta_mode: Literal["none", "summary", "compact", "full"] = "summary",
-) -> tuple[bytes, dict[str, Any]]:
+) -> tuple[bytes, EncodeMeta]:
     """
     Encode a batch of rows (each row is an iterable of indices in [0,C)).
     Global header:
@@ -335,197 +491,63 @@ def encode_batch(
     bw.write_bits(C - 1, 12)
     bw.write_bits(N, 16)
 
-    if scheme == "per_row":
-        # scheme flag 0
-        bw.write_bits(0, 1)
-        per_row_meta: list[dict[str, int]] = []
-        b_hist: dict[int, int] = {}
-        b_choice_indices: list[int] = []  # for compact meta
-        row_bits: list[int] = []
-        for r in row_list:
-            # pick best B for this row (dry run)
-            best_B, _, _ = _best_row_variant(r, C=C, B_choices=B_choices)
-            # encode for real
-            bits_added, meta = _encode_row_into(
-                bw,
-                r,
-                C=C,
-                B=best_B,
-                use_dense_bitmap=use_dense_bitmap,
-                bitmap_threshold=bitmap_threshold,
-            )
-            per_row_meta.append({"bits": bits_added, **meta})
-            row_bits.append(bits_added)
-            b_hist[best_B] = b_hist.get(best_B, 0) + 1
-            # map B to its index in B_choices for compact meta
-            try:
-                b_choice_indices.append(B_choices.index(best_B))
-            except ValueError:
-                b_choice_indices.append(0)
-
-        payload = bw.flush()
-        total_payload_bits = len(payload) * 8
-        avg_bits_per_row = (sum(row_bits) / max(1, N)) if N else 0.0
-
-        # Build meta according to meta_mode
-        if meta_mode == "none":
-            meta = {"C": C, "N": N, "scheme": "per_row"}
-        elif meta_mode == "summary":
-            meta = {
-                "C": C,
-                "N": N,
-                "scheme": "per_row",
-                "B_choices": B_choices,
-                "B_hist": b_hist,
-                "total_bits": total_payload_bits,
-                "avg_bits_per_row": avg_bits_per_row,
-            }
-        elif meta_mode == "compact":
-            meta = {
-                "C": C,
-                "N": N,
-                "scheme": "per_row",
-                "B_choices": B_choices,
-                "row_b_codes": bytes(b_choice_indices),
-                "row_bits": row_bits,
-            }
-        elif meta_mode == "full":
-            meta = {
-                "C": C,
-                "N": N,
-                "rows": per_row_meta,
-                "B_choices": B_choices,
-                "scheme": "per_row",
-            }
-
-        return payload, meta
-
-    # scheme == "global"
-    # Choose global B and k if not fixed
-    if B_fixed is not None and ((B_fixed & (B_fixed - 1)) != 0 or C % B_fixed != 0):
-        raise ValueError("B_fixed must be a power-of-two dividing C")
-
-    candidate_Bs = [B_fixed] if B_fixed is not None else list(B_choices)
-    candidate_ks = [k_fixed] if k_fixed is not None else list(range(0, 9))
-
-    best_total_bits = None
-    best_B = None
-    best_k = None
-
-    bks = [
-        (B, k)
-        for B in candidate_Bs
-        for k in candidate_ks
-        if B is not None and k is not None
-    ]
-    for B, k in bks:
-        tmp_total = 0
-        tmp_bw = BitWriter()
-        # simulate rows without headers
-        for r in row_list:
-            tmp_total += _encode_row_global_into(
-                tmp_bw, r, C=C, B=B, k=k, bitmap_threshold=bitmap_threshold
-            )
-        if (best_total_bits is None) or (tmp_total < best_total_bits):
-            best_total_bits = tmp_total
-            best_B = B
-            best_k = k
-
-    assert best_B is not None and best_k is not None
-
-    lb = math.ceil(math.log2(best_B))
-    # scheme flag 1
-    bw.write_bits(1, 1)
-    # global lb and k
-    bw.write_bits(lb, 5)
-    bw.write_bits(best_k, 4)
-
-    row_bits: list[int] = []
-    for r in row_list:
-        bits_added = _encode_row_global_into(
-            bw, r, C=C, B=best_B, k=best_k, bitmap_threshold=bitmap_threshold
+    if scheme == "global":
+        bw.write_bits(1, 1)
+        meta = _encode_batch_global(
+            bw,
+            row_list,
+            C,
+            B_choices,
+            bitmap_threshold,
+            B_fixed,
+            k_fixed,
+            meta_mode,
         )
-        row_bits.append(bits_added)
+    else:  # per_row
+        bw.write_bits(0, 1)
+        meta = _encode_batch_per_row(
+            bw, row_list, C, B_choices, use_dense_bitmap, bitmap_threshold, meta_mode
+        )
 
-    payload = bw.flush()
-    total_payload_bits = len(payload) * 8
-    avg_bits_per_row = (sum(row_bits) / max(1, N)) if N else 0.0
-
-    if meta_mode == "none":
-        meta = {"C": C, "N": N, "scheme": "global", "B": best_B, "k": best_k}
-    elif meta_mode == "summary":
-        meta = {
-            "C": C,
-            "N": N,
-            "scheme": "global",
-            "B": best_B,
-            "k": best_k,
-            "total_bits": total_payload_bits,
-            "avg_bits_per_row": avg_bits_per_row,
-        }
-    elif meta_mode == "compact":
-        meta = {
-            "C": C,
-            "N": N,
-            "scheme": "global",
-            "B": best_B,
-            "k": best_k,
-            "row_bits": row_bits,
-        }
-    elif meta_mode == "full":
-        meta = {
-            "C": C,
-            "N": N,
-            "scheme": "global",
-            "B": best_B,
-            "k": best_k,
-            "row_bits": row_bits,
-        }
-
-    return payload, meta
+    return bw.flush(), meta
 
 
-def decode_batch(payload: bytes) -> list[list[int]]:
-    """placeholder"""
-    br = BitReader(payload)
-    C = br.read_bits(12) + 1
-    N = br.read_bits(16)
+def _decode_batch_per_row(br: BitReader, N: int, C: int) -> list[list[int]]:
+    """Helper for per-row scheme."""
     out: list[list[int]] = []
+    for _ in range(N):
+        lb = br.read_bits(5)
+        k = br.read_bits(4)
+        B = 1 << lb
+        if B <= 0 or C % B != 0:
+            raise ValueError("Invalid (B,C) in row header")
+        n_sub = C // B
 
-    # scheme flag: 0=per_row, 1=global
-    scheme = br.read_bits(1)
-    if scheme == 0:
-        for _ in range(N):
-            lb = br.read_bits(5)
-            k = br.read_bits(4)
-            B = 1 << lb
-            if B <= 0 or C % B != 0:
-                raise ValueError("Invalid (B,C) in row header")
-            n_sub = C // B
+        row = []
+        mode = br.read_bits(1)
+        for j in range(n_sub):
+            s_j = rice_read(br, k)
+            if s_j == 0:
+                continue
 
-            row = []
-            mode = br.read_bits(1)
-            for j in range(n_sub):
-                s_j = rice_read(br, k)
-                if s_j == 0:
-                    continue
+            if mode == 1:
+                bitmask = br.read_bits(B)
+                while bitmask:
+                    lsb = bitmask & -bitmask
+                    pos = lsb.bit_length() - 1
+                    row.append(j * B + pos)
+                    bitmask ^= lsb
+            else:
+                for _k in range(s_j):
+                    loc = br.read_bits(lb)
+                    row.append(j * B + loc)
+        row.sort()
+        out.append(row)
+    return out
 
-                if mode == 1:
-                    bitmask = br.read_bits(B)
-                    while bitmask:
-                        lsb = bitmask & -bitmask
-                        pos = lsb.bit_length() - 1
-                        row.append(j * B + pos)
-                        bitmask ^= lsb
-                else:
-                    for _k in range(s_j):
-                        loc = br.read_bits(lb)
-                        row.append(j * B + loc)
-            row.sort()
-            out.append(row)
-        return out
 
-    # scheme == 1 (global)
+def _decode_batch_global(br: BitReader, N: int, C: int) -> list[list[int]]:
+    """Helper for global scheme."""
     lb = br.read_bits(5)
     k = br.read_bits(4)
     B = 1 << lb
@@ -534,6 +556,7 @@ def decode_batch(payload: bytes) -> list[list[int]]:
     n_sub = C // B
     bitmap_threshold = _derive_bitmap_threshold(B, lb)
 
+    out: list[list[int]] = []
     for _ in range(N):
         row: list[int] = []
         for j in range(n_sub):
@@ -555,6 +578,19 @@ def decode_batch(payload: bytes) -> list[list[int]]:
         row.sort()
         out.append(row)
     return out
+
+
+def decode_batch(payload: bytes) -> list[list[int]]:
+    """placeholder"""
+    br = BitReader(payload)
+    C = br.read_bits(12) + 1
+    N = br.read_bits(16)
+
+    # scheme flag: 0=per_row, 1=global
+    scheme = br.read_bits(1)
+    if scheme == 1:
+        return _decode_batch_global(br, N, C)
+    return _decode_batch_per_row(br, N, C)
 
 
 # ---------- Quick demo ----------

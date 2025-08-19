@@ -1,8 +1,10 @@
 import math
 import random
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Literal
+
+import numpy as np
+from joblib import Parallel, delayed
 
 # ---------- Bit I/O ----------
 
@@ -126,12 +128,21 @@ def rice_read(br: BitReader, k: int) -> int:
     return (q << k) | r
 
 
+def rice_bits(x: int, k: int) -> int:
+    """Returns number of bits for Rice-coded x with param k."""
+    if x < 0:
+        raise ValueError("Rice expects non-negative")
+    m = 1 << k
+    q = x // m
+    return q + 1 + k
+
+
 # ---------- Per-row encoder with subchunks (count-first; omit mode if empty) ----------
 
 
 def _encode_row_into(
     bw: BitWriter,
-    indices: Sequence[int],
+    indices: list[int],
     C: int,
     B: int,
     use_dense_bitmap: bool = True,
@@ -159,7 +170,7 @@ def _encode_row_into(
 
     # default bitmap threshold = arg where bitmap bits <= locals bits (ignoring count)
     if bitmap_threshold is None:
-        bitmap_threshold = max(1, math.floor(B / lb))
+        bitmap_threshold = max(1, (B // lb))
 
     start_bits = bw.bits_written()
     # Small row header
@@ -184,9 +195,38 @@ def _encode_row_into(
     return bits_added, {"B": B, "lb": lb, "k": k, "bitmap_threshold": bitmap_threshold}
 
 
+def _calculate_row_bits_global(
+    indices: list[int],
+    C: int,
+    B: int,
+    k: int,
+    bitmap_threshold: int | None = None,
+) -> int:
+    """
+    Calculates the number of bits for a row with a fixed global B and k, without writing.
+    """
+    lb = math.ceil(math.log2(B))
+    idx_sorted = check_and_sort_values(B, C, indices)
+    subs = instantiate_subs(B, C, idx_sorted)
+
+    if bitmap_threshold is None:
+        bitmap_threshold = _derive_bitmap_threshold(B, lb)
+
+    total_bits = 0
+    use_bitmap = [len(sub_n) >= bitmap_threshold for sub_n in subs]
+    for sub_n, use_bmap in zip(subs, use_bitmap):
+        s_j = len(sub_n)
+        total_bits += rice_bits(s_j, k)
+        if s_j == 0:
+            continue
+        total_bits += B if use_bmap else s_j * lb
+
+    return total_bits
+
+
 def _encode_row_global_into(
     bw: BitWriter,
-    indices: Sequence[int],
+    indices: list[int],
     C: int,
     B: int,
     k: int,
@@ -253,26 +293,27 @@ def instantiate_subs(B: int, C: int, idx_sorted: list[int]) -> list[list[int]]:
     """placeholder"""
     n_sub = C // B
     subs: list[list[int]] = [[] for _ in range(n_sub)]
+
     for v in idx_sorted:
         j = v // B
         subs[j].append(v % B)
     return subs
 
 
-def check_and_sort_values(B: int, C: int, indices: Sequence[int]) -> list[int]:
+def check_and_sort_values(B: int, C: int, indices: list[int]) -> list[int]:
     """placeholder"""
     if C % B != 0 or (B & (B - 1)) != 0:
         raise ValueError("B must be power-of-two dividing C")
 
-    idx_sorted = sorted(int(v) for v in indices)
-    if min(idx_sorted) < 0 or max(idx_sorted) >= C:
+    _ = indices.sort()
+    if min(indices) < 0 or max(indices) >= C:
         raise ValueError("Index out of range")
 
-    return idx_sorted
+    return indices
 
 
 def _best_row_variant(
-    indices: Sequence[int], C: int, B_choices: tuple[int, ...]
+    indices: list[int], C: int, B_choices: tuple[int, ...]
 ) -> tuple[int, dict[str, int], tuple[int, int, int]]:
     """
     Try multiple B and pick the shortest (in bits).
@@ -299,7 +340,7 @@ def _best_row_variant(
 def _derive_bitmap_threshold(B: int, lb: int) -> int:
     """placeholder"""
     # default bitmap threshold = arg where bitmap bits <= locals bits (ignoring count)
-    return max(1, math.floor(B / max(lb, 1)))
+    return max(1, (B // max(lb, 1)))
 
 
 @dataclass
@@ -359,7 +400,7 @@ def _encode_batch_per_row(
 
     payload = bw.flush()
     total_payload_bits = len(payload) * 8
-    avg_bits_per_row = (sum(row_bits) / max(1, N)) if N else 0.0
+    avg_bits_per_row = (np.sum(row_bits) / max(1, N)) if N else 0.0
 
     meta = EncodeMeta(C=C, N=N, scheme="per_row", B_choices=B_choices)
 
@@ -405,18 +446,26 @@ def _encode_batch_global(
         if B is not None and k is not None
     ]
     for B, k in bks:
-        tmp_total = 0
-        tmp_bw = BitWriter()
-        for r in row_list:
-            tmp_total += _encode_row_global_into(
-                tmp_bw, r, C=C, B=B, k=k, bitmap_threshold=bitmap_threshold
-            )
+        row_bits: list[int] = Parallel(n_jobs=20, prefer='threads')(
+            delayed(_calculate_row_bits_global)(r, C, B, k, bitmap_threshold)
+            for r in row_list
+        )
+        # tmp_total: int = np.sum(
+        #     [
+        #         _calculate_row_bits_global(
+        #             r, C=C, B=B, k=k, bitmap_threshold=bitmap_threshold
+        #         )
+        #         for r in row_list
+        #     ]
+        # )
+        tmp_total = np.sum(row_bits)
         if (best_total_bits is None) or (tmp_total < best_total_bits):
             best_total_bits = tmp_total
             best_B = B
             best_k = k
 
-    assert best_B is not None and best_k is not None
+    if best_B is None or best_k is None:
+        raise ValueError(f"Best of k or B is None: {best_B=} {best_k=}")
 
     lb = math.ceil(math.log2(best_B))
     bw.write_bits(lb, 5)
@@ -431,7 +480,7 @@ def _encode_batch_global(
 
     payload = bw.flush()
     total_payload_bits = len(payload) * 8
-    avg_bits_per_row = (sum(row_bits) / max(1, N)) if N else 0.0
+    avg_bits_per_row = (np.sum(row_bits) / max(1, N)) if N else 0.0
 
     meta = EncodeMeta(
         C=C,
@@ -448,7 +497,7 @@ def _encode_batch_global(
 
 
 def encode_batch(
-    rows: Sequence[Sequence[int]],
+    rows: list[list[int]],
     C: int = 4096,
     B_choices: tuple[int, ...] = (32, 64, 128),
     use_dense_bitmap: bool = True,
@@ -506,7 +555,13 @@ def encode_batch(
     else:  # per_row
         bw.write_bits(0, 1)
         meta = _encode_batch_per_row(
-            bw, row_list, C, B_choices, use_dense_bitmap, bitmap_threshold, meta_mode
+            bw,
+            row_list,
+            C,
+            B_choices,
+            use_dense_bitmap,
+            bitmap_threshold,
+            meta_mode,
         )
 
     return bw.flush(), meta

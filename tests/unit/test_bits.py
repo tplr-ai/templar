@@ -246,8 +246,8 @@ def test_encode_batch_global_logic():
     C = 4096
     B_choices = (64,)
     row_list = gen_batch(N=5, C=C, s=16, seed=1)
-    bw = BitWriter()
 
+    bw = BitWriter()
     meta = _encode_batch_global(
         bw,
         row_list,
@@ -264,6 +264,7 @@ def test_encode_batch_global_logic():
     assert meta.B == 64
     assert meta.k == 3
     assert meta.row_bits is not None
+    assert len(bw.flush()) > 0
 
 
 def test_decode_batch_per_row_logic():

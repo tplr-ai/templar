@@ -102,7 +102,7 @@ def rice_k_from_mean(lmbda: float) -> int:
     """placeholder"""
     if lmbda <= 0.0:
         return 0
-    return max(0, int(round(math.log2(max(lmbda, 1e-9)))))
+    return max(0, round(math.log2(max(lmbda, 1e-9))))
 
 
 def rice_write(bw: BitWriter, x: int, k: int) -> None:
@@ -113,8 +113,7 @@ def rice_write(bw: BitWriter, x: int, k: int) -> None:
     q = x // m
     r = x & (m - 1)
     bw.write_unary(q)
-    if k:
-        bw.write_bits(r, k)
+    bw.write_bits(r, k)
 
 
 def rice_read(br: BitReader, k: int) -> int:
@@ -148,21 +147,10 @@ def _encode_row_into(
            mode_bit (1=bitmap, 0=locals)
            if mode=0: s_j * lb bits (local indices)
            if mode=1: B bits bitmap
-    """
-    idx_sorted = sorted(int(v) for v in indices)
-    for v in idx_sorted:
-        if v < 0 or v >= C:
-            raise ValueError("Index out of range")
-
-    if C % B != 0 or (B & (B - 1)) != 0:
-        raise ValueError("B must be power-of-two dividing C")
-
-    n_sub = C // B
+    """    
     lb = math.ceil(math.log2(B))
-    subs: list[list[int]] = [[] for _ in range(n_sub)]
-    for v in idx_sorted:
-        j = v // B
-        subs[j].append(v % B)
+    idx_sorted = check_and_sort_values(B, C, indices)
+    subs = instantiate_subs(B, C, idx_sorted)
 
     # choose Rice k from per-subchunk mean unless overridden
     lmbda = (len(idx_sorted) / C) * B
@@ -178,8 +166,54 @@ def _encode_row_into(
     bw.write_bits(k, 4)
 
     # Payload
-    for j in range(n_sub):
-        s_j = len(subs[j])
+    bw = write_bytes_loop(
+        bw, k, subs, bitmap_threshold, B, lb, use_dense_bitmap=use_dense_bitmap
+    )
+
+    bits_added = bw.bits_written() - start_bits
+    return bits_added, {"B": B, "lb": lb, "k": k, "bitmap_threshold": bitmap_threshold}
+
+
+def _encode_row_global_into(
+    bw: BitWriter,
+    indices: Sequence[int],
+    C: int,
+    B: int,
+    k: int,
+    bitmap_threshold: int | None = None,
+) -> int:
+    """
+    Encode a row with a fixed global B and k.
+    Differences from _encode_row_into:
+      - No per-row header (lb,k) written here
+      - No per-subchunk mode bit; decoder derives mode deterministically from threshold
+    Returns bits_added.
+    """
+    lb = math.ceil(math.log2(B))
+    idx_sorted = check_and_sort_values(B, C, indices)
+    subs = instantiate_subs(B, C, idx_sorted)
+
+    if bitmap_threshold is None:
+        bitmap_threshold = _derive_bitmap_threshold(B, lb)
+
+    start_bits = bw.bits_written()
+    bw = write_bytes_loop(bw, k, subs, bitmap_threshold, B, lb, use_dense_bitmap=True)
+
+    return bw.bits_written() - start_bits
+
+
+def write_bytes_loop(
+    bw: BitWriter,
+    k: int,
+    subs: list[list[int]],
+    bitmap_threshold: int,
+    B: int,
+    lb: int,
+    use_dense_bitmap: bool,
+) -> BitWriter:
+    """placeholder"""
+    for sub_n in subs:
+        s_j = len(sub_n)
         rice_write(bw, s_j, k)
         if s_j == 0:
             continue  # omit mode bit for empties
@@ -189,24 +223,44 @@ def _encode_row_into(
 
         if use_bitmap:
             bitmask = 0
-            for loc in subs[j]:
+            for loc in sub_n:
                 bitmask |= 1 << loc
             bw.write_bits(bitmask, B)
         else:
-            for loc in subs[j]:
+            for loc in sub_n:
                 bw.write_bits(loc, lb)
+    return bw
 
-    bits_added = bw.bits_written() - start_bits
-    return bits_added, {"B": B, "lb": lb, "k": k, "bitmap_threshold": bitmap_threshold}
+
+def instantiate_subs(B: int, C: int, idx_sorted: list[int]) -> list[list[int]]:
+    """placeholder"""
+    n_sub = C // B
+    subs: list[list[int]] = [[] for _ in range(n_sub)]
+    for v in idx_sorted:
+        j = v // B
+        subs[j].append(v % B)
+    return subs
+
+
+def check_and_sort_values(B: int, C: int, indices: Sequence[int]) -> list[int]:
+    """placeholder"""
+    if C % B != 0 or (B & (B - 1)) != 0:
+        raise ValueError("B must be power-of-two dividing C")
+
+    idx_sorted = sorted(int(v) for v in indices)
+    if min(idx_sorted) < 0 or max(idx_sorted) >= C:
+        raise ValueError("Index out of range")
+
+    return idx_sorted
 
 
 def _best_row_variant(
     indices: Sequence[int], C: int, B_choices: tuple[int, ...]
 ) -> tuple[int, dict[str, int], tuple[int, int, int]]:
     """
-    Try multiple B and pick the shortest (in bits). 
-    
-        Returns 
+    Try multiple B and pick the shortest (in bits).
+
+        Returns
             (best_B, meta_row, (lb,k,bitmap_threshold)).
     """
     # Dry-run encodes into throwaway writers to measure bits; then caller re-encodes for real.
@@ -231,58 +285,6 @@ def _derive_bitmap_threshold(B: int, lb: int) -> int:
     return max(1, math.floor(B / max(lb, 1)))
 
 
-def _encode_row_global_into(
-    bw: BitWriter,
-    indices: Sequence[int],
-    C: int,
-    B: int,
-    k: int,
-    bitmap_threshold: int | None = None,
-) -> int:
-    """
-    Encode a row with a fixed global B and k.
-    Differences from _encode_row_into:
-      - No per-row header (lb,k) written here
-      - No per-subchunk mode bit; decoder derives mode deterministically from threshold
-    Returns bits_added.
-    """
-    idx_sorted = sorted(int(v) for v in indices)
-    for v in idx_sorted:
-        if v < 0 or v >= C:
-            raise ValueError("Index out of range")
-
-    if C % B != 0 or (B & (B - 1)) != 0:
-        raise ValueError("B must be power-of-two dividing C")
-
-    n_sub = C // B
-    lb = math.ceil(math.log2(B))
-    subs: list[list[int]] = [[] for _ in range(n_sub)]
-    for v in idx_sorted:
-        j = v // B
-        subs[j].append(v % B)
-
-    if bitmap_threshold is None:
-        bitmap_threshold = _derive_bitmap_threshold(B, lb)
-
-    start_bits = bw.bits_written()
-    for j in range(n_sub):
-        s_j = len(subs[j])
-        rice_write(bw, s_j, k)
-        if s_j == 0:
-            continue
-        use_bitmap = s_j >= bitmap_threshold
-        if use_bitmap:
-            bitmask = 0
-            for loc in subs[j]:
-                bitmask |= 1 << loc
-            bw.write_bits(bitmask, B)
-        else:
-            for loc in subs[j]:
-                bw.write_bits(loc, lb)
-
-    return bw.bits_written() - start_bits
-
-
 def encode_batch(
     rows: Sequence[Sequence[int]],
     C: int = 4096,
@@ -303,7 +305,7 @@ def encode_batch(
     scheme:
       - "per_row" (default, scheme bit=0): Each row writes its own lb and k header and,
         for non-empty subchunks, a mode bit.
-      - "global" (scheme bit=1): One global lb and k are written once; rows do not write 
+      - "global" (scheme bit=1): One global lb and k are written once; rows do not write
         per-row lb/k or per-subchunk mode bits.
     meta_mode:
       - "none": minimal meta {C,N,scheme[,B,k]}
@@ -403,23 +405,25 @@ def encode_batch(
     best_total_bits = None
     best_B = None
     best_k = None
-    for B in candidate_Bs:
-        if B is None:
-            continue
-        for k in candidate_ks:
-            if k is None:
-                continue
-            tmp_total = 0
-            tmp_bw = BitWriter()
-            # simulate rows without headers
-            for r in row_list:
-                tmp_total += _encode_row_global_into(
-                    tmp_bw, r, C=C, B=B, k=k, bitmap_threshold=bitmap_threshold
-                )
-            if (best_total_bits is None) or (tmp_total < best_total_bits):
-                best_total_bits = tmp_total
-                best_B = B
-                best_k = k
+
+    bks = [
+        (B, k)
+        for B in candidate_Bs
+        for k in candidate_ks
+        if B is not None and k is not None
+    ]
+    for B, k in bks:
+        tmp_total = 0
+        tmp_bw = BitWriter()
+        # simulate rows without headers
+        for r in row_list:
+            tmp_total += _encode_row_global_into(
+                tmp_bw, r, C=C, B=B, k=k, bitmap_threshold=bitmap_threshold
+            )
+        if (best_total_bits is None) or (tmp_total < best_total_bits):
+            best_total_bits = tmp_total
+            best_B = B
+            best_k = k
 
     assert best_B is not None and best_k is not None
 
@@ -566,142 +570,3 @@ def gen_batch(N=5000, C=4096, s=32, clustered=False, seed=0):
         for _ in range(N):
             rows.append(sorted(rng.sample(range(C), s)))
     return rows
-
-
-# if __name__ == "__main__":
-#     C = 4096
-#     batch = gen_batch(N=5_000, C=C, s=32, clustered=False, seed=42)
-#     enc, meta = encode_batch(batch, C=C, B_choices=(32, 64, 128), meta_mode="summary")
-#     dec = decode_batch(enc)
-#     ok = (batch == dec)
-#     total_raw_bits = sum(len(r) * math.ceil(math.log2(C)) for r in batch)
-#     print(f"Roundtrip OK: {ok}")
-#     print(f"Rows: {meta['N']}, Encoded size: {len(enc)/1024:.2f} KiB, "
-#           f"Raw baseline: {total_raw_bits/8/1024:.2f} KiB")
-#     # Show a few per-row picks (works with summary or full meta)
-#     picks = {}
-#     if meta.get("scheme") == "per_row":
-#         if "rows" in meta:
-#             for row_meta in meta["rows"][:50]:
-#                 picks[row_meta["B"]] = picks.get(row_meta["B"], 0) + 1
-#         elif "B_hist" in meta:
-#             # Approximate using top counts from histogram
-#             sorted_hist = sorted(meta["B_hist"].items(), key=lambda kv: -kv[1])
-#             remaining = 50
-#             for b, cnt in sorted_hist:
-#                 take = min(cnt, remaining)
-#                 if take <= 0:
-#                     break
-#                 picks[b] = take
-#                 remaining -= take
-#     print("First-50 row B picks:", picks)
-
-#     import pickle
-#     import os
-#     import sys
-
-#     file_paths = [
-#         "/content/indices_rank0_k128.pkl",
-#         "/content/indices_rank0_k256.pkl",
-#         "/content/indices_rank0_k32.pkl"
-#     ]
-
-#     # Assuming C=4096 and using the default B_choices=(32, 64, 128) as in the demo
-#     C = 4096
-
-#     loaded_indices_dict = {}
-
-#     for file_path in file_paths:
-#         try:
-#             with open(file_path, 'rb') as f:
-#                 loaded_indices = pickle.load(f)
-#             loaded_indices_dict[os.path.basename(file_path)] = loaded_indices
-#             print(f"Successfully loaded indices from {os.path.basename(file_path)}")
-#         except FileNotFoundError:
-#             print(f"Error: File not found at {file_path}")
-#         except Exception as e:
-#             print(f"An error occurred while loading {os.path.basename(file_path)}: {e}")
-
-
-#     print("\n--- Encoding and Decoding with encode_batch ---")
-
-#     for file_name, loaded_indices in loaded_indices_dict.items():
-#         rows_to_encode = []
-#         total_original_indices = 0
-
-#         # Assuming loaded_indices is a tensor
-#         # with shape (batch_size, num_rows, num_indices_per_row)
-#         # Flatten the last two dimensions to get individual rows if it's a 3D tensor
-#         if loaded_indices.ndim == 3:
-#             for i in range(loaded_indices.shape[0]):
-#                 for j in range(loaded_indices.shape[1]):
-#                     indices = loaded_indices[i, j, :].tolist()
-#                     # Remove -1 indices if present, as they are not part of the support
-#                     valid_indices = [idx for idx in indices if idx != -1]
-#                     total_original_indices += len(valid_indices)
-#                     rows_to_encode.append(valid_indices)
-#         elif loaded_indices.ndim == 2:
-#             for i in range(loaded_indices.shape[0]):
-#                 indices = loaded_indices[i, :].tolist()
-#                 valid_indices = [idx for idx in indices if idx != -1]
-#                 total_original_indices += len(valid_indices)
-#                 rows_to_encode.append(valid_indices)
-#         else:
-#             tplr.logger.warning(
-#               f"Skipping file {file_name} with unsupported tensor dims: {loaded_indices.ndim}"
-            # )
-#             continue
-
-
-#         if not rows_to_encode:
-#             print(f"\nNo valid indices found in {file_name} to encode.")
-#             continue
-
-#         print(f"\nEncoding a batch of {len(rows_to_encode)} rows from {file_name}.")
-
-#         try:
-#             # Use summary meta to reduce pickled metadata overhead
-#             # Switch scheme to "global" to cut stream-side headers
-#             encoded_batch, meta = encode_batch(
-#                   rows_to_encode, C=C, scheme="global", meta_mode="summary"
-        #       )
-#             print(f"Encoded batch size for {file_name}: {len(encoded_batch)} bytes.")
-
-#             # Calculate and print the per-index bit cost
-#             total_encoded_bits = len(encoded_batch) * 8
-#             meta_size_bits_64 = sys.getsizeof(pickle.dumps(meta)) * 8
-#             total_encoded_bits += meta_size_bits_64
-#             if total_original_indices > 0:
-#                 bits_per_index = total_encoded_bits / total_original_indices
-#                 print(f"Total original indices in {file_name}: {total_original_indices}")
-#                 print(f"Total encoded bits for {file_name}: {total_encoded_bits}")
-#                 print(f"Average bits per index for {file_name}: {bits_per_index:.2f}")
-#             else:
-#                 print(f"No valid indices found in {file_name} to calculate bit cost.")
-
-#             # Decode the batch and verify roundtrip by sorting
-#             decoded_batch = decode_batch(encoded_batch)
-
-#             # Sort indices within each row for comparison
-#             sorted_rows_to_encode = [sorted(row) for row in rows_to_encode]
-#             sorted_decoded_batch = [sorted(row) for row in decoded_batch]
-
-#             # Verify full-batch equality and report any mismatches
-#             if len(sorted_rows_to_encode) != len(sorted_decoded_batch):
-                    # expected = len(sorted_rows_to_encode)
-                    # received = len(sorted_decoded_batch)
-#                 print(f"Roundtrip verification for {file_name}: False (row count mismatch {expected} vs {received})")
-#             else:
-#                 mismatches = []
-#                 for idx, (orig_row, dec_row) in enumerate(zip(sorted_rows_to_encode, sorted_decoded_batch)):
-#                     if orig_row != dec_row:
-#                         mismatches.append(idx)
-#                         if len(mismatches) <= 5:
-#                             print(f"Mismatch at row {idx}: orig_len={len(orig_row)}, dec_len={len(dec_row)}")
-#                 if mismatches:
-#                     print(f"Roundtrip verification for {file_name}: False ({len(mismatches)} mismatched rows)")
-#                 else:
-#                     print(f"Roundtrip verification for {file_name}: True (all {len(sorted_rows_to_encode)} rows match)")
-
-#         except Exception as e:
-#             print(f"An error occurred during encoding/decoding for {file_name}: {e}")

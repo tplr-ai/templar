@@ -165,9 +165,13 @@ def _encode_row_into(
     bw.write_bits(lb, 5)
     bw.write_bits(k, 4)
 
+    use_bitmap = use_dense_bitmap and (len(subs) >= bitmap_threshold)
+    bw.write_bits(1 if use_bitmap else 0, 1)
+    use_bitmap = [use_bitmap for _ in range(len(subs))]
+
     # Payload
     bw = write_bytes_loop(
-        bw, k, subs, bitmap_threshold, B, lb, use_dense_bitmap=use_dense_bitmap
+        bw, k, subs, B, lb, use_bitmap,
     )
 
     bits_added = bw.bits_written() - start_bits
@@ -197,7 +201,13 @@ def _encode_row_global_into(
         bitmap_threshold = _derive_bitmap_threshold(B, lb)
 
     start_bits = bw.bits_written()
-    bw = write_bytes_loop(bw, k, subs, bitmap_threshold, B, lb, use_dense_bitmap=True)
+    
+    use_bitmap = [len(sub_n) >= bitmap_threshold for sub_n in subs]
+    
+    # Payload
+    bw = write_bytes_loop(
+        bw, k, subs, B, lb, use_bitmap,
+    )
 
     return bw.bits_written() - start_bits
 
@@ -206,22 +216,18 @@ def write_bytes_loop(
     bw: BitWriter,
     k: int,
     subs: list[list[int]],
-    bitmap_threshold: int,
     B: int,
     lb: int,
-    use_dense_bitmap: bool,
+    use_bitmap: list[bool], 
 ) -> BitWriter:
     """placeholder"""
-    for sub_n in subs:
+    for sub_n, use_bmap in zip(subs, use_bitmap):
         s_j = len(sub_n)
         rice_write(bw, s_j, k)
         if s_j == 0:
             continue  # omit mode bit for empties
 
-        use_bitmap = use_dense_bitmap and (s_j >= bitmap_threshold)
-        bw.write_bits(1 if use_bitmap else 0, 1)
-
-        if use_bitmap:
+        if use_bmap:
             bitmask = 0
             for loc in sub_n:
                 bitmask |= 1 << loc
@@ -265,9 +271,9 @@ def _best_row_variant(
     """
     # Dry-run encodes into throwaway writers to measure bits; then caller re-encodes for real.
     best: tuple[float, dict[str, int]] = (math.inf, {})
-    for B in B_choices:
+    for b_ in B_choices:
         tmp = BitWriter()
-        bits, meta = _encode_row_into(tmp, indices, C=C, B=B)
+        bits, meta = _encode_row_into(tmp, indices, C=C, B=b_)
         if bits < best[0]:
             best = (bits, meta)
     if best[0] == math.inf:
@@ -498,11 +504,11 @@ def decode_batch(payload: bytes) -> list[list[int]]:
             n_sub = C // B
 
             row = []
+            mode = br.read_bits(1)
             for j in range(n_sub):
                 s_j = rice_read(br, k)
                 if s_j == 0:
                     continue
-                mode = br.read_bits(1)
                 if mode == 1:
                     bitmask = br.read_bits(B)
                     while bitmask:

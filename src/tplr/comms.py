@@ -1553,8 +1553,6 @@ class Comms(ChainManager):
                         skipped_uids.append(uid)
                         continue
 
-                    decoded_cache: dict[str, torch.Tensor] = {}
-
                     # ---------- Begin Compressed Indices and Values Check ----------
                     valid_response = True
                     for param_name, tensor in state_dict_resp.items():
@@ -1616,46 +1614,44 @@ class Comms(ChainManager):
                                 )
                                 valid_response = False
                                 break
-                        # Check if values are valid (not NaN, not Inf)
+                        # Check if values are valid (not NaN, not Inf) - validate without dequantizing
                         elif param_name.endswith("vals"):
-                            tensor_to_check = tensor.to(device)
-                            if (
-                                torch.isnan(tensor_to_check).any()
-                                or torch.isinf(tensor_to_check).any()
-                            ):
-                                tplr.logger.warning(
-                                    f"NaN/Inf in {param_name} from UID {uid}, skipping"
-                                )
-                                valid_response = False
-                                break
+                            # Only move to device for validation if needed
+                            if tensor.dtype == torch.uint8:
+                                # For quantized values, do a quick check on the raw bytes
+                                if tensor.nelement() == 0:
+                                    tplr.logger.warning(
+                                        f"Empty tensor in {param_name} from UID {uid}, skipping"
+                                    )
+                                    valid_response = False
+                                    break
+                            else:
+                                # For non-quantized tensors, check for NaN/Inf
+                                tensor_to_check = tensor.to(device)
+                                if (
+                                    torch.isnan(tensor_to_check).any()
+                                    or torch.isinf(tensor_to_check).any()
+                                ):
+                                    tplr.logger.warning(
+                                        f"NaN/Inf in {param_name} from UID {uid}, skipping"
+                                    )
+                                    valid_response = False
+                                    break
+                                # Clean up temporary tensor
+                                del tensor_to_check
 
                             # ------------------------------------------------------
-                            # (2)  De‑quantise *just for validation* (cheap‑ish)
+                            # (2)  Only validate quantization params exist, don't dequantize
                             # ------------------------------------------------------
                             qparams = state_dict_resp.get(
                                 param_name[:-4] + "quant_params", None
                             )
-                            if qparams is not None:
-                                try:
-                                    vals_f32 = compressor._dequantize_values(
-                                        tensor_to_check, qparams
-                                    )
-                                    if (
-                                        not torch.isfinite(vals_f32).all()
-                                    ) or vals_f32.abs().max() > 1e3:
-                                        tplr.logger.warning(
-                                            f"Decoded values in {param_name} from UID {uid} "
-                                            f"are non‑finite or too large; max={vals_f32.abs().max()}"
-                                        )
-                                        valid_response = False
-                                        break
-                                    decoded_cache[param_name] = vals_f32
-                                except Exception as e:
-                                    tplr.logger.warning(
-                                        f"De‑quantisation failed for {param_name} from UID {uid}: {e}"
-                                    )
-                                    valid_response = False
-                                    break
+                            if qparams is None and tensor.dtype == torch.uint8:
+                                tplr.logger.warning(
+                                    f"Missing quant_params for quantized {param_name} from UID {uid}"
+                                )
+                                valid_response = False
+                                break
 
                     missing_params = (
                         expected_compressed_params - received_compressed_params
@@ -1675,7 +1671,7 @@ class Comms(ChainManager):
                         continue
                     # ---------- End Compressed Indices and Values Check ----------
 
-                    # Process tensors (with normalization on 'vals' keys).
+                    # Process tensors - keep everything quantized to save memory
                     for param_name, tensor in state_dict_resp.items():
                         # 1️⃣  Indices are kept as‑is -----------------------------------------
                         if param_name.endswith("idxs"):
@@ -1687,27 +1683,20 @@ class Comms(ChainManager):
                                 tensor.element_size() * tensor.nelement()
                             )
 
-                        # 2️⃣  Values → de‑quantise once and store as fp32 --------------------
+                        # 2️⃣  Values → keep quantized, store with quant_params ---------------
                         elif param_name.endswith("vals"):
-                            # Re-use if we already decoded during validation
-                            tensor = decoded_cache.get(param_name, tensor.to(device))
-
-                            # If still uint8 it means we skipped validation (unlikely),
-                            # so decode now.
-                            if tensor.dtype == torch.uint8:
-                                qparams = state_dict_resp.get(
-                                    param_name[:-4] + "quant_params", None
-                                )
-                                if qparams is not None:
-                                    tensor = compressor._dequantize_values(
-                                        tensor, qparams
-                                    )
-
+                            # Keep values quantized - just store the raw tensor
                             aggregated_state_dict.setdefault(param_name, []).append(
-                                tensor
+                                tensor  # Keep original dtype (uint8 if quantized)
                             )
                             metrics["download_bytes"] += (
                                 tensor.element_size() * tensor.nelement()
+                            )
+
+                        # 3️⃣  Store quantization parameters for later use --------------------
+                        elif param_name.endswith("quant_params"):
+                            aggregated_state_dict.setdefault(param_name, []).append(
+                                tensor
                             )
 
                     valid_uids.append(uid)

@@ -64,7 +64,7 @@ elif [ "$NODE_TYPE" = "validator" ]; then
     exec torchrun \
         --standalone \
         --nnodes 1 \
-        --nproc_per_node 1 \
+        --nproc_per_node 4 \
         neurons/validator.py \
         --wallet.name ${WALLET_NAME} \
         --wallet.hotkey ${WALLET_HOTKEY} \

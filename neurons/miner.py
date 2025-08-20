@@ -447,6 +447,21 @@ class Miner(BaseNode, Trainer):
 
         self.comms.start_commitment_fetcher()
 
+        # Put a dummy gradient to mark this miner as active for validators
+        if self.is_master:
+            tplr.logger.info("Putting dummy gradient to mark miner as active...")
+            dummy_gradient = {
+                "metadata": {"window": self.current_window, "dummy": True}
+            }
+            await self.comms.put(
+                state_dict=dummy_gradient,
+                uid=str(self.uid),
+                window=self.current_window,
+                key="gradient",
+                local=False,
+            )
+            tplr.logger.info("Dummy gradient posted successfully")
+
         while not self.stop_event.is_set():
             await asyncio.sleep(0)
             # 1. Initialize window and update peers

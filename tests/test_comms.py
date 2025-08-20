@@ -3,6 +3,7 @@
 import os
 import json
 import random
+import re
 import shutil
 from unittest.mock import patch, MagicMock, AsyncMock
 from botocore.exceptions import ClientError
@@ -3339,6 +3340,44 @@ async def test_s3_get_object_no_load(comms_instance):
             assert result == key
             mock_move.assert_called_once()
             assert mock_move.call_args[0][1] == key
+
+
+@pytest.mark.asyncio
+async def test_list_bucket_checkpoints(comms_instance):
+    """Test the _list_bucket_checkpoints method."""
+    bucket = comms_instance.get_own_bucket("gradients", "read")
+    uid = 0
+    version = tplr.__version__
+    pat = rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$"
+
+    with patch.object(comms_instance, "_get_s3_client") as mock_get_s3_client:
+        mock_s3_client = AsyncMock()
+        mock_get_s3_client.return_value = mock_s3_client
+
+        # Mock list_objects_v2 to return paginated results
+        mock_s3_client.list_objects_v2.side_effect = [
+            {
+                "Contents": [{"Key": f"checkpoint-10-{uid}-v{version}.pt"}],
+                "IsTruncated": True,
+                "NextContinuationToken": "token1",
+            },
+            {
+                "Contents": [
+                    {"Key": f"checkpoint-5-{uid}-v{version}.pt"},
+                    {"Key": "other-file.txt"},
+                ],
+                "IsTruncated": False,
+            },
+        ]
+
+        checkpoints = await comms_instance._list_bucket_checkpoints(
+            bucket, uid, version, pat
+        )
+
+        assert len(checkpoints) == 2
+        assert checkpoints[10] == f"checkpoint-10-{uid}-v{version}.pt"
+        assert checkpoints[5] == f"checkpoint-5-{uid}-v{version}.pt"
+        assert "other-file.txt" not in checkpoints.values()
 
 
 @pytest.mark.asyncio

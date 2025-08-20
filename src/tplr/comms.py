@@ -32,11 +32,13 @@ from typing import Any, Literal, cast
 
 import aiofiles
 import bittensor as bt
+import boto3
 import botocore
 import torch
 import torch.distributed as dist
 from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError, ConnectionClosedError
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
@@ -141,8 +143,10 @@ class Comms(ChainManager):
         self.peers: list[int] = []
         self.reserve_peers: list[int] = []
 
-        self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
-        self.gather_semaphore = asyncio.Semaphore(20)
+        self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS // 2)
+        self.gather_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS // 2)
+        # Limit how many TransferManagers run concurrently (protects threads/conn pool)
+        self.upload_sem = asyncio.Semaphore(4)
 
     async def _get_s3_client(self, bucket: Bucket) -> AioBaseClient:
         """
@@ -472,8 +476,8 @@ class Comms(ChainManager):
                     data = await f.read()
                     await s3_client.put_object(Bucket=bucket.name, Key=key, Body=data)
             else:
-                # Multipart upload for large files
-                await self.upload_large_file(file_path, key, s3_client, bucket)
+                # Multipart upload for large files -> boto3 TransferManager in a thread
+                await self._upload_large_file_via_boto3(file_path, key, bucket)
 
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(bucket)
@@ -749,6 +753,49 @@ class Comms(ChainManager):
                 except Exception as abort_e:
                     tplr.logger.error(f"Failed to abort multipart upload: {abort_e}")
             raise
+
+    async def _upload_large_file_via_boto3(
+        self, file_path: str, key: str, bucket: Bucket
+    ) -> None:
+        """
+        Upload large files using boto3's TransferManager inside a worker thread.
+        Bounded by self.upload_sem to avoid spinning up many managers at once.
+        """
+        MB = 1024 * 1024
+        file_size_gb = os.path.getsize(file_path) / (1024**3)
+        if file_size_gb > 10:
+            part_size = 128 * MB
+            max_conc = 16
+        elif file_size_gb > 1:
+            part_size = 64 * MB
+            max_conc = 12
+        else:
+            part_size = 32 * MB
+            max_conc = 8
+
+        tconf = TransferConfig(
+            multipart_threshold=part_size,
+            multipart_chunksize=part_size,
+            max_concurrency=max_conc,
+            use_threads=True,
+        )
+
+        endpoint = self.get_base_url(bucket.account_id)
+
+        async with self.upload_sem:
+
+            def _do():
+                c = boto3.client(
+                    "s3",
+                    endpoint_url=endpoint,
+                    region_name=CF_REGION_NAME,
+                    config=client_config,  # reuses your existing botocore.Config
+                    aws_access_key_id=bucket.access_key_id,
+                    aws_secret_access_key=bucket.secret_access_key,
+                )
+                c.upload_file(file_path, bucket.name, key, Config=tconf)
+
+            await asyncio.to_thread(_do)
 
     async def download_large_file(
         self,

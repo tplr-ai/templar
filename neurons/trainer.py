@@ -25,7 +25,6 @@ from typing import Iterable
 import torch
 import torch.distributed as dist
 from torch import autocast
-from torch.distributed.optim import ZeroRedundancyOptimizer
 from torch.distributed.tensor import DTensor as DT
 from torch.optim import SGD, lr_scheduler
 from torch.utils.data import DataLoader
@@ -33,7 +32,8 @@ from torchtitan.components.loss import cross_entropy_loss
 
 import tplr
 from neurons.base_node import CPU_COUNT
-from tplr import model_factory, muon
+from tplr import model_factory
+from tplr.muon import Muon, SingleDeviceMuonWithAuxAdam
 
 
 class Trainer:
@@ -204,20 +204,16 @@ class Trainer:
             )
         else:
             if optimizer_type == "adamw":
-                # Use AdamW with ZeroRedundancyOptimizer for distributed training
                 adamw_config = optimizer_config.get("adamw", {})
                 # Use optimizer-specific learning rate if provided
                 adamw_lr = adamw_config.get("learning_rate", 2e-4)
                 adamw_weight_decay = adamw_config.get("weight_decay", 0.1)
-                inner_optimizer = ZeroRedundancyOptimizer(
+                inner_optimizer = torch.optim.AdamW(
                     self.model.parameters(),
-                    optimizer_class=torch.optim.AdamW,
                     lr=adamw_lr,
                     weight_decay=adamw_weight_decay,
                     betas=tuple(adamw_config.get("betas", [0.9, 0.95])),
                     eps=adamw_config.get("eps", 1e-8),
-                    parameters_as_bucket_view=True,
-                    overlap_with_ddp=False,
                 )
                 tplr.logger.info(
                     f"[Init] Using AdamW inner optimizer with lr={adamw_lr}, "
@@ -232,6 +228,13 @@ class Trainer:
                 muon_config = optimizer_config.get("muon", {})
                 # Use optimizer-specific learning rate if provided
                 muon_lr = muon_config.get("learning_rate", 0.02)
+
+                # Check if we're using FSDP (DTensor parameters)
+                is_fsdp = False
+                for param in self.model.parameters():
+                    if isinstance(param, DT):
+                        is_fsdp = True
+                        break
 
                 # Separate parameters for Muon (2D matrices) and Adam (embeddings, scalars, head)
                 hidden_2d_params = []
@@ -294,25 +297,40 @@ class Trainer:
                     )
                     raise ValueError("Model must have 2D weight matrices for Muon")
 
-                muon_group = dict(
-                    params=hidden_2d_params,
-                    lr=muon_lr,
-                    momentum=muon_config.get("momentum", 0.95),
-                    weight_decay=muon_config.get("weight_decay", 0.01),
-                    use_muon=True,
-                )
-
-                param_groups = adam_groups + [muon_group]
-                # Use ZeroRedundancyOptimizer wrapper for distributed training
-                inner_optimizer = ZeroRedundancyOptimizer(
-                    params=param_groups,
-                    optimizer_class=muon.SingleDeviceMuonWithAuxAdam,
-                    parameters_as_bucket_view=True,
-                    overlap_with_ddp=False,
-                )
+                # Use new Muon optimizer if FSDP is enabled, otherwise use single device version
+                if is_fsdp:
+                    # FSDP version with additional options
+                    muon_group = dict(
+                        params=hidden_2d_params,
+                        lr=muon_lr,
+                        momentum=muon_config.get("momentum", 0.95),
+                        weight_decay=muon_config.get("weight_decay", 0.01),
+                        use_muon=True,
+                        rms_scale=muon_config.get(
+                            "rms_scale", True
+                        ),  # Add RMS scaling option
+                        nesterov=muon_config.get(
+                            "nesterov", True
+                        ),  # Add Nesterov option
+                    )
+                    param_groups = adam_groups + [muon_group]
+                    inner_optimizer = Muon(param_groups)
+                    optimizer_name = "Muon (FSDP2)"
+                else:
+                    # Single device version with original options
+                    muon_group = dict(
+                        params=hidden_2d_params,
+                        lr=muon_lr,
+                        momentum=muon_config.get("momentum", 0.95),
+                        weight_decay=muon_config.get("weight_decay", 0.01),
+                        use_muon=True,
+                    )
+                    param_groups = adam_groups + [muon_group]
+                    inner_optimizer = SingleDeviceMuonWithAuxAdam(param_groups)
+                    optimizer_name = "Muon (Single Device)"
 
                 tplr.logger.info(
-                    f"[Init] Using Muon inner optimizer with lr={muon_lr}, "
+                    f"[Init] Using {optimizer_name} inner optimizer with lr={muon_lr}, "
                     f"momentum={muon_config.get('momentum', 0.95)}, weight_decay={muon_config.get('weight_decay', 0.01)}"
                 )
                 tplr.logger.info(

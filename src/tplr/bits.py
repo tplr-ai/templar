@@ -224,8 +224,6 @@ def _calculate_row_bits_from_subs(
     return total_bits
 
 
-
-
 def _encode_row_global_into(
     bw: BitWriter,
     indices: list[int],
@@ -364,6 +362,24 @@ class EncodeMeta:
     rows: list[dict[str, int]] | None = None
 
 
+# def encode_rowwise_inner_loop(
+#     row: list[int],
+#     C: int,
+#     B_choices: tuple[int, ...],
+#     use_dense_bitmap,
+#     bitmap_threshold,
+# ):
+#     best_B, _, _ = _best_row_variant(r, C=C, B_choices=B_choices)
+#     return _encode_row_into(
+#         bw,
+#         row,
+#         C=C,
+#         B=best_B,
+#         use_dense_bitmap=use_dense_bitmap,
+#         bitmap_threshold=bitmap_threshold,
+#     )
+
+
 def _encode_batch_per_row(
     bw: BitWriter,
     row_list: list[list[int]],
@@ -426,11 +442,21 @@ def _encode_batch_global(
     B_fixed: int | None,
     k_fixed: int | None,
     meta_mode: str,
+    heuristic_sample_size: int | None,
 ) -> EncodeMeta:
     """Helper for global scheme."""
     N = len(row_list)
     if B_fixed is not None and ((B_fixed & (B_fixed - 1)) != 0 or C % B_fixed != 0):
         raise ValueError("B_fixed must be a power-of-two dividing C")
+
+    # If a heuristic sample size is given, use a random subset of rows for the search
+    search_list = row_list
+    if (
+        heuristic_sample_size is not None
+        and B_fixed is None
+        and heuristic_sample_size < N
+    ):
+        search_list = random.sample(row_list, heuristic_sample_size)
 
     candidate_Bs = [B_fixed] if B_fixed is not None else list(B_choices)
     candidate_ks = [k_fixed] if k_fixed is not None else list(range(0, 9))
@@ -451,7 +477,8 @@ def _encode_batch_global(
         with Parallel(n_jobs=20, prefer="threads") as parallel:
             # Pre-calculate subs for all rows for this B
             subs_by_row = parallel(
-                delayed(instantiate_subs)(B, C, check_and_sort_values(B, C, r)) for r in row_list
+                delayed(instantiate_subs)(B, C, check_and_sort_values(B, C, r))
+                for r in search_list
             )
 
             for k in candidate_ks:
@@ -514,6 +541,7 @@ def encode_batch(
     B_fixed: int | None = None,
     k_fixed: int | None = None,
     meta_mode: Literal["none", "summary", "compact", "full"] = "summary",
+    heuristic_sample_size: int | None = None,
 ) -> tuple[bytes, EncodeMeta]:
     """
     Encode a batch of rows (each row is an iterable of indices in [0,C)).
@@ -558,6 +586,7 @@ def encode_batch(
             B_fixed,
             k_fixed,
             meta_mode,
+            heuristic_sample_size,
         )
     else:  # per_row
         bw.write_bits(0, 1)

@@ -256,6 +256,7 @@ def test_encode_batch_global_logic():
         B_fixed=64,
         k_fixed=3,
         meta_mode="full",
+        heuristic_sample_size=None,
     )
 
     assert meta.scheme == "global"
@@ -264,8 +265,6 @@ def test_encode_batch_global_logic():
     assert meta.k == 3
     assert meta.row_bits is not None
     assert len(bw.flush()) > 0
-
-
 
 
 def test_encode_meta_dataclass():

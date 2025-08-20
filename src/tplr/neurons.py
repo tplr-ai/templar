@@ -485,6 +485,47 @@ async def catchup_with_aggregation_server(
     target_w = instance.current_window
     tplr.logger.info(f"Replaying windows {start_w} ... {target_w - 1}")
 
+    # Verify checkpoint loaded correctly before applying any gradients
+    if checkpoint_current_window > 0 and instance.is_master:
+        tplr.logger.info(
+            f"Verifying checkpoint state at window {checkpoint_current_window}"
+        )
+        debug_fetch = await instance.comms.get(
+            uid=str(leader_uid),
+            window=checkpoint_current_window,
+            key="debug",
+            local=False,
+            stale_retention=10,
+        )
+
+        if debug_fetch.success and isinstance(debug_fetch.data, dict):
+            debug_dict = debug_fetch.data  # validator's payload
+
+            cmp = await compare_model_with_debug_dict(
+                instance.model,
+                debug_dict,
+                param_avg_change={},  # Empty since we haven't started tracking yet
+                learning_rate=instance.hparams.learning_rate,
+            )
+            if cmp["success"]:
+                tplr.logger.info(
+                    f"✓ Checkpoint verification: model matches window {checkpoint_current_window} "
+                    f"(l2_norm={cmp['l2_norm']:.4f}, avg_steps_behind={cmp['avg_steps_behind']:.3f})"
+                )
+                if cmp["l2_norm"] > 0.1:  # Threshold for acceptable difference
+                    tplr.logger.warning(
+                        f"⚠️ Large L2 norm difference detected: {cmp['l2_norm']:.4f}. "
+                        f"Checkpoint may not have loaded correctly."
+                    )
+            else:
+                tplr.logger.warning(
+                    f"⚠️ Could not verify checkpoint state for window {checkpoint_current_window}"
+                )
+        else:
+            tplr.logger.info(
+                f"No debug dict available for window {checkpoint_current_window}, skipping verification"
+            )
+
     prev_param_state: dict[str, torch.Tensor] = {}
     param_avg_change: dict[str, torch.Tensor] = {}
     alpha: float = 0.20
@@ -496,83 +537,111 @@ async def catchup_with_aggregation_server(
         # ------------------------------------------------------------------
         # 1) Fetch the aggregated object dumped by the leader validator.
         # ------------------------------------------------------------------
-        fetch = await instance.comms.get(
-            uid=str(leader_uid),
-            window=start_w,
-            key="aggregator",
-            timeout=60,
-            local=False,
-            stale_retention=10,
-        )
-
-        # ── A. aggregated object exists → normal path ────────────────────
-        if fetch.success and fetch.data and "state_dict" in fetch.data:
-            payload = fetch.data
-
-            # ------------------------------------------------------------------
-            # Re‑create the SimpleNamespace expected by `outer_step`.
-            # ------------------------------------------------------------------
-            gather_ns = SimpleNamespace(
-                state_dict=SimpleNamespace(**payload["state_dict"]),
-                uids=payload.get("uids", []),
-                skipped_uids=payload.get("skipped_uids", []),
-                success_rate=payload.get("success_rate", 0.0),
-            )
-
-        # ── B. aggregated object *missing* or *malformed* ────────────────
-        else:
-            is_last_window = start_w == target_w - 1
-            tplr.logger.warning(
-                "    ↳ %s – %s",
-                "not available" if fetch is None else "malformed payload",
-                "attempting gather‑fallback" if is_last_window else "skipping",
-            )
-
-            if not is_last_window:
-                start_w += 1
-                continue
-
-            sync_block = (start_w + 1) * instance.hparams.blocks_per_window
-            ts_value = await instance.loop.run_in_executor(
-                None, instance.query_block_timestamp, sync_block
-            )
-            if ts_value is None:
-                tplr.logger.warning(
-                    f"Could not get timestamp for sync block {sync_block}.",
-                )
-                time_min = time_max = None
-            else:
-                time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
-                time_max = time_min + timedelta(
-                    seconds=instance.hparams.time_window_delta_seconds
-                )
-
-            # ---- Gather fallback ----------------------------------------
-            gather_ns = await instance.comms.gather(
-                my_uid=instance.uid,
-                uids=instance.comms.peers,
+        if instance.is_master:
+            fetch = await instance.comms.get(
+                uid=str(leader_uid),
                 window=start_w,
-                key="gradient",
-                timeout=45,
-                device=str(instance.config.device),
+                key="aggregator",
+                timeout=60,
                 local=False,
                 stale_retention=10,
-                totalks=instance.totalks,
-                compressor=instance.compressor,
-                time_min=time_min,
-                time_max=time_max,
             )
 
-            if gather_ns is None:
-                tplr.logger.warning("    ↳ gather‑fallback failed – skipping")
-                start_w += 1
-                continue
+            # ── A. aggregated object exists → normal path ────────────────────
+            if fetch.success and fetch.data is not None and "state_dict" in fetch.data:
+                payload = fetch.data
 
-            tplr.logger.info("    ↳ gather‑fallback succeeded – applying")
+                # ------------------------------------------------------------------
+                # Re‑create the SimpleNamespace expected by `outer_step`.
+                # ------------------------------------------------------------------
+                gather_ns = SimpleNamespace(
+                    state_dict=SimpleNamespace(**payload["state_dict"]),
+                    uids=payload.get("uids", []),
+                    skipped_uids=payload.get("skipped_uids", []),
+                    success_rate=payload.get("success_rate", 0.0),
+                )
+
+            # ── B. aggregated object *missing* or *malformed* ────────────────
+            else:
+                gather_ns = None
+                is_last_window = start_w == target_w - 1
+                tplr.logger.warning(
+                    "    ↳ %s – %s",
+                    "not available" if fetch is None else "malformed payload",
+                    "attempting gather‑fallback" if is_last_window else "skipping",
+                )
+
+                if is_last_window:
+                    sync_block = (start_w + 1) * instance.hparams.blocks_per_window
+                    ts_value = await instance.loop.run_in_executor(
+                        None, instance.query_block_timestamp, sync_block
+                    )
+                    if ts_value is None:
+                        tplr.logger.warning(
+                            f"Could not get timestamp for sync block {sync_block}.",
+                        )
+                        time_min = time_max = None
+                    else:
+                        time_min = datetime.fromtimestamp(ts_value, tz=timezone.utc)
+                        time_max = time_min + timedelta(
+                            seconds=instance.hparams.time_window_delta_seconds
+                        )
+
+                    # ---- Gather fallback ----------------------------------------
+                    gather_ns = await instance.comms.gather(
+                        my_uid=instance.uid,
+                        uids=instance.comms.peers,
+                        window=start_w,
+                        key="gradient",
+                        timeout=45,
+                        device=str(instance.config.device),
+                        local=False,
+                        stale_retention=10,
+                        totalks=instance.totalks,
+                        compressor=instance.compressor,
+                        time_min=time_min,
+                        time_max=time_max,
+                    )
+
+                if gather_ns is None:
+                    tplr.logger.warning("    ↳ gather‑fallback failed – skipping")
+                else:
+                    tplr.logger.info("    ↳ gather‑fallback succeeded – applying")
+        else:
+            gather_ns = None
+
+        # Broadcast whether we should skip this window (master decides)
+        skip_window = False
+        if dist.is_available() and dist.is_initialized():
+            if instance.is_master:
+                skip_flag = 1 if gather_ns is None else 0
+                skip_tensor = torch.tensor(
+                    [skip_flag], dtype=torch.int32, device=instance.config.device
+                )
+            else:
+                skip_tensor = torch.tensor(
+                    [0], dtype=torch.int32, device=instance.config.device
+                )
+            dist.broadcast(skip_tensor, src=0)
+            skip_window = bool(skip_tensor.item())
+        elif instance.is_master and gather_ns is None:
+            skip_window = True
+
+        # If skipping, continue to next window without updating scheduler
+        if skip_window:
+            instance.global_step = start_w - instance.start_window
+            start_w += 1
+            continue
 
         # ------------------------------------------------------------------
-        # 2) Apply those gradients through the shared helper.
+        # 2) All ranks apply the update.
         # ------------------------------------------------------------------
+        # Synchronize all ranks before applying the outer step to ensure
+        # they're processing the same window together
+        if dist.is_available() and dist.is_initialized():
+            device_id = torch.cuda.current_device()
+            dist.barrier(device_ids=[device_id])
+
         outer_step(
             instance.model,
             instance.outer_optimizer,
@@ -582,9 +651,11 @@ async def catchup_with_aggregation_server(
             xshapes=instance.xshapes,
             totalks=instance.totalks,
             device=instance.config.device,
-            is_master=True,
-            world_size=1,
+            is_master=instance.is_master,  # rank-0 handles logging
+            world_size=instance.world_size,
             use_dct=instance.hparams.use_dct,
+            wandb_run=instance.wandb if instance.is_master else None,
+            global_step=instance.global_step,
         )
 
         # advance LR scheduler if one exists.
@@ -598,66 +669,75 @@ async def catchup_with_aggregation_server(
         # 3) Debug‑dict comparison to estimate “how many steps behind” we are
         # ──────────────────────────────────────────────────────────────────────
         try:
-            debug_fetch = await instance.comms.get(
-                uid=str(leader_uid),
-                window=start_w,
-                key="debug",
-                local=False,
-                stale_retention=10,
-            )
-
-            if debug_fetch.success:
-                debug_dict = debug_fetch.data  # validator's payload
-
-                # --- update EMA of parameter‑slice changes ------------------
-                bare_model = getattr(instance.model, "module", instance.model)
-                for name, p in bare_model.named_parameters():
-                    if p.numel() < 2:
-                        continue
-
-                    # Handle DTensor parameters
-                    if isinstance(p, DT):
-                        curr_slice = p.to_local().detach().cpu().flatten()[slice_idx]
-                    else:
-                        curr_slice = p.detach().cpu().flatten()[slice_idx]
-
-                    if name in prev_param_state:
-                        delta = (curr_slice - prev_param_state[name]).abs()
-                        if name not in param_avg_change:
-                            param_avg_change[name] = delta.clone()
-                        else:
-                            param_avg_change[name].mul_(1 - alpha).add_(delta * alpha)
-                    prev_param_state[name] = curr_slice.clone()
-
-                # --- call shared comparison helper --------------------------
-                lr = instance.outer_optimizer.param_groups[0]["lr"]
-                cmp = await compare_model_with_debug_dict(
-                    model=instance.model,
-                    debug_dict=debug_dict,
-                    learning_rate=lr,
-                    index_range=(0, 2),
-                    param_avg_change=param_avg_change,
+            if instance.is_master:
+                debug_fetch = await instance.comms.get(
+                    uid=str(leader_uid),
+                    window=start_w,
+                    key="debug",
+                    local=False,
+                    stale_retention=10,
                 )
 
-                if cmp["success"]:
-                    tplr.logger.info(
-                        f"[catch‑up] window {start_w} "
-                        f"avg_steps_behind={cmp['avg_steps_behind']:.3f}, "
-                        f"l2_norm={cmp['l2_norm']:.4f}"
+                if debug_fetch.success and isinstance(debug_fetch.data, dict):
+                    debug_dict = debug_fetch.data  # validator's payload
+
+                    # --- update EMA of parameter‑slice changes ------------------
+                    bare_model = getattr(instance.model, "module", instance.model)
+                    for name, p in bare_model.named_parameters():
+                        if p.numel() < 2:
+                            continue
+
+                        # Handle DTensor parameters
+                        if isinstance(p, DT):
+                            curr_slice = (
+                                p.to_local().detach().cpu().flatten()[slice_idx]
+                            )
+                        else:
+                            curr_slice = p.detach().cpu().flatten()[slice_idx]
+
+                        if name in prev_param_state:
+                            delta = (curr_slice - prev_param_state[name]).abs()
+                            if name not in param_avg_change:
+                                param_avg_change[name] = delta.clone()
+                            else:
+                                param_avg_change[name].mul_(1 - alpha).add_(
+                                    delta * alpha
+                                )
+                        prev_param_state[name] = curr_slice.clone()
+
+                    # --- call shared comparison helper --------------------------
+                    lr = instance.outer_optimizer.param_groups[0]["lr"]
+                    cmp = await compare_model_with_debug_dict(
+                        model=instance.model,
+                        debug_dict=debug_dict,
+                        learning_rate=lr,
+                        index_range=(0, 2),
+                        param_avg_change=param_avg_change,
                     )
+
+                    if cmp["success"]:
+                        tplr.logger.info(
+                            f"[catch‑up] window {start_w} "
+                            f"avg_steps_behind={cmp['avg_steps_behind']:.3f}, "
+                            f"l2_norm={cmp['l2_norm']:.4f}"
+                        )
+                    else:
+                        tplr.logger.warning(
+                            f"[catch‑up] debug‑dict comparison failed for window {start_w}"
+                        )
                 else:
                     tplr.logger.warning(
-                        f"[catch‑up] debug‑dict comparison failed for window {start_w}"
+                        f"[catch‑up] no debug‑dict found for window {start_w}"
                     )
-            else:
-                tplr.logger.warning(
-                    f"[catch‑up] no debug‑dict found for window {start_w}"
-                )
         except Exception as exc:
             tplr.logger.warning(f"[catch‑up] debug‑dict processing error: {exc}")
 
         instance.global_step = start_w - instance.start_window
         start_w += 1
+
+        if dist.is_available() and dist.is_initialized():
+            device_id = torch.cuda.current_device()
+            dist.barrier(device_ids=[device_id])
 
         # If the chain progressed while we were busy, extend the target.
         if instance.current_window > target_w:

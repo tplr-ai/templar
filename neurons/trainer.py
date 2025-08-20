@@ -355,6 +355,8 @@ class Trainer:
         total_loss = 0.0
         n_batches = 0
 
+        world_size = dist.get_world_size() if dist.is_initialized() else 1
+
         with torch.inference_mode():
             model.eval()
             for i, batch in enumerate(loader):
@@ -371,21 +373,34 @@ class Trainer:
                     input_ids = batch.to(device, dtype=torch.long, non_blocking=True)
                 else:
                     input_ids = torch.tensor(batch, dtype=torch.long, device=device)
+
                 labels = input_ids.clone()
                 labels[:, :-1] = input_ids[:, 1:]  # shift left by one
                 labels[:, -1] = self.tokenizer.pad_token_id
                 labels = torch.where(
                     labels == self.tokenizer.pad_token_id, -100, labels
                 )
+
                 with autocast(device_type=device.type, dtype=torch.bfloat16):
                     logits = model(input_ids)
+
                 loss = cross_entropy_loss(logits, labels)
+
                 total_loss += loss.item()
                 n_batches += 1
                 del input_ids, labels, logits
                 torch.cuda.empty_cache()
 
                 await asyncio.sleep(0)
+
+        # Average loss across all ranks, sum batches for distributed training
+        if world_size > 1 and dist.is_initialized():
+            loss_tensor = torch.tensor([total_loss], dtype=torch.float32, device=device)
+            batch_tensor = torch.tensor([n_batches], dtype=torch.int32, device=device)
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(batch_tensor, op=dist.ReduceOp.SUM)
+            total_loss = loss_tensor.item()  # Total loss across ranks
+            n_batches = int(batch_tensor.item())  # Total batches across all ranks
 
         return total_loss, n_batches
 

@@ -1968,9 +1968,6 @@ class Validator(BaseNode, Trainer):
                 current_window=self.current_window,
             )
 
-            # ── profiler step (only master – validators are single‑rank) ─
-            if self._prof is not None:
-                self._prof.step()
             # 17. Create checkpoints periodically
             if (
                 self.global_step % self.hparams.checkpoint_frequency == 0

@@ -64,7 +64,7 @@
       "head_lr_scale": 0.2,
       "embed_lr_scale": 0.2,
       "scalar_lr_scale": 0.2,
-      "learning_rate": 8e-3,
+      "learning_rate": 5e-3,
       "scheduler": {
         "warmup_steps": 750,
         "t_max": 20000,

@@ -18,7 +18,6 @@
 
 import asyncio
 import math
-import typing
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -28,6 +27,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DTensor as DT
+from torch.distributed.tensor import distribute_tensor
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from wandb.sdk.wandb_run import Run
@@ -44,67 +44,109 @@ NeuronT = TypeVar("NeuronT", "Miner", "Validator")
 
 def prepare_gradient_dict(miner: "Miner", step_window: int):
     """
-    Prepares the gradient dictionary for sharing by compressing the
-    momentum for each parameter and attaching metadata.
-
-    Args:
-        miner (Miner): Instance of Miner containing model, scheduler, momentum, compressor, transformer and hparams.
-        step_window (int): The current window number.
-
-    Returns:
-        tuple: (gradient, xshapes, totalks, transmitted) where:
-            gradient (dict): Contains keys for each parameter's compressed gradients and metadata.
-            xshapes (dict): The computed shapes for each parameter.
-            totalks (dict): Total length information for each parameter.
+    DTensor-deadlock-safe:
+    - All ranks: rendezvous on DTensor grads (GFULL) and DTensor params (PFULL).
+    - Only owning ranks: momentum update, encode, compress, estimate/decode, EF update.
     """
-    gradient = {}
-    xshapes = {}
-    totalks = {}
+
+    # ------------ helpers ------------
+    def ddp_initialized():
+        return dist.is_available() and dist.is_initialized()
+
+    def is_dtensor(x):
+        try:
+            from torch.distributed._tensor import DTensor  # type: ignore[attr-defined]
+
+            return isinstance(x, DTensor)
+        except Exception:
+            return type(x).__name__ in {"DTensor", "DistributedTensor", "DT"}
+
+    def get_mesh_group(x):
+        if not is_dtensor(x):
+            return None
+        mesh = getattr(x, "device_mesh", None)
+        if mesh is None:
+            spec = getattr(x, "_spec", None)
+            mesh = getattr(spec, "mesh", None)
+        if mesh is not None:
+            try:
+                return mesh.get_group()
+            except Exception:
+                pass
+        return dist.group.WORLD if ddp_initialized() else None
+
+    def barrier(group=None):
+        if ddp_initialized() and group is not None:
+            dist.barrier(group=group)
+
+    # ------------ start ------------
+    gradient, xshapes, totalks = {}, {}, {}
     lr = float(miner.hparams.outer_learning_rate)
+    use_dct = getattr(miner.hparams, "use_dct", False)
+    topk = getattr(miner.hparams, "topk_compression", 32)
 
     if isinstance(miner.model, torch.nn.parallel.DistributedDataParallel):
         model_iterator = miner.model.module.named_parameters()
     else:
         model_iterator = miner.model.named_parameters()
-    for n, p in model_iterator:
-        # Skip parameters not owned by this rank
-        if n not in miner.owned_params:
+
+    for _, (n, p) in enumerate(model_iterator, 1):
+        owned = n in miner.owned_params
+        p_is_dt = is_dtensor(p)
+        g = getattr(p, "grad", None)
+        g_is_dt = is_dtensor(g)
+
+        # --- 1) Grad full_tensor rendezvous (GFULL) ---
+        if g_is_dt:
+            grp_g = get_mesh_group(g)
+            barrier(grp_g)
+            assert g is not None
+            grad_full = g.full_tensor().to(p.device)
+            barrier(grp_g)
+        else:
+            if g is None and not p_is_dt:
+                continue
+            assert g is not None, f"p.grad is None for {n}"
+            grad_full = g.to(p.device)
+
+        # --- 2) Param full_tensor rendezvous (PFULL) for DT params ---
+        full_p = None
+        if p_is_dt:
+            grp_p = get_mesh_group(p)
+            barrier(grp_p)
+            assert isinstance(p, DT)
+            full_p = p.full_tensor().to(p.device)
+            barrier(grp_p)
+
+        # Non-owners: after participating in collectives, drop grad and continue.
+        if not owned:
+            p.grad = None
+            full_p = None
             continue
 
-        # Apply momentum decay.
-        miner.error_feedback[n].mul_(miner.hparams.momentum_decay)
+        # --- 3) Momentum buffer update (owner only) ---
+        # Handle DTensor error feedback by creating new regular tensor if needed
+        error_feedback = miner.error_feedback[n]
+        if error_feedback is None:
+            error_feedback = torch.zeros_like(grad_full, device=p.device)
+            miner.error_feedback[n] = error_feedback
+        elif error_feedback.device != p.device:
+            error_feedback = error_feedback.to(p.device)
 
-        # Ensure the gradient is on the same device as the parameter.
-        assert p.grad is not None
+        error_feedback.mul_(miner.hparams.momentum_decay)
+        error_feedback.add_(grad_full, alpha=lr)
 
-        # For DTensors, we need to get the full gradient since error_feedback stores full tensors
-        if isinstance(p.grad, DT):
-            # Get the full gradient from all shards
-            grad = p.grad.full_tensor().to(p.device)
-        else:
-            grad = p.grad.to(p.device)
-
-        if miner.error_feedback[n].device != p.device:
-            miner.error_feedback[n] = miner.error_feedback[n].to(p.device)
-
-        # Normal behavior for later iterations
-        miner.error_feedback[n].add_(grad, alpha=lr)
-
-        encoded = miner.transformer.encode(
-            miner.error_feedback[n], use_dct=miner.hparams.use_dct
-        )
+        # --- 4) Encode & compress (owner only) ---
+        encoded = miner.transformer.encode(error_feedback, use_dct=use_dct)
 
         idxs, vals, xshape, totalk, quant_params = miner.compressor.compress(
-            encoded, miner.hparams.topk_compression
+            encoded, topk
         )
-        if totalk is None:
-            tplr.logger.info("totalk is None")
-        del encoded  # Free the encoded tensor immediately
+        del encoded
 
-        # Estimate transmitted gradient
-        # For DTensors, use full tensor for decompression since we compressed the full tensor
-        if isinstance(p, DT):
-            full_p = p.full_tensor().to(p.device)
+        # --- 5) Decompress reference (owner only) ---
+        if p_is_dt:
+            assert full_p is not None
             decompressed = miner.compressor.decompress(
                 full_p, idxs, vals, xshape, totalk, quant_params
             )
@@ -112,38 +154,27 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
             decompressed = miner.compressor.decompress(
                 p, idxs, vals, xshape, totalk, quant_params
             )
-        transmit_grad = miner.transformer.decode(
-            decompressed, use_dct=miner.hparams.use_dct
-        )
-        del decompressed  # Free intermediate tensor
 
-        # Handle DTensor compatibility for subtraction
-        # Since we're not supporting TP and using full tensors for DTensors,
-        # the error_feedback for DTensor parameters is already a full tensor
-        if isinstance(p, DT):
-            # When p is DTensor, error_feedback[n] is a regular full tensor
-            # and transmit_grad should also be a regular full tensor
-            miner.error_feedback[n].sub_(transmit_grad)
-        else:
-            # Both are regular tensors
-            miner.error_feedback[n].sub_(transmit_grad)
+        # --- 6) Decode & error-feedback update (owner only) ---
+        transmit_grad = miner.transformer.decode(decompressed, use_dct=use_dct)
+        del decompressed
+        error_feedback.sub_(transmit_grad)
+        miner.error_feedback[n] = error_feedback
+        del transmit_grad, error_feedback
+        full_p = None
 
-        # Move compressed values to CPU to save GPU memory
+        # --- 7) Pack outputs (move compressed artifacts to CPU) ---
         gradient[n + "idxs"] = idxs.cpu() if isinstance(idxs, torch.Tensor) else idxs
         gradient[n + "vals"] = vals.cpu() if isinstance(vals, torch.Tensor) else vals
         gradient[n + "quant_params"] = quant_params
         xshapes[n] = xshape
         totalks[n] = totalk
 
-        del transmit_grad
-
-        # Clear gradient to free memory
+        # Clear per-param grad
         p.grad = None
 
     torch.cuda.empty_cache()
-
     gradient["metadata"] = {"window": step_window}
-
     return gradient, xshapes, totalks
 
 

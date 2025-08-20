@@ -1638,14 +1638,19 @@ class Comms(ChainManager):
 
                         if param_name.endswith("idxs"):
                             base_name = param_name[:-4]
-                            totalk_tensor = totalks.get(base_name)
-                            if totalk_tensor is None:
+                            totalk_value = totalks.get(base_name)
+                            if totalk_value is None:
                                 tplr.logger.warning(
                                     f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
                                 )
                                 valid_response = False
                                 break
-                            totalk = totalk_tensor.numel()
+                            # totalks stores integers, not tensors
+                            totalk = (
+                                totalk_value
+                                if isinstance(totalk_value, int)
+                                else totalk_value.numel()
+                            )
                             # Get corresponding vals tensor for 12-bit unpacking
                             vals_tensor = state_dict_resp.get(base_name + "vals", None)
                             try:

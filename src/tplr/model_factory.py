@@ -174,11 +174,17 @@ def create_parallel_dims(
             world_size=1,
         )
     elif role == "validator":
-        # Validator: data parallel replication, no sharding
+        # Validator: pipeline parallelism with data parallel replication
+        tp_degree = 4
+        if world_size % tp_degree != 0:
+            raise ValueError(
+                f"World size ({world_size}) must be divisible by "
+                f"tensor-parallel degree ({tp_degree})"
+            )
         return ParallelDims(
-            dp_replicate=world_size,
+            dp_replicate=world_size // tp_degree,
             dp_shard=1,
-            tp=1,
+            tp=tp_degree,
             pp=1,
             cp=1,
             ep=1,

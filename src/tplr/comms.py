@@ -34,9 +34,14 @@ import aiofiles
 import bittensor as bt
 import botocore
 import torch
+import torch.distributed as dist
 from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
 from botocore.exceptions import ClientError, ConnectionClosedError
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    set_model_state_dict,
+)
 from tqdm import tqdm as std_tqdm
 
 import tplr
@@ -1481,6 +1486,9 @@ class Comms(ChainManager):
         skipped_uids = []  # Retain UIDs that are skipped.
         global_steps = []
 
+        # Ensure deterministic order across processes/ranks
+        uids = sorted(uids)
+
         async with self.gather_semaphore:
             batch_tasks = [
                 self.get_with_retry(
@@ -2212,72 +2220,75 @@ class Comms(ChainManager):
         self,
         model,
         current_window: int,
-        device: str,
         init_version: str | None = None,
+        is_master: bool = True,
     ) -> tuple[bool, int]:
         """
-        Loads the latest checkpoint into the model and associated components.
-
-        This method orchestrates the process of finding and loading the latest
-        checkpoint. It updates the model's state dictionary and returns metadata
-        about the loaded checkpoint, such as its window number. This is a critical
-        step for resuming training or synchronizing a new neuron.
-
-        Args:
-            model: The PyTorch model to load the state into.
-            current_window (int): The current local window, used for logging and context.
-            device (str): The device to load the model tensors onto.
-            init_version (str | None, optional): The templar version to look for.
-                Defaults to the current version.
-
-        Returns:
-            tuple[bool, int]: A tuple where the first element is a boolean indicating
-            success, and the second is the window number of the loaded checkpoint.
+        Rank-0 downloads; all ranks fan-out once.
+        Returns (success, checkpoint_sync_window) identically on all ranks.
         """
-        init_version = init_version if init_version is not None else tplr.__version__
-        result = await self.get_latest_checkpoint(init_version)
-        if not result:
-            tplr.logger.info("No valid checkpoints found")
+        # --------- rank-0 fetch + minimal metadata ----------
+        ok, sync_win, full_sd, present = False, 0, {}, set()
+        if is_master:
+            try:
+                init_version = init_version or __version__
+            except NameError:
+                pass
+            result = await self.get_latest_checkpoint(init_version)
+            if result:
+                try:
+                    checkpoint_data, _ = result
+                    full_sd = checkpoint_data["model_state_dict"]
+                    present = {k for k in full_sd.keys()}
+
+                    # Prefer sync_window; fall back to current_window if older ckpt
+                    sw = checkpoint_data.get("sync_window")
+                    cw = checkpoint_data.get("current_window")
+                    sync_win = int(
+                        sw if sw is not None else cw if cw is not None else 0
+                    )
+                    ok = True
+
+                    tplr.logger.info(
+                        f"Checkpoint loaded on rank-0: "
+                        f"start={checkpoint_data.get('start_window')}, "
+                        f"current={checkpoint_data.get('current_window')}, "
+                        f"sync={sync_win}, local_current={current_window}"
+                    )
+                except Exception as e:
+                    tplr.logger.error(f"[ckpt] parse/load failed on rank-0: {e}")
+                    ok, sync_win, full_sd, present = False, 0, {}, set()
+            else:
+                tplr.logger.info("No valid checkpoints found on rank-0")
+
+        # --------- broadcast tiny meta-object to all ranks ----------
+        if dist.is_available() and dist.is_initialized():
+            obj = [(bool(ok), int(sync_win), list(present))] if is_master else [None]
+            dist.broadcast_object_list(obj, src=0)
+            ok, sync_win, present_list = obj[0]
+            present = set(present_list or [])
+        if not ok:
             return False, 0
 
-        checkpoint_data, checkpoint_window = result
-        try:
-            # 1) Load model and optimizer state
-            model.load_state_dict(
-                {
-                    k: v.to(device)
-                    for k, v in checkpoint_data["model_state_dict"].items()
-                }
-            )
-            model.to(device)
+        # --------- single fan-out of weights/buffers ----------
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(
+                full_state_dict=True, broadcast_from_rank0=True, strict=True
+            ),
+        )
 
-            checkpoint_start_window = checkpoint_data.get("start_window")
-            checkpoint_current_window = checkpoint_data.get("current_window")
-            checkpoint_sync_window = checkpoint_data.get("sync_window")
-            if (
-                checkpoint_start_window is None
-                or checkpoint_current_window is None
-                or checkpoint_sync_window is None
-            ):
-                tplr.logger.warning(
-                    "Checkpoint missing start_window or current_window info"
-                )
-                return False, 0
+        # Barrier for cleanliness
+        if dist.is_available() and dist.is_initialized():
+            # Get the current device for this rank
+            if torch.cuda.is_available():
+                device_id = torch.cuda.current_device()
+                dist.barrier(device_ids=[device_id])
+            else:
+                dist.barrier()
 
-            tplr.logger.info(
-                f"Checkpoint loaded. start_window={checkpoint_start_window}, "
-                f"checkpoint_current_window={checkpoint_current_window}, "
-                f"checkpoint_sync_window={checkpoint_sync_window}, "
-                f"local_current_window={current_window}"
-            )
-
-            return True, checkpoint_sync_window
-        except KeyError as e:
-            tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
-            return False, 0
-        except Exception as e:
-            tplr.logger.error(f"Failed to load checkpoint: {e}")
-            return False, 0
+        return True, int(sync_win)
 
     async def post_peer_list(
         self,

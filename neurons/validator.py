@@ -43,6 +43,13 @@ import uvloop
 from openskill.models import PlackettLuce
 from rich.console import Console
 from rich.table import Table
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_model_state_dict,
+    set_model_state_dict,
+)
+from torch.distributed.tensor import DTensor as DT
+from torch.distributed.tensor import distribute_tensor
 
 import tplr
 from neurons import BaseNode, Trainer
@@ -1866,47 +1873,38 @@ class Validator(BaseNode, Trainer):
                     current_window=self.current_window,
                 )
 
-                checkpoint_data = await self.create_checkpoint_async()
+                checkpoint_data = {
+                    "model_state_dict": get_model_state_dict(
+                        self.model, options=StateDictOptions(full_state_dict=True)
+                    ),
+                    "start_window": self.start_window,
+                    "current_window": self.current_window,
+                    "sync_window": self.sync_window,
+                }
 
-                # Then save asynchronously
-                t = asyncio.create_task(
-                    self.comms.put(
-                        state_dict=checkpoint_data,
-                        uid=str(self.uid),
-                        window=self.sync_window,
-                        key="checkpoint",
-                        global_step=self.global_step,
-                        local=False,
+                if self.is_master:
+                    # Then save asynchronously
+                    t = asyncio.create_task(
+                        self.comms.put(
+                            state_dict=checkpoint_data,
+                            uid=str(self.uid),
+                            window=self.sync_window,
+                            key="checkpoint",
+                            global_step=self.global_step,
+                            local=False,
+                        )
                     )
-                )
-                self._bg_tasks.add(t)
-                t.add_done_callback(self._bg_tasks.discard)
+                    self._bg_tasks.add(t)
+                    t.add_done_callback(self._bg_tasks.discard)
+
+            # Synchronize all ranks before moving to next window
+            if self.world_size > 1 and dist.is_initialized():
+                dist.barrier()
 
             # 19. Increment global step
             self.global_step += 1
 
             torch.cuda.empty_cache()
-
-    async def create_checkpoint_async(self):
-        """Create checkpoint in a thread pool to avoid blocking"""
-
-        def _create_checkpoint():
-            # This runs in a thread, not blocking the event loop
-            return {
-                "model_state_dict": {
-                    k: v.cpu().clone() for k, v in self.model.state_dict().items()
-                },
-                "start_window": self.start_window,
-                "current_window": self.current_window,
-                "sync_window": self.sync_window,
-            }
-
-        # Run in thread pool
-        checkpoint_data = await asyncio.get_event_loop().run_in_executor(
-            self.executor,  # Your ThreadPoolExecutor
-            _create_checkpoint,
-        )
-        return checkpoint_data
 
     def select_initial_peers(self) -> tuple[list[int], list[int]] | None:
         """
@@ -2652,41 +2650,50 @@ class Validator(BaseNode, Trainer):
             >= self.hparams.checkpoint_frequency + checkpoint_window_buffer
         )
         # Proceed to load checkpoint
-        (
-            success,
-            loaded_checkpoint_window,
-        ) = await self.comms.load_checkpoint(
+        #   • rank-0 (or single-GPU run) downloads & catches-up
+        #   • remaining ranks receive state via NCCL broadcast
+        ckpt_ok, ckpt_sync_win = await self.comms.load_checkpoint(
             model=self.model,
             current_window=self.current_window,
-            device=cast(str, self.config.device),
             init_version=tplr.__version__
             if has_new_checkpoint
             else self.bootstrap_version,
+            is_master=self.is_master,
         )
-        if success:
-            tplr.logger.info(f"Loaded checkpoint with global_step={self.global_step}")
-            # Only catch up if we're behind
-            for _ in range(
-                self.start_window,
-                (loaded_checkpoint_window + 1) * self.hparams.inner_steps,
-            ):
-                self.inner_scheduler.step()
-            if (
-                loaded_checkpoint_window < self.current_window
-                and self.global_step > checkpoint_window_buffer
-            ):
-                tplr.logger.info(
-                    f"Checkpoint is behind current window ({loaded_checkpoint_window} < {self.current_window}), starting catchup..."
-                )
-                await tplr.neurons.catchup_with_aggregation_server(
-                    self, max(loaded_checkpoint_window, self.start_window)
-                )
-            else:
-                tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
 
+        if ckpt_ok:
+            tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
         else:
-            tplr.logger.info("Starting from scratch")
-            self.model.to(self.config.device)  # type: ignore
+            tplr.logger.info("No checkpoint found – starting from scratch")
+
+        # Decide catch-up windows and run catch-up on ALL ranks (avoids DTensor collective hangs)
+        need_catchup = (not ckpt_ok) or (
+            ckpt_ok
+            and ckpt_sync_win < self.current_window
+            and self.global_step > checkpoint_window_buffer
+        )
+
+        if need_catchup:
+            start_from = (
+                self.start_window
+                if not ckpt_ok
+                else max(ckpt_sync_win, self.start_window)
+            )
+            tplr.logger.info(
+                f"Checkpoint is behind current window ({ckpt_sync_win} < {self.current_window}), starting catchup..."
+            )
+            await tplr.neurons.catchup_with_aggregation_server(self, start_from)
+        else:
+            tplr.logger.info("Checkpoint is up-to-date, skipping catchup.")
+
+        # Replay scheduler steps if checkpoint was loaded
+        if ckpt_ok:
+            steps_to_replay = (
+                ckpt_sync_win - self.start_window + 1
+            ) * self.hparams.inner_steps
+            for _ in range(steps_to_replay):
+                self.inner_scheduler.step()
+
         return
 
     def bin_evaluation_peers(self, num_bins: int) -> dict[int, list[int]]:

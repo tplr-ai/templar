@@ -408,39 +408,32 @@ class Miner(BaseNode, Trainer):
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
 
-        ckpt_ok = False
-        ckpt_sync_win = self.start_window
-        if self.world_size == 1 or self.is_master:
-            (
-                ckpt_ok,
-                ckpt_sync_win,
-            ) = await self.comms.load_checkpoint(
-                model=self.bare_model,
-                current_window=self.current_window,
-                device=str(self.device),
-                init_version=tplr.__version__
-                if has_new_checkpoint
-                else self.bootstrap_version,
+        ckpt_ok, ckpt_sync_win = await self.comms.load_checkpoint(
+            model=self.bare_model,
+            current_window=self.current_window,
+            init_version=tplr.__version__
+            if has_new_checkpoint
+            else self.bootstrap_version,
+            is_master=self.is_master,
+        )
+        if ckpt_ok:
+            tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
+        else:
+            tplr.logger.info("No checkpoint found – starting from scratch")
+
+        # Decide catch-up windows and run catch-up on ALL ranks (avoids DTensor collective hangs)
+        need_catchup = (not ckpt_ok) or (
+            ckpt_ok
+            and ckpt_sync_win < self.current_window
+            and self.global_step > checkpoint_window_buffer
+        )
+        if need_catchup:
+            start_from = (
+                self.start_window
+                if not ckpt_ok
+                else max(ckpt_sync_win, self.start_window)
             )
-
-            if ckpt_ok:
-                tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
-                # catch-up only if the checkpoint lags behind
-                if (
-                    ckpt_sync_win < self.current_window
-                    and self.global_step > checkpoint_window_buffer
-                ):
-                    await tplr.neurons.catchup_with_aggregation_server(
-                        self, max(ckpt_sync_win, self.start_window)
-                    )
-
-            else:
-                tplr.logger.info("No checkpoint found – starting from scratch")
-
-                # still perform the full catch-up from the very first window
-                await tplr.neurons.catchup_with_aggregation_server(
-                    self, self.start_window
-                )
+            await tplr.neurons.catchup_with_aggregation_server(self, start_from)
 
         if ckpt_ok:
             steps_to_replay = (
@@ -448,23 +441,6 @@ class Miner(BaseNode, Trainer):
             ) * self.hparams.inner_steps
             for _ in range(steps_to_replay):
                 self.inner_scheduler.step()
-
-        # ---- broadcast to other ranks (if any) --------------------------------
-        if self.world_size > 1:
-            bcast_start = tplr.T()
-
-            # 1) parameters & buffers
-            for tensor in self.bare_model.state_dict().values():
-                if torch.is_tensor(tensor) and not isinstance(tensor, DT):
-                    dist.broadcast(tensor.data, src=0)
-
-            bcast_time = tplr.T() - bcast_start
-            tplr.logger.info(
-                f"{tplr.P(self.current_window, bcast_time)} "
-                f"Broadcast checkpoint to {self.world_size - 1} ranks"
-            )
-
-            dist.barrier(device_ids=[self.local_rank])
 
         self.comms.start_commitment_fetcher()
 

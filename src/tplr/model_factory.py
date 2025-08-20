@@ -218,15 +218,21 @@ def create_parallel_dims(
         ValueError: If parallelization parameters are invalid
     """
     if role == "evaluator":
-        # Evaluator: single GPU, no sharding
+        # Evaluator: support both single and multi-GPU configurations
+        tp_degree = min(4, world_size)  # Use up to 4 GPUs for TP
+        if world_size % tp_degree != 0:
+            raise ValueError(
+                f"World size ({world_size}) must be divisible by "
+                f"tensor-parallel degree ({tp_degree})"
+            )
         return ParallelDims(
-            dp_replicate=1,
+            dp_replicate=world_size // tp_degree,
             dp_shard=1,
-            tp=1,
+            tp=tp_degree,
             pp=1,
             cp=1,
             ep=1,
-            world_size=1,
+            world_size=world_size,
         )
     elif role == "validator":
         # Validator: pipeline parallelism with data parallel replication

@@ -64,7 +64,7 @@ elif [ "$NODE_TYPE" = "validator" ]; then
     exec torchrun \
         --standalone \
         --nnodes 1 \
-        --nproc_per_node 1 \
+        --nproc_per_node 4 \
         neurons/validator.py \
         --wallet.name ${WALLET_NAME} \
         --wallet.hotkey ${WALLET_HOTKEY} \
@@ -75,11 +75,20 @@ elif [ "$NODE_TYPE" = "validator" ]; then
         ${PROJECT:+--project ${PROJECT}} \
         ${DEBUG_FLAG}
 elif [ "$NODE_TYPE" = "evaluator" ]; then
-    echo "Starting evaluator with torchrun..."
+    # Count the number of visible GPUs for evaluator
+    if [ -n "$NVIDIA_VISIBLE_DEVICES" ]; then
+        # Count commas + 1 to get number of GPUs
+        NUM_GPUS=$(echo "$NVIDIA_VISIBLE_DEVICES" | tr -cd ',' | wc -c)
+        NUM_GPUS=$((NUM_GPUS + 1))
+    else
+        NUM_GPUS=1
+    fi
+    
+    echo "Starting evaluator with torchrun using $NUM_GPUS GPU(s)..."
     exec torchrun \
         --standalone \
         --nnodes 1 \
-        --nproc_per_node 1 \
+        --nproc_per_node $NUM_GPUS \
         scripts/evaluator.py \
         --netuid ${NETUID} \
         --device cuda \

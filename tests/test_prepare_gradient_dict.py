@@ -411,8 +411,15 @@ def test_behavior_when_p_grad_is_none():
 
     step_window = 3
 
-    with pytest.raises(AssertionError):
-        prepare_gradient_dict(miner, step_window)
+    # The function should skip parameters with None gradients and return an empty gradient dict
+    gradient, xshapes, totalks = prepare_gradient_dict(miner, step_window)
+
+    # Should only have metadata, no parameter data since grad was None
+    assert "metadata" in gradient
+    assert gradient["metadata"]["window"] == step_window
+    # Weight should be skipped, so no weightidxs/weightvals
+    assert "weightidxs" not in gradient
+    assert "weightvals" not in gradient
 
 
 def test_logging_behavior(caplog):

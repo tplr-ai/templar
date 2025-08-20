@@ -24,29 +24,33 @@ import random
 import re
 import shutil
 import time
+import uuid
 from datetime import datetime, timezone
 from functools import partial
-
-# from .hparams import HParams
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal, cast
 
 import aiofiles
 import bittensor as bt
+import boto3
 import botocore
 import torch
+import torch.distributed as dist
 from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError, ConnectionClosedError
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    set_model_state_dict,
+)
 from tqdm import tqdm as std_tqdm
 
-import tplr as tplr
+import tplr
+from tplr.chain import ChainManager
 from tplr.compress import TopKCompressor, unpack_12bit_indices
-
-from . import __version__
-from .chain import ChainManager
-from .config import BUCKET_SECRETS, client_config
-from .schemas import Bucket
+from tplr.config import BUCKET_SECRETS, client_config
+from tplr.schemas import Bucket, CommsGetResult
 
 # Constants
 CF_REGION_NAME: str = "enam"
@@ -55,20 +59,48 @@ PEERS_FILE_PREFIX = "peers_"
 CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
+SAFE_BUCKET_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
+# Allow path-like keys. Tighten if you need to.
+SAFE_KEY_RE = re.compile(r"^[a-zA-Z0-9._/-]+$")
+
 
 class Comms(ChainManager):
+    """
+    The Comms class handles all communication and data transfer operations for the templar network.
+    It is responsible for managing S3 client connections, handling file uploads and downloads,
+    and managing data for gradients, checkpoints, and other operational data.
+
+    This class builds upon the ChainManager to interact with the blockchain while providing
+    specialized methods for efficient data handling in a distributed environment.
+    """
+
     def __init__(
         self,
-        wallet: "bt.wallet | None",
+        wallet: bt.wallet | None,
         save_location: str = "/tmp",
         key_prefix: str = "model",
         config=None,
-        netuid=None,
+        netuid: int | None = None,
         metagraph=None,
         hparams=None,
-        uid=None,
+        uid: int | None = None,
         **kwargs,
     ):
+        """
+        Initializes the Comms object, setting up necessary configurations, directories,
+        and background tasks for communication.
+
+        Args:
+            wallet (bt.wallet | None): The bittensor wallet instance.
+            save_location (str, optional): The base directory for saving local files. Defaults to "/tmp".
+            key_prefix (str, optional): A prefix for keys used in storage. Defaults to "model".
+            config (object, optional): Configuration object. Defaults to None.
+            netuid (int | None, optional): The network UID. Defaults to None.
+            metagraph (object, optional): The metagraph instance. Defaults to None.
+            hparams (object, optional): Hyperparameters object. Defaults to None.
+            uid (int | None, optional): The UID of the neuron. Defaults to None.
+            **kwargs: Additional keyword arguments.
+        """
         self.uid = uid
         self.wallet = wallet
 
@@ -111,13 +143,24 @@ class Comms(ChainManager):
         self.peers: list[int] = []
         self.reserve_peers: list[int] = []
 
-        self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
-        self.gather_semaphore = asyncio.Semaphore(20)
+        self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS // 2)
+        self.gather_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS // 2)
+        # Limit how many TransferManagers run concurrently (protects threads/conn pool)
+        self.upload_sem = asyncio.Semaphore(4)
 
-    async def _get_s3_client(self, bucket: Bucket):
+    async def _get_s3_client(self, bucket: Bucket) -> AioBaseClient:
         """
-        Returns a persistent s3_client for the given bucket credentials.
-        We create it if we haven't already, else reuse the existing client.
+        Retrieves or creates a persistent S3 client for the given bucket.
+
+        This method ensures that a single client is reused for each set of bucket
+        credentials to optimize resource usage. If a client for the specified
+        bucket does not exist, it is created and stored for future use.
+
+        Args:
+            bucket (Bucket): The bucket for which to get the S3 client.
+
+        Returns:
+            AioBaseClient: The asynchronous S3 client for the specified bucket.
         """
         key = (bucket.access_key_id, bucket.secret_access_key, bucket.account_id)
         if key in self._s3_clients:
@@ -143,7 +186,11 @@ class Comms(ChainManager):
 
     async def close_all_s3_clients(self):
         """
-        Closes all S3 clients that have been created and stored
+        Closes all active S3 clients.
+
+        This method iterates through all created S3 clients and closes them
+        gracefully. It's intended to be called during shutdown to release
+        all network resources.
         """
         for key, client in list(self._s3_clients.items()):
             try:
@@ -153,11 +200,26 @@ class Comms(ChainManager):
         self._s3_clients.clear()
 
     async def _purge_s3_client(self, bucket: Bucket) -> None:
+        """
+        Removes a specific S3 client from the managed pool.
+
+        This is typically used when a client encounters a persistent error
+        (e.g., ConnectionClosedError) and needs to be recreated on the next request.
+
+        Args:
+            bucket (Bucket): The bucket whose client needs to be purged.
+        """
         key = (bucket.access_key_id, bucket.secret_access_key, bucket.account_id)
         if key in self._s3_clients:
             del self._s3_clients[key]
 
     def start_background_tasks(self):
+        """
+        Initializes and starts background tasks for the Comms instance.
+
+        This method sets up a thread pool executor and starts the `track_active_peers`
+        task to run in the background, continuously monitoring peer activity.
+        """
         self.loop = asyncio.get_running_loop()
 
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
@@ -169,13 +231,25 @@ class Comms(ChainManager):
     def get_own_bucket(
         self,
         bucket_type: Literal["gradients", "dataset", "aggregator"],
-        access_type=None,
+        access_type: Literal["read", "write"] | None = None,
     ) -> Bucket:
-        """Gets bucket configuration from environment variables via config.BUCKET_SECRETS.
+        """
+        Retrieves bucket configuration from environment variables.
+
+        This method constructs a `Bucket` object based on the specified type and
+        access level, using credentials stored in `BUCKET_SECRETS`.
 
         Args:
-            bucket_type: Either "gradients" or "dataset" to determine which bucket to use
-            access_type: For gradients bucket, either "read" or "write" to determine access level
+            bucket_type (Literal["gradients", "dataset", "aggregator"]): The type of bucket to retrieve.
+            access_type (Literal["read", "write"] | None, optional): The access level required.
+                Required for 'gradients' and 'aggregator' buckets. Defaults to None.
+
+        Returns:
+            Bucket: The configured bucket object.
+
+        Raises:
+            ValueError: If `bucket_type` or `access_type` is invalid.
+            KeyError: If required R2 configuration is missing.
         """
         try:
             if bucket_type not in ["gradients", "dataset", "aggregator"]:
@@ -214,12 +288,25 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error creating bucket: {e}")
             raise
 
-    def get_base_url(self, account_id):
-        """Constructs the base URL for the R2 storage endpoint."""
+    def get_base_url(self, account_id: str) -> str:
+        """
+        Constructs the base URL for the R2 storage endpoint.
+
+        Args:
+            account_id (str): The R2 account ID.
+
+        Returns:
+            str: The full endpoint URL for the R2 storage.
+        """
         return f"https://{account_id}.r2.cloudflarestorage.com"
 
     def delete_local_directory(self, path: str):
-        """Safely remove a local directory and all its contents."""
+        """
+        Safely removes a local directory and all its contents.
+
+        Args:
+            path (str): The path to the directory to be deleted.
+        """
         if not os.path.exists(path):
             return
         for root, dirs, files in os.walk(path, topdown=False):
@@ -233,7 +320,17 @@ class Comms(ChainManager):
     async def cleanup_local_data(
         self, uid: str, current_window: int, stale_retention: int
     ):
-        """Clean up stale local data for a given uid."""
+        """
+        Cleans up stale local data for a given UID.
+
+        Removes directories and files that are older than the specified retention window
+        to manage local disk space.
+
+        Args:
+            uid (str): The UID whose local data needs to be cleaned.
+            current_window (int): The current training window, used as a reference point.
+            stale_retention (int): The number of windows to keep before data is considered stale.
+        """
         user_dir = os.path.join(LOCAL_TMP_DIR, str(uid))
         if not os.path.exists(user_dir):
             return
@@ -255,7 +352,17 @@ class Comms(ChainManager):
     async def cleanup_s3_data(
         self, uid: str, current_window: int, stale_retention: int
     ):
-        """Clean up stale S3 data for a given uid."""
+        """
+        Cleans up stale S3 data for a given UID.
+
+        Deletes objects from the S3 bucket that are older than the specified retention
+        window to manage storage costs and keep the bucket clean.
+
+        Args:
+            uid (str): The UID whose S3 data needs to be cleaned.
+            current_window (int): The current training window.
+            stale_retention (int): The number of windows to keep.
+        """
         try:
             min_allowed_window = current_window - stale_retention
 
@@ -323,14 +430,23 @@ class Comms(ChainManager):
         key: str,
         file_path: str | None = None,
         bucket: Bucket | None = None,
-    ):
+    ) -> None:
         """
-        Puts an object into S3 storage, handling different file types appropriately.
+        Uploads an object to S3, handling different file types and sizes.
+
+        This method supports both regular and multipart uploads for large files.
+        It also handles JSON and PyTorch tensor files appropriately.
 
         Args:
-            key (str): The key/path to store the data under
-            file_path (str, optional): The local file path to upload
-            bucket (Bucket, optional): The bucket to use. Defaults to self.bucket
+            key (str): The S3 object key.
+            file_path (str | None, optional): The local path to the file to upload.
+                Required for non-JSON files. Defaults to None.
+            bucket (Bucket | None, optional): The target bucket. If None, uses the
+                default instance bucket. Defaults to None.
+
+        Raises:
+            ValueError: If `file_path` is not provided for a non-JSON file.
+            Exception: Propagates exceptions from the S3 client.
         """
         try:
             if bucket is None:
@@ -360,8 +476,8 @@ class Comms(ChainManager):
                     data = await f.read()
                     await s3_client.put_object(Bucket=bucket.name, Key=key, Body=data)
             else:
-                # Multipart upload for large files
-                await self.upload_large_file(file_path, key, s3_client, bucket)
+                # Multipart upload for large files -> boto3 TransferManager in a thread
+                await self._upload_large_file_via_boto3(file_path, key, bucket)
 
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(bucket)
@@ -372,17 +488,35 @@ class Comms(ChainManager):
     async def s3_get_object(
         self,
         key: str,
-        bucket: Bucket = None,
+        bucket: Bucket | None = None,
         timeout: int = 30,
-        time_min: datetime = None,
-        time_max: datetime = None,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
         load_data: bool = True,
+        show_progress: bool = True,
     ):
-        """Download object from S3 using asynchronous streaming."""
-        import uuid
+        """Download object from S3 using asynchronous streaming.
 
+        Args:
+            key: The S3 object key to download
+            bucket: The bucket configuration (defaults to self.bucket)
+                        timeout (int, optional): Download timeout in seconds. Defaults to 30.
+            time_min (datetime | None, optional): The minimum modification time for the object.
+                If the object is older, it's skipped. Defaults to None.
+            time_max (datetime | None, optional): The maximum modification time for the object.
+                If the object is newer, it's skipped. Defaults to None.
+            load_data (bool, optional): If True, loads the object into memory.
+                If False, moves it to a local path. Defaults to True.
+
+        Returns:
+            Any | None: The loaded data (e.g., dict from JSON, tensor from .pt),
+                a status dictionary if skipped, or None if not found or on error.
+        """
+
+        # Replace forward slashes in key to avoid creating subdirectories
+        safe_key = key.replace("/", "_")
         temp_file_path = os.path.join(
-            self.temp_dir, f"temp_{key}_{uuid.uuid4().hex}.pt"
+            self.temp_dir, f"temp_{safe_key}_{uuid.uuid4().hex}.pt"
         )
         s3_client = await self._get_s3_client(bucket)
         try:
@@ -431,8 +565,8 @@ class Comms(ChainManager):
 
             file_size = response["ContentLength"]  # type: ignore
 
-            # Download the object
-            if file_size <= 4 * 1024 * 1024 * 1024:  # 4GB
+            # Download the object - choose method based on file size
+            if file_size <= 1 * 1024 * 1024 * 1024:  # 1GB - use simple download
                 response = await asyncio.wait_for(
                     s3_client.get_object(Bucket=bucket.name, Key=key),
                     timeout=timeout,
@@ -443,13 +577,16 @@ class Comms(ChainManager):
                         await f.write(data)
                 success = True
             else:
+                # Use our optimized Python implementation for all large files
                 success = await self.download_large_file(
                     s3_client=s3_client,
                     bucket=bucket,
                     key=key,
                     file_size=file_size,
                     temp_file_path=temp_file_path,
+                    show_progress=show_progress,
                 )
+
                 if not success:
                     return None
 
@@ -496,16 +633,34 @@ class Comms(ChainManager):
     async def upload_large_file(
         self, file_path: str, key: str, s3_client, bucket: Bucket | None = None
     ):
-        """Uploads a large file to S3 using asynchronous multipart upload with 5MB chunks."""
+        """
+        Uploads a large file to S3 using a robust, asynchronous multipart strategy.
+
+        This method handles large file uploads by splitting them into chunks and
+        uploading them in parallel. It includes retry logic for transient network
+        errors and dynamically adjusts part sizes based on the file's total size
+        to optimize performance.
+
+        Args:
+            file_path (str): The local path to the file to be uploaded.
+            key (str): The destination S3 object key.
+            s3_client: The `AioBaseClient` instance to use for the upload.
+            bucket (Bucket | None, optional): The target S3 bucket. If None, the
+                instance's default bucket is used. Defaults to None.
+
+        Raises:
+            Exception: Propagates exceptions from the S3 client if the upload
+                fails after multiple retries.
+        """
         upload_id = None
         MAX_RETRIES = 3
         file_size_gb = os.path.getsize(file_path) / (1024 * 1024 * 1024)
         if file_size_gb > 10:
-            PART_SIZE = 128 * 1024 * 1024
+            part_size = 128 * 1024 * 1024
         elif file_size_gb > 1:
-            PART_SIZE = 64 * 1024 * 1024
+            part_size = 64 * 1024 * 1024
         else:
-            PART_SIZE = 32 * 1024 * 1024
+            part_size = 32 * 1024 * 1024
 
         if bucket is None:
             bucket = self.bucket
@@ -524,12 +679,12 @@ class Comms(ChainManager):
                         await asyncio.sleep(2**attempt)
 
                 file_size = os.path.getsize(file_path)
-                total_parts = math.ceil(file_size / PART_SIZE)
+                total_parts = math.ceil(file_size / part_size)
                 parts = []
 
                 async def upload_part(part_number: int):
-                    byte_range_start = (part_number - 1) * PART_SIZE
-                    byte_range_end = min(byte_range_start + PART_SIZE, file_size)
+                    byte_range_start = (part_number - 1) * part_size
+                    byte_range_end = min(byte_range_start + part_size, file_size)
 
                     for attempt in range(MAX_RETRIES):
                         try:
@@ -599,62 +754,144 @@ class Comms(ChainManager):
                     tplr.logger.error(f"Failed to abort multipart upload: {abort_e}")
             raise
 
+    async def _upload_large_file_via_boto3(
+        self, file_path: str, key: str, bucket: Bucket
+    ) -> None:
+        """
+        Upload large files using boto3's TransferManager inside a worker thread.
+        Bounded by self.upload_sem to avoid spinning up many managers at once.
+        """
+        MB = 1024 * 1024
+        file_size_gb = os.path.getsize(file_path) / (1024**3)
+        if file_size_gb > 10:
+            part_size = 128 * MB
+            max_conc = 16
+        elif file_size_gb > 1:
+            part_size = 64 * MB
+            max_conc = 12
+        else:
+            part_size = 32 * MB
+            max_conc = 8
+
+        tconf = TransferConfig(
+            multipart_threshold=part_size,
+            multipart_chunksize=part_size,
+            max_concurrency=max_conc,
+            use_threads=True,
+        )
+
+        endpoint = self.get_base_url(bucket.account_id)
+
+        async with self.upload_sem:
+
+            def _do():
+                c = boto3.client(
+                    "s3",
+                    endpoint_url=endpoint,
+                    region_name=CF_REGION_NAME,
+                    config=client_config,  # reuses your existing botocore.Config
+                    aws_access_key_id=bucket.access_key_id,
+                    aws_secret_access_key=bucket.secret_access_key,
+                )
+                c.upload_file(file_path, bucket.name, key, Config=tconf)
+
+            await asyncio.to_thread(_do)
+
     async def download_large_file(
-        self, s3_client, bucket: Bucket, key: str, file_size: int, temp_file_path: str
-    ):
-        """Download large file using multipart download with concurrent chunks."""
+        self,
+        s3_client,
+        bucket: Bucket,
+        key: str,
+        file_size: int,
+        temp_file_path: str,
+        show_progress: bool = True,
+    ) -> bool:
+        """
+        Downloads a large file from S3 using a parallel, multipart strategy.
+
+        This method optimizes large file downloads by fetching multiple chunks
+        concurrently. It dynamically adjusts the chunk size and the number of
+        parallel workers based on available system resources (GPU or CPU) to
+        maximize download speed. It also includes a progress bar and robust
+        error handling with retries.
+
+        Args:
+            s3_client: The `AioBaseClient` instance for the download.
+            bucket (Bucket): The S3 bucket to download from.
+            key (str): The S3 object key.
+            file_size (int): The total size of the file in bytes.
+            temp_file_path (str): The local path to save the downloaded file.
+
+        Returns:
+            bool: True if the download was successful, False otherwise.
+
+        """
         try:
-            # Determine optimal chunk size and concurrency
-            gpu_available = torch.cuda.is_available()
-            if gpu_available:
-                gpu_mem = torch.cuda.get_device_properties(0).total_memory
-                max_workers = min(torch.cuda.device_count() * 4, 16)
-                chunk_size = min(
-                    max(
-                        5 * 1024 * 1024,  # Minimum 5MB for S3 multipart
-                        gpu_mem // (max_workers * 4),
-                    ),
-                    5 * 1024 * 1024 * 1024,  # Maximum 5GB
-                )
-            else:
-                cpu_count = os.cpu_count() or 1
-                max_workers = min(cpu_count * 4, 16)
-                chunk_size = min(
-                    max(
-                        5 * 1024 * 1024,
-                        file_size // (max_workers * 2),
-                    ),
-                    5 * 1024 * 1024 * 1024,
+            # Centralised parameter selection (no logic duplication)
+            params = self._calc_download_params(
+                file_size, os.getenv("DOWNLOAD_MAX_WORKERS")
+            )
+            chunk_size = params["chunk_size"]
+            max_workers = params["max_workers"]
+            total_chunks = params["total_chunks"]
+            file_size_gb = params["file_size_gb"]
+
+            tplr.logger.info(
+                f"Downloading {file_size_gb:.1f}GB file with {chunk_size // (1024 * 1024)}MB chunks, {max_workers} workers"
+            )
+
+            # Resume capability - check for existing partial file
+            resume_info = await self._get_download_resume_info(
+                temp_file_path, total_chunks, chunk_size, file_size
+            )
+            downloaded_chunks = resume_info["completed_chunks"]
+            remaining_chunks = resume_info["remaining_chunks"]
+
+            if downloaded_chunks:
+                tplr.logger.info(
+                    f"Resuming download: {len(downloaded_chunks)}/{total_chunks} chunks already completed"
                 )
 
-            total_chunks = math.ceil(file_size / chunk_size)
-            max_workers = min(max_workers, total_chunks)
-            semaphore = asyncio.Semaphore(max_workers)
-
-            # Create the file with the correct size
+            # Create directory if needed
             target_directory = os.path.dirname(temp_file_path)
             if target_directory:
                 os.makedirs(target_directory, exist_ok=True)
 
-            async with aiofiles.open(temp_file_path, "wb") as f:
-                await f.truncate(file_size)
+            # Use a memory-efficient approach - don't pre-allocate the entire file
+            # Instead, create sparse file or extend as needed
+            if not os.path.exists(temp_file_path):
+                # Create file
+                async with aiofiles.open(temp_file_path, "wb") as f:
+                    pass  # Just create the file
 
-            # Create progress bar
-            pbar = std_tqdm(
-                total=file_size,
-                unit="B",
-                unit_scale=True,
-                desc=f"Downloading {key} ({max_workers} workers)",
+            # Create progress bar if requested
+            already_downloaded = sum(
+                chunk["size"] for chunk in downloaded_chunks.values()
             )
+            if show_progress:
+                pbar = std_tqdm(
+                    total=file_size,
+                    initial=already_downloaded,
+                    unit="B",
+                    unit_scale=True,
+                    desc=f"Downloading {key} ({max_workers} workers)",
+                )
+            else:
+                pbar = None
 
-            downloaded_chunks = {}
+            # Memory-controlled semaphore to prevent excessive memory usage
+            download_semaphore = asyncio.Semaphore(max_workers)
 
-            async def download_chunk(chunk_number: int, max_retries: int = 3):
-                """Download a specific chunk with retries."""
+            async def download_chunk_streaming(chunk_number: int, max_retries: int = 3):
+                """Download chunk directly to file using streaming (no data loss, no over-read)."""
+                if chunk_number in downloaded_chunks:
+                    return chunk_number
+
                 for attempt in range(max_retries):
-                    async with semaphore:
+                    async with download_semaphore:
                         start = chunk_number * chunk_size
                         end = min(start + chunk_size, file_size) - 1
+                        expected_len = end - start + 1
 
                         try:
                             response = await s3_client.get_object(
@@ -663,46 +900,88 @@ class Comms(ChainManager):
                                 Range=f"bytes={start}-{end}",
                             )
 
-                            async with response["Body"] as stream:  # type: ignore
-                                chunk_data = await stream.read()
+                            bytes_written = 0
+                            buffer_size = min(8 * 1024 * 1024, expected_len)  # ≤ 8MB
 
-                            # Verify chunk size matches expected
-                            chunk_len = len(chunk_data)
-                            expected_len = end - start + 1
-                            if chunk_len != expected_len:
+                            async with aiofiles.open(temp_file_path, "rb+") as f:
+                                await f.seek(start)
+                                stream = response[
+                                    "Body"
+                                ]  # aiobotocore AIOStreamingBody
+                                try:
+                                    while bytes_written < expected_len:
+                                        to_read = min(
+                                            buffer_size, expected_len - bytes_written
+                                        )
+                                        chunk = await stream.read(to_read)
+                                        if not chunk:
+                                            raise Exception(
+                                                f"Unexpected EOF in range {start}-{end}; "
+                                                f"wrote {bytes_written} of {expected_len}"
+                                            )
+                                        await f.write(chunk)
+                                        bytes_written += len(chunk)
+                                finally:
+                                    # Return connection to pool properly
+                                    if hasattr(stream, "release_conn"):
+                                        try:
+                                            await stream.release_conn()
+                                        except TypeError:
+                                            # some versions define it sync
+                                            stream.release_conn()
+                                    else:
+                                        # fallback: sync close
+                                        try:
+                                            stream.close()
+                                        except Exception:
+                                            pass
+
+                            if bytes_written != expected_len:
                                 raise Exception(
-                                    f"Chunk size mismatch: got {chunk_len}, expected {expected_len}"
+                                    f"Chunk write mismatch: wrote {bytes_written}, expected {expected_len}"
                                 )
+                            if pbar:
+                                pbar.update(expected_len)
 
-                            async with aiofiles.open(temp_file_path, "rb+") as f2:
-                                await f2.seek(start)
-                                await f2.write(chunk_data)
-
-                            pbar.update(chunk_len)
                             downloaded_chunks[chunk_number] = {
                                 "start": start,
                                 "end": end + 1,
-                                "size": chunk_len,
+                                "size": bytes_written,
                             }
-
                             return chunk_number
 
+                        except asyncio.CancelledError:
+                            raise
                         except Exception as e:
                             tplr.logger.error(
                                 f"Error downloading chunk {chunk_number} (attempt {attempt + 1}/{max_retries}): {e}"
                             )
-                            if attempt == max_retries - 1:  # Last attempt
+                            if attempt == max_retries - 1:
                                 raise
-                            await asyncio.sleep(
-                                1 * (attempt + 1)
-                            )  # Exponential backoff
+                            await asyncio.sleep((2**attempt) + random.uniform(0, 1))
 
             try:
-                tasks = [
-                    asyncio.create_task(download_chunk(i)) for i in range(total_chunks)
-                ]
-                await asyncio.gather(*tasks)
+                # Download remaining chunks
+                if remaining_chunks:
+                    tasks = [
+                        asyncio.create_task(download_chunk_streaming(c))
+                        for c in remaining_chunks
+                    ]
+                    try:
+                        results = await asyncio.gather(*tasks, return_exceptions=True)
+                        # propagate first real error (skip CancelledError/None)
+                        for r in results:
+                            if isinstance(r, Exception) and not isinstance(
+                                r, asyncio.CancelledError
+                            ):
+                                raise r
+                    finally:
+                        # ➌ make sure **all** tasks are finished before we return
+                        for t in tasks:
+                            t.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
 
+                # Final verification
                 if len(downloaded_chunks) != total_chunks:
                     missing_chunks = set(range(total_chunks)) - set(
                         downloaded_chunks.keys()
@@ -717,20 +996,128 @@ class Comms(ChainManager):
                         f"Downloaded size ({downloaded_size}) != expected size ({file_size})"
                     )
 
+                # Verify file integrity
+                actual_file_size = os.path.getsize(temp_file_path)
+                if actual_file_size != file_size:
+                    raise Exception(
+                        f"File size mismatch: {actual_file_size} != {file_size}"
+                    )
+
+                tplr.logger.info(f"Successfully downloaded {file_size_gb:.1f}GB file")
                 return True
 
             finally:
-                pbar.close()
+                if pbar:
+                    pbar.close()
 
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(bucket)
+            return False
         except Exception as e:
             tplr.logger.error(f"Error in download_large_file for {key}: {e}")
             return False
 
+    async def _get_download_resume_info(
+        self, temp_file_path: str, total_chunks: int, chunk_size: int, file_size: int
+    ):
+        """Check existing partial file and determine which chunks need to be downloaded."""
+        completed_chunks = {}
+        remaining_chunks = list(range(total_chunks))
+
+        if not os.path.exists(temp_file_path):
+            return {
+                "completed_chunks": completed_chunks,
+                "remaining_chunks": remaining_chunks,
+            }
+
+        try:
+            current_file_size = os.path.getsize(temp_file_path)
+            if current_file_size == 0:
+                return {
+                    "completed_chunks": completed_chunks,
+                    "remaining_chunks": remaining_chunks,
+                }
+
+            # For resume capability, we need to verify which chunks are complete
+            # We'll do a basic verification by checking file size and assuming
+            # sequential chunks are complete up to the current size
+            completed_bytes = min(current_file_size, file_size)
+            completed_full_chunks = completed_bytes // chunk_size
+
+            # Mark completed chunks
+            for chunk_num in range(min(completed_full_chunks, total_chunks)):
+                start = chunk_num * chunk_size
+                end = min(start + chunk_size, file_size)
+                completed_chunks[chunk_num] = {
+                    "start": start,
+                    "end": end,
+                    "size": end - start,
+                }
+                if chunk_num in remaining_chunks:
+                    remaining_chunks.remove(chunk_num)
+
+            # If there's a partial chunk at the end, we'll re-download it
+            # This is safer than trying to resume from the middle of a chunk
+
+            tplr.logger.debug(
+                f"Resume analysis: {len(completed_chunks)}/{total_chunks} chunks verified complete"
+            )
+
+        except Exception as e:
+            tplr.logger.warning(
+                f"Error analyzing partial file for resume: {e}. Starting fresh download."
+            )
+            # If we can't analyze the partial file, start fresh
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+            completed_chunks = {}
+            remaining_chunks = list(range(total_chunks))
+
+        return {
+            "completed_chunks": completed_chunks,
+            "remaining_chunks": remaining_chunks,
+        }
+
+    @staticmethod
+    def _calc_download_params(
+        file_size: int, custom_workers: str | None = None
+    ) -> dict[str, float | int]:
+        """
+        Decide chunk size & worker count according to file size, with an
+        optional explicit override (DOWNLOAD_MAX_WORKERS).
+        """
+        file_size_gb = file_size / (1024 * 1024 * 1024)
+
+        if file_size_gb > 100:  # ≥100 GB
+            chunk_size = 512 * 1024 * 1024  # 512 MB
+            max_workers = min(32, max(8, CPU_COUNT))
+        elif file_size_gb > 10:  # 10–100 GB
+            chunk_size = 256 * 1024 * 1024  # 256 MB
+            max_workers = min(16, max(8, CPU_COUNT))
+        else:  # <10 GB
+            chunk_size = 64 * 1024 * 1024  # 64 MB
+            max_workers = min(8, max(6, CPU_COUNT * 2))
+
+        # Optional override
+        if custom_workers:
+            try:
+                max_workers = int(custom_workers)
+            except ValueError:
+                pass
+
+        total_chunks = math.ceil(file_size / chunk_size)
+        max_workers = min(max_workers, total_chunks)
+
+        return {
+            "chunk_size": chunk_size,
+            "max_workers": max_workers,
+            "total_chunks": total_chunks,
+            "file_size_gb": file_size_gb,
+        }
+
     async def put(
         self,
-        state_dict: dict,
+        state_dict: dict[str, Any],
         window: int,
         key: Literal["checkpoint", "debug", "gradient", "aggregator"],
         uid: str | None = None,
@@ -739,22 +1126,30 @@ class Comms(ChainManager):
         stale_retention: int = 10,
     ) -> float:
         """
-        Saves the data locally or uploads to S3, then cleans up stale files.
+        Saves a state dictionary to either local storage or a remote S3 bucket.
+
+        This method acts as a high-level interface for persisting data like model
+        checkpoints, gradients, or other artifacts. It handles file serialization,
+        temporary file management, and routing to the correct storage backend (local
+        or S3). It also triggers cleanup routines to remove stale data.
 
         Args:
-            state_dict (dict): Data to save.
-            uid (str): Target user/miner identifier.
-            window (int): Current training window.
-            key (str): Label for the data (e.g., "gradient").
-            global_step (int, optional): Global step counter. Defaults to 0.
-            local (bool, optional): If True, store locally; otherwise upload to S3. Defaults to True.
-            stale_retention (int, optional): Number of windows to keep before cleanup. Defaults to 10.
+            state_dict (dict[str, torch.Tensor]): The state dictionary to save.
+            window (int): The current training window, used for organizing files.
+            key (Literal["checkpoint", "debug", "gradient", "aggregator"]): The type of data being saved.
+            uid (str | None, optional): The UID associated with the data, used for creating
+                unique file paths. Defaults to None.
+            global_step (int, optional): The global training step. Defaults to 0.
+            local (bool, optional): If True, saves the file to the local filesystem.
+                If False, uploads to the remote S3 bucket. Defaults to True.
+            stale_retention (int, optional): The number of windows to retain before
+                data is considered stale and eligible for cleanup. Defaults to 10.
 
         Returns:
-            float: The elapsed time (in seconds) for the PUT operation.
+            float: The time taken for the save operation in seconds.
         """
         if key == "aggregator":
-            filename = f"{key}-{window}-v{__version__}.pt"
+            filename = f"{key}-{window}-v{tplr.__version__}.pt"
             bucket_config = BUCKET_SECRETS["aggregator"]
             credentials = bucket_config["credentials"]["write"]
 
@@ -766,7 +1161,7 @@ class Comms(ChainManager):
                 secret_access_key=credentials["secret_access_key"],
             )
         else:
-            filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+            filename = f"{key}-{window}-{uid}-v{tplr.__version__}.pt"
             bucket = None
         tplr.logger.debug(f"PUT {filename} -->")
 
@@ -820,8 +1215,21 @@ class Comms(ChainManager):
         self, uid: int, window: int, version: str = tplr.__version__
     ) -> float:
         """
-        Return POSIX seconds of the gradient file’s Last-Modified header,
-        or 0.0 if it does not exist / fails.
+        Retrieves the last-modified timestamp of a gradient file from S3.
+
+        This method performs a HEAD request to get the metadata of an S3 object
+        without downloading its content, providing an efficient way to check for
+        the existence and modification time of a gradient file.
+
+        Args:
+            uid (int): The UID of the miner who owns the gradient.
+            window (int): The window number for the gradient.
+            version (str, optional): The templar version string. Defaults to `tplr.__version__`.
+
+        Returns:
+            float: The POSIX timestamp (seconds since epoch) of the file's
+                last modification, or 0.0 if the file is not found or an
+                error occurs.
         """
         bucket = self.commitments.get(int(uid))
         if not bucket:
@@ -843,19 +1251,44 @@ class Comms(ChainManager):
         local: bool = True,
         stale_retention: int = 10,
         timeout: int = 30,
-        time_min: datetime = None,
-        time_max: datetime = None,
-    ) -> Optional[tuple[dict, int]]:
-        """GET operation."""
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
+        show_progress: bool = True,
+    ) -> CommsGetResult:
+        """
+        Retrieves an object from storage, either locally or from a remote S3 bucket.
+
+        This method serves as a high-level interface for fetching data like checkpoints
+        or gradients. It supports time-based validation to skip files that are too
+        old or too new, and it can handle both local file paths and remote S3 keys.
+
+        Args:
+            uid (str): The UID associated with the data.
+            window (int): The training window of the data.
+            key (Literal["checkpoint", "debug", "gradient", "aggregator"]): The type of data.
+            local (bool, optional): If True, retrieves from local storage. If False,
+                fetches from the remote S3 bucket. Defaults to True.
+            stale_retention (int, optional): The number of windows to keep before
+                considering local data stale. Defaults to 10.
+            timeout (int, optional): Timeout in seconds for S3 requests. Defaults to 30.
+            time_min (datetime | None, optional): The minimum modification time for the
+                object. If the object is older, it's skipped. Defaults to None.
+            time_max (datetime | None, optional): The maximum modification time for the
+                object. If the object is newer, it's skipped. Defaults to None.
+
+        Returns:
+            CommsGetResult: An object containing the status of the operation and the
+                retrieved data if successful.
+        """
         if key == "aggregator":
-            filename = f"{key}-{window}-v{__version__}.pt"
+            filename = f"{key}-{window}-v{tplr.__version__}.pt"
         else:
-            filename = f"{key}-{window}-{uid}-v{__version__}.pt"
+            filename = f"{key}-{window}-{uid}-v{tplr.__version__}.pt"
         tplr.logger.debug(f"GET {filename} -->")
 
         try:
             if local:
-                # Local storage logic remains unchanged
+                # Local storage logic
                 await self.cleanup_local_data(
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
@@ -864,13 +1297,13 @@ class Comms(ChainManager):
                 )
                 if not os.path.exists(local_path):
                     tplr.logger.debug(f"Local file not found: {local_path}")
-                    return None
+                    return CommsGetResult(status="NOT_FOUND")
                 loaded_data = torch.load(local_path, weights_only=True)
                 if key == "checkpoint":
-                    return loaded_data, None
+                    return CommsGetResult(data=loaded_data)
                 state_dict = loaded_data.get("state_dict")
                 global_step = loaded_data.get("global_step", 0)
-                return state_dict, global_step
+                return CommsGetResult(data=state_dict, global_step=global_step)
 
             # Remote storage logic
             if key == "aggregator":
@@ -888,7 +1321,7 @@ class Comms(ChainManager):
                 bucket = self.commitments.get(int(uid))
             tplr.logger.debug(f"Peer bucket : {bucket}")
             if not bucket:
-                return None
+                return CommsGetResult(status="NOT_FOUND")
 
             loaded_data = await self.s3_get_object(
                 key=filename,
@@ -896,10 +1329,11 @@ class Comms(ChainManager):
                 timeout=timeout,
                 time_min=time_min,
                 time_max=time_max,
+                show_progress=show_progress,
             )
 
             if loaded_data is None:
-                return None
+                return CommsGetResult(status="NOT_FOUND")
 
             # Check for TOO_LATE/TOO_EARLY marker
             if isinstance(loaded_data, dict):
@@ -907,23 +1341,23 @@ class Comms(ChainManager):
                     tplr.logger.info(
                         f"Object for UID {uid}, window {window}, key {key} was uploaded too late. Skipping."
                     )
-                    return {"__status": "TOO_LATE"}, global_step
+                    return CommsGetResult(status="TOO_LATE")
                 elif loaded_data.get("__status") == "TOO_EARLY":
                     tplr.logger.info(
                         f"Object for UID {uid}, window {window}, key {key} was uploaded too early. Skipping."
                     )
-                    return {"__status": "TOO_EARLY"}, global_step
+                    return CommsGetResult(status="TOO_EARLY")
 
             if key == "checkpoint":
-                return loaded_data, None
+                return CommsGetResult(data=loaded_data)
 
             state_dict = loaded_data.get("state_dict")
             global_step = loaded_data.get("global_step", 0)
-            return state_dict, global_step
+            return CommsGetResult(data=state_dict, global_step=global_step)
 
         except Exception as e:
             tplr.logger.debug(f"GET error {filename}: {e}")
-            return None
+            return CommsGetResult(status="ERROR")
         finally:
             tplr.logger.debug(f"GET {filename} <--")
 
@@ -935,10 +1369,37 @@ class Comms(ChainManager):
         timeout: int,
         local: bool = True,
         stale_retention: int = 10,
-        time_min: datetime = None,
-        time_max: datetime = None,
-    ) -> Optional[dict]:
-        """GET with retry operation."""
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
+        show_progress: bool = False,
+    ) -> CommsGetResult | None:
+        """
+        Attempts to retrieve an object from storage with a retry mechanism.
+
+        This wrapper around the `get` method provides resilience against transient
+        issues by retrying the fetch operation until a timeout is reached. It is
+        particularly useful for fetching gradients that may not be immediately
+        available. It also includes a grace period for time-based validation to
+        accommodate minor clock discrepancies.
+
+        Args:
+            uid (str): The UID associated with the data.
+            window (int): The training window of the data.
+            key (str): The type of data to retrieve.
+            timeout (int): The total time in seconds to keep retrying.
+            local (bool, optional): Whether to fetch from local or remote storage.
+                Defaults to True.
+            stale_retention (int, optional): The retention period for local data.
+                Defaults to 10.
+            time_min (datetime | None, optional): The minimum modification time for the
+                object. Defaults to None.
+            time_max (datetime | None, optional): The maximum modification time for the
+                object. Defaults to None.
+
+        Returns:
+            CommsGetResult | None: A result object if successful, or None if the
+                operation times out or is permanently skipped.
+        """
         start_time = time.time()
         end_time = start_time + timeout
         tried_after_time_max = False
@@ -974,7 +1435,7 @@ class Comms(ChainManager):
                 )
 
             # Make the request
-            state_dict = await self.get(
+            result = await self.get(
                 uid=uid,
                 window=window,
                 key=key,
@@ -982,25 +1443,21 @@ class Comms(ChainManager):
                 stale_retention=stale_retention,
                 time_min=time_min,
                 time_max=time_max,
+                show_progress=show_progress,
             )
 
-            # Check for TOO_LATE/TOO_EARLY markers
-            if isinstance(state_dict, dict):
-                if state_dict.get("__status") == "TOO_LATE":
-                    tplr.logger.info(
-                        f"Gradient for UID {uid}, window {window} exists but was uploaded too late. Skipping."
-                    )
-                    return None
-                elif state_dict.get("__status") == "TOO_EARLY":
-                    tplr.logger.info(
-                        f"Gradient for UID {uid}, window {window} exists but was uploaded too early. Skipping."
-                    )
-                    return None
+            if result.success:
+                return result
 
-            # If we got a result, return it
-            if state_dict is not None:
-                return state_dict
+            if result.status in ["TOO_LATE", "TOO_EARLY"]:
+                formatted_status = result.status.lower().split("_")
+                formatted_status = " ".join(formatted_status)
+                tplr.logger.info(
+                    f"Gradient for UID {uid}, window {window} exists but was uploaded {formatted_status}. Skipping."
+                )
+                return None
 
+            # For NOT_FOUND or ERROR, we retry.
             # Short delay before retrying
             await asyncio.sleep(0.5)
 
@@ -1012,7 +1469,7 @@ class Comms(ChainManager):
         key: str,
         timeout: int,
         device: str,
-        totalks: dict,
+        totalks: dict[str, torch.Tensor],
         compressor: TopKCompressor,
         expected_compressed_params: set[str] | None = None,
         local: bool = True,
@@ -1020,7 +1477,40 @@ class Comms(ChainManager):
         time_min: datetime | None = None,
         time_max: datetime | None = None,
     ) -> SimpleNamespace | None:
-        """Gather operation with individual gradient normalization and connection management."""
+        """
+        Gathers and processes gradients from a list of peer UIDs.
+
+        This is a core method for distributed training, responsible for fetching
+        compressed gradients from multiple peers, validating them, and aggregating
+        them into a single structure. It handles decompression, de-quantization,
+        and robust error checking to ensure data integrity.
+
+        Args:
+            my_uid (int | None): The UID of the neuron performing the gather.
+            uids (list[int]): A list of peer UIDs to gather gradients from.
+            window (int): The current training window.
+            key (str): The key identifying the data to gather (e.g., "gradient").
+            timeout (int): The timeout for fetching data from each peer.
+            device (str): The device to move tensors to (e.g., "cuda" or "cpu").
+            totalks (dict[str, torch.Tensor]): A dictionary mapping parameter names
+                to their total number of elements, used for validation.
+            compressor (TopKCompressor): The compressor instance for de-quantization.
+            expected_compressed_params (set[str] | None, optional): A set of parameter
+                names that are expected to be in the compressed state dict. Defaults to None.
+            local (bool, optional): Whether to fetch from local or remote storage.
+                Defaults to True.
+            stale_retention (int, optional): The retention period for local data.
+                Defaults to 10.
+            time_min (datetime | None, optional): The minimum modification time for
+                gradients. Defaults to None.
+            time_max (datetime | None, optional): The maximum modification time for
+                gradients. Defaults to None.
+
+        Returns:
+            SimpleNamespace | None: A namespace containing the aggregated state dict,
+                a list of UIDs from which gradients were successfully gathered, and
+                performance metrics. Returns None if no valid gradients are received.
+        """
         if not expected_compressed_params:
             expected_compressed_params = set()
 
@@ -1044,10 +1534,13 @@ class Comms(ChainManager):
         skipped_uids = []  # Retain UIDs that are skipped.
         global_steps = []
 
+        # Ensure deterministic order across processes/ranks
+        uids = sorted(uids)
+
         async with self.gather_semaphore:
             batch_tasks = [
                 self.get_with_retry(
-                    uid=uid,
+                    uid=str(uid),
                     window=window,
                     key=key,
                     timeout=timeout,
@@ -1086,7 +1579,11 @@ class Comms(ChainManager):
 
                     try:
                         # This is where get response uses the step
-                        state_dict_resp, global_step_resp = response
+                        response = cast(CommsGetResult, response)
+                        state_dict_resp, global_step_resp = (
+                            response.data,
+                            response.global_step,
+                        )
                         tplr.logger.debug(
                             f"Received state dict and global step {global_step_resp} from UID {uid}"
                         )
@@ -1103,8 +1600,6 @@ class Comms(ChainManager):
                         tplr.logger.debug(f"Empty state dict from UID {uid}")
                         skipped_uids.append(uid)
                         continue
-
-                    decoded_cache: dict[str, torch.Tensor] = {}
 
                     # ---------- Begin Compressed Indices and Values Check ----------
                     valid_response = True
@@ -1143,13 +1638,19 @@ class Comms(ChainManager):
 
                         if param_name.endswith("idxs"):
                             base_name = param_name[:-4]
-                            totalk = totalks.get(base_name)
-                            if totalk is None:
+                            totalk_value = totalks.get(base_name)
+                            if totalk_value is None:
                                 tplr.logger.warning(
                                     f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
                                 )
                                 valid_response = False
                                 break
+                            # totalks stores integers, not tensors
+                            totalk = (
+                                totalk_value
+                                if isinstance(totalk_value, int)
+                                else totalk_value.numel()
+                            )
                             # Get corresponding vals tensor for 12-bit unpacking
                             vals_tensor = state_dict_resp.get(base_name + "vals", None)
                             try:
@@ -1166,46 +1667,44 @@ class Comms(ChainManager):
                                 )
                                 valid_response = False
                                 break
-                        # Check if values are valid (not NaN, not Inf)
+                        # Check if values are valid (not NaN, not Inf) - validate without dequantizing
                         elif param_name.endswith("vals"):
-                            tensor_to_check = tensor.to(device)
-                            if (
-                                torch.isnan(tensor_to_check).any()
-                                or torch.isinf(tensor_to_check).any()
-                            ):
-                                tplr.logger.warning(
-                                    f"NaN/Inf in {param_name} from UID {uid}, skipping"
-                                )
-                                valid_response = False
-                                break
+                            # Only move to device for validation if needed
+                            if tensor.dtype == torch.uint8:
+                                # For quantized values, do a quick check on the raw bytes
+                                if tensor.nelement() == 0:
+                                    tplr.logger.warning(
+                                        f"Empty tensor in {param_name} from UID {uid}, skipping"
+                                    )
+                                    valid_response = False
+                                    break
+                            else:
+                                # For non-quantized tensors, check for NaN/Inf
+                                tensor_to_check = tensor.to(device)
+                                if (
+                                    torch.isnan(tensor_to_check).any()
+                                    or torch.isinf(tensor_to_check).any()
+                                ):
+                                    tplr.logger.warning(
+                                        f"NaN/Inf in {param_name} from UID {uid}, skipping"
+                                    )
+                                    valid_response = False
+                                    break
+                                # Clean up temporary tensor
+                                del tensor_to_check
 
                             # ------------------------------------------------------
-                            # (2)  De‑quantise *just for validation* (cheap‑ish)
+                            # (2)  Only validate quantization params exist, don't dequantize
                             # ------------------------------------------------------
                             qparams = state_dict_resp.get(
                                 param_name[:-4] + "quant_params", None
                             )
-                            if qparams is not None:
-                                try:
-                                    vals_f32 = compressor._dequantize_values(
-                                        tensor_to_check, qparams
-                                    )
-                                    if (
-                                        not torch.isfinite(vals_f32).all()
-                                    ) or vals_f32.abs().max() > 1e3:
-                                        tplr.logger.warning(
-                                            f"Decoded values in {param_name} from UID {uid} "
-                                            f"are non‑finite or too large; max={vals_f32.abs().max()}"
-                                        )
-                                        valid_response = False
-                                        break
-                                    decoded_cache[param_name] = vals_f32
-                                except Exception as e:
-                                    tplr.logger.warning(
-                                        f"De‑quantisation failed for {param_name} from UID {uid}: {e}"
-                                    )
-                                    valid_response = False
-                                    break
+                            if qparams is None and tensor.dtype == torch.uint8:
+                                tplr.logger.warning(
+                                    f"Missing quant_params for quantized {param_name} from UID {uid}"
+                                )
+                                valid_response = False
+                                break
 
                     missing_params = (
                         expected_compressed_params - received_compressed_params
@@ -1225,7 +1724,7 @@ class Comms(ChainManager):
                         continue
                     # ---------- End Compressed Indices and Values Check ----------
 
-                    # Process tensors (with normalization on 'vals' keys).
+                    # Process tensors - keep everything quantized to save memory
                     for param_name, tensor in state_dict_resp.items():
                         # 1️⃣  Indices are kept as‑is -----------------------------------------
                         if param_name.endswith("idxs"):
@@ -1237,27 +1736,20 @@ class Comms(ChainManager):
                                 tensor.element_size() * tensor.nelement()
                             )
 
-                        # 2️⃣  Values → de‑quantise once and store as fp32 --------------------
+                        # 2️⃣  Values → keep quantized, store with quant_params ---------------
                         elif param_name.endswith("vals"):
-                            # Re-use if we already decoded during validation
-                            tensor = decoded_cache.get(param_name, tensor.to(device))
-
-                            # If still uint8 it means we skipped validation (unlikely),
-                            # so decode now.
-                            if tensor.dtype == torch.uint8:
-                                qparams = state_dict_resp.get(
-                                    param_name[:-4] + "quant_params", None
-                                )
-                                if qparams is not None:
-                                    tensor = compressor._dequantize_values(
-                                        tensor, qparams
-                                    )
-
+                            # Keep values quantized - just store the raw tensor
                             aggregated_state_dict.setdefault(param_name, []).append(
-                                tensor
+                                tensor  # Keep original dtype (uint8 if quantized)
                             )
                             metrics["download_bytes"] += (
                                 tensor.element_size() * tensor.nelement()
+                            )
+
+                        # 3️⃣  Store quantization parameters for later use --------------------
+                        elif param_name.endswith("quant_params"):
+                            aggregated_state_dict.setdefault(param_name, []).append(
+                                tensor
                             )
 
                     valid_uids.append(uid)
@@ -1305,11 +1797,26 @@ class Comms(ChainManager):
         **kwargs,
     ) -> SimpleNamespace | None:
         """
-        1. Call `gather()` on the main `gather_uids`.
-        2. Any UID that fails (or is missing) is replaced *once* with the next
-           UID(s) from `reserve_uids`, then gathered again.
-        3. Results are *merged* so the caller receives a single object that
-           looks exactly like the old `gather()` return value.
+        Gathers gradients with a fallback mechanism using a reserve set of UIDs.
+
+        This method first attempts to gather gradients from a primary list of UIDs.
+        If any of these fail, it replaces the failed UIDs with UIDs from a reserve
+        list and retries the gather operation. The results from both attempts are
+        merged to maximize the number of successfully collected gradients.
+
+        Args:
+            my_uid (int | None): The UID of the neuron performing the gather.
+            gather_uids (list[int]): The primary list of UIDs to gather from.
+            reserve_uids (list[int]): A list of fallback UIDs to use if the
+                primary gather fails for some peers.
+            expected_compressed_params (set[str] | None, optional): A set of
+                parameter names expected in the compressed state dict. Defaults to None.
+            **kwargs: Additional arguments to be passed to the `gather` method.
+
+        Returns:
+            SimpleNamespace | None: A merged namespace containing the aggregated
+                state dict and metrics from both primary and reserve gathers, or
+                None if no gradients could be collected.
         """
         if len(gather_uids + reserve_uids) == 0:
             return None
@@ -1394,21 +1901,21 @@ class Comms(ChainManager):
         )
         return primary
 
-    async def cleanup_old_checkpoints(self, keep_last: int = 3):
+    async def cleanup_old_checkpoints(self, keep_last: int = 3) -> None:
         """
         Removes old checkpoints from storage, keeping only the most recent ones.
         """
         try:
             s3_client = await self._get_s3_client(self.bucket)
 
-            paginator = s3_client.get_paginator("list_objects_v2")
-            checkpoint_files = []
+            paginator = s3_client.get_paginator("list_objects_v2")  # type: ignore
+            checkpoint_files: list[dict[str, Any]] = []
 
             async for page in paginator.paginate(
                 Bucket=self.bucket.name, Prefix="checkpoint"
             ):
-                for obj in page.get("Contents", []):
-                    if obj["Key"].startswith("checkpoint"):
+                for obj in page.get("Contents", {}):
+                    if obj.get("Key", "").startswith("checkpoint"):
                         checkpoint_files.append(obj)
 
             checkpoint_files.sort(key=lambda x: x["LastModified"], reverse=True)
@@ -1423,13 +1930,29 @@ class Comms(ChainManager):
 
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(self.bucket)
+            return
         except Exception as e:
             tplr.logger.error(f"Error cleaning up old checkpoints: {e}")
 
     ## Peer Management
 
     async def is_miner_active(self, uid: int, recent_windows: int = 3) -> bool:
-        """Check if the miner has uploaded gradients in the last few windows."""
+        """
+        Checks if a miner is active by verifying recent gradient uploads.
+
+        This method determines a miner's activity by checking for the existence of
+        gradient files in their S3 bucket within a specified number of recent
+        windows. This is used to filter out inactive or unresponsive peers.
+
+        Args:
+            uid (int): The UID of the miner to check.
+            recent_windows (int, optional): The number of recent windows to check for
+                gradient uploads. Defaults to 3.
+
+        Returns:
+            bool: True if the miner has uploaded a gradient in the specified
+                recent windows, False otherwise.
+        """
         tplr.logger.debug(f"Checking if UID {uid} is active")
         current_window = self.current_window
 
@@ -1452,8 +1975,10 @@ class Comms(ChainManager):
                 return False
 
             current_window = self.current_window
+            if current_window is None:
+                return False
             for window in range(current_window - recent_windows, current_window + 1):
-                filename = f"gradient-{window}-{uid}-v{__version__}.pt"
+                filename = f"gradient-{window}-{uid}-v{tplr.__version__}.pt"
                 tplr.logger.debug(f"Checking for {filename} in {peer_bucket.name}")
                 try:
                     await s3_client.head_object(Bucket=peer_bucket.name, Key=filename)
@@ -1467,14 +1992,22 @@ class Comms(ChainManager):
 
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(peer_bucket)
+            return False
         except Exception as e:
             tplr.logger.error(f"Error accessing bucket for UID {uid}: {e}")
             return False
 
         return False
 
-    async def track_active_peers(self):
-        """Background task to keep track of active peers."""
+    async def track_active_peers(self) -> None:
+        """
+        Periodically checks for and updates the set of active peers.
+
+        This background task runs continuously, iterating through all known peers
+        (from commitments) and using `is_miner_active` to determine if they are
+        still responsive. The set of active peers is updated and used for
+        subsequent operations like gradient gathering.
+        """
         while True:
             active_peers = set()
             max_concurrent = min(30, len(self.commitments) if self.commitments else 10)
@@ -1510,8 +2043,20 @@ class Comms(ChainManager):
     # Checkpoint Operations
 
     async def _get_highest_stake_validator_bucket(self):
-        """Get the bucket for the validator with highest stake."""
+        """
+        Retrieves the bucket information for the validator with the highest stake.
+
+        This method identifies the validator with the most stake in the network,
+        fetches their committed bucket details, and returns the bucket object
+        along with the validator's UID.
+
+        Returns:
+            tuple[Bucket | None, int | None]: A tuple containing the `Bucket` object
+            and the UID of the highest-staked validator, or (None, None) if not found.
+        """
         # Get validator with highest stake
+        if self.metagraph is None:
+            return None, None
         validator_uid = self.metagraph.S.argmax().item()
         tplr.logger.info(f"Found validator with highest stake: {validator_uid}")
 
@@ -1526,13 +2071,24 @@ class Comms(ChainManager):
         tplr.logger.info(f"Validator Bucket: {validator_bucket}")
         return validator_bucket, validator_uid
 
-    async def get_latest_checkpoint(self, version):
+    async def get_latest_checkpoint(self, version: str) -> tuple[Any, int] | None:
         """
-        Sequentially check:
-        1. Whether the highest-staked validator has a checkpoint.
-        2. Whether the R2 bucket of this instance has a checkpoint.
-        3. Whether a checkpoint exists locally.
-        If none are found, return None.
+        Retrieves the latest available model checkpoint from various sources.
+
+        This method follows a specific search order to find the most recent checkpoint:
+        1. The S3 bucket of the highest-staked validator.
+        2. The instance's own S3 bucket.
+        3. The local filesystem.
+
+        It ensures that the most authoritative and up-to-date checkpoint is loaded,
+        which is crucial for miners joining the network or recovering from a restart.
+
+        Args:
+            version (str): The templar version string to match against checkpoint files.
+
+        Returns:
+            tuple[Any, int] | None: A tuple containing the loaded checkpoint data and its
+            corresponding window number, or None if no valid checkpoint is found.
         """
         try:
             # 1. Check validator bucket
@@ -1540,7 +2096,7 @@ class Comms(ChainManager):
                 validator_bucket,
                 validator_uid,
             ) = await self._get_highest_stake_validator_bucket()
-            if validator_bucket:
+            if validator_bucket and validator_uid is not None:
                 result = await self._get_bucket_checkpoint(
                     validator_bucket, validator_uid, version
                 )
@@ -1550,13 +2106,12 @@ class Comms(ChainManager):
 
             # 2. Check self R2 bucket
             self_bucket = self.bucket  # Use self.bucket saved in __init__
-            if self_bucket:
+            if self_bucket and self.uid is not None:
                 result = await self._get_bucket_checkpoint(
                     self_bucket, self.uid, version
                 )
                 if result:
                     return result
-
             # 3. Check local storage
             local_result = self._load_latest_local_checkpoint(version)
             if local_result:
@@ -1571,7 +2126,21 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error getting latest checkpoint: {e}")
             return None
 
-    def _load_latest_local_checkpoint(self, version: str):
+    def _load_latest_local_checkpoint(self, version: str) -> tuple[Any, int] | None:
+        """
+        Loads the most recent checkpoint file from the local filesystem.
+
+        This method scans the local checkpoint directory for files matching the
+        current UID and version, identifies the one with the highest window number,
+        and loads it into memory.
+
+        Args:
+            version (str): The templar version string to match against checkpoint files.
+
+        Returns:
+            tuple[Any, int] | None: A tuple containing the loaded checkpoint data and
+            its window number, or None if no local checkpoint is found.
+        """
         try:
             local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
             pattern = rf"checkpoint-(\d+)-{self.uid}-v{re.escape(version)}\.pt$"
@@ -1610,8 +2179,25 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error in local checkpoint loading: {e}")
             return None
 
-    async def _get_bucket_checkpoint(self, bucket, uid, version: str):
-        """Helper to get checkpoint from a specific bucket."""
+    async def _get_bucket_checkpoint(
+        self, bucket: Bucket, uid: int, version: str
+    ) -> tuple[Any, int] | None:
+        """
+        Fetches the latest checkpoint from a specified S3 bucket.
+
+        This helper method lists all checkpoint files in the given bucket that match
+        the UID and version, determines the one with the highest window number,
+        and downloads it.
+
+        Args:
+            bucket (Bucket): The S3 bucket to search for checkpoints.
+            uid (int): The UID of the owner of the checkpoint.
+            version (str): The templar version string to match.
+
+        Returns:
+            tuple[Any, int] | None: A tuple containing the loaded checkpoint data and
+            its window number, or None if not found.
+        """
         try:
             s3_client = await self._get_s3_client(bucket)
 
@@ -1668,60 +2254,83 @@ class Comms(ChainManager):
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(bucket)
             return None
+        except Exception as e:
+            tplr.logger.error(f"Error in _get_bucket_checkpoint: {e}")
+            return None
 
     async def load_checkpoint(
         self,
         model,
         current_window: int,
-        device: str,
-        init_version: Optional[str] = None,
+        init_version: str | None = None,
+        is_master: bool = True,
     ) -> tuple[bool, int]:
         """
-        Loads the latest checkpoint. No catchup or step simulation happens here.
-        Returns:
-            tuple: (success: bool, checkpoint_current_window: int)
+        Rank-0 downloads; all ranks fan-out once.
+        Returns (success, checkpoint_sync_window) identically on all ranks.
         """
-        init_version = init_version if init_version is not None else __version__
-        result = await self.get_latest_checkpoint(init_version)
-        if not result:
-            tplr.logger.info("No valid checkpoints found")
+        # --------- rank-0 fetch + minimal metadata ----------
+        ok, sync_win, full_sd, present = False, 0, {}, set()
+        if is_master:
+            try:
+                init_version = init_version or __version__
+            except NameError:
+                pass
+            result = await self.get_latest_checkpoint(init_version)
+            if result:
+                try:
+                    checkpoint_data, _ = result
+                    full_sd = checkpoint_data["model_state_dict"]
+                    present = {k for k in full_sd.keys()}
+
+                    # Prefer sync_window; fall back to current_window if older ckpt
+                    sw = checkpoint_data.get("sync_window")
+                    cw = checkpoint_data.get("current_window")
+                    sync_win = int(
+                        sw if sw is not None else cw if cw is not None else 0
+                    )
+                    ok = True
+
+                    tplr.logger.info(
+                        f"Checkpoint loaded on rank-0: "
+                        f"start={checkpoint_data.get('start_window')}, "
+                        f"current={checkpoint_data.get('current_window')}, "
+                        f"sync={sync_win}, local_current={current_window}"
+                    )
+                except Exception as e:
+                    tplr.logger.error(f"[ckpt] parse/load failed on rank-0: {e}")
+                    ok, sync_win, full_sd, present = False, 0, {}, set()
+            else:
+                tplr.logger.info("No valid checkpoints found on rank-0")
+
+        # --------- broadcast tiny meta-object to all ranks ----------
+        if dist.is_available() and dist.is_initialized():
+            obj = [(bool(ok), int(sync_win), list(present))] if is_master else [None]
+            dist.broadcast_object_list(obj, src=0)
+            ok, sync_win, present_list = obj[0]
+            present = set(present_list or [])
+        if not ok:
             return False, 0
 
-        checkpoint_data, checkpoint_window = result
-        try:
-            # 1) Load model and optimizer state
-            model.load_state_dict(
-                {
-                    k: v.to(device)
-                    for k, v in checkpoint_data["model_state_dict"].items()
-                }
-            )
-            model.to(device)
+        # --------- single fan-out of weights/buffers ----------
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(
+                full_state_dict=True, broadcast_from_rank0=True, strict=True
+            ),
+        )
 
-            checkpoint_start_window = checkpoint_data.get("start_window")
-            checkpoint_current_window = checkpoint_data.get("current_window")
-            checkpoint_sync_window = checkpoint_data.get("sync_window")
-            if checkpoint_start_window is None or checkpoint_current_window is None:
-                tplr.logger.warning(
-                    "Checkpoint missing start_window or current_window info"
-                )
-                return False, 0
+        # Barrier for cleanliness
+        if dist.is_available() and dist.is_initialized():
+            # Get the current device for this rank
+            if torch.cuda.is_available():
+                device_id = torch.cuda.current_device()
+                dist.barrier(device_ids=[device_id])
+            else:
+                dist.barrier()
 
-            tplr.logger.info(
-                f"Checkpoint loaded. start_window={checkpoint_start_window}, "
-                f"checkpoint_current_window={checkpoint_current_window}, "
-                f"checkpoint_sync_window={checkpoint_sync_window}, "
-                f"local_current_window={current_window}"
-            )
-
-            return True, checkpoint_sync_window
-
-        except KeyError as e:
-            tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
-            return False, 0
-        except Exception as e:
-            tplr.logger.error(f"Failed to load checkpoint: {e}")
-            return False, 0
+        return True, int(sync_win)
 
     async def post_peer_list(
         self,
@@ -1731,11 +2340,13 @@ class Comms(ChainManager):
         first_effective_window: int,
         sync_window: int,
         initial_selection: bool,
-    ):
-        """Upload peer list and debug data as JSON to the node's R2 bucket.
+    ) -> None:
+        """
+        Uploads the selected peer list to the node's S3 bucket.
 
-        The first_effective_window is a future window (>current_window) from
-        which this list peer list will be used.
+        This method is used by validators to publish the list of miners that should
+        participate in the upcoming training windows. The list is stored as a JSON
+        object in a location that is accessible to all miners.
 
         The following debugging fields are included in the JSON:
         - sync_window: when the peer list was updated in "validator time"
@@ -1743,8 +2354,18 @@ class Comms(ChainManager):
           list (except for during the initial peer selection)
         - initial selection: whether this peer list is the first one in the
           current run
+
+        Args:
+            peers (list[int]): The list of primary peer UIDs.
+            reserve_peers (list[int] | None, optional): A list of reserve peer UIDs.
+                Defaults to None.
+            first_effective_window (int): The window from which this peer list becomes active.
+            sync_window (int): The window at which the peer list was generated.
+            initial_selection (bool): A flag indicating if this is the first peer
+                selection of the run.
         """
-        key = f"{PEERS_FILE_PREFIX}{first_effective_window}_v{__version__}.json"
+
+        key = f"{PEERS_FILE_PREFIX}{first_effective_window}_v{tplr.__version__}.json"
         peers_and_weights = {
             "peers": peers,
             "reserve_peers": reserve_peers or [],
@@ -1768,9 +2389,18 @@ class Comms(ChainManager):
                 os.remove(temp_file)
 
     # Start Window Operations
-    async def post_start_window(self, start_window: int):
-        """Upload the start window as a JSON object to the node's R2 bucket."""
-        key = f"start_window_v{__version__}.json"
+    async def post_start_window(self, start_window: int) -> None:
+        """
+        Uploads the starting window number to the node's S3 bucket.
+
+        This method allows a validator to broadcast the official starting window for
+        a training run. This is essential for synchronizing all participating
+        neurons and ensuring they start from the same point.
+
+        Args:
+            start_window (int): The window number to be set as the starting point.
+        """
+        key = f"start_window_v{tplr.__version__}.json"
         start_window_data = {"start_window": start_window}
 
         # Create temporary JSON file
@@ -1787,10 +2417,27 @@ class Comms(ChainManager):
     async def get_peer_list(
         self, fetch_previous: bool = False
     ) -> tuple[list[int], list[int], int] | None:
+        """
+        Retrieves the peer list from the highest-staked validator's bucket.
+
+        Miners use this method to discover which peers they should collaborate with
+        for gradient aggregation. It fetches the JSON file posted by the validator
+        and parses it to return the primary and reserve peer lists.
+
+        Args:
+            fetch_previous (bool, optional): If True, attempts to fetch the second
+                most recent peer list instead of the latest one. Defaults to False.
+
+        Returns:
+            tuple[list[int], list[int], int] | None: A tuple containing the list of
+            primary peers, reserve peers, and the window from which the list is
+            effective. Returns None if no list is found.
+        """
         tplr.logger.info(
             f"Looking for a {'previous' if fetch_previous else 'current'} peer list on a validator bucket"
         )
         while True:
+            validator_bucket = None
             try:
                 (
                     validator_bucket,
@@ -1809,7 +2456,7 @@ class Comms(ChainManager):
                 )
 
                 s3_client = await self._get_s3_client(validator_bucket)
-                pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{re.escape(__version__)}\.json$"
+                pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{re.escape(tplr.__version__)}\.json$"
                 keys = []
                 continuation_token = None
 
@@ -1876,6 +2523,8 @@ class Comms(ChainManager):
                     key=selected_key, bucket=validator_bucket
                 )
 
+                if peers_data is None:
+                    return None
                 if isinstance(peers_data, dict):
                     peers_dict = peers_data
                 else:
@@ -1889,12 +2538,29 @@ class Comms(ChainManager):
                 )
 
             except (ConnectionClosedError, ClientError):
-                await self._purge_s3_client(validator_bucket)
+                if validator_bucket:
+                    await self._purge_s3_client(validator_bucket)
+                await asyncio.sleep(10)
             except Exception as e:
                 tplr.logger.error(f"Error fetching peer list: {e}")
                 await asyncio.sleep(10)
 
     async def get_start_window(self, retries: int = -1) -> int | None:
+        """
+        Retrieves the official start window from the highest-staked validator.
+
+        This method repeatedly attempts to fetch the `start_window.json` file from
+        the lead validator's bucket. This is a crucial step for a neuron that is
+        just joining the network, as it needs to know the globally agreed-upon
+        starting point for training.
+
+        Args:
+            retries (int, optional): The number of times to retry fetching the start
+                window. A value of -1 means infinite retries. Defaults to -1.
+
+        Returns:
+            int | None: The start window number if successfully fetched, otherwise None.
+        """
         attempt = 0
         while retries == -1 or attempt < retries:
             try:
@@ -1915,7 +2581,8 @@ class Comms(ChainManager):
                 )
 
                 start_window_data = await self.s3_get_object(
-                    key=f"start_window_v{__version__}.json", bucket=validator_bucket
+                    key=f"start_window_v{tplr.__version__}.json",
+                    bucket=validator_bucket,
                 )
 
                 if start_window_data is not None:
@@ -1954,7 +2621,26 @@ class Comms(ChainManager):
         current_window,
         start_window,
     ):
-        """Save checkpoint to R2 and local storage."""
+        """
+        Saves a complete training checkpoint to both local and remote storage.
+
+        This method captures the full state of training—including the model,
+        optimizer, scheduler, and momentum buffers—and persists it. Checkpoints
+        are saved locally for quick access and uploaded to S3 for durability and
+        sharing with other neurons.
+
+        Args:
+            model: The PyTorch model.
+            optimizer: The optimizer instance.
+            scheduler: The learning rate scheduler instance.
+            momentum: A dictionary of momentum buffers.
+            global_step (int): The global training step.
+            current_window (int): The current training window.
+            start_window (int): The starting window of the training run.
+
+        Returns:
+            bool: True if the checkpoint was saved successfully.
+        """
         checkpoint_data = {
             "model_state_dict": {
                 k: v.cpu().clone() for k, v in model.state_dict().items()
@@ -1999,6 +2685,27 @@ class Comms(ChainManager):
         allowed_topk: int | None = None,
         vals: torch.Tensor | None = None,
     ) -> None:
+        """
+        Validates the integrity and format of compressed gradient indices.
+
+        This is a crucial security and stability check to ensure that gradients
+        received from peers are well-formed. It verifies that indices are within
+        the expected bounds and that the compression format (e.g., 12-bit packing)
+        is correctly applied.
+
+        Args:
+            param_name (str): The name of the parameter being checked.
+            idxs (torch.Tensor): The tensor of indices.
+            totalk (int): The total number of elements in the original uncompressed tensor.
+            allowed_topk (int | None, optional): The expected number of top-k values.
+                Defaults to the hparams configuration.
+            vals (torch.Tensor | None, optional): The corresponding values tensor,
+                required for validating 12-bit packed indices. Defaults to None.
+
+        Raises:
+            ValueError: If any validation check fails, such as out-of-bounds
+                indices, incorrect data types, or malformed packed data.
+        """
         allowed_topk = (
             min(self.hparams.topk_compression, totalk)
             if allowed_topk is None
@@ -2044,8 +2751,22 @@ class Comms(ChainManager):
         else:
             raise ValueError(f"[{param_name}] Expected tensor but got {type(idxs)}")
 
-    async def s3_get_object_size(self, bucket: Bucket, key: str) -> Optional[int]:
-        """Get the size of an S3 object without downloading it using HEAD request."""
+    async def s3_get_object_size(self, bucket: Bucket, key: str) -> int | None:
+        """
+        Retrieves the size of an S3 object without downloading its content.
+
+        This method uses an S3 HEAD request to efficiently fetch the metadata of an
+        object, including its size in bytes. This is useful for pre-allocation or
+        for making decisions about how to download a file.
+
+        Args:
+            bucket (Bucket): The S3 bucket containing the object.
+            key (str): The key of the object.
+
+        Returns:
+            int | None: The size of the object in bytes, or None if the object
+                is not found or an error occurs.
+        """
         try:
             s3_client = await self._get_s3_client(bucket)
 
@@ -2068,8 +2789,25 @@ class Comms(ChainManager):
 
     async def s3_get_object_range(
         self, bucket: Bucket, key: str, start: int, end: int, timeout: int = 30
-    ) -> Optional[bytes]:
-        """Download a specific byte range from S3 object."""
+    ) -> None | bytes:
+        """
+        Downloads a specific byte range from an S3 object.
+
+        This is a low-level utility for partial file downloads. It's a key component
+        of the parallel, multipart download strategy used for large files, allowing
+        different parts of a file to be fetched concurrently.
+
+        Args:
+            bucket (Bucket): The S3 bucket containing the object.
+            key (str): The key of the object.
+            start (int): The starting byte position.
+            end (int): The ending byte position.
+            timeout (int, optional): The timeout for the request in seconds. Defaults to 30.
+
+        Returns:
+            None | bytes: The downloaded chunk of data as bytes, or None if an
+                error occurs.
+        """
         try:
             s3_client = await self._get_s3_client(bucket)
 
@@ -2106,15 +2844,19 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error downloading range {start}-{end} for {key}: {e}")
             return None
 
-    async def get_debug_dict(self, window: int):
+    async def get_debug_dict(self, window: int) -> dict[str, Any] | None:
         """
-        Get debug dictionary from validator bucket for a specific window.
+        Retrieves a debug dictionary from the lead validator's bucket for a specific window.
+
+        This method allows for the inspection of validator state at a particular point
+        in time, which is invaluable for debugging and performance analysis. The debug
+        dictionary can contain various metrics and metadata.
 
         Args:
-            window: Specific window to retrieve debug data for
+            window (int): The specific window for which to retrieve the debug data.
 
         Returns:
-            Debug dictionary or None if not found
+            dict | None: The debug dictionary if found, otherwise None.
         """
         try:
             (
@@ -2160,11 +2902,20 @@ class Comms(ChainManager):
         self, candidates: list[int], weights: list[int], k: int
     ) -> list[int]:
         """
-        Perform a weighted random sample (without replacement) of size k.
-        candidates: list of items (uids).
-        weights:    list of corresponding weights (integers or floats).
-        k:          number of items to sample.
-        Returns a list of selected items.
+        Performs a weighted random sample without replacement.
+
+        This utility function is used to select a subset of candidates (e.g., miners)
+        based on their associated weights (e.g., stake or performance scores). It
+        ensures that the selection is both random and biased towards higher-weighted
+        candidates, and that no candidate is selected more than once.
+
+        Args:
+            candidates (list[int]): A list of items to sample from (e.g., UIDs).
+            weights (list[int]): A list of corresponding weights for each candidate.
+            k (int): The number of items to sample.
+
+        Returns:
+            list[int]: A list of the selected items.
         """
         tplr.logger.debug("Starting weighted random sampling")
         tplr.logger.debug(f"Candidates: {candidates}")

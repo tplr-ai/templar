@@ -49,6 +49,8 @@ from pathlib import Path
 
 import bittensor as bt
 import torch
+import torch.distributed as dist
+from torch.cuda import device_count as _cuda_device_count
 from torch.utils.data import DataLoader
 from torchtitan.components.loss import cross_entropy_loss
 
@@ -186,12 +188,36 @@ class Evaluator:
         # Mock for the comms class
         self.uid = 1
 
+        # Initialize distributed training if available
+        self.world_size = 1
+        self.rank = 0
+        self.is_master = True
+        self.local_rank = 0
+        self.device = self.config.device
+
+        # Check if we should use distributed evaluation
+        if dist.is_available() and "WORLD_SIZE" in os.environ:
+            self.world_size = int(os.environ.get("WORLD_SIZE", 1))
+            self.rank = int(os.environ.get("RANK", 0))
+            self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
+            self.is_master = self.rank == 0
+
+            if not dist.is_initialized():
+                dist.init_process_group(backend="nccl")
+                torch.cuda.set_device(self.local_rank)
+
+            self.device = f"cuda:{self.local_rank}"
+            tplr.logger.info(
+                f"Distributed evaluation: rank {self.rank}/{self.world_size}, "
+                f"local_rank {self.local_rank}, is_master: {self.is_master}"
+            )
+
         # Initialize TorchTitan model using model factory
         self.model = initialize_torchtitan_model(
             hparams=self.hparams,
             role="evaluator",
-            device="cpu",
-            world_size=1,
+            device=self.device if self.world_size > 1 else "cpu",
+            world_size=self.world_size,
         )
 
         self.tokenizer = self.hparams.tokenizer
@@ -199,6 +225,8 @@ class Evaluator:
         if getattr(self.tokenizer, "pad_token_id", None) is None:
             # LLaMA tokenizers typically don't have PAD; use EOS
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+        # All ranks need comms for distributed checkpoint loading
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
             save_location="/tmp",
@@ -210,21 +238,36 @@ class Evaluator:
             uid=self.uid,
         )
 
-        self.buckets = self.comms.get_all_buckets()
         self.last_eval_window = 0
         self.stop_event = asyncio.Event()
         self.last_block_number = 0
         self.eval_counter = 0
 
-        # Initialize metrics logger with consistent patterns
-        self.metrics_logger = tplr.metrics.MetricsLogger(
-            prefix="E",
-            uid=str(self.uid),
-            config=self.config,
-            role="evaluator",
-            group="evaluations",
-            job_type="eval",
+        # Only master rank gets buckets and initializes metrics logger
+        if self.is_master:
+            self.buckets = self.comms.get_all_buckets()
+
+            # Initialize metrics logger with consistent patterns
+            self.metrics_logger = tplr.metrics.MetricsLogger(
+                prefix="E",
+                uid=str(self.uid),
+                config=self.config,
+                role="evaluator",
+                group="evaluations",
+                job_type="eval",
+            )
+        else:
+            self.buckets = None
+            self.metrics_logger = None
+
+        # ── Multi‑GPU detection (honors external CUDA_VISIBLE_DEVICES) ───────────
+        use_cuda = (
+            str(self.config.device).startswith("cuda") and torch.cuda.is_available()
         )
+        # reflect the externally‑set visible set
+        self.num_visible_gpus: int = _cuda_device_count() if use_cuda else 0
+        self.primary_device: str = "cuda:0" if self.num_visible_gpus > 0 else "cpu"
+        self.multi_gpu: bool = self.num_visible_gpus > 1
 
     async def update_state(self) -> None:
         """
@@ -237,7 +280,7 @@ class Evaluator:
         """Load and prepare the latest model checkpoint for evaluation.
 
         This method:
-        1. Fetches the latest checkpoint from storage
+        1. Uses comms.load_checkpoint for distributed loading
         2. Verifies checkpoint validity
         3. Updates internal state trackers
 
@@ -248,75 +291,48 @@ class Evaluator:
             - checkpoint_window (int): Window number of checkpoint
             - global_step (int): Global training step
         """
-        result = await self.comms.get_latest_checkpoint(version=self.version)
-        if not result:
-            tplr.logger.error(
-                f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket_name', 'unknown')}, "
-                f"key_prefix: {self.comms.key_prefix}"
-            )
-            return (False, {}, 0, 0)
-
-        tplr.logger.debug(f"get_latest_checkpoint() result: {result}")
-
-        checkpoint_data, _ = result
-        tplr.logger.debug(f"Checkpoint data: {checkpoint_data}")
-
-        if not isinstance(checkpoint_data, dict):
-            tplr.logger.error("Checkpoint data is not a dictionary")
-            return (False, {}, 0, 0)
-
-        checkpoint_start_window = checkpoint_data.get("start_window")
-        checkpoint_current_window = checkpoint_data.get("current_window", None)
-
-        if checkpoint_start_window is None or checkpoint_current_window is None:
-            tplr.logger.error("Checkpoint missing start_window or current_window info")
-            return (False, checkpoint_data, 0, 0)
-
-        if int(checkpoint_current_window) <= self.last_eval_window:
-            tplr.logger.info(
-                f"Checkpoint already evaluated (checkpoint window: {checkpoint_current_window}, "
-                f"last evaluated: {self.last_eval_window})."
-            )
-            return (False, checkpoint_data, int(checkpoint_current_window), 0)
-
-        tplr.logger.info(
-            f"Loading model from checkpoint (window: {checkpoint_current_window})"
+        # Get the current window to check against
+        current_window = (
+            self.subtensor.get_current_block() // self.hparams.blocks_per_window
         )
 
-        # Debug: Check checkpoint model dimensions
-        if "model_state_dict" in checkpoint_data:
-            model_state = checkpoint_data["model_state_dict"]
-            if isinstance(model_state, dict):
-                # TorchTitan uses different key names: layers.0.attention.wk
-                k_proj_key = "layers.0._orig_mod.attention.wk.weight"
-                if k_proj_key in model_state:
-                    k_proj_shape = model_state[k_proj_key].shape
-                    tplr.logger.debug(f"Checkpoint k_proj shape: {k_proj_shape}")
-                    # TorchTitan model structure
-                    expected_shape = next(
-                        (
-                            v.shape
-                            for k, v in self.model.state_dict().items()
-                            if "layers.0.attention.wk" in k
-                        ),
-                        None,
-                    )
-                    if expected_shape:
-                        tplr.logger.debug(f"Expected k_proj shape: {expected_shape}")
+        # Use load_checkpoint which handles distributed loading properly
+        success, checkpoint_window = await self.comms.load_checkpoint(
+            model=self.model,
+            current_window=current_window,
+            init_version=self.version,
+            is_master=self.is_master,
+        )
 
-                self.model.load_state_dict(
-                    {k: v.to("cpu") for k, v in model_state.items()}
+        if not success:
+            if self.is_master:
+                tplr.logger.error(
+                    f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket_name', 'unknown')}, "
+                    f"key_prefix: {self.comms.key_prefix}"
                 )
-        self.model.to("cpu")  # type: ignore
+            return (False, {}, 0, 0)
 
-        global_step = int(checkpoint_current_window) - int(checkpoint_start_window)
+        if checkpoint_window <= self.last_eval_window:
+            if self.is_master:
+                tplr.logger.info(
+                    f"Checkpoint already evaluated (checkpoint window: {checkpoint_window}, "
+                    f"last evaluated: {self.last_eval_window})."
+                )
+            return (False, {}, checkpoint_window, 0)
 
-        tplr.logger.info(
-            f"Loaded checkpoint (start_window={checkpoint_start_window}, "
-            f"current_window={checkpoint_current_window}, global_step={global_step})"
-        )
+        # Calculate global step (assuming start_window is 0 for evaluator)
+        global_step = checkpoint_window
 
-        return (True, checkpoint_data, int(checkpoint_current_window), global_step)
+        if self.is_master:
+            tplr.logger.info(
+                f"Loaded checkpoint (window={checkpoint_window}, global_step={global_step})"
+            )
+
+        # Synchronize all ranks after loading
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
+        return (True, {}, checkpoint_window, global_step)
 
     def _run_lm_eval(
         self,
@@ -340,17 +356,31 @@ class Evaluator:
         Returns:
             Tuple containing (exit_code, runtime)
         """
+        visible_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+
         if model_args is None:
+            # Always include dtype; add multi‑GPU sharding hints if >1 visible GPU.
+            if visible_gpus > 1 and str(self.config.device).startswith("cuda"):
+                # Harness path for single‑process multi‑GPU sharding (no DDP).
+                # Uses all GPUs in CUDA_VISIBLE_DEVICES.
+                extra = ["parallelize=True", "device_map_option=auto"]
             model_args = f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}"
+            if extra:
+                model_args = model_args + "," + ",".join(extra)
         if batch_size is None:
             batch_size = str(self.config.actual_batch_size)
+
+        # For sharded runs, pass plain 'cuda' so lm‑eval doesn’t pin to ':0'.
+        device_arg = self.config.device
+        if visible_gpus > 1 and str(device_arg).startswith("cuda"):
+            device_arg = "cuda"
 
         cmd_parts = [
             "lm-eval",
             "--model hf",
             f"--model_args {model_args}",
             f"--tasks {tasks}",
-            f"--device {self.config.device}",
+            f"--device {device_arg}",
             f"--batch_size {batch_size}",
             f"--output_path {output_dir}",
         ]
@@ -518,97 +548,109 @@ class Evaluator:
             checkpoint_window = 0
             global_step = 0
 
-        tplr.logger.info(
-            f"Starting benchmark run at global step {global_step} (checkpoint window: {checkpoint_window})"
-        )
+        if self.is_master:
+            tplr.logger.info(
+                f"Starting benchmark run at global step {global_step} (checkpoint window: {checkpoint_window})"
+            )
 
         # Run custom perplexity evaluation first. It manages its own model device placement.
+        # This runs on all ranks for distributed evaluation
         await self._evaluate_custom(
             global_step=global_step,
             checkpoint_window=checkpoint_window,
             block_number=block_number,
         )
 
-        os.makedirs(MODEL_PATH, exist_ok=True)
+        # Only master rank runs lm-eval (command-line tool can't be distributed)
+        if self.is_master:
+            os.makedirs(MODEL_PATH, exist_ok=True)
 
-        # Convert TorchTitan model to HuggingFace format for lm-eval
-        try:
-            convert_titan_to_hf(
-                titan_model=self.model,
-                hparams=self.hparams,
-                save_path=MODEL_PATH,
+            # Convert TorchTitan model to HuggingFace format for lm-eval
+            try:
+                convert_titan_to_hf(
+                    titan_model=self.model,
+                    hparams=self.hparams,
+                    save_path=MODEL_PATH,
+                )
+                self.hparams.tokenizer.save_pretrained(MODEL_PATH)
+            except Exception as e:
+                tplr.logger.error(
+                    f"Failed to convert model at step {global_step}: {e}. Skipping evaluation cycle."
+                )
+                return global_step
+
+            results_dir = os.path.join(MODEL_PATH, "results")
+            os.makedirs(results_dir, exist_ok=True)
+
+            self.eval_counter += 1
+
+            task_list: list[str] = self.config.tasks.split(",")  # type: ignore
+            has_mmlu_task = "mmlu" in task_list
+            should_run_mmlu_n_shot = has_mmlu_task and (
+                self.config.skip_gaps or self.eval_counter % 4 == 0
             )
-            self.hparams.tokenizer.save_pretrained(MODEL_PATH)
-        except Exception as e:
-            tplr.logger.error(
-                f"Failed to convert model at step {global_step}: {e}. Skipping evaluation cycle."
-            )
-            return global_step
+            regular_tasks = [t for t in task_list if t != "mmlu"]
+            tasks = ",".join(regular_tasks)
 
-        results_dir = os.path.join(MODEL_PATH, "results")
-        os.makedirs(results_dir, exist_ok=True)
+            if tasks:
+                exit_code, benchmark_runtime = self._run_lm_eval(
+                    tasks=tasks,
+                    output_dir=results_dir,
+                )
 
-        self.eval_counter += 1
+                self._process_results(
+                    task_name=tasks,
+                    results_dir=results_dir,
+                    global_step=global_step,
+                    checkpoint_window=checkpoint_window,
+                    block_number=block_number,
+                    benchmark_runtime=benchmark_runtime,
+                    exit_code=exit_code,
+                )
+                if os.path.exists(results_dir):
+                    shutil.rmtree(results_dir)
+            else:
+                tplr.logger.info("No regular tasks to run")
 
-        task_list: list[str] = self.config.tasks.split(",")  # type: ignore
-        has_mmlu_task = "mmlu" in task_list
-        should_run_mmlu_n_shot = has_mmlu_task and (
-            self.config.skip_gaps or self.eval_counter % 4 == 0
-        )
-        regular_tasks = [t for t in task_list if t != "mmlu"]
-        tasks = ",".join(regular_tasks)
+            if should_run_mmlu_n_shot:
+                tplr.logger.info(f"Run #{self.eval_counter}: Running mmlu")
 
-        if tasks:
-            exit_code, benchmark_runtime = self._run_lm_eval(
-                tasks=tasks,
-                output_dir=results_dir,
-            )
+                exit_code, benchmark_runtime = self._run_lm_eval(
+                    tasks="mmlu",
+                    output_dir=results_dir,
+                    model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}",
+                    batch_size="auto",
+                    limit="0.15",
+                    num_fewshot=5,
+                )
 
-            self._process_results(
-                task_name=tasks,
-                results_dir=results_dir,
-                global_step=global_step,
-                checkpoint_window=checkpoint_window,
-                block_number=block_number,
-                benchmark_runtime=benchmark_runtime,
-                exit_code=exit_code,
-            )
-            if os.path.exists(results_dir):
-                shutil.rmtree(results_dir)
-        else:
-            tplr.logger.info("No regular tasks to run")
+                self._process_results(
+                    task_name="mmlu",
+                    results_dir=results_dir,
+                    global_step=global_step,
+                    checkpoint_window=checkpoint_window,
+                    block_number=block_number,
+                    benchmark_runtime=benchmark_runtime,
+                    exit_code=exit_code,
+                )
+                if os.path.exists(results_dir):
+                    shutil.rmtree(results_dir)
+            elif has_mmlu_task:
+                tplr.logger.info(
+                    f"Skipping mmlu (run #{self.eval_counter}, next at run #{(self.eval_counter // 4 + 1) * 4})"
+                )
 
-        if should_run_mmlu_n_shot:
-            tplr.logger.info(f"Run #{self.eval_counter}: Running mmlu")
+            if os.path.exists(MODEL_PATH):
+                shutil.rmtree(MODEL_PATH)
 
-            exit_code, benchmark_runtime = self._run_lm_eval(
-                tasks="mmlu",
-                output_dir=results_dir,
-                model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}",
-                batch_size="auto",
-                limit="0.15",
-                num_fewshot=5,
-            )
-
-            self._process_results(
-                task_name="mmlu",
-                results_dir=results_dir,
-                global_step=global_step,
-                checkpoint_window=checkpoint_window,
-                block_number=block_number,
-                benchmark_runtime=benchmark_runtime,
-                exit_code=exit_code,
-            )
-            if os.path.exists(results_dir):
-                shutil.rmtree(results_dir)
-        elif has_mmlu_task:
-            tplr.logger.info(
-                f"Skipping mmlu (run #{self.eval_counter}, next at run #{(self.eval_counter // 4 + 1) * 4})"
-            )
-
-        if os.path.exists(MODEL_PATH):
-            shutil.rmtree(MODEL_PATH)
+        # All ranks should clear cache
         torch.cuda.empty_cache()
+
+        # Synchronize all ranks after evaluation
+        import torch.distributed as dist
+
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
 
         self.last_eval_window = checkpoint_window
         self.last_block_number = block_number
@@ -624,12 +666,14 @@ class Evaluator:
     ) -> None:
         """Run evaluation on a custom dataset and log perplexity."""
         if not self.config.custom_eval_path:
-            tplr.logger.info("Custom evaluation path not provided, skipping.")
+            if self.is_master:
+                tplr.logger.info("Custom evaluation path not provided, skipping.")
             return
 
-        tplr.logger.info(
-            f"Starting custom evaluation on dataset: {self.config.custom_eval_path}"
-        )
+        if self.is_master:
+            tplr.logger.info(
+                f"Starting custom evaluation on dataset: {self.config.custom_eval_path}"
+            )
         os.environ["DATASET_BINS_PATH"] = self.config.custom_eval_path
 
         try:
@@ -645,20 +689,41 @@ class Evaluator:
             elif (eval_path / "test_000000.npy").exists():
                 file_prefix = "test"
 
-            tplr.logger.info(f"Using file prefix: {file_prefix}")
+            if self.is_master:
+                tplr.logger.info(f"Using file prefix: {file_prefix}")
 
             # 2. Setup dataset and dataloader
+            # For distributed evaluation, each rank processes different samples
             custom_dataset = tplr.SharedShardedDataset(
                 shard_index=0,  # Use shard index 0 for evaluation dataset
                 sequence_length=self.hparams.sequence_length,
-                rank=0,  # Evaluator is single-process
-                world_size=1,
+                rank=self.rank if self.world_size > 1 else 0,
+                world_size=self.world_size,
                 file_prefix=file_prefix,  # Use detected or default prefix
             )
-            # Limit evaluation to 1024 samples as requested
-            sampler = torch.utils.data.SubsetRandomSampler(
-                range(min(1024, len(custom_dataset)))
-            )
+
+            # Create a distributed sampler if using multiple GPUs
+            if self.world_size > 1:
+                # Limit to 1024 samples total, distributed across ranks
+                total_samples = min(1024, len(custom_dataset))
+                indices = list(range(total_samples))
+                # Each rank gets a subset
+                samples_per_rank = total_samples // self.world_size
+                start_idx = self.rank * samples_per_rank
+                end_idx = (
+                    start_idx + samples_per_rank
+                    if self.rank < self.world_size - 1
+                    else total_samples
+                )
+                sampler = torch.utils.data.SubsetRandomSampler(
+                    indices[start_idx:end_idx]
+                )
+            else:
+                # Single GPU: use all samples up to 1024
+                sampler = torch.utils.data.SubsetRandomSampler(
+                    range(min(1024, len(custom_dataset)))
+                )
+
             dataloader = DataLoader(
                 dataset=custom_dataset,
                 batch_size=self.config.actual_batch_size,
@@ -668,18 +733,18 @@ class Evaluator:
             )
 
             # 2. Prepare model for evaluation
-            self.model.to(self.config.device)  # type: ignore
+            self.model.to(self.device)  # type: ignore
             self.model.eval()
 
-            total_loss = 0.0
-            total_tokens = 0
+            local_loss = 0.0
+            local_tokens = 0
             start_time = time.time()
 
             # 3. Evaluation loop
             with torch.inference_mode():
-                for batch in dataloader:
+                for batch_idx, batch in enumerate(dataloader):
                     input_ids = batch.to(
-                        self.config.device, dtype=torch.long, non_blocking=True
+                        self.device, dtype=torch.long, non_blocking=True
                     )
                     labels = input_ids.clone()
                     labels[:, :-1] = input_ids[:, 1:]  # shift left by one
@@ -700,10 +765,25 @@ class Evaluator:
                     # Accumulate loss, weighted by the number of tokens
                     num_tokens = (labels != -100).sum().item()
                     if num_tokens > 0:
-                        total_loss += loss.item() * num_tokens
-                        total_tokens += num_tokens
+                        local_loss += loss.item() * num_tokens
+                        local_tokens += num_tokens
 
-            # 4. Calculate final metrics
+            # 4. Gather results from all ranks if distributed
+            if self.world_size > 1:
+                # Convert to tensors for all_reduce
+                loss_tensor = torch.tensor([local_loss], device=self.device)
+                tokens_tensor = torch.tensor([local_tokens], device=self.device)
+
+                dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+                dist.all_reduce(tokens_tensor, op=dist.ReduceOp.SUM)
+
+                total_loss = loss_tensor.item()
+                total_tokens = int(tokens_tensor.item())
+            else:
+                total_loss = local_loss
+                total_tokens = local_tokens
+
+            # 5. Calculate final metrics (only master logs)
             eval_runtime = time.time() - start_time
             average_loss = total_loss / total_tokens if total_tokens > 0 else 0
             perplexity = (
@@ -712,29 +792,35 @@ class Evaluator:
                 else float("inf")
             )
 
-            tplr.logger.info(
-                f"Custom evaluation finished. Perplexity: {perplexity:.4f}, Avg Loss: {average_loss:.4f}, Runtime: {eval_runtime:.2f}s"
-            )
+            if self.is_master:
+                tplr.logger.info(
+                    f"Custom evaluation finished. Perplexity: {perplexity:.4f}, "
+                    f"Avg Loss: {average_loss:.4f}, Runtime: {eval_runtime:.2f}s, "
+                    f"Total tokens: {total_tokens}"
+                )
 
-            # 5. Log metrics
-            self.metrics_logger.log(
-                "custom_evaluation",
-                tags={
-                    "global_step": global_step,
-                    "window": checkpoint_window,
-                    "block": block_number,
-                },
-                fields={
-                    "perplexity": perplexity,
-                    "average_loss": average_loss,
-                    "runtime_s": eval_runtime,
-                },
-            )
+                # 6. Log metrics (only master)
+                self.metrics_logger.log(
+                    "custom_evaluation",
+                    tags={
+                        "global_step": global_step,
+                        "window": checkpoint_window,
+                        "block": block_number,
+                        "world_size": self.world_size,
+                    },
+                    fields={
+                        "perplexity": perplexity,
+                        "average_loss": average_loss,
+                        "runtime_s": eval_runtime,
+                        "total_tokens": total_tokens,
+                    },
+                )
         except Exception as e:
-            tplr.logger.error(f"Custom evaluation failed: {e}", exc_info=True)
+            if self.is_master:
+                tplr.logger.error(f"Custom evaluation failed: {e}", exc_info=True)
         finally:
-            # 6. Cleanup
-            self.model.to("cpu")  # type: ignore
+            # 7. Cleanup
+            self.model.to("cpu" if self.world_size == 1 else self.device)  # type: ignore
             torch.cuda.empty_cache()
             if "DATASET_BINS_PATH" in os.environ:
                 del os.environ["DATASET_BINS_PATH"]
@@ -749,36 +835,59 @@ class Evaluator:
         4. Maintain evaluation interval
         """
         try:
-            self.comms.start_commitment_fetcher()
-            self.comms.start_background_tasks()
+            # Only master starts background tasks
+            if self.is_master:
+                self.comms.start_commitment_fetcher()
+                self.comms.start_background_tasks()
 
             await self._evaluate()
 
             while not self.stop_event.is_set():
-                await self.update_state()
+                # Only master updates state and checks for new checkpoints
+                if self.is_master:
+                    await self.update_state()
+                    latest_block = self.subtensor.get_current_block()
+                    start_window = await self.comms.get_start_window()
 
-                latest_block = self.subtensor.get_current_block()
-                start_window = await self.comms.get_start_window()
-
-                if start_window is not None and (
-                    latest_block > self.last_block_number
-                    or start_window > self.last_eval_window
-                ):
-                    tplr.logger.info(
-                        f"New checkpoint detected (block: {latest_block}, window: {start_window}), executing benchmark..."
+                    should_evaluate = start_window is not None and (
+                        latest_block > self.last_block_number
+                        or start_window > self.last_eval_window
                     )
-                    await self._evaluate()
+
+                    if should_evaluate:
+                        tplr.logger.info(
+                            f"New checkpoint detected (block: {latest_block}, window: {start_window}), executing benchmark..."
+                        )
                 else:
+                    # Non-master ranks just wait for master's decision
+                    should_evaluate = False
+
+                # Broadcast evaluation decision to all ranks
+                if dist.is_available() and dist.is_initialized():
+                    should_eval_tensor = torch.tensor(
+                        [1 if should_evaluate else 0],
+                        dtype=torch.int32,
+                        device=self.device if self.device != "cpu" else "cpu",
+                    )
+                    dist.broadcast(should_eval_tensor, src=0)
+                    should_evaluate = bool(should_eval_tensor.item())
+
+                if should_evaluate:
+                    await self._evaluate()
+                elif self.is_master:
                     tplr.logger.info(
                         f"No new checkpoint available (block: {latest_block}/{self.last_block_number}, "
                         f"window: {start_window}/{self.last_eval_window})"
                     )
+
                 await asyncio.sleep(self.config.eval_interval)  # type: ignore
         except KeyboardInterrupt:
-            tplr.logger.info("Benchmark run interrupted by user")
+            if self.is_master:
+                tplr.logger.info("Benchmark run interrupted by user")
             self.stop_event.set()
         except Exception as e:
-            tplr.logger.error(f"Benchmark run failed: {e}")
+            if self.is_master:
+                tplr.logger.error(f"Benchmark run failed: {e}")
 
     def cleanup(self) -> None:
         """

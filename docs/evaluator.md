@@ -61,7 +61,7 @@ Run the evaluator using Docker Compose:
    R2_DATASET_READ_SECRET_ACCESS_KEY=your_secret_key
    
    # Optional evaluator-specific variables
-   EVALUATOR_GPU_ID=7  # GPU device ID (default: 7)
+   EVALUATOR_GPU_IDS="4,5,6,7"  # GPU device IDs (default: 4,5,6,7)
    INFLUXDB_TOKEN=your_influxdb_token  # For metrics logging
    CUSTOM_EVAL_PATH=eval_dataset  # Custom evaluation dataset path
    EVAL_INTERVAL=600  # Seconds between evaluations (default: 10 min)

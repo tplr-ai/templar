@@ -44,6 +44,9 @@ def setup_evaluator_with_mocks():
         evaluator.metrics_logger = MagicMock()
         evaluator.comms = MagicMock()
         evaluator.version = "test_version"
+        evaluator.subtensor = MagicMock()
+        evaluator.hparams = MagicMock(blocks_per_window=100)
+        evaluator.is_master = True
 
         yield evaluator
 
@@ -61,26 +64,26 @@ async def test_evaluator_skips_old_checkpoints(evaluator):
     """
     Test that load_latest_model skips checkpoints with window_number <= last_eval_window
     """
-    # Create checkpoint with window equal to last_eval_window (should skip)
-    old_checkpoint_data = {
-        "start_window": 50,
-        "current_window": 100,  # Same as last_eval_window
-        "model_state_dict": {"layer.weight": torch.zeros(10, 10)},
-        "momentum": {"layer.weight": torch.zeros(10, 10)},
-    }
+    # Mock subtensor to return current block
+    evaluator.subtensor.get_current_block = MagicMock(return_value=10100)  # window 101
 
-    mock_get_latest = AsyncMock(return_value=(old_checkpoint_data, None))
-    evaluator.comms.get_latest_checkpoint = mock_get_latest
+    # Mock load_checkpoint to return failure (window <= last_eval_window)
+    mock_load_checkpoint = AsyncMock(return_value=(False, 100))
+    evaluator.comms.load_checkpoint = mock_load_checkpoint
 
     success, data, window, step = await evaluator.load_latest_model()
 
-    # Verify that get_latest_checkpoint was called with the version parameter
-    mock_get_latest.assert_called_once_with(version=evaluator.version)
+    # Verify that load_checkpoint was called with correct parameters
+    mock_load_checkpoint.assert_called_once_with(
+        model=evaluator.model,
+        current_window=101,
+        init_version=evaluator.version,
+        is_master=True,
+    )
 
     assert not success, "Should not load when checkpoint window equals last_eval_window"
-    assert window == 100, "Should return correct window number"
+    assert window == 0, "Should return 0 for window when checkpoint loading fails"
     assert evaluator.last_eval_window == 100, "last_eval_window should not change"
-    evaluator.model.load_state_dict.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -89,48 +92,26 @@ async def test_evaluator_loads_new_checkpoints(evaluator):
     Test that load_latest_model loads checkpoints with window_number > last_eval_window
     and calculates global step correctly
     """
-    # Create checkpoint with window > last_eval_window (should load)
-    model_state_dict = {
-        "layer.weight": torch.ones(10, 10),
-        "layer.bias": torch.ones(10),
-    }
+    # Mock subtensor to return current block
+    evaluator.subtensor.get_current_block = MagicMock(return_value=11100)  # window 111
 
-    new_checkpoint_data = {
-        "start_window": 50,
-        "current_window": 110,
-        "model_state_dict": model_state_dict,
-    }
-
-    loaded_model_state = None
-
-    def capture_model_load(state_dict):
-        nonlocal loaded_model_state
-        loaded_model_state = state_dict
-        return None
-
-    evaluator.model.load_state_dict.side_effect = capture_model_load
-    mock_get_latest = AsyncMock(return_value=(new_checkpoint_data, None))
-    evaluator.comms.get_latest_checkpoint = mock_get_latest
+    # Mock load_checkpoint to return success with new checkpoint window
+    mock_load_checkpoint = AsyncMock(return_value=(True, 110))
+    evaluator.comms.load_checkpoint = mock_load_checkpoint
 
     success, data, window, step = await evaluator.load_latest_model()
 
-    # Verify that get_latest_checkpoint was called with the version parameter
-    mock_get_latest.assert_called_once_with(version=evaluator.version)
+    # Verify that load_checkpoint was called with correct parameters
+    mock_load_checkpoint.assert_called_once_with(
+        model=evaluator.model,
+        current_window=111,
+        init_version=evaluator.version,
+        is_master=True,
+    )
 
     assert success, "Should load when checkpoint window > last_eval_window"
     assert window == 110, "Should return correct window number"
-    assert step == 60, "Should calculate global step as 110-50=60"
-
-    evaluator.model.load_state_dict.assert_called_once()
-
-    evaluator.model.to.assert_called_once_with(evaluator.config.device)
-
-    assert loaded_model_state is not None, "Model state dict should be loaded"
-    assert len(loaded_model_state) == len(model_state_dict), (
-        "Model state dict should have same number of keys"
-    )
-    for key in model_state_dict:
-        assert key in loaded_model_state, f"Key {key} should be in loaded state dict"
+    assert step == 110, "Global step should match checkpoint window"
 
 
 if __name__ == "__main__":

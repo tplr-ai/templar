@@ -32,6 +32,7 @@ def _make_validator(tmp_path, device="cpu"):
     v_cls = nv.Validator
     v = object.__new__(v_cls)  # bypass original __init__
     v.config = cfg
+    v.device = device  # Add device attribute for load_state
     v.state_path = os.path.join(tmp_path, "validator-state-TEST.pt")
     v.global_step = 123
     d = device
@@ -87,11 +88,13 @@ async def test_save_and_load_roundtrip(tmp_path):
     2.  Create another *empty* Validator, then         →  `load_state()`
     3.  Assert: global_step and all six tensors match element‑wise, dtype and device.
     """
-    # set‑up
+    # set‑up - use seed for v1
+    torch.manual_seed(42)
     v1 = _make_validator(tmp_path, device="cpu")
     await v1.save_state()
 
-    # new instance with zeroed tensors
+    # new instance with different random tensors (different seed)
+    torch.manual_seed(99)
     v2 = _make_validator(tmp_path, device="cpu")
     # ensure tensors differ before load
     for t in ("gradient_scores", "weights"):

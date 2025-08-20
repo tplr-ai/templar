@@ -51,6 +51,18 @@ class BitWriter:
             self.nbits = 0
         return bytes(self.buf)
 
+    def append_chunk(self, chunk_buf: bytearray, chunk_nbits: int, chunk_cur: int):
+        """Appends a chunk of bits from another BitWriter's state."""
+        if self.nbits == 0:
+            self.buf.extend(chunk_buf)
+            self.nbits = chunk_nbits
+            self.cur = chunk_cur
+        else:
+            for byte in chunk_buf:
+                self.write_bits(byte, 8)
+            if chunk_nbits > 0:
+                self.write_bits(chunk_cur, chunk_nbits)
+
 
 class BitReader:
     """placeholder"""
@@ -224,45 +236,6 @@ def _calculate_row_bits_from_subs(
     return total_bits
 
 
-def _encode_row_global_into(
-    bw: BitWriter,
-    indices: list[int],
-    C: int,
-    B: int,
-    k: int,
-    bitmap_threshold: int | None = None,
-) -> int:
-    """
-    Encode a row with a fixed global B and k.
-    Differences from _encode_row_into:
-      - No per-row header (lb,k) written here
-      - No per-subchunk mode bit; decoder derives mode deterministically from threshold
-    Returns bits_added.
-    """
-    lb = math.ceil(math.log2(B))
-    idx_sorted = check_and_sort_values(B, C, indices)
-    subs = instantiate_subs(B, C, idx_sorted)
-
-    if bitmap_threshold is None:
-        bitmap_threshold = _derive_bitmap_threshold(B, lb)
-
-    start_bits = bw.bits_written()
-
-    use_bitmap = [len(sub_n) >= bitmap_threshold for sub_n in subs]
-
-    # Payload
-    bw = write_bytes_loop(
-        bw,
-        k,
-        subs,
-        B,
-        lb,
-        use_bitmap,
-    )
-
-    return bw.bits_written() - start_bits
-
-
 def write_bytes_loop(
     bw: BitWriter,
     k: int,
@@ -310,26 +283,69 @@ def check_and_sort_values(B: int, C: int, indices: list[int]) -> list[int]:
     return indices
 
 
+def _encode_row_global_inner_loop(
+    row: list[int],
+    C: int,
+    B: int,
+    k: int,
+    bitmap_threshold: int | None,
+) -> tuple[bytearray, int, int, int]:
+    """Encodes a single row with global parameters and returns its bitwise components and total bit count."""
+    bw = BitWriter()
+    lb = math.ceil(math.log2(B))
+    idx_sorted = check_and_sort_values(B, C, row)
+    subs = instantiate_subs(B, C, idx_sorted)
+
+    if bitmap_threshold is None:
+        bitmap_threshold = _derive_bitmap_threshold(B, lb)
+
+    use_bitmap = [len(sub_n) >= bitmap_threshold for sub_n in subs]
+
+    bw = write_bytes_loop(
+        bw,
+        k,
+        subs,
+        B,
+        lb,
+        use_bitmap,
+    )
+    return bw.buf, bw.nbits, bw.cur, bw.bits_written()
+
+
 def _best_row_variant(
     indices: list[int], C: int, B_choices: tuple[int, ...]
-) -> tuple[int, dict[str, int], tuple[int, int, int]]:
+) -> tuple[int, dict[str, int], bytes]:
     """
     Try multiple B and pick the shortest (in bits).
 
         Returns
-            (best_B, meta_row, (lb,k,bitmap_threshold)).
+            (best_B, meta_row, bytes).
     """
     # Dry-run encodes into throwaway writers to measure bits; then caller re-encodes for real.
-    best: tuple[float, dict[str, int]] = (math.inf, {})
+    best: tuple[float, dict[str, int], bytes] = (math.inf, {}, b"")
     for b_ in B_choices:
         tmp = BitWriter()
         bits, meta = _encode_row_into(tmp, indices, C=C, B=b_)
         if bits < best[0]:
-            best = (bits, meta)
+            best = (bits, meta, tmp.flush())
     if best[0] == math.inf:
         raise ValueError("Best not found")
-    meta = best[1]
-    return meta["B"], meta, (meta["lb"], meta["k"], meta["bitmap_threshold"])
+    
+    return best[1]["B"], best[1], best[2]
+
+
+def encode_rowwise_inner_loop(
+    row: list[int],
+    C: int,
+    B_choices: tuple[int, ...],
+    use_dense_bitmap: bool,
+    bitmap_threshold: int | None,
+) -> tuple[bytes, dict[str, int], int]:
+    """Encodes a single row and returns the raw bytes and metadata."""
+    _, meta_row, best_bytes = _best_row_variant(
+        row, C=C, B_choices=B_choices
+    )
+    return best_bytes, meta_row, len(best_bytes) * 8
 
 
 # ---------- Batch encoder/decoder ----------
@@ -362,24 +378,6 @@ class EncodeMeta:
     rows: list[dict[str, int]] | None = None
 
 
-# def encode_rowwise_inner_loop(
-#     row: list[int],
-#     C: int,
-#     B_choices: tuple[int, ...],
-#     use_dense_bitmap,
-#     bitmap_threshold,
-# ):
-#     best_B, _, _ = _best_row_variant(r, C=C, B_choices=B_choices)
-#     return _encode_row_into(
-#         bw,
-#         row,
-#         C=C,
-#         B=best_B,
-#         use_dense_bitmap=use_dense_bitmap,
-#         bitmap_threshold=bitmap_threshold,
-#     )
-
-
 def _encode_batch_per_row(
     bw: BitWriter,
     row_list: list[list[int]],
@@ -391,26 +389,43 @@ def _encode_batch_per_row(
 ) -> EncodeMeta:
     """Helper for per-row scheme."""
     N = len(row_list)
-    per_row_meta: list[dict[str, int]] = []
-    b_hist: dict[int, int] = {}
-    b_choice_indices: list[int] = []
-    row_bits: list[int] = []
 
-    for r in row_list:
-        best_B, _, _ = _best_row_variant(r, C=C, B_choices=B_choices)
-        bits_added, meta_row = _encode_row_into(
-            bw,
-            r,
-            C=C,
-            B=best_B,
-            use_dense_bitmap=use_dense_bitmap,
-            bitmap_threshold=bitmap_threshold,
+    if N == 0:
+        meta = EncodeMeta(C=C, N=0, scheme="per_row", B_choices=B_choices)
+        meta.total_bits = 0
+        meta.avg_bits_per_row = 0.0
+        if meta_mode == "summary":
+            meta.B_hist = {}
+        elif meta_mode == "compact":
+            meta.row_b_codes = b""
+            meta.row_bits = []
+        elif meta_mode == "full":
+            meta.rows = []
+        return meta
+
+    with Parallel(n_jobs=20, prefer="threads") as parallel:
+        results = parallel(
+            delayed(encode_rowwise_inner_loop)(
+                r, C, B_choices, use_dense_bitmap, bitmap_threshold
+            )
+            for r in row_list
         )
-        per_row_meta.append({"bits": bits_added, **meta_row})
-        row_bits.append(bits_added)
-        b_hist[best_B] = b_hist.get(best_B, 0) + 1
+
+    per_row_bytes, per_row_meta, row_bits = zip(*results)
+
+    for chunk in per_row_bytes:
+        bw.write_bits(len(chunk), 16)
+        for byte_val in chunk:
+            bw.write_bits(byte_val, 8)
+
+    b_hist: dict[int, int] = {}
+    for meta in per_row_meta:
+        b_hist[meta["B"]] = b_hist.get(meta["B"], 0) + 1
+
+    b_choice_indices: list[int] = []
+    for m in per_row_meta:
         try:
-            b_choice_indices.append(B_choices.index(best_B))
+            b_choice_indices.append(B_choices.index(m["B"]))
         except ValueError:
             b_choice_indices.append(0)
 
@@ -465,16 +480,17 @@ def _encode_batch_global(
     best_B = None
     best_k = None
 
-    for B in candidate_Bs:
-        if B is None:
-            continue
-        lb = math.ceil(math.log2(B))
-        if bitmap_threshold is None:
-            derived_bitmap_threshold = _derive_bitmap_threshold(B, lb)
-        else:
-            derived_bitmap_threshold = bitmap_threshold
+    with Parallel(n_jobs=20, prefer="threads") as parallel:
 
-        with Parallel(n_jobs=20, prefer="threads") as parallel:
+        for B in candidate_Bs:
+            if B is None:
+                continue
+            lb = math.ceil(math.log2(B))
+            if bitmap_threshold is None:
+                derived_bitmap_threshold = _derive_bitmap_threshold(B, lb)
+            else:
+                derived_bitmap_threshold = bitmap_threshold
+
             # Pre-calculate subs for all rows for this B
             subs_by_row = parallel(
                 delayed(instantiate_subs)(B, C, check_and_sort_values(B, C, r))
@@ -498,19 +514,31 @@ def _encode_batch_global(
                     best_B = B
                     best_k = k
 
-    if best_B is None or best_k is None:
-        raise ValueError(f"Best of k or B is None: {best_B=} {best_k=}")
+        if best_B is None or best_k is None:
+            raise ValueError(f"Best of k or B is None: {best_B=} {best_k=}")
 
-    lb = math.ceil(math.log2(best_B))
-    bw.write_bits(lb, 5)
-    bw.write_bits(best_k, 4)
+        lb = math.ceil(math.log2(best_B))
+        bw.write_bits(lb, 5)
+        bw.write_bits(best_k, 4)
 
-    row_bits: list[int] = []
-    for r in row_list:
-        bits_added = _encode_row_global_into(
-            bw, r, C=C, B=best_B, k=best_k, bitmap_threshold=bitmap_threshold
+        results = parallel(
+            delayed(_encode_row_global_inner_loop)(
+                r,
+                C=C,
+                B=best_B,
+                k=best_k,
+                bitmap_threshold=bitmap_threshold,
+            )
+            for r in row_list
         )
-        row_bits.append(bits_added)
+
+    if not results:
+        row_bits = []
+    else:
+        bufs, nbits_list, curs, row_bits_list = zip(*results)
+        row_bits = list(row_bits_list)
+        for i in range(len(bufs)):
+            bw.append_chunk(bufs[i], nbits_list[i], curs[i])
 
     payload = bw.flush()
     total_payload_bits = len(payload) * 8
@@ -607,22 +635,28 @@ def _decode_batch_per_row(br: BitReader, N: int, C: int) -> list[list[int]]:
     """Helper for per-row scheme."""
     out: list[list[int]] = []
     for _ in range(N):
-        lb = br.read_bits(5)
-        k = br.read_bits(4)
+        chunk_len = br.read_bits(16)
+        chunk_buf = bytearray()
+        for _ in range(chunk_len):
+            chunk_buf.append(br.read_bits(8))
+
+        chunk_br = BitReader(bytes(chunk_buf))
+        lb = chunk_br.read_bits(5)
+        k = chunk_br.read_bits(4)
         B = 1 << lb
         if B <= 0 or C % B != 0:
             raise ValueError("Invalid (B,C) in row header")
         n_sub = C // B
 
         row = []
-        mode = br.read_bits(1)
+        mode = chunk_br.read_bits(1)
         for j in range(n_sub):
-            s_j = rice_read(br, k)
+            s_j = rice_read(chunk_br, k)
             if s_j == 0:
                 continue
 
             if mode == 1:
-                bitmask = br.read_bits(B)
+                bitmask = chunk_br.read_bits(B)
                 while bitmask:
                     lsb = bitmask & -bitmask
                     pos = lsb.bit_length() - 1
@@ -630,7 +664,7 @@ def _decode_batch_per_row(br: BitReader, N: int, C: int) -> list[list[int]]:
                     bitmask ^= lsb
             else:
                 for _k in range(s_j):
-                    loc = br.read_bits(lb)
+                    loc = chunk_br.read_bits(lb)
                     row.append(j * B + loc)
         out.append(row)
     return out
@@ -649,6 +683,7 @@ def _decode_batch_global(br: BitReader, N: int, C: int) -> list[list[int]]:
     out: list[list[int]] = []
     for _ in range(N):
         row: list[int] = []
+        # Since we don't know the chunk length, we must decode row by row from the main stream
         for j in range(n_sub):
             s_j = rice_read(br, k)
             if s_j == 0:

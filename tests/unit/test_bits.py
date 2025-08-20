@@ -9,7 +9,6 @@ from src.tplr.bits import (
     _derive_bitmap_threshold,
     _encode_batch_global,
     _encode_batch_per_row,
-    _encode_row_global_into,
     _encode_row_into,
     check_and_sort_values,
     decode_batch,
@@ -121,8 +120,18 @@ def test_decode_batch_invalid_data_per_row():
     bw.write_bits(4096, 12)  # C-1 = 4096 -> C=4097
     bw.write_bits(1, 16)  # N=1
     bw.write_bits(0, 1)  # scheme=per_row
-    bw.write_bits(5, 5)  # lb=5 -> B=32. 4097 is not divisible by 32
-    bw.write_bits(0, 4)  # k=0
+
+    # Construct a dummy chunk with an invalid header
+    dummy_chunk_bw = BitWriter()
+    dummy_chunk_bw.write_bits(5, 5)  # lb=5 -> B=32. 4097 is not divisible by 32
+    dummy_chunk_bw.write_bits(0, 4)  # k=0
+    dummy_chunk_bytes = dummy_chunk_bw.flush()
+
+    # Write the chunk length and the chunk itself
+    bw.write_bits(len(dummy_chunk_bytes), 16)
+    for byte_val in dummy_chunk_bytes:
+        bw.write_bits(byte_val, 8)
+
     data = bw.flush()
     with pytest.raises(ValueError, match="Invalid .* in row header"):
         decode_batch(data)

@@ -1253,6 +1253,7 @@ class Comms(ChainManager):
         timeout: int = 30,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
+        show_progress: bool = True,
     ) -> CommsGetResult:
         """
         Retrieves an object from storage, either locally or from a remote S3 bucket.

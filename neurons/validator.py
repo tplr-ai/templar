@@ -1968,6 +1968,19 @@ class Validator(BaseNode, Trainer):
                 current_window=self.current_window,
             )
 
+            # Clean up memory before potential checkpoint creation
+            if 'gather_result' in locals() and gather_result is not None:
+                del gather_result
+            if 'state_dict' in locals():
+                del state_dict
+            if 'clip_norm_dict' in locals():
+                del clip_norm_dict
+            torch.cuda.empty_cache()
+            
+            # Synchronize all ranks before checkpoint
+            if self.world_size > 1 and dist.is_initialized():
+                dist.barrier()
+
             # 17. Create checkpoints periodically
             if (
                 self.global_step % self.hparams.checkpoint_frequency == 0
@@ -1982,7 +1995,10 @@ class Validator(BaseNode, Trainer):
 
                 checkpoint_data = {
                     "model_state_dict": get_model_state_dict(
-                        self.model, options=StateDictOptions(full_state_dict=True)
+                        self.model, options=StateDictOptions(
+                            full_state_dict=True,
+                            cpu_offload=True  # Offload to CPU to save GPU memory
+                        )
                     ),
                     "start_window": self.start_window,
                     "current_window": self.current_window,

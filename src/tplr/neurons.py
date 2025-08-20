@@ -178,6 +178,7 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
     return gradient, xshapes, totalks
 
 
+@torch.no_grad()
 def outer_step(
     model: nn.Module,
     optimizer: Optimizer,
@@ -195,145 +196,180 @@ def outer_step(
     global_step: int | None = None,
 ) -> None:
     """
-    Synchronize gradients (if DDP) and apply optimizer step
+    Memory-minimizing variant:
+      - Builds and applies ONE param's grad at a time.
+      - Calls optimizer.step() per param (others have grad=None, so they're skipped).
+      - Frees all temporaries and grad immediately after each step.
     """
     bare_model = getattr(model, "module", model)
+    bare_model.train()
 
-    if is_master:
-        min_median_norm = float("inf")
-        max_median_norm = float("-inf")
+    # Free any existing grads entirely (do not allocate zeros)
+    optimizer.zero_grad(set_to_none=True)
 
-        model.train()
-        optimizer.zero_grad()
+    ddp = world_size > 1 and dist.is_available() and dist.is_initialized()
+    src_rank = 0
+    on_src = is_master or not ddp
 
-        if (
-            gather_result is not None
-            and gather_result.state_dict is not None
-            and bool(vars(gather_result.state_dict))
-        ):
-            for n, p in bare_model.named_parameters():
-                idxs = getattr(gather_result.state_dict, n + "idxs", None)
-                vals = getattr(gather_result.state_dict, n + "vals", None)
-                qps = getattr(gather_result.state_dict, n + "quant_params", None)
+    # Only master reads aggregated payload
+    src_sd: dict | None = None
+    if (
+        on_src
+        and gather_result is not None
+        and getattr(gather_result, "state_dict", None) is not None
+    ):
+        src_sd = gather_result.state_dict
+        if isinstance(src_sd, SimpleNamespace):
+            src_sd = vars(src_sd).copy()
 
-                if idxs is None or vals is None:
-                    tplr.logger.info(f"Gradient data missing for {n}, skipping.")
-                    continue
+    # compact flag broadcast
+    def _bcast_flag(v: int) -> int:
+        t = torch.tensor([v], device=device, dtype=torch.int32)
+        if ddp:
+            dist.broadcast(t, src_rank)
+        return int(t.item())
 
-                # normalise container types
+    # optional stats
+    min_median_norm = float("inf")
+    max_median_norm = float("-inf")
+
+    for name, p in bare_model.named_parameters():
+        # ---- master decides if this param has an update; others receive a flag ----
+        has_update = 0
+        payload = None
+
+        if on_src and src_sd is not None:
+            idxs = src_sd.get(name + "idxs")
+            vals = src_sd.get(name + "vals")
+            qps = src_sd.get(name + "quant_params")
+
+            if idxs is not None and vals is not None:
                 if not isinstance(idxs, (list, tuple)):
                     idxs = [idxs]
                 if not isinstance(vals, (list, tuple)):
                     vals = [vals]
-
-                # ------------------------------------------------------------------
-                # 1️⃣  Ensure every vals tensor is fp32/fp16 (de-quant if needed)
-                # ------------------------------------------------------------------
                 vals_f32 = compressor.maybe_dequantize_values(vals, qps, device)
+                if vals_f32:
+                    payload = (idxs, vals_f32)
+                    has_update = 1
 
-                block_norms = torch.stack([torch.norm(v, p=2) for v in vals_f32])
+        flag_result = _bcast_flag(has_update)
+        if flag_result == 0:
+            # Nothing to apply for this param
+            continue
 
-                # Handle DTensor parameters
-                if isinstance(p, DT):
-                    # Work with local shard for decompression
-                    local_p = p.to_local()
-                    new_grad = transformer.decode(
-                        compressor.batch_decompress(
-                            local_p,
-                            typing.cast(list[torch.Tensor], idxs),
-                            typing.cast(list[torch.Tensor], vals_f32),
-                            xshapes[n],
-                            totalks[n],
-                            quantize_params=None,  # already de-quantised
-                            block_norms=block_norms,
-                            normalise=False,
-                            clip_norm=True,
-                        ),
-                        use_dct=use_dct,
-                    )
+        full_grad_src = torch.empty(1)
+        decompressed = None
+        block_norms = None
 
-                    # Convert back to DTensor
-                    new_grad_dt = DT.from_local(
-                        new_grad,
-                        device_mesh=p.device_mesh,
-                        placements=p.placements,
-                        run_check=False,
-                    )
-                    new_grad = new_grad_dt
-                else:
-                    new_grad = transformer.decode(
-                        compressor.batch_decompress(
-                            p.to(device),
-                            typing.cast(list[torch.Tensor], idxs),
-                            typing.cast(list[torch.Tensor], vals_f32),
-                            xshapes[n],
-                            totalks[n],
-                            quantize_params=None,  # already de-quantised
-                            block_norms=block_norms,
-                            normalise=False,
-                            clip_norm=True,
-                        ),
-                        use_dct=use_dct,
-                    )
+        # ------- build the full dense grad on the source rank only -------
+        if on_src:
+            idxs, vals_f32 = payload  # type: ignore[misc]
+            block_norms = torch.stack([torch.norm(v, p=2) for v in vals_f32])
 
-                # 2️⃣  last-chance validation
-                if isinstance(new_grad, DT):
-                    local_grad_check = new_grad.to_local()
-                    finite_check = torch.isfinite(local_grad_check).all()
-                    max_check = local_grad_check.abs().max() <= 1e3
-                else:
-                    finite_check = torch.isfinite(new_grad).all()
-                    max_check = new_grad.abs().max() <= 1e3
+            # stats
+            med = float(torch.median(block_norms).item())
+            min_median_norm = min(min_median_norm, med)
+            max_median_norm = max(max_median_norm, med)
 
-                if not finite_check or not max_check:
-                    tplr.logger.warning(f"Non-finite gradient for {n}; dropping.")
-                    continue
-
-                # track stats
-                med = torch.median(block_norms).item()
-                min_median_norm = min(min_median_norm, med)
-                max_median_norm = max(max_median_norm, med)
-
-                p.grad = new_grad if p.grad is None else p.grad.copy_(new_grad)
-
-        # ------------------------------------------------------------------
-        # log med-norm range
-        # ------------------------------------------------------------------
-        if (
-            wandb_run is not None
-            and global_step is not None
-            and max_median_norm > float("-inf")
-        ):
-            wandb_run.log(
-                {
-                    "compress/min_median_block_norm": min_median_norm,
-                    "compress/max_median_block_norm": max_median_norm,
-                },
-                step=global_step,
+            # Use empty_like to avoid copying the param; just provide dtype/device/shape
+            ref = torch.empty_like(p, device=device, dtype=p.dtype)
+            decompressed = compressor.batch_decompress(
+                ref,
+                idxs,
+                vals_f32,
+                xshapes[name],
+                totalks[name],
+                quantize_params=None,
+                block_norms=block_norms,
+                normalise=False,
+                clip_norm=True,
             )
 
-        # ------------------------------------------------------------------
-        # 4️⃣  global grad-norm clip then optimiser step
-        # ------------------------------------------------------------------
+            full_grad_src = transformer.decode(decompressed, use_dct=use_dct)
+            # Single conversion to target dtype+device to avoid extra temporaries
+            full_grad_src = full_grad_src.to(
+                dtype=p.dtype, device=p.device, non_blocking=True
+            )
+
+            # Free intermediate pieces ASAP
+            del vals_f32, idxs, vals, qps, ref, decompressed
+            decompressed = None
+
+        # ------- distribute/broadcast directly into p.grad, step, then free -------
+        if isinstance(p, DT):
+            # DTensor param: scatter shards from master
+            src_tensor = (
+                full_grad_src
+                if on_src
+                else torch.empty(p.shape, device=p.device, dtype=p.dtype)
+            )
+            new_grad = distribute_tensor(
+                src_tensor,
+                device_mesh=p.device_mesh,
+                placements=p.placements,
+                src_data_rank=src_rank,
+            )
+            # master no longer needs the full dense grad
+            if on_src:
+                del full_grad_src
+                full_grad_src = None
+
+            # quick sanity (view, no extra big alloc)
+            local_view = new_grad.to_local()
+            if not torch.isfinite(local_view).all():
+                del new_grad, local_view
+                torch.cuda.empty_cache()
+                continue
+
+            p.grad = new_grad  # DTensor grad
+            del new_grad, local_view
+
+        else:
+            # Replicated param: broadcast dense grad once.
+            if ddp:
+                if on_src:
+                    # Broadcast from the source tensor; then reuse it as grad
+                    dist.broadcast(full_grad_src, src_rank)  # type: ignore[arg-type]
+                    p.grad = full_grad_src
+                    full_grad_src = None
+                else:
+                    # Receive directly into p.grad to avoid an extra buffer
+                    p.grad = torch.empty_like(p, device=p.device, dtype=p.dtype)
+                    dist.broadcast(p.grad, src_rank)  # type: ignore[arg-type]
+            else:
+                # Single process: just use the built tensor
+                p.grad = full_grad_src
+                full_grad_src = None
+
+            if p.grad is not None and not torch.isfinite(p.grad).all():  # type: ignore[arg-type]
+                p.grad = None
+                torch.cuda.empty_cache()
+                continue
+
+        # ---- apply update immediately for THIS param and free its grad ----
         optimizer.step()
+        p.grad = None  # free grad storage right away
         torch.cuda.empty_cache()
 
-        if world_size > 1:
-            for name, tensor in bare_model.state_dict().items():
-                if torch.is_tensor(tensor):
-                    if isinstance(tensor, DT):
-                        continue
-                    else:
-                        dist.broadcast(tensor.data, src=0)
+    # optional W&B (master only)
+    if (
+        on_src
+        and wandb_run is not None
+        and global_step is not None
+        and max_median_norm > float("-inf")
+    ):
+        wandb_run.log(
+            {
+                "compress/min_median_block_norm": min_median_norm,
+                "compress/max_median_block_norm": max_median_norm,
+            },
+            step=global_step,
+        )
 
-    else:
-        if world_size > 1:
-            for name, tensor in bare_model.state_dict().items():
-                if torch.is_tensor(tensor):
-                    if isinstance(tensor, DT):
-                        continue
-                    else:
-                        dist.broadcast(tensor.data, src=0)
+    # Extra safety: ensure no grads are left allocated
+    optimizer.zero_grad(set_to_none=True)
+    torch.cuda.empty_cache()
 
 
 async def update_peers(instance: NeuronT, window: int, peer_start: float) -> None:

@@ -54,6 +54,31 @@ torch.backends.cudnn.allow_tf32 = True
 
 
 class Miner(BaseNode, Trainer):
+    def log_gpu_memory(self, stage: str):
+        """Log current GPU memory allocation and reservation"""
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated(self.device) / 1024**3
+            reserved = torch.cuda.memory_reserved(self.device) / 1024**3
+            tplr.logger.info(
+                f"[GPU Memory - {stage}] Allocated: {allocated:.2f} GB, Reserved: {reserved:.2f} GB"
+            )
+
+    def check_memory_threshold(self, threshold_gb: float = 0.5):
+        """Check if available memory is below threshold and cleanup if needed"""
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated(self.device) / 1024**3
+            reserved = torch.cuda.memory_reserved(self.device) / 1024**3
+            max_memory = (
+                torch.cuda.get_device_properties(self.device).total_memory / 1024**3
+            )
+            available = max_memory - allocated
+
+            if available < threshold_gb:
+                tplr.logger.warning(f"Low GPU memory: {available:.2f} GB available")
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize(self.device)
+                self.log_gpu_memory("After emergency cleanup")
+
     # Command line config items.
     @staticmethod
     def miner_config():
@@ -228,39 +253,17 @@ class Miner(BaseNode, Trainer):
         self.xshapes = {}
         self.totalks = {}
         model_iterator = self.bare_model.named_parameters()
-        param_info = {}  # Store parameter info for second pass
 
         for idx, (n, p) in enumerate(model_iterator):
-            # Handle DTensor - use full tensor shape for DCT registration
-            # since we're not supporting TP and will use full tensors for compression
-            if isinstance(p, DT):
-                full_p = p.full_tensor()
-                # Ensure the dummy tensor is on the correct device
-                dummy = torch.zeros_like(full_p, device=self.device)
-                tplr.logger.debug(
-                    f"DTensor {n}: full_p.device={full_p.device}, dummy.device={dummy.device}, self.device={self.device}"
-                )
-            else:
-                dummy = torch.zeros_like(p, device=self.device)
-
-            # Store info for second pass
-            param_info[n] = {
-                "dummy": dummy,
-                "idx": idx,
-            }
             if idx % self.world_size == self.rank:
                 # this rank "owns" the parameter
                 self.owned_params.add(n)
                 # For DTensors, create error feedback based on full tensor since TP is not supported
-                self.error_feedback[n] = dummy
+                self.error_feedback[n] = None
 
-        # Second pass: now encode all tensors (DCT shapes should be registered)
-        for n, info in param_info.items():
-            dummy = info["dummy"]
-
-            enc = self.transformer.encode(dummy, use_dct=self.hparams.use_dct)
-            tplr.logger.debug(
-                f"[Init] Successfully applied DCT to {n} with shape {dummy.shape}"
+            enc = self.transformer.encode(
+                torch.empty(p.shape, dtype=torch.float16, device=self.device),
+                use_dct=self.hparams.use_dct,
             )
             _, _, xshape, totalk, _ = self.compressor.compress(
                 enc,
@@ -270,7 +273,7 @@ class Miner(BaseNode, Trainer):
             self.totalks[n] = totalk
 
         tplr.logger.info(
-            f"[Init] DCT compression initialized for {len(param_info)} parameters"
+            f"[Init] Compression initialized for {len(self.xshapes)} parameters"
         )
 
         self.bootstrap_version = getattr(self.hparams, "checkpoint_init_version", None)
@@ -408,39 +411,32 @@ class Miner(BaseNode, Trainer):
         #   • remaining ranks receive state via NCCL broadcast
         # ------------------------------------------------------------------
 
-        ckpt_ok = False
-        ckpt_sync_win = self.start_window
-        if self.world_size == 1 or self.is_master:
-            (
-                ckpt_ok,
-                ckpt_sync_win,
-            ) = await self.comms.load_checkpoint(
-                model=self.bare_model,
-                current_window=self.current_window,
-                device=str(self.device),
-                init_version=tplr.__version__
-                if has_new_checkpoint
-                else self.bootstrap_version,
+        ckpt_ok, ckpt_sync_win = await self.comms.load_checkpoint(
+            model=self.bare_model,
+            current_window=self.current_window,
+            init_version=tplr.__version__
+            if has_new_checkpoint
+            else self.bootstrap_version,
+            is_master=self.is_master,
+        )
+        if ckpt_ok:
+            tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
+        else:
+            tplr.logger.info("No checkpoint found – starting from scratch")
+
+        # Decide catch-up windows and run catch-up on ALL ranks (avoids DTensor collective hangs)
+        need_catchup = (not ckpt_ok) or (
+            ckpt_ok
+            and ckpt_sync_win < self.current_window
+            and self.global_step > checkpoint_window_buffer
+        )
+        if need_catchup:
+            start_from = (
+                self.start_window
+                if not ckpt_ok
+                else max(ckpt_sync_win, self.start_window)
             )
-
-            if ckpt_ok:
-                tplr.logger.info(f"Checkpoint loaded (sync_window={ckpt_sync_win})")
-                # catch-up only if the checkpoint lags behind
-                if (
-                    ckpt_sync_win < self.current_window
-                    and self.global_step > checkpoint_window_buffer
-                ):
-                    await tplr.neurons.catchup_with_aggregation_server(
-                        self, max(ckpt_sync_win, self.start_window)
-                    )
-
-            else:
-                tplr.logger.info("No checkpoint found – starting from scratch")
-
-                # still perform the full catch-up from the very first window
-                await tplr.neurons.catchup_with_aggregation_server(
-                    self, self.start_window
-                )
+            await tplr.neurons.catchup_with_aggregation_server(self, start_from)
 
         if ckpt_ok:
             steps_to_replay = (
@@ -449,24 +445,22 @@ class Miner(BaseNode, Trainer):
             for _ in range(steps_to_replay):
                 self.inner_scheduler.step()
 
-        # ---- broadcast to other ranks (if any) --------------------------------
-        if self.world_size > 1:
-            bcast_start = tplr.T()
-
-            # 1) parameters & buffers
-            for tensor in self.bare_model.state_dict().values():
-                if torch.is_tensor(tensor) and not isinstance(tensor, DT):
-                    dist.broadcast(tensor.data, src=0)
-
-            bcast_time = tplr.T() - bcast_start
-            tplr.logger.info(
-                f"{tplr.P(self.current_window, bcast_time)} "
-                f"Broadcast checkpoint to {self.world_size - 1} ranks"
-            )
-
-            dist.barrier(device_ids=[self.local_rank])
-
         self.comms.start_commitment_fetcher()
+
+        # Put a dummy gradient to mark this miner as active for validators
+        if self.is_master:
+            tplr.logger.info("Putting dummy gradient to mark miner as active...")
+            dummy_gradient = {
+                "metadata": {"window": self.current_window, "dummy": True}
+            }
+            await self.comms.put(
+                state_dict=dummy_gradient,
+                uid=str(self.uid),
+                window=self.current_window,
+                key="gradient",
+                local=False,
+            )
+            tplr.logger.info("Dummy gradient posted successfully")
 
         while not self.stop_event.is_set():
             await asyncio.sleep(0)
@@ -555,9 +549,10 @@ class Miner(BaseNode, Trainer):
             gradient = {}
             processed_state_dict = {}
             if self.is_master:
-                for shard in gathered:
+                for i, shard in enumerate(gathered):
                     if shard is not None:
                         gradient.update(shard)
+                        gathered[i] = None  # Free memory immediately after using shard
 
                 # dataset metadata
                 gidx = self.sampler._global_indices()
@@ -580,6 +575,7 @@ class Miner(BaseNode, Trainer):
                 tplr.logger.info(
                     f"Merged {len(gathered)} shards → {len(gradient) - 1} tensors"
                 )
+                del gathered  # Free gathered list after merging
 
                 # move to CPU before R2 upload
                 processed_state_dict = {
@@ -608,9 +604,16 @@ class Miner(BaseNode, Trainer):
                     f"Uploaded {upload_size / 1e6:.1f} MB shard-merged gradient"
                 )
 
+                # Free memory immediately after upload
+                del processed_state_dict
+                del gradient
+                torch.cuda.empty_cache()
+
             else:
                 # non-master ranks simply wait; they don't upload
                 put_time = 0.0
+                if self.world_size > 1:
+                    del gathered  # Free gathered list on non-master ranks too
 
             tplr.logger.info(f"Stopped accumulating: {n_batches} batches")
             if self.world_size > 1:
@@ -664,8 +667,6 @@ class Miner(BaseNode, Trainer):
                 )
                 tplr.logger.info("Gather task completed!")
                 gather_time = tplr.T() - gather_start
-            if self.world_size > 1:
-                dist.barrier(device_ids=[self.local_rank])
 
             # 5. Calculate and log metrics
             self.total_tokens_processed += window_tokens
@@ -684,6 +685,8 @@ class Miner(BaseNode, Trainer):
             # ---------------------------------------------------------------------
 
             # 8. Apply gathered gradients
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
             update_start = tplr.T()
             _ = self.outer_step(gather_result)
 
@@ -720,21 +723,18 @@ class Miner(BaseNode, Trainer):
                     )
 
                 # Store the debug dictionary
-                t = asyncio.create_task(
-                    self.comms.put(
-                        state_dict=debug_dict,
-                        uid=str(self.uid),
-                        window=step_window,
-                        key="debug",
-                        local=False,
-                    )
+                await self.comms.put(
+                    state_dict=debug_dict,
+                    uid=str(self.uid),
+                    window=step_window,
+                    key="debug",
+                    local=False,
                 )
-                self._bg_tasks.add(t)
-                t.add_done_callback(self._bg_tasks.discard)
 
                 tplr.logger.info(
                     f"Stored debug values for window {self.current_window}"
                 )
+
             # Log total window time and metrics
             tplr.logger.info(
                 f"{tplr.P(self.current_window, tplr.T() - window_start)} Completed window iteration"
@@ -839,16 +839,15 @@ class Miner(BaseNode, Trainer):
             if self.world_size > 1:
                 dist.barrier(device_ids=[self.local_rank])
 
-            # Delete local variables to clear up memory
-            del gather_result, shard_gradient
-            if self.is_master:
-                del processed_state_dict, gradient
+            # Delete any remaining local variables to clear up memory
+            del shard_gradient
+            if gather_result is not None:
+                del gather_result
+            torch.cuda.empty_cache()
+            # Check memory threshold periodically
+            self.check_memory_threshold(threshold_gb=0.5)
 
             await self.cleanup_window()
-
-            # ── profiler step (only master) ─────────────────────────────
-            if self.is_master and self._prof is not None:
-                self._prof.step()
 
             # 4. Wait for next window
             tplr.logger.info("Wait for next window...")
@@ -881,13 +880,31 @@ class Miner(BaseNode, Trainer):
 
     async def cleanup_window(self):
         """Aggressive memory cleanup between windows"""
+        import gc
+
         # Clear gradients more thoroughly
         self.model.zero_grad(set_to_none=True)
         self.inner_optimizer.zero_grad(set_to_none=True)
 
-        # Empty CUDA cache
-        torch.cuda.empty_cache()
+        # Clear error feedback for non-owned params to save memory
+        for name in list(self.error_feedback.keys()):
+            if name not in self.owned_params and self.error_feedback[name] is not None:
+                self.error_feedback[name] = None
+
+        # Clear any cached autocast states
         torch.clear_autocast_cache()
+
+        # Empty CUDA cache multiple times for thorough cleanup
+        for _ in range(3):
+            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(self.device)
+
+        # Force garbage collection
+        gc.collect()
+
+        # Check memory threshold after cleanup
+        self.check_memory_threshold(threshold_gb=1.0)
 
         # Log memory status
         tplr.logger.info(

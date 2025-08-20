@@ -113,8 +113,8 @@ class TestOuterStep(unittest.TestCase):
         self.device = "cpu"
         self.wandb_run = MagicMock()
 
-        # Mock model parameters
-        self.param1 = MagicMock()
+        # Mock model parameters with actual tensor
+        self.param1 = torch.nn.Parameter(torch.zeros(10))
         self.param1.grad = None
         self.model.named_parameters.return_value = [("param1", self.param1)]
         self.model.module.named_parameters.return_value = [("param1", self.param1)]

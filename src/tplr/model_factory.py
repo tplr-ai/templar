@@ -25,7 +25,13 @@ from types import SimpleNamespace
 from typing import Literal
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    get_model_state_dict,
+    set_model_state_dict,
+)
 from torchtitan.config import (
     ActivationCheckpoint,
     Float8,
@@ -35,7 +41,11 @@ from torchtitan.config import (
     Training,
 )
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.llama3 import Llama3StateDictAdapter, TransformerModelArgs
+from torchtitan.models.llama3 import (
+    Llama3StateDictAdapter,
+    TransformerModelArgs,
+    llama3_configs,
+)
 from torchtitan.models.llama3 import Transformer as TitanLlama
 from torchtitan.models.llama3.infra.parallelize import parallelize_llama
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
@@ -43,27 +53,72 @@ from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 import tplr
 
 
-def create_titan_model_args(hf_config, sequence_length: int) -> TransformerModelArgs:
-    """Convert HuggingFace LlamaConfig to TorchTitan TransformerModelArgs.
+def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
+    """Get TorchTitan TransformerModelArgs from predefined configs or custom hparams.
 
     Args:
-        hf_config: HuggingFace LlamaConfig object
-        sequence_length: Maximum sequence length for the model
+        hparams: Hyperparameters object containing model configuration
 
     Returns:
         TransformerModelArgs configured for TorchTitan
+
+    Raises:
+        ValueError: If model_size is not valid
     """
-    return TransformerModelArgs(
-        dim=hf_config.hidden_size,
-        n_layers=hf_config.num_hidden_layers,
-        n_heads=hf_config.num_attention_heads,
-        n_kv_heads=getattr(hf_config, "num_key_value_heads", None),
-        vocab_size=hf_config.vocab_size,
-        multiple_of=256,
-        max_seq_len=sequence_length,
-        rope_theta=getattr(hf_config, "rope_theta", 1e4),
-        depth_init=True,
+    model_size = hparams.model_size
+    sequence_length = hparams.sequence_length
+    vocab_size = (
+        hparams.tokenizer.vocab_size
+        if hasattr(hparams, "tokenizer")
+        else hparams.model_config.vocab_size
     )
+
+    if model_size in llama3_configs:
+        tplr.logger.info(f"Using predefined TorchTitan config for {model_size}")
+        # Create a copy of the config to avoid modifying the original
+        args = TransformerModelArgs(**vars(llama3_configs[model_size]))
+        # Update max_seq_len with our sequence length
+        args.max_seq_len = sequence_length
+        # Update vocab_size if provided (from tokenizer)
+        args.vocab_size = vocab_size
+        tplr.logger.info(f"Using vocab_size: {vocab_size}")
+        return args
+
+    # Fall back to creating custom config from hparams for non-standard sizes (150M, 1B, etc.)
+    tplr.logger.info(f"Creating custom TorchTitan config for {model_size} from hparams")
+
+    # Create custom TransformerModelArgs from hparams
+    args = TransformerModelArgs(
+        dim=hparams.model_config.hidden_size,
+        n_layers=hparams.model_config.num_hidden_layers,
+        n_heads=hparams.model_config.num_attention_heads,
+        n_kv_heads=getattr(
+            hparams.model_config,
+            "num_key_value_heads",
+            hparams.model_config.num_attention_heads,
+        ),
+        vocab_size=vocab_size,
+        ffn_dim_multiplier=None,  # Will calculate from intermediate_size
+        multiple_of=256,
+        norm_eps=getattr(hparams.model_config, "rms_norm_eps", 1e-5),
+        rope_theta=getattr(hparams.model_config, "rope_theta", 10000.0),
+        max_seq_len=sequence_length,
+    )
+
+    # Calculate ffn_dim_multiplier to match the intermediate_size from hparams
+    # The formula in TorchTitan is: ffn_dim = int(8 * dim / 3 * ffn_dim_multiplier)
+    # We need to reverse engineer ffn_dim_multiplier from intermediate_size
+    target_intermediate_size = hparams.model_config.intermediate_size
+    base_ffn = int(8 * args.dim / 3)
+    args.ffn_dim_multiplier = target_intermediate_size / base_ffn
+
+    tplr.logger.info(
+        f"Custom config: dim={args.dim}, n_layers={args.n_layers}, "
+        f"n_heads={args.n_heads}, n_kv_heads={args.n_kv_heads}, "
+        f"intermediate_size={target_intermediate_size}"
+    )
+
+    return args
 
 
 def create_job_config(
@@ -163,22 +218,34 @@ def create_parallel_dims(
         ValueError: If parallelization parameters are invalid
     """
     if role == "evaluator":
-        # Evaluator: single GPU, no sharding
+        # Evaluator: support both single and multi-GPU configurations
+        tp_degree = min(4, world_size)  # Use up to 4 GPUs for TP
+        if world_size % tp_degree != 0:
+            raise ValueError(
+                f"World size ({world_size}) must be divisible by "
+                f"tensor-parallel degree ({tp_degree})"
+            )
         return ParallelDims(
-            dp_replicate=1,
+            dp_replicate=world_size // tp_degree,
             dp_shard=1,
-            tp=1,
+            tp=tp_degree,
             pp=1,
             cp=1,
             ep=1,
-            world_size=1,
+            world_size=world_size,
         )
     elif role == "validator":
-        # Validator: data parallel replication, no sharding
+        # Validator: pipeline parallelism with data parallel replication
+        tp_degree = 4
+        if world_size % tp_degree != 0:
+            raise ValueError(
+                f"World size ({world_size}) must be divisible by "
+                f"tensor-parallel degree ({tp_degree})"
+            )
         return ParallelDims(
-            dp_replicate=world_size,
+            dp_replicate=world_size // tp_degree,
             dp_shard=1,
-            tp=1,
+            tp=tp_degree,
             pp=1,
             cp=1,
             ep=1,
@@ -247,13 +314,8 @@ def initialize_torchtitan_model(
     Returns:
         Initialized and parallelized TorchTitan model
     """
-    # Create model arguments from HuggingFace config
-    hf_cfg = hparams.model_config
-    titan_args = create_titan_model_args(hf_cfg, hparams.sequence_length)
-
-    # Create model on meta device
-    with torch.device("meta"):
-        model = TitanLlama(titan_args)
+    # Get model arguments using predefined TorchTitan configs or custom hparams
+    titan_args = get_titan_model_args(hparams)
 
     # Create parallelization dimensions
     pdims = create_parallel_dims(world_size, hparams, role)
@@ -261,9 +323,13 @@ def initialize_torchtitan_model(
     # Create job config
     job_config = create_job_config(hparams, role)
 
-    # Build mesh if needed (for miner)
-    if role == "miner" and world_size > 1:
+    if world_size > 1 and dist.is_available() and dist.is_initialized():
+        # Only build a mesh when distributed is initialized (avoids single-proc errors)
         _ = pdims.build_mesh()
+
+    # Create model on meta device
+    with torch.device("meta"):
+        model = TitanLlama(titan_args)
 
     # Parallelize the model
     model = parallelize_llama(
@@ -272,15 +338,50 @@ def initialize_torchtitan_model(
         job_config=job_config,
     )
 
-    # Initialize model weights on the target device
-    if role == "evaluator":
-        # Evaluator initializes on CPU
-        model.to_empty(device="cpu")
-        model.init_weights()  # type: ignore
+    # Initialize weights via rank‑0 broadcast of a single full FP32 state (FSDP2/DCP)
+    target_device = "cpu" if role == "evaluator" else device
+    model.to_empty(device=target_device)
+    if dist.is_available() and dist.is_initialized() and world_size > 1:
+        rank = dist.get_rank()
+        if rank == 0:
+            with torch.device("meta"):
+                ref = TitanLlama(titan_args)  # unsharded reference
+            ref.to_empty(device="cpu")
+            torch.manual_seed(42)
+            with torch.no_grad():
+                ref.init_weights()
+            full_sd = get_model_state_dict(
+                ref, options=StateDictOptions(full_state_dict=True)
+            )
+        else:
+            full_sd = {}
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(
+                full_state_dict=True, broadcast_from_rank0=True, strict=True
+            ),
+        )
+        dist.barrier()
     else:
-        # Validator and miner initialize on GPU
-        model.to_empty(device=device)
-        model.init_weights()  # type: ignore
+        # Single‑process path (e.g., 1‑GPU validator / CPU evaluator)
+        with torch.device("meta"):
+            ref = TitanLlama(titan_args)
+        ref.to_empty(device="cpu")
+        torch.manual_seed(42)
+        with torch.no_grad():
+            ref.init_weights()
+        full_sd = get_model_state_dict(
+            ref, options=StateDictOptions(full_state_dict=True)
+        )
+        missing, unexpected = set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(full_state_dict=True, strict=True),
+        )
+        assert not missing and not unexpected, (
+            f"Missing {missing}, unexpected {unexpected}"
+        )
 
     # Log initialization details
     if role == "miner":
@@ -390,10 +491,8 @@ def convert_titan_to_hf(
             nk = k.replace("_orig_mod.", "").replace("module.", "")
             cleaned[nk] = v
 
-        # Reuse existing function to create TorchTitan args
-        titan_args = create_titan_model_args(
-            hparams.model_config, hparams.sequence_length
-        )
+        # Get TorchTitan args from predefined configs or custom hparams
+        titan_args = get_titan_model_args(hparams)
 
         # Use official adapter for state dict conversion
         adapter = Llama3StateDictAdapter(titan_args)

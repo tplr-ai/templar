@@ -1,6 +1,5 @@
 import abc
 import asyncio
-import contextlib
 import functools
 import os
 import signal
@@ -33,7 +32,6 @@ class BaseNode(abc.ABC):
 
     # background bookkeeping
     stop_event: asyncio.Event
-    _bg_tasks: set[asyncio.Task]
 
     # ─── window-change helpers ────────────────────────────────────────────
     window_changed: asyncio.Event | None
@@ -73,26 +71,31 @@ class BaseNode(abc.ABC):
         self._threads.append(t)
 
         # ── profiler setup (enabled only when flag > 0) ─────────────────
-        prof_ctx = contextlib.nullcontext()
         prof_iters = int(getattr(self.config, "profile_iters", 0))
-        if prof_iters > 0 and getattr(self, "is_master", True):
+        if prof_iters > 0:
+            # Profile all ranks, with separate directories for each
             profile_dir = getattr(self.config, "profile_dir", "./log/profiler")
+            rank = getattr(self, "rank", 0)
+            profile_dir = f"{profile_dir}/rank_{rank}"
             os.makedirs(profile_dir, exist_ok=True)
 
-            self._prof = tp.profile(
-                activities=[tp.ProfilerActivity.CPU, tp.ProfilerActivity.CUDA],
-                schedule=tp.schedule(wait=0, warmup=1, active=prof_iters, repeat=1),
-                on_trace_ready=tp.tensorboard_trace_handler(profile_dir),
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True,
-            )
-            prof_ctx = self._prof  # context‑manager
+            # Store profiler config but don't start it yet
+            self._prof_config = {
+                "activities": [tp.ProfilerActivity.CPU, tp.ProfilerActivity.CUDA],
+                "schedule": tp.schedule(wait=0, warmup=1, active=prof_iters, repeat=1),
+                "on_trace_ready": tp.tensorboard_trace_handler(profile_dir),
+                "record_shapes": True,
+                "profile_memory": True,
+                "with_stack": True,
+            }
+            self._prof = None  # Will be created in inner_steps
+        else:
+            self._prof_config = None
+            self._prof = None
 
         # subclasses do their normal work here ----------------------------
         try:
-            with prof_ctx:
-                await self.run()
+            await self.run()
         except Exception:
             # Catch and log the unhandled exception before shutting down.
             tplr.logger.error("Unhandled exception in run()", exc_info=True)

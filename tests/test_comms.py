@@ -428,9 +428,12 @@ async def test_gather_quant_params_validation(comms_instance, dummy_compressor):
     # Global step list should match accepted peer
     assert res.global_steps == [2], f"unexpected global_steps {res.global_steps}"
 
-    # Returned vals must be de-quantised (no uint8)
+    # Values are now kept quantized for memory optimization
+    # The vals tensor should still be uint8 (quantized)
     vals_list = getattr(res.state_dict, val_key)
-    assert vals_list[0].dtype != torch.uint8, "vals tensor still quantised"
+    assert vals_list[0].dtype == torch.uint8, (
+        "vals tensor should remain quantised for memory optimization"
+    )
 
 
 @pytest.mark.asyncio
@@ -895,6 +898,14 @@ async def test_load_checkpoint_success(monkeypatch):
     comms = Comms.__new__(Comms)
     comms.wallet = MagicMock()
 
+    # Mock distributed functions to avoid initialization errors
+    monkeypatch.setattr("torch.distributed.is_available", lambda: False)
+    monkeypatch.setattr("torch.distributed.is_initialized", lambda: False)
+
+    # Mock set_model_state_dict to avoid distributed operations
+    mock_set_state_dict = MagicMock()
+    monkeypatch.setattr("tplr.comms.set_model_state_dict", mock_set_state_dict)
+
     # --- Build a tiny, real model, optimiser & scheduler -------------------
     model = torch.nn.Linear(4, 2)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
@@ -920,7 +931,6 @@ async def test_load_checkpoint_success(monkeypatch):
     success, sync_window = await comms.load_checkpoint(
         model=model,
         current_window=1,
-        device="cpu",
     )
 
     # --- Assertions --------------------------------------------------------
@@ -957,7 +967,6 @@ async def test_load_checkpoint_missing_data(comms_instance):
     ) = await comms_instance.load_checkpoint(
         model=mock_model,
         current_window=1,
-        device="cpu",
     )
 
     assert not success

@@ -32,11 +32,18 @@ from typing import Any, Literal, cast
 
 import aiofiles
 import bittensor as bt
+import boto3
 import botocore
 import torch
+import torch.distributed as dist
 from aiobotocore.client import AioBaseClient
 from aiobotocore.session import get_session
+from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError, ConnectionClosedError
+from torch.distributed.checkpoint.state_dict import (
+    StateDictOptions,
+    set_model_state_dict,
+)
 from tqdm import tqdm as std_tqdm
 
 import tplr
@@ -136,8 +143,10 @@ class Comms(ChainManager):
         self.peers: list[int] = []
         self.reserve_peers: list[int] = []
 
-        self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
-        self.gather_semaphore = asyncio.Semaphore(20)
+        self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS // 2)
+        self.gather_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS // 2)
+        # Limit how many TransferManagers run concurrently (protects threads/conn pool)
+        self.upload_sem = asyncio.Semaphore(4)
 
     async def _get_s3_client(self, bucket: Bucket) -> AioBaseClient:
         """
@@ -467,8 +476,8 @@ class Comms(ChainManager):
                     data = await f.read()
                     await s3_client.put_object(Bucket=bucket.name, Key=key, Body=data)
             else:
-                # Multipart upload for large files
-                await self.upload_large_file(file_path, key, s3_client, bucket)
+                # Multipart upload for large files -> boto3 TransferManager in a thread
+                await self._upload_large_file_via_boto3(file_path, key, bucket)
 
         except (ConnectionClosedError, ClientError):
             await self._purge_s3_client(bucket)
@@ -744,6 +753,49 @@ class Comms(ChainManager):
                 except Exception as abort_e:
                     tplr.logger.error(f"Failed to abort multipart upload: {abort_e}")
             raise
+
+    async def _upload_large_file_via_boto3(
+        self, file_path: str, key: str, bucket: Bucket
+    ) -> None:
+        """
+        Upload large files using boto3's TransferManager inside a worker thread.
+        Bounded by self.upload_sem to avoid spinning up many managers at once.
+        """
+        MB = 1024 * 1024
+        file_size_gb = os.path.getsize(file_path) / (1024**3)
+        if file_size_gb > 10:
+            part_size = 128 * MB
+            max_conc = 16
+        elif file_size_gb > 1:
+            part_size = 64 * MB
+            max_conc = 12
+        else:
+            part_size = 32 * MB
+            max_conc = 8
+
+        tconf = TransferConfig(
+            multipart_threshold=part_size,
+            multipart_chunksize=part_size,
+            max_concurrency=max_conc,
+            use_threads=True,
+        )
+
+        endpoint = self.get_base_url(bucket.account_id)
+
+        async with self.upload_sem:
+
+            def _do():
+                c = boto3.client(
+                    "s3",
+                    endpoint_url=endpoint,
+                    region_name=CF_REGION_NAME,
+                    config=client_config,  # reuses your existing botocore.Config
+                    aws_access_key_id=bucket.access_key_id,
+                    aws_secret_access_key=bucket.secret_access_key,
+                )
+                c.upload_file(file_path, bucket.name, key, Config=tconf)
+
+            await asyncio.to_thread(_do)
 
     async def download_large_file(
         self,
@@ -1201,6 +1253,7 @@ class Comms(ChainManager):
         timeout: int = 30,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
+        show_progress: bool = True,
     ) -> CommsGetResult:
         """
         Retrieves an object from storage, either locally or from a remote S3 bucket.
@@ -1481,6 +1534,9 @@ class Comms(ChainManager):
         skipped_uids = []  # Retain UIDs that are skipped.
         global_steps = []
 
+        # Ensure deterministic order across processes/ranks
+        uids = sorted(uids)
+
         async with self.gather_semaphore:
             batch_tasks = [
                 self.get_with_retry(
@@ -1545,8 +1601,6 @@ class Comms(ChainManager):
                         skipped_uids.append(uid)
                         continue
 
-                    decoded_cache: dict[str, torch.Tensor] = {}
-
                     # ---------- Begin Compressed Indices and Values Check ----------
                     valid_response = True
                     for param_name, tensor in state_dict_resp.items():
@@ -1584,14 +1638,19 @@ class Comms(ChainManager):
 
                         if param_name.endswith("idxs"):
                             base_name = param_name[:-4]
-                            totalk_tensor = totalks.get(base_name)
-                            if totalk_tensor is None:
+                            totalk_value = totalks.get(base_name)
+                            if totalk_value is None:
                                 tplr.logger.warning(
                                     f"Missing totalk for parameter {base_name} from UID {uid}, skipping UID."
                                 )
                                 valid_response = False
                                 break
-                            totalk = totalk_tensor.numel()
+                            # totalks stores integers, not tensors
+                            totalk = (
+                                totalk_value
+                                if isinstance(totalk_value, int)
+                                else totalk_value.numel()
+                            )
                             # Get corresponding vals tensor for 12-bit unpacking
                             vals_tensor = state_dict_resp.get(base_name + "vals", None)
                             try:
@@ -1608,46 +1667,44 @@ class Comms(ChainManager):
                                 )
                                 valid_response = False
                                 break
-                        # Check if values are valid (not NaN, not Inf)
+                        # Check if values are valid (not NaN, not Inf) - validate without dequantizing
                         elif param_name.endswith("vals"):
-                            tensor_to_check = tensor.to(device)
-                            if (
-                                torch.isnan(tensor_to_check).any()
-                                or torch.isinf(tensor_to_check).any()
-                            ):
-                                tplr.logger.warning(
-                                    f"NaN/Inf in {param_name} from UID {uid}, skipping"
-                                )
-                                valid_response = False
-                                break
+                            # Only move to device for validation if needed
+                            if tensor.dtype == torch.uint8:
+                                # For quantized values, do a quick check on the raw bytes
+                                if tensor.nelement() == 0:
+                                    tplr.logger.warning(
+                                        f"Empty tensor in {param_name} from UID {uid}, skipping"
+                                    )
+                                    valid_response = False
+                                    break
+                            else:
+                                # For non-quantized tensors, check for NaN/Inf
+                                tensor_to_check = tensor.to(device)
+                                if (
+                                    torch.isnan(tensor_to_check).any()
+                                    or torch.isinf(tensor_to_check).any()
+                                ):
+                                    tplr.logger.warning(
+                                        f"NaN/Inf in {param_name} from UID {uid}, skipping"
+                                    )
+                                    valid_response = False
+                                    break
+                                # Clean up temporary tensor
+                                del tensor_to_check
 
                             # ------------------------------------------------------
-                            # (2)  De‑quantise *just for validation* (cheap‑ish)
+                            # (2)  Only validate quantization params exist, don't dequantize
                             # ------------------------------------------------------
                             qparams = state_dict_resp.get(
                                 param_name[:-4] + "quant_params", None
                             )
-                            if qparams is not None:
-                                try:
-                                    vals_f32 = compressor._dequantize_values(
-                                        tensor_to_check, qparams
-                                    )
-                                    if (
-                                        not torch.isfinite(vals_f32).all()
-                                    ) or vals_f32.abs().max() > 1e3:
-                                        tplr.logger.warning(
-                                            f"Decoded values in {param_name} from UID {uid} "
-                                            f"are non‑finite or too large; max={vals_f32.abs().max()}"
-                                        )
-                                        valid_response = False
-                                        break
-                                    decoded_cache[param_name] = vals_f32
-                                except Exception as e:
-                                    tplr.logger.warning(
-                                        f"De‑quantisation failed for {param_name} from UID {uid}: {e}"
-                                    )
-                                    valid_response = False
-                                    break
+                            if qparams is None and tensor.dtype == torch.uint8:
+                                tplr.logger.warning(
+                                    f"Missing quant_params for quantized {param_name} from UID {uid}"
+                                )
+                                valid_response = False
+                                break
 
                     missing_params = (
                         expected_compressed_params - received_compressed_params
@@ -1667,7 +1724,7 @@ class Comms(ChainManager):
                         continue
                     # ---------- End Compressed Indices and Values Check ----------
 
-                    # Process tensors (with normalization on 'vals' keys).
+                    # Process tensors - keep everything quantized to save memory
                     for param_name, tensor in state_dict_resp.items():
                         # 1️⃣  Indices are kept as‑is -----------------------------------------
                         if param_name.endswith("idxs"):
@@ -1679,27 +1736,20 @@ class Comms(ChainManager):
                                 tensor.element_size() * tensor.nelement()
                             )
 
-                        # 2️⃣  Values → de‑quantise once and store as fp32 --------------------
+                        # 2️⃣  Values → keep quantized, store with quant_params ---------------
                         elif param_name.endswith("vals"):
-                            # Re-use if we already decoded during validation
-                            tensor = decoded_cache.get(param_name, tensor.to(device))
-
-                            # If still uint8 it means we skipped validation (unlikely),
-                            # so decode now.
-                            if tensor.dtype == torch.uint8:
-                                qparams = state_dict_resp.get(
-                                    param_name[:-4] + "quant_params", None
-                                )
-                                if qparams is not None:
-                                    tensor = compressor._dequantize_values(
-                                        tensor, qparams
-                                    )
-
+                            # Keep values quantized - just store the raw tensor
                             aggregated_state_dict.setdefault(param_name, []).append(
-                                tensor
+                                tensor  # Keep original dtype (uint8 if quantized)
                             )
                             metrics["download_bytes"] += (
                                 tensor.element_size() * tensor.nelement()
+                            )
+
+                        # 3️⃣  Store quantization parameters for later use --------------------
+                        elif param_name.endswith("quant_params"):
+                            aggregated_state_dict.setdefault(param_name, []).append(
+                                tensor
                             )
 
                     valid_uids.append(uid)
@@ -2212,72 +2262,75 @@ class Comms(ChainManager):
         self,
         model,
         current_window: int,
-        device: str,
         init_version: str | None = None,
+        is_master: bool = True,
     ) -> tuple[bool, int]:
         """
-        Loads the latest checkpoint into the model and associated components.
-
-        This method orchestrates the process of finding and loading the latest
-        checkpoint. It updates the model's state dictionary and returns metadata
-        about the loaded checkpoint, such as its window number. This is a critical
-        step for resuming training or synchronizing a new neuron.
-
-        Args:
-            model: The PyTorch model to load the state into.
-            current_window (int): The current local window, used for logging and context.
-            device (str): The device to load the model tensors onto.
-            init_version (str | None, optional): The templar version to look for.
-                Defaults to the current version.
-
-        Returns:
-            tuple[bool, int]: A tuple where the first element is a boolean indicating
-            success, and the second is the window number of the loaded checkpoint.
+        Rank-0 downloads; all ranks fan-out once.
+        Returns (success, checkpoint_sync_window) identically on all ranks.
         """
-        init_version = init_version if init_version is not None else tplr.__version__
-        result = await self.get_latest_checkpoint(init_version)
-        if not result:
-            tplr.logger.info("No valid checkpoints found")
+        # --------- rank-0 fetch + minimal metadata ----------
+        ok, sync_win, full_sd, present = False, 0, {}, set()
+        if is_master:
+            try:
+                init_version = init_version or __version__
+            except NameError:
+                pass
+            result = await self.get_latest_checkpoint(init_version)
+            if result:
+                try:
+                    checkpoint_data, _ = result
+                    full_sd = checkpoint_data["model_state_dict"]
+                    present = {k for k in full_sd.keys()}
+
+                    # Prefer sync_window; fall back to current_window if older ckpt
+                    sw = checkpoint_data.get("sync_window")
+                    cw = checkpoint_data.get("current_window")
+                    sync_win = int(
+                        sw if sw is not None else cw if cw is not None else 0
+                    )
+                    ok = True
+
+                    tplr.logger.info(
+                        f"Checkpoint loaded on rank-0: "
+                        f"start={checkpoint_data.get('start_window')}, "
+                        f"current={checkpoint_data.get('current_window')}, "
+                        f"sync={sync_win}, local_current={current_window}"
+                    )
+                except Exception as e:
+                    tplr.logger.error(f"[ckpt] parse/load failed on rank-0: {e}")
+                    ok, sync_win, full_sd, present = False, 0, {}, set()
+            else:
+                tplr.logger.info("No valid checkpoints found on rank-0")
+
+        # --------- broadcast tiny meta-object to all ranks ----------
+        if dist.is_available() and dist.is_initialized():
+            obj = [(bool(ok), int(sync_win), list(present))] if is_master else [None]
+            dist.broadcast_object_list(obj, src=0)
+            ok, sync_win, present_list = obj[0]
+            present = set(present_list or [])
+        if not ok:
             return False, 0
 
-        checkpoint_data, checkpoint_window = result
-        try:
-            # 1) Load model and optimizer state
-            model.load_state_dict(
-                {
-                    k: v.to(device)
-                    for k, v in checkpoint_data["model_state_dict"].items()
-                }
-            )
-            model.to(device)
+        # --------- single fan-out of weights/buffers ----------
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(
+                full_state_dict=True, broadcast_from_rank0=True, strict=True
+            ),
+        )
 
-            checkpoint_start_window = checkpoint_data.get("start_window")
-            checkpoint_current_window = checkpoint_data.get("current_window")
-            checkpoint_sync_window = checkpoint_data.get("sync_window")
-            if (
-                checkpoint_start_window is None
-                or checkpoint_current_window is None
-                or checkpoint_sync_window is None
-            ):
-                tplr.logger.warning(
-                    "Checkpoint missing start_window or current_window info"
-                )
-                return False, 0
+        # Barrier for cleanliness
+        if dist.is_available() and dist.is_initialized():
+            # Get the current device for this rank
+            if torch.cuda.is_available():
+                device_id = torch.cuda.current_device()
+                dist.barrier(device_ids=[device_id])
+            else:
+                dist.barrier()
 
-            tplr.logger.info(
-                f"Checkpoint loaded. start_window={checkpoint_start_window}, "
-                f"checkpoint_current_window={checkpoint_current_window}, "
-                f"checkpoint_sync_window={checkpoint_sync_window}, "
-                f"local_current_window={current_window}"
-            )
-
-            return True, checkpoint_sync_window
-        except KeyError as e:
-            tplr.logger.error(f"Invalid checkpoint format: missing key {e}")
-            return False, 0
-        except Exception as e:
-            tplr.logger.error(f"Failed to load checkpoint: {e}")
-            return False, 0
+        return True, int(sync_win)
 
     async def post_peer_list(
         self,

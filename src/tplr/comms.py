@@ -2104,79 +2104,11 @@ class Comms(ChainManager):
                     # If successfully retrieved, return immediately.
                     return result
 
-            # 2. Check self R2 bucket
-            self_bucket = self.bucket  # Use self.bucket saved in __init__
-            if self_bucket and self.uid is not None:
-                result = await self._get_bucket_checkpoint(
-                    self_bucket, self.uid, version
-                )
-                if result:
-                    return result
-            # 3. Check local storage
-            local_result = self._load_latest_local_checkpoint(version)
-            if local_result:
-                return local_result
-
-            tplr.logger.info(
-                "No checkpoint found in validator / self R2 / local storage"
-            )
+            tplr.logger.info("No checkpoint found in validator R2 storage")
             return None
 
         except Exception as e:
             tplr.logger.error(f"Error getting latest checkpoint: {e}")
-            return None
-
-    def _load_latest_local_checkpoint(self, version: str) -> tuple[Any, int] | None:
-        """
-        Loads the most recent checkpoint file from the local filesystem.
-
-        This method scans the local checkpoint directory for files matching the
-        current UID and version, identifies the one with the highest window number,
-        and loads it into memory.
-
-        Args:
-            version (str): The templar version string to match against checkpoint files.
-
-        Returns:
-            tuple[Any, int] | None: A tuple containing the loaded checkpoint data and
-            its window number, or None if no local checkpoint is found.
-        """
-        try:
-            local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
-            pattern = rf"checkpoint-(\d+)-{self.uid}-v{re.escape(version)}\.pt$"
-
-            if not os.path.exists(local_dir):
-                return None
-
-            checkpoints = []
-            for window_dir in os.listdir(local_dir):
-                path = os.path.join(local_dir, window_dir)
-                if not os.path.isdir(path):
-                    continue
-
-                for file in os.listdir(path):
-                    match = re.match(pattern, file)
-                    if match:
-                        # window number comes from match.group(1)
-                        w = int(match.group(1))
-                        file_path = os.path.join(path, file)
-                        checkpoints.append(
-                            {
-                                "path": file_path,
-                                "window": w,
-                                "modified": os.path.getmtime(file_path),
-                            }
-                        )
-
-            if checkpoints:
-                # choose the last modified checkpoint
-                latest = max(checkpoints, key=lambda x: x["modified"])
-                checkpoint_data = torch.load(latest["path"], weights_only=True)
-                return checkpoint_data, latest["window"]
-            else:
-                return None
-        except Exception as e:
-            tplr.logger.error(f"Error in local checkpoint loading: {e}")
             return None
 
     async def _get_bucket_checkpoint(

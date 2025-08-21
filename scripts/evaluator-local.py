@@ -21,64 +21,9 @@ import torch
 from transformers.models.llama import LlamaForCausalLM
 
 import tplr
+from neurons import evaluator
 
 MODEL_PATH: str = "models/eval"
-
-
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Local evaluator script for model checkpoints"
-    )
-    parser.add_argument(
-        "--checkpoint_path",
-        type=str,
-        required=True,
-        help="Path to the model checkpoint file",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda:0",
-        help="Device to use for evaluation",
-    )
-    parser.add_argument(
-        "--tasks",
-        type=str,
-        default="arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag",
-        help="Comma-separated list of tasks to evaluate",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=8,
-        help="Evaluation batch size",
-    )
-    parser.add_argument(
-        "--limit",
-        type=float,
-        default=1.0,
-        help="Fraction of dataset to evaluate (0.0-1.0)",
-    )
-    parser.add_argument(
-        "--num_fewshot",
-        type=int,
-        default=0,
-        help="Number of few-shot examples",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="evaluation_results",
-        help="Directory to save evaluation results",
-    )
-    parser.add_argument(
-        "--cleanup",
-        action="store_true",
-        help="Clean up model files after evaluation",
-    )
-
-    return parser.parse_args()
 
 
 def load_checkpoint(checkpoint_path: str, device: str) -> tuple[LlamaForCausalLM, dict]:
@@ -92,7 +37,7 @@ def load_checkpoint(checkpoint_path: str, device: str) -> tuple[LlamaForCausalLM
 
     model = LlamaForCausalLM(config=hparams.model_config)
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
     if "model_state_dict" in checkpoint:
         model_state = checkpoint["model_state_dict"]
@@ -102,15 +47,6 @@ def load_checkpoint(checkpoint_path: str, device: str) -> tuple[LlamaForCausalLM
         metadata = {}
 
     model.load_state_dict(model_state)
-    model.to("cpu")
-
-    model.load_state_dict(
-        {
-            k: v.to("cpu")
-            for k, v in model_state.items()  # type: ignore
-        }
-    )
-    model.to("cpu")  # type: ignore
 
     tplr.logger.info("Model loaded successfully")
     return model, metadata
@@ -202,7 +138,7 @@ def print_results(results: dict) -> None:
 
 def main():
     """Main entry point."""
-    args = parse_args()
+    args = evaluator.Evaluator.config()
 
     try:
         hparams = tplr.load_hparams()
@@ -222,7 +158,7 @@ def main():
         tplr.logger.info(f"Results saved to {output_file}")
 
     except Exception as e:
-        tplr.logger.error(f"Evaluation failed: {e}")
+        tplr.logger.exception(f"Evaluation failed: {e}")
         sys.exit(1)
 
 

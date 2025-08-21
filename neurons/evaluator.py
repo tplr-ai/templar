@@ -62,75 +62,6 @@ MODEL_PATH: str = "models/eval"
 DEFAULT_EVAL_INTERVAL: int = 60 * 10  # 10 mins default interval
 
 
-def config() -> bt.Config:
-    """
-    Parse command-line arguments and return a configuration object.
-    """
-
-    parser = argparse.ArgumentParser(
-        description="Evaluator script. Use --help to display options.",
-        add_help=True,
-    )
-    parser.add_argument(
-        "--netuid",
-        type=int,
-        default=3,
-        help="Bittensor network UID.",
-    )
-    parser.add_argument(
-        "--actual_batch_size",
-        type=int,
-        default=8,
-        help="Evaluation batch size.",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda:0",
-        help="Device to use for evaluation",
-    )
-    parser.add_argument(
-        "--tasks",
-        type=str,
-        default="arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu",
-        help="Comma-separated list of tasks to evaluate",
-    )
-    parser.add_argument(
-        "--checkpoint_path",
-        type=str,
-        default=None,
-        help="Path to save/load checkpoints",
-    )
-    parser.add_argument(
-        "--eval_interval",
-        type=int,
-        default=DEFAULT_EVAL_INTERVAL,
-        help="Global steps between evaluations",
-    )
-    parser.add_argument(
-        "--uid",
-        type=int,
-        default=None,
-        help="Override the wallet's UID",
-    )
-    parser.add_argument(
-        "--skip-gaps",
-        type=bool,
-        default=False,
-        help="Skip gaps in the evaluation process",
-    )
-    parser.add_argument(
-        "--custom_eval_path",
-        type=str,
-        default=None,
-        help="Path to the custom evaluation dataset bins for perplexity calculation.",
-    )
-
-    bt.subtensor.add_args(parser)
-    parser.parse_args()
-    return bt.config(parser)
-
-
 class Evaluator:
     """Templar Model Evaluator Component
 
@@ -162,8 +93,103 @@ class Evaluator:
         last_block_number (int): Last processed block number
     """
 
+    @staticmethod
+    def config() -> bt.Config:
+        """
+        Parse command-line arguments and return a configuration object.
+        """
+
+        parser = argparse.ArgumentParser(
+            description="Evaluator script. Use --help to display options.",
+            add_help=True,
+        )
+        parser.add_argument(
+            "--netuid",
+            type=int,
+            default=3,
+            help="Bittensor network UID.",
+        )
+        parser.add_argument(
+            "--actual_batch_size",
+            type=int,
+            default=8,
+            help="Evaluation batch size.",
+        )
+        parser.add_argument(
+            "--device",
+            type=str,
+            default="cuda:0",
+            help="Device to use for evaluation",
+        )
+        parser.add_argument(
+            "--tasks",
+            type=str,
+            default="arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu",
+            help="Comma-separated list of tasks to evaluate",
+        )
+        parser.add_argument(
+            "--checkpoint_path",
+            type=str,
+            default=None,
+            help="Path to save/load checkpoints",
+        )
+        parser.add_argument(
+            "--eval_interval",
+            type=int,
+            default=DEFAULT_EVAL_INTERVAL,
+            help="Global steps between evaluations",
+        )
+        parser.add_argument(
+            "--uid",
+            type=int,
+            default=None,
+            help="Override the wallet's UID",
+        )
+        parser.add_argument(
+            "--skip-gaps",
+            type=bool,
+            default=False,
+            help="Skip gaps in the evaluation process",
+        )
+        parser.add_argument(
+            "--custom_eval_path",
+            type=str,
+            default=None,
+            help="Path to the custom evaluation dataset bins for perplexity calculation.",
+        )
+
+        # For local runs:
+        parser.add_argument(
+            "--limit",
+            type=float,
+            default=1.0,
+            help="Fraction of dataset to evaluate (0.0-1.0)",
+        )
+        parser.add_argument(
+            "--num_fewshot",
+            type=int,
+            default=0,
+            help="Number of few-shot examples",
+        )
+        parser.add_argument(
+            "--output_dir",
+            type=str,
+            default="evaluation_results",
+            help="Directory to save evaluation results",
+        )
+        parser.add_argument(
+            "--cleanup",
+            action="store_true",
+            help="Clean up model files after evaluation",
+        )
+
+        bt.subtensor.add_args(parser)
+        return parser.parse_args()
+
     def __init__(self) -> None:
-        self.config = config()
+        parsed_args = config()
+        self.config = bt.config(parsed_args)
+
         if self.config.netuid is None:
             raise ValueError("No netuid provided")
         if self.config.device is None:

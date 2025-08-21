@@ -26,10 +26,10 @@ Required Environment Variables:
 
 Usage Examples:
     Basic run:
-        $ uv run ./scripts/evaluator.py
+        $ uv run ./neurons/evaluator.py
 
     Custom configuration:
-        $ uv run scripts/evaluator.py \\
+        $ uv run neurons/evaluator.py \\
             --netuid 3 \\
             --device cuda \\
             --tasks "arc_challenge,winogrande" \\
@@ -207,7 +207,6 @@ class Evaluator:
             tplr.debug()
         if self.config.trace:
             tplr.trace()
-
 
         # Use constant for default checkpoint directory.
         self.checkpoint_path: str = (

@@ -1,4 +1,5 @@
 import asyncio
+
 from botocore import exceptions as boto_excepts
 
 import tplr
@@ -32,21 +33,34 @@ def handle_s3_exceptions(
         tplr.logger.exception(f"{base_message} An unexpected error occurred: {e}")
     return purge
 
+
 def handle_general_exceptions(e: Exception, func_name: str) -> None:
     """A centralized helper function to log and handle common Python exceptions."""
     base_message = f"Function '{func_name}' encountered an error:"
 
     if isinstance(e, IndexError):
-        tplr.logger.exception(f"{base_message} IndexError - likely access to a list/tuple with an out-of-bounds index: {e}")
+        tplr.logger.exception(
+            f"{base_message} IndexError - likely access to a list/tuple with an out-of-bounds index: {e}"
+        )
     elif isinstance(e, ValueError):
-        tplr.logger.exception(f"{base_message} ValueError - an argument is of the correct type but has an inappropriate value: {e}")
+        tplr.logger.exception(
+            f"{base_message} ValueError - an argument is of the correct type but has an inappropriate value: {e}"
+        )
     elif isinstance(e, KeyError):
-        tplr.logger.exception(f"{base_message} KeyError - likely access to a dictionary with a non-existent key: {e}")
+        tplr.logger.exception(
+            f"{base_message} KeyError - likely access to a dictionary with a non-existent key: {e}"
+        )
     elif isinstance(e, TypeError):
-        tplr.logger.exception(f"{base_message} TypeError - an operation or function is applied to an object of inappropriate type: {e}")
+        tplr.logger.exception(
+            f"{base_message} TypeError - an operation or function is applied to an object of inappropriate type: {e}"
+        )
     elif isinstance(e, AttributeError):
-        tplr.logger.exception(f"{base_message} AttributeError - an attribute reference or assignment fails: {e}")
+        tplr.logger.exception(
+            f"{base_message} AttributeError - an attribute reference or assignment fails: {e}"
+        )
     elif isinstance(e, FileNotFoundError):
-        tplr.logger.exception(f"{base_message} FileNotFoundError - a file or directory is requested but doesn't exist: {e}")
+        tplr.logger.exception(
+            f"{base_message} FileNotFoundError - a file or directory is requested but doesn't exist: {e}"
+        )
     else:
         tplr.logger.exception(f"{base_message} An unexpected error occurred: {e}")

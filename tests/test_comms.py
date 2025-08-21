@@ -3009,53 +3009,6 @@ async def test_track_active_peers(comms_instance):
 
 
 @pytest.mark.asyncio
-async def test_load_latest_local_checkpoint(comms_instance):
-    """Test the _load_latest_local_checkpoint method."""
-    comms_instance.uid = 0
-    version = tplr.__version__
-    local_dir = os.path.join("/tmp/local_store", str(comms_instance.uid))
-
-    # Cleanup before test
-    if os.path.exists(local_dir):
-        shutil.rmtree(local_dir)
-    os.makedirs(local_dir)
-
-    # Create some dummy checkpoint files
-    checkpoint_data_1 = {"model_state_dict": {"param1": torch.tensor(1)}, "window": 1}
-    checkpoint_data_2 = {"model_state_dict": {"param1": torch.tensor(2)}, "window": 2}
-
-    path1 = os.path.join(local_dir, "1")
-    os.makedirs(path1)
-    torch.save(
-        checkpoint_data_1,
-        os.path.join(path1, f"checkpoint-1-{comms_instance.uid}-v{version}.pt"),
-    )
-
-    path2 = os.path.join(local_dir, "2")
-    os.makedirs(path2)
-    torch.save(
-        checkpoint_data_2,
-        os.path.join(path2, f"checkpoint-2-{comms_instance.uid}-v{version}.pt"),
-    )
-
-    # Make the second checkpoint the latest
-    await asyncio.sleep(0.1)
-    os.utime(os.path.join(path2, f"checkpoint-2-{comms_instance.uid}-v{version}.pt"))
-
-    result = comms_instance._load_latest_local_checkpoint(version)
-    assert result is not None
-    data, window = result
-    assert window == 2
-    assert data is not None
-    assert data["window"] == 2
-    assert "model_state_dict" in data
-    assert torch.equal(data["model_state_dict"]["param1"], torch.tensor(2))
-
-    # Cleanup after test
-    shutil.rmtree(local_dir)
-
-
-@pytest.mark.asyncio
 async def test_get_peer_list(comms_instance):
     """Test the get_peer_list method."""
     comms_instance.metagraph.S = torch.tensor([10.0, 50.0, 20.0])
@@ -3348,39 +3301,3 @@ async def test_s3_get_object_no_load(comms_instance):
             assert result == key
             mock_move.assert_called_once()
             assert mock_move.call_args[0][1] == key
-
-
-@pytest.mark.asyncio
-async def test_get_latest_checkpoint_local(comms_instance):
-    """Test get_latest_checkpoint when the latest checkpoint is local."""
-    version = tplr.__version__
-
-    with (
-        patch.object(
-            comms_instance,
-            "_get_highest_stake_validator_bucket",
-            new_callable=AsyncMock,
-        ) as mock_get_validator_bucket,
-        patch.object(
-            comms_instance, "_get_bucket_checkpoint", new_callable=AsyncMock
-        ) as mock_get_bucket_checkpoint,
-        patch.object(
-            comms_instance, "_load_latest_local_checkpoint"
-        ) as mock_load_local,
-    ):
-        mock_get_validator_bucket.return_value = (None, None)
-        mock_get_bucket_checkpoint.return_value = None
-
-        local_checkpoint_data = {
-            "model_state_dict": {"param": torch.tensor(1)},
-            "window": 10,
-        }
-        mock_load_local.return_value = (local_checkpoint_data, 10)
-
-        result = await comms_instance.get_latest_checkpoint(version)
-
-        assert result is not None
-        data, window = result
-        assert window == 10
-        assert data == local_checkpoint_data
-        mock_load_local.assert_called_once_with(version)

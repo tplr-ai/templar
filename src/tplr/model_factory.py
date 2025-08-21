@@ -219,16 +219,16 @@ def create_parallel_dims(
     """
     if role == "evaluator":
         # Evaluator: support both single and multi-GPU configurations
-        tp_degree = min(4, world_size)  # Use up to 4 GPUs for TP
-        if world_size % tp_degree != 0:
+        dp_shard = min(4, world_size)  # Use up to 4 GPUs for TP
+        if world_size % dp_shard != 0:
             raise ValueError(
                 f"World size ({world_size}) must be divisible by "
-                f"tensor-parallel degree ({tp_degree})"
+                f"dp_shard degree ({dp_shard})"
             )
         return ParallelDims(
-            dp_replicate=world_size // tp_degree,
-            dp_shard=1,
-            tp=tp_degree,
+            dp_replicate=world_size // dp_shard,
+            dp_shard=dp_shard,
+            tp=1,
             pp=1,
             cp=1,
             ep=1,
@@ -236,16 +236,16 @@ def create_parallel_dims(
         )
     elif role == "validator":
         # Validator: pipeline parallelism with data parallel replication
-        tp_degree = 4
-        if world_size % tp_degree != 0:
+        dp_shard = 4
+        if world_size % dp_shard != 0:
             raise ValueError(
                 f"World size ({world_size}) must be divisible by "
-                f"tensor-parallel degree ({tp_degree})"
+                f"dp_shard degree ({dp_shard})"
             )
         return ParallelDims(
-            dp_replicate=world_size // tp_degree,
-            dp_shard=1,
-            tp=tp_degree,
+            dp_replicate=world_size // dp_shard,
+            dp_shard=dp_shard,
+            tp=1,
             pp=1,
             cp=1,
             ep=1,

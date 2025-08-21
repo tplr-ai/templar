@@ -41,6 +41,7 @@ https://github.com/tplr-ai/templar/blob/main/docs/miner.md
 
 import argparse
 import asyncio
+from datetime import timedelta
 import json
 import os
 import shutil
@@ -94,7 +95,7 @@ class Evaluator:
     """
 
     @staticmethod
-    def config() -> bt.Config:
+    def evaluator_config() -> bt.config:
         """
         Parse command-line arguments and return a configuration object.
         """
@@ -158,7 +159,7 @@ class Evaluator:
             help="Path to the custom evaluation dataset bins for perplexity calculation.",
         )
 
-        # For local runs:
+        # For "local" runs:
         parser.add_argument(
             "--limit",
             type=float,
@@ -184,16 +185,23 @@ class Evaluator:
         )
 
         bt.subtensor.add_args(parser)
-        return parser.parse_args()
+        parser.parse_args()
+        config = bt.config(parser)
+        return config
 
     def __init__(self) -> None:
-        parsed_args = config()
-        self.config = bt.config(parsed_args)
+        self.config = self.evaluator_config()
+
+        if self.config.debug:
+            tplr.debug()
+        if self.config.trace:
+            tplr.trace()
 
         if self.config.netuid is None:
             raise ValueError("No netuid provided")
         if self.config.device is None:
             raise ValueError("No device provided")
+
         # Use constant for default checkpoint directory.
         self.checkpoint_path: str = (
             self.config.checkpoint_path or CHECKPOINT_DEFAULT_DIR
@@ -215,34 +223,45 @@ class Evaluator:
         self.uid = 1
 
         # Initialize distributed training if available
-        self.world_size = 1
-        self.rank = 0
-        self.is_master = True
-        self.local_rank = 0
-        self.device = self.config.device
+        self.rank = int(os.getenv("RANK", 0))
+        self.world_size = int(os.getenv("WORLD_SIZE", 1))
+        self.local_rank = int(os.getenv("LOCAL_RANK", 0))
+        self.is_master = self.rank == 0
+        tplr.logger.info(
+            f"[Init] rank={self.rank}, world_size={self.world_size}, local_rank={self.local_rank}"
+        )
 
-        # Check if we should use distributed evaluation
-        if dist.is_available() and "WORLD_SIZE" in os.environ:
-            self.world_size = int(os.environ.get("WORLD_SIZE", 1))
-            self.rank = int(os.environ.get("RANK", 0))
-            self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
-            self.is_master = self.rank == 0
-
+        if self.world_size >= 1:
             if not dist.is_initialized():
                 dist.init_process_group(backend="nccl")
                 torch.cuda.set_device(self.local_rank)
 
-            self.device = f"cuda:{self.local_rank}"
+            dist.init_process_group(
+                backend="nccl",
+                init_method="env://",
+                timeout=timedelta(minutes=45),
+                rank=self.rank,
+                world_size=self.world_size,
+            )
+            torch.cuda.set_device(self.local_rank)
+            tplr.logger.info("[Init] NCCL process-group ready and GPU selected")
+            self.config.device = f"cuda:{self.local_rank}"
+
             tplr.logger.info(
                 f"Distributed evaluation: rank {self.rank}/{self.world_size}, "
                 f"local_rank {self.local_rank}, is_master: {self.is_master}"
             )
+        else:
+            self.config.device = self.config.device or "cuda"
+
+        self.device = self.config.device
+        tplr.logger.info(f"[Init] device set → {self.device}")
 
         # Initialize TorchTitan model using model factory
         self.model = initialize_torchtitan_model(
             hparams=self.hparams,
             role="evaluator",
-            device=self.device if self.world_size > 1 else "cpu",
+            device=self.device if self.world_size > 1 else "cpu", # Still curious about this?
             world_size=self.world_size,
         )
 
@@ -302,7 +321,7 @@ class Evaluator:
         self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
         self.buckets = self.comms.get_all_buckets()
 
-    async def load_latest_model(self) -> tuple[bool, dict, int, int]:
+    async def load_latest_model(self) -> tuple[bool, int, int]:
         """Load and prepare the latest model checkpoint for evaluation.
 
         This method:
@@ -336,7 +355,7 @@ class Evaluator:
                     f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket_name', 'unknown')}, "
                     f"key_prefix: {self.comms.key_prefix}"
                 )
-            return (False, {}, 0, 0)
+            return (False, 0, 0)
 
         if checkpoint_window <= self.last_eval_window:
             if self.is_master:
@@ -344,7 +363,7 @@ class Evaluator:
                     f"Checkpoint already evaluated (checkpoint window: {checkpoint_window}, "
                     f"last evaluated: {self.last_eval_window})."
                 )
-            return (False, {}, checkpoint_window, 0)
+            return (False, checkpoint_window, 0)
 
         # Calculate global step (assuming start_window is 0 for evaluator)
         global_step = checkpoint_window
@@ -358,7 +377,7 @@ class Evaluator:
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
 
-        return (True, {}, checkpoint_window, global_step)
+        return (True, checkpoint_window, global_step)
 
     def _run_lm_eval(
         self,
@@ -384,6 +403,7 @@ class Evaluator:
         """
         visible_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
 
+        extra = None
         if model_args is None:
             # Always include dtype; add multi‑GPU sharding hints if >1 visible GPU.
             if visible_gpus > 1 and str(self.config.device).startswith("cuda"):
@@ -555,7 +575,6 @@ class Evaluator:
 
         (
             success,
-            _,
             checkpoint_window,
             global_step,
         ) = await self.load_latest_model()
@@ -673,8 +692,6 @@ class Evaluator:
         torch.cuda.empty_cache()
 
         # Synchronize all ranks after evaluation
-        import torch.distributed as dist
-
         if dist.is_available() and dist.is_initialized():
             dist.barrier()
 

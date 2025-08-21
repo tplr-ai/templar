@@ -142,7 +142,7 @@ def print_results(results: dict) -> None:
 
 def main():
     """Main entry point."""
-    args = evaluator.Evaluator.config()
+    args = evaluator.Evaluator.evaluator_config()
 
     try:
         hparams = tplr.load_hparams()

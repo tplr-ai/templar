@@ -15,14 +15,15 @@ import torch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.evaluator import Evaluator
+from neurons.evaluator import Evaluator
 
 
 def setup_evaluator_with_mocks():
     """Setup evaluator with necessary mocks for testing"""
     with (
         patch(
-            "scripts.evaluator.config", return_value=MagicMock(netuid=3, device="cpu")
+            "neurons.evaluator.Evaluator.evaluator_config",
+            return_value=MagicMock(netuid=3, device="cpu"),
         ),
         patch("bittensor.subtensor"),
         patch("bittensor.metagraph"),
@@ -71,7 +72,7 @@ async def test_evaluator_skips_old_checkpoints(evaluator):
     mock_load_checkpoint = AsyncMock(return_value=(False, 100))
     evaluator.comms.load_checkpoint = mock_load_checkpoint
 
-    success, data, window, step = await evaluator.load_latest_model()
+    success, window, step = await evaluator.load_latest_model()
 
     # Verify that load_checkpoint was called with correct parameters
     mock_load_checkpoint.assert_called_once_with(
@@ -99,7 +100,7 @@ async def test_evaluator_loads_new_checkpoints(evaluator):
     mock_load_checkpoint = AsyncMock(return_value=(True, 110))
     evaluator.comms.load_checkpoint = mock_load_checkpoint
 
-    success, data, window, step = await evaluator.load_latest_model()
+    success, window, step = await evaluator.load_latest_model()
 
     # Verify that load_checkpoint was called with correct parameters
     mock_load_checkpoint.assert_called_once_with(

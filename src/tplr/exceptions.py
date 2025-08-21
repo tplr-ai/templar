@@ -8,6 +8,8 @@ import tplr
 def handle_s3_exceptions(
     e: Exception,
     func_name: str,
+    *args,
+    **kwargs,
 ) -> bool:
     """A centralized helper function to log and handle exceptions."""
     purge = False
@@ -34,7 +36,9 @@ def handle_s3_exceptions(
     return purge
 
 
-def handle_general_exceptions(e: Exception, func_name: str) -> None:
+def handle_general_exceptions(
+    e: Exception, func_name: str, *args, **kwargs
+) -> Exception:
     """A centralized helper function to log and handle common Python exceptions."""
     base_message = f"Function '{func_name}' encountered an error:"
 
@@ -64,3 +68,33 @@ def handle_general_exceptions(e: Exception, func_name: str) -> None:
         )
     else:
         tplr.logger.exception(f"{base_message} An unexpected error occurred: {e}")
+    return e
+
+
+def handle_evaluator_exceptions(
+    e: Exception, func_name: str, *args, **kwargs
+) -> Exception:
+    """A centralized helper function to log and handle exceptions in the evaluator."""
+    base_message = f"Evaluator function '{func_name}' encountered an error:"
+
+    is_master = False
+    if args:
+        self = args[0]
+        is_master = getattr(self, "is_master", False)
+
+    if not is_master:
+        tplr.logger.debug(f"Exception raised but not from master device")
+
+    else:
+        if isinstance(e, asyncio.TimeoutError):
+            tplr.logger.exception(f"{base_message} Operation timed out: {e}")
+        elif isinstance(e, KeyboardInterrupt):
+            tplr.logger.exception(msg=f"Benchmark run cancelled by user: {e}")
+        elif isinstance(e, (ValueError, FileNotFoundError)):
+            tplr.logger.exception(
+                f"{base_message} Error loading latest file: - likely an issue with file handling or data processing: {e}"
+            )
+        else:
+            tplr.logger.exception(f"{base_message} An unexpected error occurred: {e}")
+
+    return e

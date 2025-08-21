@@ -110,7 +110,7 @@ def retry_on_failure(
 
 
 def async_exception_catcher(
-    exception_handler: Callable[[_E, str], Any],
+    exception_handler: Callable[..., Any],
     on_error_return: Callable[[Exception], _OnErrReturn | None] = lambda e: None,
     on_error_raise: bool = False,
 ) -> Callable[
@@ -129,9 +129,7 @@ def async_exception_catcher(
             try:
                 return await func(*args, **kwargs)
             except Exception as e:  # noqa: W0718
-                handler_output = exception_handler(e, func.__name__)
-                if handler_output:
-                    return handler_output
+                handler_output = exception_handler(e, func.__name__, *args, **kwargs)
 
                 if on_error_raise:
                     raise
@@ -143,40 +141,44 @@ def async_exception_catcher(
     return decorator
 
 
-# def sync_exception_catcher(
-#     exception_handler: Callable,
-#     on_error_return: Callable[[Exception], _E] = lambda e: None,
-#     on_error_raise: bool = False,
-# ) -> Callable[[Callable[..., _R]], Callable[..., _R, | _E]]:
-#     """
-#     A decorator for synchronous functions that wraps the function
-#     in a try...except block and uses the centralized exception handler.
-#     """
+def sync_exception_catcher(
+    exception_handler: Callable[..., _E],
+    on_error_return: Callable[[Exception], _E] = lambda e: None,
+    on_error_raise: bool = False,
+) -> Callable[[Callable[..., _R]], Callable[..., _R | _E]]:
+    """
+    A decorator for synchronous functions that wraps the function
+    in a try...except block and uses the centralized exception handler.
+    """
 
-#     def decorator(func):
-#         @functools.wraps(func)
-#         def wrapper(*args: Any, **kwargs: Any) -> _R | _E:
-#             try:
-#                 return func(*args, **kwargs)
-#             except Exception as e:  # noqa: W0718
-#                 purge = exception_handler(e, func.__name__)
-#                 if purge:
-#                     raise NotImplementedError(
-#                         "Purge is async; not supported for sync wrapper"
-#                     ) from e
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args: Any, **kwargs: Any) -> _R | _E:
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:  # noqa: W0718
+                handler_output = exception_handler(e, func.__name__, *args, **kwargs)
 
-#                 if on_error_raise:
-#                     raise
+                if on_error_raise:
+                    raise
 
-#                 return on_error_return(e)
-#         return wrapper
-#     return decorator
+                return on_error_return(e)
+
+        return wrapper
+
+    return decorator
 
 
 async_s3_exception_catcher = partial(
     async_exception_catcher, exceptions.handle_s3_exceptions
 )
 # s3_exception_catcher = partial(sync_exception_catcher, exceptions.handle_s3_exceptions)
-general_exception_catcher = partial(
+async_general_exception_catcher = partial(
     async_exception_catcher, exceptions.handle_general_exceptions
+)
+async_evaluator_exception_catcher = partial(
+    async_exception_catcher, exceptions.handle_evaluator_exceptions
+)
+evaluator_exception_catcher = partial(
+    sync_exception_catcher, exceptions.handle_evaluator_exceptions
 )

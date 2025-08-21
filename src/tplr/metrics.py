@@ -183,11 +183,11 @@ class MetricsLogger:
     def log(
         self,
         measurement: str,
-        tags: dict,
-        fields: dict,
-        timestamp=None,
-        with_system_metrics=False,
-        with_gpu_metrics=False,
+        tags: dict[str, Any],
+        fields: dict[str, Any],
+        timestamp: int = None,
+        with_system_metrics: bool = False,
+        with_gpu_metrics: bool = False,
         sample_rate: float = 1.0,
     ) -> None:
         """

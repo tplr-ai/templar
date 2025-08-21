@@ -245,16 +245,14 @@ class Evaluator:
             )
             torch.cuda.set_device(self.local_rank)
             tplr.logger.info("[Init] NCCL process-group ready and GPU selected")
-            self.config.device = f"cuda:{self.local_rank}"
+            self.device: str = f"cuda:{self.local_rank}"
 
             tplr.logger.info(
                 f"Distributed evaluation: rank {self.rank}/{self.world_size}, "
                 f"local_rank {self.local_rank}, is_master: {self.is_master}"
             )
         else:
-            self.config.device = self.config.device or "cuda"
-
-        self.device = self.config.device
+            self.device: str = self.config.device or "cuda"  # I think this is probably breaking? "cpu" instead?
         tplr.logger.info(f"[Init] device set → {self.device}")
 
         # Initialize TorchTitan model using model factory
@@ -303,16 +301,7 @@ class Evaluator:
             )
         else:
             self.buckets = None
-            self.metrics_logger = None
-
-        # ── Multi‑GPU detection (honors external CUDA_VISIBLE_DEVICES) ───────────
-        use_cuda = (
-            str(self.config.device).startswith("cuda") and torch.cuda.is_available()
-        )
-        # reflect the externally‑set visible set
-        self.num_visible_gpus: int = _cuda_device_count() if use_cuda else 0
-        self.primary_device: str = "cuda:0" if self.num_visible_gpus > 0 else "cpu"
-        self.multi_gpu: bool = self.num_visible_gpus > 1
+            self.metrics_logger = None  # is this breaking?
 
     async def update_state(self) -> None:
         """
@@ -383,8 +372,8 @@ class Evaluator:
         self,
         tasks: str,
         output_dir: str,
+        batch_size: str,
         model_args: str | None = None,
-        batch_size: str | None = None,
         limit: str | None = None,
         num_fewshot: int | None = None,
     ) -> tuple[int, float]:
@@ -401,25 +390,20 @@ class Evaluator:
         Returns:
             Tuple containing (exit_code, runtime)
         """
-        visible_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
-
+        default_model_args = [f"pretrained={MODEL_PATH}", "tokenizer={MODEL_PATH}"]
+        
         extra = None
-        if model_args is None:
-            # Always include dtype; add multi‑GPU sharding hints if >1 visible GPU.
-            if visible_gpus > 1 and str(self.config.device).startswith("cuda"):
-                # Harness path for single‑process multi‑GPU sharding (no DDP).
-                # Uses all GPUs in CUDA_VISIBLE_DEVICES.
-                extra = ["parallelize=True", "device_map_option=auto"]
-            model_args = f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}"
-            if extra:
-                model_args = model_args + "," + ",".join(extra)
-        if batch_size is None:
-            batch_size = str(self.config.actual_batch_size)
-
-        # For sharded runs, pass plain 'cuda' so lm‑eval doesn’t pin to ':0'.
-        device_arg = self.config.device
-        if visible_gpus > 1 and str(device_arg).startswith("cuda"):
+        device_arg = self.device
+        if self.world_size > 1 and str(self.device).startswith("cuda"):
+            # Harness path for single‑process multi‑GPU sharding (no DDP).
+            # Uses all GPUs in CUDA_VISIBLE_DEVICES.
+            extra = ["parallelize=True", "device_map_option=auto"]
+            
+            # For sharded runs, pass plain 'cuda' so lm‑eval doesn’t pin to ':0'.
             device_arg = "cuda"
+
+        if extra and model_args is None:
+            model_args = ",".join(default_model_args + extra)
 
         cmd_parts = [
             "lm-eval",
@@ -438,10 +422,10 @@ class Evaluator:
 
         command = " ".join(cmd_parts)
 
-        start_time = time.time()
+        start_time = tplr.T()
         tplr.logger.info(f"Running benchmark command: {command}")
         exit_code = os.system(command)
-        benchmark_runtime = time.time() - start_time
+        benchmark_runtime = tplr.T() - start_time
 
         return exit_code, benchmark_runtime
 
@@ -641,6 +625,7 @@ class Evaluator:
                 exit_code, benchmark_runtime = self._run_lm_eval(
                     tasks=tasks,
                     output_dir=results_dir,
+                    batch_size=str(self.config.actual_batch_size),  # shouldn't this basically always be auto?
                 )
 
                 self._process_results(

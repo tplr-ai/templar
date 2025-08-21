@@ -211,15 +211,7 @@ class Miner(BaseNode, Trainer):
 
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)
-        self.subtensor = bt.subtensor(config=self.config)
-        self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
-        tplr.logger.info("[Init] Bittensor wallet/metagraph loaded")
-        if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
-            tplr.logger.error(
-                f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
-            )
-            sys.exit()
-        self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+        tplr.logger.info("[Init] Bittensor wallet loaded")
         super().__init__()
 
         self.init_model()
@@ -292,11 +284,17 @@ class Miner(BaseNode, Trainer):
             save_location="/tmp",
             key_prefix="model",
             config=self.config,
-            netuid=self.config.netuid,
-            metagraph=self.metagraph,
             hparams=self.hparams,
-            uid=self.uid,
+            uid=None,  # UID will be set after comms is initialized
         )
+
+        if self.wallet.hotkey.ss58_address not in self.comms.metagraph.hotkeys:
+            tplr.logger.error(
+                f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.comms.metagraph.netuid}[/bold]"
+            )
+            sys.exit()
+        self.uid = self.comms.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+        self.comms.uid = self.uid
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
         if self.is_master:
@@ -305,7 +303,7 @@ class Miner(BaseNode, Trainer):
             dist.barrier(device_ids=[self.local_rank])
 
         # Init state params
-        self.current_block = self.subtensor.block
+        self.current_block = self.comms.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         tplr.logger.info(
             f"[Init] chain at block {self.current_block}, window {self.current_window}"
@@ -643,7 +641,7 @@ class Miner(BaseNode, Trainer):
             if self.config.test:
                 # In test mode, use all UIDs from metagraph except self
                 tplr.logger.info("Test mode active: Using all peers from metagraph.")
-                all_uids = list(range(1, len(self.metagraph.S)))
+                all_uids = list(range(1, len(self.comms.metagraph.S)))
                 self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
             tplr.logger.info(f"Final peers for gather: {self.comms.peers}")

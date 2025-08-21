@@ -216,8 +216,6 @@ class Evaluator:
         os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
 
         self.netuid = self.config.netuid
-        self.subtensor = bt.subtensor(config=self.config)
-        self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
         self.hparams = tplr.load_hparams()
         tplr.logger.info(
             f"Loaded hparams: hidden_size={self.hparams.hidden_size}, num_hidden_layers={self.hparams.num_hidden_layers}, num_key_value_heads={self.hparams.num_key_value_heads}"
@@ -284,8 +282,6 @@ class Evaluator:
             save_location="/tmp",
             key_prefix="model",
             config=self.config,
-            netuid=self.netuid,
-            metagraph=self.metagraph,
             hparams=self.hparams,
             uid=self.uid,
         )
@@ -316,7 +312,7 @@ class Evaluator:
         """
         Refresh the metagraph and bucket information.
         """
-        self.metagraph = self.subtensor.metagraph(netuid=self.netuid)
+        self.comms.metagraph = self.comms.subtensor.metagraph(netuid=self.netuid)
         self.buckets = self.comms.get_all_buckets()
 
     async def load_latest_model(self) -> tuple[bool, int, int]:
@@ -336,7 +332,7 @@ class Evaluator:
         """
         # Get the current window to check against
         current_window = (
-            self.subtensor.get_current_block() // self.hparams.blocks_per_window
+            self.comms.subtensor.get_current_block() // self.hparams.blocks_per_window
         )
 
         # Use load_checkpoint which handles distributed loading properly
@@ -552,7 +548,7 @@ class Evaluator:
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
 
-        block_number = self.subtensor.get_current_block() - 1
+        block_number = self.comms.subtensor.get_current_block() - 1
 
         tplr.logger.info(f"Looking for new checkpoint (block: {block_number})")
 
@@ -922,7 +918,7 @@ class Evaluator:
             start_window = None
             if self.is_master:
                 await self.update_state()
-                latest_block = self.subtensor.get_current_block()
+                latest_block = self.comms.subtensor.get_current_block()
                 start_window = await self.comms.get_start_window()
 
                 should_evaluate = start_window is not None and (

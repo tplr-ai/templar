@@ -204,16 +204,6 @@ class Validator(BaseNode, Trainer):
 
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)
-        self.subtensor = bt.subtensor(config=self.config)
-        self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
-
-        self.current_hotkeys = dict(zip(self.metagraph.uids, self.metagraph.hotkeys))
-        if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
-            tplr.logger.error(
-                f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
-            )
-            sys.exit()
-        self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         super().__init__()
 
         try:
@@ -278,18 +268,25 @@ class Validator(BaseNode, Trainer):
             save_location="/tmp",
             key_prefix="model",
             config=self.config,
-            netuid=self.config.netuid,
-            metagraph=self.metagraph,
             hparams=self.hparams,
-            uid=self.uid,
+            uid=None,  # UID will be set after comms is initialized
         )
+
+        self.current_hotkeys = dict(zip(self.comms.metagraph.uids, self.comms.metagraph.hotkeys))
+        if self.wallet.hotkey.ss58_address not in self.comms.metagraph.hotkeys:
+            tplr.logger.error(
+                f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.comms.metagraph.netuid}[/bold]"
+            )
+            sys.exit()
+        self.uid = self.comms.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+        self.comms.uid = self.uid
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
         self.comms.try_commit(self.wallet, self.bucket)
         # self.comms.fetch_commitments()
 
         # Init state params
-        self.current_block = self.subtensor.block
+        self.current_block = self.comms.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         self.start_window = self.current_window  # Record the start window
         self.global_step = 0  # Initialize global_step to zero
@@ -734,7 +731,7 @@ class Validator(BaseNode, Trainer):
         # Handle start_window similar to miner - only master rank checks and posts
         if self.is_master:
             # Only post start window if you are the highest stake validator
-            if self.uid == self.metagraph.S.argmax().item():
+            if self.uid == self.comms.metagraph.S.argmax().item():
                 # Check if an existing start window already exists
                 try:
                     existing_start_window = await self.comms.get_start_window(retries=2)
@@ -958,7 +955,7 @@ class Validator(BaseNode, Trainer):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                all_uids = list(range(1, len(self.metagraph.S)))
+                all_uids = list(range(1, len(self.comms.metagraph.S)))
                 self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
                 # For evaluation, also use all peers but track separately with equal initial weight
@@ -1654,7 +1651,7 @@ class Validator(BaseNode, Trainer):
                     positive_weighted_uids.append(self.burn_uid)
                     positive_weighted_uids.sort()
                 if positive_weighted_uids and self.is_master:
-                    self.subtensor.set_weights(
+                    self.comms.subtensor.set_weights(
                         wallet=self.wallet,
                         netuid=cast(int, self.config.netuid),
                         uids=positive_weighted_uids,
@@ -2067,7 +2064,7 @@ class Validator(BaseNode, Trainer):
             # 1. Create a dictionary of active peers with non-zero incentive
             uid_to_incentive = {}
             for uid, incentive in zip(
-                self.metagraph.uids.tolist(), self.metagraph.I.tolist()
+                self.comms.metagraph.uids.tolist(), self.comms.metagraph.I.tolist()
             ):
                 if incentive > 0 and uid in self.comms.active_peers:
                     uid_to_incentive[uid] = float(incentive)
@@ -3287,7 +3284,7 @@ class Validator(BaseNode, Trainer):
                 return {k: to_cpu(v) for k, v in obj.items()}
             return obj  # leave ints, floats, strings … untouched
 
-        if self.is_master and self.uid == self.metagraph.S.argmax().item():
+        if self.is_master and self.uid == self.comms.metagraph.S.argmax().item():
             try:
                 raw_state = gather_result.state_dict
                 # Accept both SimpleNamespace and plain dict
@@ -3339,7 +3336,7 @@ class Validator(BaseNode, Trainer):
             Updated idx_overlap_peers, keeping in mind deregistering
         """
         found_uids = list(idx_overlap_peers.keys())
-        latest_hotkeys = dict(zip(self.metagraph.uids, self.metagraph.hotkeys))
+        latest_hotkeys = dict(zip(self.comms.metagraph.uids, self.comms.metagraph.hotkeys))
 
         for uid in found_uids:
             if (

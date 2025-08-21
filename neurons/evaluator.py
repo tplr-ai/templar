@@ -64,6 +64,11 @@ MODEL_PATH: str = "models/eval"
 DEFAULT_EVAL_INTERVAL: int = 60 * 10  # 10 mins default interval
 
 
+class NullMetricsLogger:
+    def log(self, *args, **kwargs) -> None:
+        return
+
+
 class Evaluator:
     """Templar Model Evaluator Component
 
@@ -193,15 +198,16 @@ class Evaluator:
     def __init__(self) -> None:
         self.config = self.evaluator_config()
 
+        if self.config.netuid is None:
+            raise ValueError("No netuid provided")
+        if self.config.device is None:
+            raise ValueError("No device provided")
+
         if self.config.debug:
             tplr.debug()
         if self.config.trace:
             tplr.trace()
 
-        if self.config.netuid is None:
-            raise ValueError("No netuid provided")
-        if self.config.device is None:
-            raise ValueError("No device provided")
 
         # Use constant for default checkpoint directory.
         self.checkpoint_path: str = (
@@ -232,19 +238,16 @@ class Evaluator:
             f"[Init] rank={self.rank}, world_size={self.world_size}, local_rank={self.local_rank}"
         )
 
-        if self.world_size >= 1:
+        if self.world_size > 1:
             if not dist.is_initialized():
-                dist.init_process_group(backend="nccl")
+                dist.init_process_group(
+                    backend="nccl",
+                    init_method="env://",
+                    timeout=timedelta(minutes=45),
+                    rank=self.rank,
+                    world_size=self.world_size,
+                )
                 torch.cuda.set_device(self.local_rank)
-
-            dist.init_process_group(
-                backend="nccl",
-                init_method="env://",
-                timeout=timedelta(minutes=45),
-                rank=self.rank,
-                world_size=self.world_size,
-            )
-            torch.cuda.set_device(self.local_rank)
             tplr.logger.info("[Init] NCCL process-group ready and GPU selected")
             self.device: str = f"cuda:{self.local_rank}"
 
@@ -252,19 +255,20 @@ class Evaluator:
                 f"Distributed evaluation: rank {self.rank}/{self.world_size}, "
                 f"local_rank {self.local_rank}, is_master: {self.is_master}"
             )
-        else:
-            self.device: str = (
-                self.config.device or "cuda"
-            )  # I think this is probably breaking? "cpu" instead?
+        else: # Single GPU or CPU mode
+            if self.config.device:
+                self.device: str = self.config.device
+            elif torch.cuda.is_available():
+                self.device: str = "cuda:0" # Use cuda:0 for single GPU
+            else:
+                self.device: str = "cpu"
         tplr.logger.info(f"[Init] device set → {self.device}")
 
         # Initialize TorchTitan model using model factory
         self.model = initialize_torchtitan_model(
             hparams=self.hparams,
             role="evaluator",
-            device=self.device
-            if self.world_size > 1
-            else "cpu",  # Still curious about this?
+            device=self.device, 
             world_size=self.world_size,
         )
 
@@ -306,7 +310,7 @@ class Evaluator:
             )
         else:
             self.buckets = None
-            self.metrics_logger = None  # is this breaking?
+            self.metrics_logger = NullMetricsLogger()
 
     async def update_state(self) -> None:
         """
@@ -429,12 +433,12 @@ class Evaluator:
 
         start_time = tplr.T()
         tplr.logger.info(f"Running benchmark command: {command}")
+        # TODO: Consider replacing os.system with subprocess.run for better control and error handling.
         exit_code = os.system(command)
         benchmark_runtime = tplr.T() - start_time
 
         return exit_code, benchmark_runtime
 
-    @decos.evaluator_exception_catcher(on_error_return=lambda e: {})
     def _load_latest_file(self, eval_results_dir: str) -> dict[str, dict[str, float]]:
         """Load the latest evaluation results file from the specified directory.
 
@@ -444,14 +448,19 @@ class Evaluator:
         Returns:
             Parsed JSON data from the latest results file
         """
-        latest_file = max(
-            [os.path.join(eval_results_dir, f) for f in os.listdir(eval_results_dir)],
-            key=os.path.getctime,
-        )
-        with open(latest_file, "r") as f:
-            output = json.load(f)
-        return output
+        try:
+            latest_file = max(
+                [os.path.join(eval_results_dir, f) for f in os.listdir(eval_results_dir)],
+                key=os.path.getctime,
+            )
+            with open(latest_file, "r") as f:
+                output = json.load(f)
+            return output
+        except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
+            tplr.logger.error(f"Error loading latest evaluation file from {eval_results_dir}: {e}")
+            return {}
 
+    @decos.master_only
     def _process_results(
         self,
         task_name: str,
@@ -526,6 +535,7 @@ class Evaluator:
         )
         return
 
+    @decos.master_only
     async def _evaluate(self) -> int | None:
         """Execute benchmark evaluation on the current model.
 
@@ -602,7 +612,10 @@ class Evaluator:
 
             self.eval_counter += 1
 
-            task_list: list[str] = self.config.tasks.split(",")  # type: ignore
+            task_list: list[str] = []
+            if self.config.tasks:
+                task_list = self.config.tasks.split(",")
+            
             has_mmlu_task = "mmlu" in task_list
             should_run_mmlu_n_shot = has_mmlu_task and (
                 self.config.skip_gaps or self.eval_counter % 4 == 0
@@ -867,6 +880,8 @@ class Evaluator:
             # 6. Log metrics (only master)
             self.metrics_logger.log(
                 "custom_evaluation",
+
+
                 tags={
                     "global_step": global_step,
                     "window": checkpoint_window,
@@ -880,6 +895,9 @@ class Evaluator:
                     "total_tokens": total_tokens,
                 },
             )
+
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
 
     @decos.async_evaluator_exception_catcher()
     async def run(self) -> None:
@@ -900,6 +918,8 @@ class Evaluator:
 
         while not self.stop_event.is_set():
             # Only master updates state and checks for new checkpoints
+            latest_block = None
+            start_window = None
             if self.is_master:
                 await self.update_state()
                 latest_block = self.subtensor.get_current_block()
@@ -930,13 +950,15 @@ class Evaluator:
 
             if should_evaluate:
                 await self._evaluate()
+                if dist.is_available() and dist.is_initialized():
+                    dist.barrier()
             elif self.is_master:
                 tplr.logger.info(
                     f"No new checkpoint available (block: {latest_block}/{self.last_block_number}, "
                     f"window: {start_window}/{self.last_eval_window})"
                 )
 
-            await asyncio.sleep(self.config.eval_interval)  # type: ignore
+            await asyncio.sleep(int(self.config.eval_interval))
 
     def cleanup(self) -> None:
         """

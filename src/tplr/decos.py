@@ -182,3 +182,29 @@ async_evaluator_exception_catcher = partial(
 evaluator_exception_catcher = partial(
     sync_exception_catcher, exceptions.handle_evaluator_exceptions
 )
+
+
+def master_only(func):
+    """
+    A decorator to ensure a method on a class instance is only called by the master process.
+    The instance is assumed to have `is_master` and `rank` attributes.
+    """
+
+    @functools.wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        if getattr(self, "is_master", False):
+            # If it's an async function, await it
+            if asyncio.iscoroutinefunction(func):
+                return await func(self, *args, **kwargs)
+            # Otherwise, just call it
+            else:
+                return func(self, *args, **kwargs)
+        else:
+            # Log the skip on non-master ranks
+            rank = getattr(self, "rank", "unknown")
+            tplr.logger.debug(
+                f"Skipping {func.__name__} on non-master rank {rank}"
+            )
+            return None  # Or a more specific default if needed
+
+    return wrapper

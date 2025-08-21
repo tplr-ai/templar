@@ -1115,6 +1115,12 @@ class Validator(BaseNode, Trainer):
 
             # Barrier before evaluation starts
             if self.world_size > 1 and dist.is_initialized():
+                tplr.log_with_context(
+                    level="info",
+                    message="Pre-evaluation barrier sync",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
                 dist.barrier()
 
             # 5. Save original model state for evaluation
@@ -1364,21 +1370,14 @@ class Validator(BaseNode, Trainer):
                             eval_uid=eval_uid,
                         )
                 except Exception as e:
-                    # Track if gradient application failed on any rank
-                    gradient_failed = True
+                    # All ranks will raise the same exception from update_model_with_gradient
+                    # so no need to broadcast
                     if self.is_master:
                         self.slash_for_invalid_gradient(eval_uid, e)
 
-                    # Broadcast failure status to all ranks
-                    if self.world_size > 1 and dist.is_initialized():
-                        failed_tensor = torch.tensor(
-                            [gradient_failed], dtype=torch.bool, device=self.device
-                        )
-                        dist.broadcast(failed_tensor, src=0)
-                        gradient_failed = failed_tensor.item()
-
-                    if gradient_failed:
-                        continue
+                    # Restore model to original state before continuing
+                    self._restore_model_state(saved_state)
+                    continue
 
                 # Synchronize all ranks after gradient application
                 if self.world_size > 1 and dist.is_initialized():
@@ -1664,6 +1663,16 @@ class Validator(BaseNode, Trainer):
                         wait_for_finalization=False,
                     )
 
+            # Add barrier before model update to ensure all ranks are ready
+            if self.world_size > 1 and dist.is_initialized():
+                tplr.log_with_context(
+                    level="info",
+                    message="Pre-model-update barrier sync",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+                dist.barrier()
+
             # 14. Now, merge the gathered gradients into the model AFTER finishing evaluation
             self.model.train()
             update_start = tplr.T()
@@ -1685,6 +1694,16 @@ class Validator(BaseNode, Trainer):
                 wandb_run=self.wandb if self.is_master else None,
                 global_step=self.global_step,
             )
+
+            # Add barrier after model update to ensure all ranks complete the update
+            if self.world_size > 1 and dist.is_initialized():
+                tplr.log_with_context(
+                    level="info",
+                    message="Post-model-update barrier sync",
+                    sync_window=self.sync_window,
+                    current_window=self.current_window,
+                )
+                dist.barrier()
 
             model_update_time = tplr.T() - update_start
             if self.is_master:
@@ -2712,6 +2731,7 @@ class Validator(BaseNode, Trainer):
             on_src = self.is_master or not ddp
 
             full_grad_src = torch.empty(1)
+            has_valid_gradient = True
 
             # Build the full dense grad on the source rank only (or always in single GPU)
             if on_src:
@@ -2723,29 +2743,35 @@ class Validator(BaseNode, Trainer):
                 quant_params = eval_state_dict.get(quant_key, None)
 
                 if clip_norm:
-                    if vals is None:
-                        raise ValueError("Vals is None")
-                    if quant_params is None:
-                        raise ValueError("Quant params is None")
+                    if vals is None or quant_params is None:
+                        has_valid_gradient = False
 
-                    # convert to lists since not a list of matrices for dequant
-                    vals = [vals]
-                    quant_params = [quant_params]
+                    if has_valid_gradient:
+                        # convert to lists since not a list of matrices for dequant
+                        vals = [vals]
+                        quant_params = [quant_params]
 
-                    vals_f32 = self.compressor.maybe_dequantize_values(
-                        vals, quant_params, p.device
-                    )
-                    vals_f32 = vals_f32[0]  # Get the first (and only) tensor
+                        vals_f32 = self.compressor.maybe_dequantize_values(
+                            vals, quant_params, p.device
+                        )
+                        vals_f32 = vals_f32[0]  # Get the first (and only) tensor
 
-                    eval_norm = torch.norm(vals_f32, p=2).to(p.device)
+                        eval_norm = torch.norm(vals_f32, p=2).to(p.device)
 
-                    clip_norm_val = clip_norm_dict.get(vals_key, eval_norm)
+                        clip_norm_val = clip_norm_dict.get(vals_key, eval_norm)
 
-                    clip_factor = torch.clamp(clip_norm_val / (eval_norm + 1e-8), max=1)
+                        clip_factor = torch.clamp(
+                            clip_norm_val / (eval_norm + 1e-8), max=1
+                        )
 
-                    vals = vals_f32 * clip_factor
+                        vals = vals_f32 * clip_factor
 
-                if idxs is not None and vals is not None and quant_params is not None:
+                if (
+                    has_valid_gradient
+                    and idxs is not None
+                    and vals is not None
+                    and quant_params is not None
+                ):
                     if clip_norm:
                         quant_params = None  # Fast route for decompress
 
@@ -2786,9 +2812,21 @@ class Validator(BaseNode, Trainer):
                             eval_uid=eval_uid,
                         )
                         del full_grad_src
-                        raise ValueError(
-                            f"Invalid gradient from peer {eval_uid}: NaN or Inf in decompressed gradient for {n}"
-                        )
+                        has_valid_gradient = False
+
+            # Broadcast gradient validity to all ranks immediately
+            if ddp:
+                valid_tensor = torch.tensor(
+                    [has_valid_gradient], dtype=torch.bool, device=self.device
+                )
+                dist.broadcast(valid_tensor, src=0)
+                has_valid_gradient = bool(valid_tensor.item())
+
+            # If gradient is invalid, all ranks raise exception together
+            if not has_valid_gradient:
+                raise ValueError(
+                    f"Invalid gradient from peer {eval_uid}: Missing or invalid gradient data for {n}"
+                )
 
             # Distribute gradient for DTensor or apply directly for regular tensors
             if isinstance(p, DT):

@@ -1,5 +1,9 @@
 """Local Model Evaluator
 
+
+THIS SCRIPT UTILIZES HUGGINGFACE
+It is therefore deprecated due to the TorchTitan implementation.
+
 This script evaluates model checkpoints from local files using standardized benchmark tasks.
 Instead of pulling checkpoints from the Bittensor network, it accepts checkpoint paths as arguments.
 

@@ -13,6 +13,7 @@ Welcome to the Templar documentation. This index provides an overview of all ava
 
 ### Deployment Options
 - **[Ansible Setup](./miner-setup-ansible.md)** - Automated deployment using Ansible playbooks
+- **[Production Subtensor](./prod-subtensor.md)** - Production-ready Subtensor infrastructure with monitoring
 - **[Localnet/Testnet](./localnet.md)** - Local development environment setup
 
 ### Tools & Scripts
@@ -21,6 +22,7 @@ Welcome to the Templar documentation. This index provides an overview of all ava
 - **[R2 Bucket Management](./r2_bucket_management.md)** - Cloudflare R2 storage utilities
 
 ### Infrastructure
+- **[Production Subtensor](./prod-subtensor.md)** - Production blockchain infrastructure deployment
 - **[Log Archives](./log_archive.md)** - Accessing and analyzing network logs
 
 ## 🚀 Quick Links

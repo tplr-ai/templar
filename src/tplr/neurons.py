@@ -90,6 +90,21 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
     else:
         model_iterator = miner.model.named_parameters()
 
+    # Batch load all error feedback tensors to GPU
+    for n in miner.owned_params:
+        if miner.error_feedback.get(n, None) is not None:
+            if miner.error_feedback[n].is_cuda:
+                continue
+            # Get the device from the corresponding parameter
+            param = dict(miner.model.named_parameters()).get(n)
+            if param is not None:
+                miner.error_feedback[n] = miner.error_feedback[n].to(
+                    param.device, non_blocking=True
+                )
+    # Synchronize to ensure all transfers complete
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
     for _, (n, p) in enumerate(model_iterator, 1):
         owned = n in miner.owned_params
         p_is_dt = is_dtensor(p)
@@ -129,8 +144,8 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
         error_feedback = miner.error_feedback[n]
         if error_feedback is None:
             error_feedback = torch.zeros_like(grad_full, device=p.device)
-            miner.error_feedback[n] = error_feedback
         elif error_feedback.device != p.device:
+            # Should already be on GPU from batch load, but handle edge cases
             error_feedback = error_feedback.to(p.device)
 
         error_feedback.mul_(miner.hparams.momentum_decay)
@@ -159,6 +174,7 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
         transmit_grad = miner.transformer.decode(decompressed, use_dct=use_dct)
         del decompressed
         error_feedback.sub_(transmit_grad)
+        # Keep error feedback on GPU for now, batch offload later
         miner.error_feedback[n] = error_feedback
         del transmit_grad, error_feedback
         full_p = None
@@ -172,6 +188,21 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
 
         # Clear per-param grad
         p.grad = None
+
+    # Batch offload all error feedback tensors to CPU with pinned memory
+    for name in miner.error_feedback:
+        if (
+            miner.error_feedback[name] is not None
+            and miner.error_feedback[name].is_cuda
+        ):
+            # Copy to the pre-allocated pinned buffer
+            miner.error_feedback_cpu_buffers[name].copy_(
+                miner.error_feedback[name], non_blocking=True
+            )
+            miner.error_feedback[name] = miner.error_feedback_cpu_buffers[name]
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
     torch.cuda.empty_cache()
     gradient["metadata"] = {"window": step_window}

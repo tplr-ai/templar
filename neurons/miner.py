@@ -248,6 +248,7 @@ class Miner(BaseNode, Trainer):
         self.init_optimizers_schedulers()
 
         self.error_feedback = {}
+        self.error_feedback_cpu_buffers = {}
         self.owned_params = set()
 
         self.xshapes = {}
@@ -260,6 +261,9 @@ class Miner(BaseNode, Trainer):
                 self.owned_params.add(n)
                 # For DTensors, create error feedback based on full tensor since TP is not supported
                 self.error_feedback[n] = None
+                self.error_feedback_cpu_buffers[n] = torch.empty(
+                    p.shape, device="cpu", pin_memory=True
+                )
 
             enc = self.transformer.encode(
                 torch.empty(p.shape, dtype=torch.float16, device=self.device),

@@ -19,6 +19,7 @@
 # Standard library
 import asyncio
 import concurrent.futures
+import time
 from contextlib import nullcontext
 from typing import Iterable
 
@@ -450,7 +451,10 @@ class Trainer:
         local_tokens_sum: int = 0  # local running totals
         local_loss_sum: float = 0.0
 
+        offload_start = time.time()
         params_offloaded, param_specs = self._get_offloaded_param()
+        offload_time = time.time() - offload_start
+        tplr.logger.info(f"Parameter offload to CPU took {offload_time:.4f}s")
 
         inner_step_count: int = 0
         loader_iter = iter(loader)
@@ -629,6 +633,7 @@ class Trainer:
             # 6. parameter offloading logic
             # ------------------------------------------------------------------ #
             with tp.record_function("Parameter Offloading") if prof else nullcontext():
+                restore_start = time.time()
                 with torch.no_grad():
                     for (saved_param, param_meta), p in zip(
                         zip(params_offloaded, param_specs), self.bare_model.parameters()
@@ -650,6 +655,9 @@ class Trainer:
                             saved_param = saved_param.to(p.device, non_blocking=True)
                             p.grad = saved_param - p.data
                             p.data.copy_(saved_param)
+
+                restore_time = time.time() - restore_start
+                tplr.logger.info(f"Parameter restore to GPU took {restore_time:.4f}s")
 
         # ---------------------------------------------------------------------- #
         # 7. Return aggregated metrics

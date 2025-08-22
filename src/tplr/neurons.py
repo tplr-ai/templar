@@ -510,7 +510,7 @@ async def catchup_with_aggregation_server(
     tplr.logger.info("Starting catch‑up using aggregated_gradients...")
     assert instance.start_window is not None
 
-    leader_uid: int = instance.metagraph.S.argmax().item()
+    leader_uid: int = instance.comms.metagraph.S.argmax().item()
 
     start_w = checkpoint_current_window + 1
     target_w = instance.current_window

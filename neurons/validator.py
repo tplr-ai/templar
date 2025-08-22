@@ -272,7 +272,9 @@ class Validator(BaseNode, Trainer):
             uid=None,  # UID will be set after comms is initialized
         )
 
-        self.current_hotkeys = dict(zip(self.comms.metagraph.uids, self.comms.metagraph.hotkeys))
+        self.current_hotkeys = dict(
+            zip(self.comms.metagraph.uids, self.comms.metagraph.hotkeys)
+        )
         if self.wallet.hotkey.ss58_address not in self.comms.metagraph.hotkeys:
             tplr.logger.error(
                 f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.comms.metagraph.netuid}[/bold]"
@@ -3336,7 +3338,9 @@ class Validator(BaseNode, Trainer):
             Updated idx_overlap_peers, keeping in mind deregistering
         """
         found_uids = list(idx_overlap_peers.keys())
-        latest_hotkeys = dict(zip(self.comms.metagraph.uids, self.comms.metagraph.hotkeys))
+        latest_hotkeys = dict(
+            zip(self.comms.metagraph.uids, self.comms.metagraph.hotkeys)
+        )
 
         for uid in found_uids:
             if (

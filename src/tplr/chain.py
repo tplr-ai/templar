@@ -19,8 +19,8 @@
 # Global imports
 import asyncio
 from collections import defaultdict
-from typing import Dict, Optional
 from types import SimpleNamespace
+from typing import Dict, Optional
 
 import bittensor as bt
 import numpy as np
@@ -57,7 +57,7 @@ class ChainManager:
         """
         self.config = config
         self.netuid = self.config.netuid
-        self.hparams = SimpleNamespace(**(hparams or {}))
+        self.hparams = hparams or SimpleNamespace()
 
         # Bittensor objects
         self.subtensor = bt.subtensor(config=self.config)

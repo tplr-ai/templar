@@ -202,9 +202,7 @@ def master_only(func):
         else:
             # Log the skip on non-master ranks
             rank = getattr(self, "rank", "unknown")
-            tplr.logger.debug(
-                f"Skipping {func.__name__} on non-master rank {rank}"
-            )
+            tplr.logger.debug(f"Skipping {func.__name__} on non-master rank {rank}")
             return None  # Or a more specific default if needed
 
     return wrapper

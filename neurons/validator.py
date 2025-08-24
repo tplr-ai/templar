@@ -2158,30 +2158,30 @@ class Validator(BaseNode, Trainer):
 
     def select_next_peers(self) -> tuple[list[int], list[int]] | None:
         """
-        Simple peer selection that prioritizes the highest weights.
-        1) Get all active peers
+        Peer selection that prioritizes the highest weights among peers with positive scores.
+        1) Get all active peers with positive scores
         2) Sort them by weight (highest first)
-        3) Select up to gather_peer_count
-        4) If not enough high-weight peers, fill remaining with random active peers
+        3) Select up to gather_peer_count for gathering and reserve_peer_count for reserves
+        4) Return None if not enough peers meet the minimum requirement
         """
-        # Get all active peers as a list
+        # Get all active peers with positive scores as a list
         active_peers = [
             int(peer)
             for peer in self.comms.active_peers
-            if peer not in self.naughty_peers
+            if peer not in self.naughty_peers and self.final_scores[peer] > 0
         ]
 
-        # Check if we have enough active peers
+        # Check if we have enough active peers with positive scores
         if len(active_peers) < self.hparams.minimum_peers:
             tplr.log_with_context(
                 level="info",
-                message=f"Not enough active peers ({len(active_peers)}) to meet minimum requirement ({self.hparams.minimum_peers})",
+                message=f"Not enough active peers with positive scores ({len(active_peers)}) to meet minimum requirement ({self.hparams.minimum_peers})",
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
             return None
 
-        # Create list of (peer_id, weight) tuples
+        # Create list of (peer_id, weight) tuples for peers with positive scores
         peer_weights = []
         for peer_id in active_peers:
             weight = float(self.weights.cpu()[peer_id])

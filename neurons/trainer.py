@@ -446,6 +446,7 @@ class Trainer:
         batch_tokens: int = 0  # local counter
         accum_batch_size: int = 0
         window_entry_loss: float = 0.0
+        inner_step_losses: list = []  # Store all inner step losses
         global_tokens: int = 0  # after cross-rank reduction
         global_loss_sum: float = 0.0
         local_tokens_sum: int = 0  # local running totals
@@ -585,6 +586,10 @@ class Trainer:
                         local_loss_sum = 0
 
                         accum_batch_size = int(self._ddp_reduce(accum_batch_size))
+
+                        # Store loss for every inner step
+                        inner_step_losses.append(log_loss)
+
                         if self.is_master:
                             tplr.logger.info(
                                 f"Inner Step {inner_step_count}, "
@@ -666,6 +671,7 @@ class Trainer:
         return {
             "total_loss": global_loss_sum,  # cross-rank sum
             "window_entry_loss": window_entry_loss,
+            "inner_step_losses": inner_step_losses,  # All inner step losses
             "batch_count": batch_count,  # cross-rank sum
             "batch_tokens": global_tokens,  # cross-rank sum
         }

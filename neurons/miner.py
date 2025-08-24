@@ -510,6 +510,7 @@ class Miner(BaseNode, Trainer):
             res = await self.inner_steps(loader=self.loader, step_window=step_window)
             training_time = tplr.T() - train_start
             window_entry_loss = res["window_entry_loss"]
+            inner_step_losses = res.get("inner_step_losses", [])
             n_batches = res["batch_count"]
             window_tokens = res["batch_tokens"]
 
@@ -775,40 +776,50 @@ class Miner(BaseNode, Trainer):
                 )
                 inner_lr = self.inner_scheduler.get_last_lr()[0]
 
+                # Log individual inner step losses
+                wandb_metrics = {
+                    # Add timing metrics
+                    "miner/timing/window_total": window_total_time,
+                    "miner/timing/peer_update": peer_update_time,
+                    "miner/timing/data_loading": data_loading_time,
+                    "miner/timing/training": training_time,
+                    "miner/timing/compression": compression_time,
+                    "miner/timing/gather": gather_time,
+                    "miner/timing/put": put_time,
+                    "miner/timing/model_update": model_update_time,
+                    # Existing metrics
+                    "miner/window_entry_loss": window_entry_loss,
+                    "miner/tokens_per_sec": tokens_per_sec,
+                    "miner/total_tokens": self.total_tokens_processed,
+                    "miner/batch_tokens": window_tokens,
+                    "miner/global_step": self.global_step,
+                    "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
+                    / 1024**2,
+                    "miner/gpu_memory_cached": torch.cuda.memory_reserved() / 1024**2,
+                    "miner/gather_peers": len(self.comms.peers),
+                    "miner/effective_batch_size": len(self.comms.peers)
+                    * self.hparams.batch_size,
+                    "miner/inner_lr": inner_lr,
+                    "miner/mean_grad_norm": mean_grad_norm,
+                    "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
+                    "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
+                    "miner/grad_norm_std": grad_norm_std,
+                    "miner/mean_weight_norm": mean_weight_norm,
+                    "miner/mean_momentum_norm": mean_momentum_norm,
+                    # Added gather success rate in %
+                    "miner/gather/success_rate": gather_success_rate,
+                }
+
+                # Log each inner step loss separately to create a continuous loss graph
+                for i, loss in enumerate(inner_step_losses):
+                    # Log each inner step with correct global step
+                    self.wandb.log(
+                        {"miner/loss": loss},
+                        step=self.global_step * self.hparams.inner_steps + i,
+                    )
+
                 self.wandb.log(
-                    {
-                        # Add timing metrics
-                        "miner/timing/window_total": window_total_time,
-                        "miner/timing/peer_update": peer_update_time,
-                        "miner/timing/data_loading": data_loading_time,
-                        "miner/timing/training": training_time,
-                        "miner/timing/compression": compression_time,
-                        "miner/timing/gather": gather_time,
-                        "miner/timing/put": put_time,
-                        "miner/timing/model_update": model_update_time,
-                        # Existing metrics
-                        "miner/window_entry_loss": window_entry_loss,
-                        "miner/tokens_per_sec": tokens_per_sec,
-                        "miner/total_tokens": self.total_tokens_processed,
-                        "miner/batch_tokens": window_tokens,
-                        "miner/global_step": self.global_step,
-                        "miner/gpu_memory_allocated": torch.cuda.memory_allocated()
-                        / 1024**2,
-                        "miner/gpu_memory_cached": torch.cuda.memory_reserved()
-                        / 1024**2,
-                        "miner/gather_peers": len(self.comms.peers),
-                        "miner/effective_batch_size": len(self.comms.peers)
-                        * self.hparams.batch_size,
-                        "miner/inner_lr": inner_lr,
-                        "miner/mean_grad_norm": mean_grad_norm,
-                        "miner/max_grad_norm": max(grad_norms) if grad_norms else 0,
-                        "miner/min_grad_norm": min(grad_norms) if grad_norms else 0,
-                        "miner/grad_norm_std": grad_norm_std,
-                        "miner/mean_weight_norm": mean_weight_norm,
-                        "miner/mean_momentum_norm": mean_momentum_norm,
-                        # Added gather success rate in %
-                        "miner/gather/success_rate": gather_success_rate,
-                    },
+                    wandb_metrics,
                     step=self.global_step,
                 )
 

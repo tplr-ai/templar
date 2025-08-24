@@ -958,7 +958,7 @@ class Validator(BaseNode, Trainer):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                all_uids = list(range(1, len(self.metagraph.S)))
+                all_uids = list(range(2, len(self.metagraph.S)))
                 self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
                 # For evaluation, also use all peers but track separately with equal initial weight

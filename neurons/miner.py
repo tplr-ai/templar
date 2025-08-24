@@ -644,8 +644,8 @@ class Miner(BaseNode, Trainer):
             if self.config.test:
                 # In test mode, use all UIDs from metagraph except self
                 tplr.logger.info("Test mode active: Using all peers from metagraph.")
-                all_uids = list(range(1, len(self.metagraph.S)))
-                self.comms.peers = [uid for uid in all_uids if uid != self.uid]
+                all_uids = list(range(2, len(self.metagraph.S)))
+                self.comms.peers = all_uids
 
             tplr.logger.info(f"Final peers for gather: {self.comms.peers}")
 

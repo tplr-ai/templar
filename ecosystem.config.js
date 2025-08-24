@@ -8,7 +8,7 @@ const RANDOM_SUFFIX = execSync(
   .toString()
   .trim();
 
-const PROJECT_NAME = `test_${RANDOM_SUFFIX}`;
+const PROJECT_NAME = `500M_test`;
 
 module.exports = {
   apps: [
@@ -21,7 +21,7 @@ module.exports = {
       args: [
         "--standalone",
         "--nnodes", "1",
-        "--nproc_per_node", "2",
+        "--nproc_per_node", "4",
         "neurons/miner.py",
         "--wallet.name", "templar_test",
         "--wallet.hotkey", "M1",
@@ -34,7 +34,7 @@ module.exports = {
       env: {
         ...process.env,
         PROJECT_NAME,
-        CUDA_VISIBLE_DEVICES: "1,2"
+        CUDA_VISIBLE_DEVICES: "0,1,2,3"
       }
     },
     {
@@ -45,7 +45,7 @@ module.exports = {
       args: [
         "--standalone",
         "--nnodes", "1",
-        "--nproc_per_node", "2",
+        "--nproc_per_node", "4",
         "neurons/miner.py",
         "--wallet.name", "templar_test",
         "--wallet.hotkey", "M2",
@@ -58,7 +58,7 @@ module.exports = {
       env: {
         ...process.env,
         PROJECT_NAME,
-        CUDA_VISIBLE_DEVICES: "3,4"
+        CUDA_VISIBLE_DEVICES: "4,5,6,7"
       }
     },
 
@@ -71,7 +71,7 @@ module.exports = {
       args: [
         "--standalone",
         "--nnodes", "1",
-        "--nproc_per_node", "1",
+        "--nproc_per_node", "4",
         "neurons/validator.py",
         "--wallet.name", "templar_test",
         "--wallet.hotkey", "V1",
@@ -84,7 +84,7 @@ module.exports = {
       env: {
         ...process.env,
         PROJECT_NAME,
-        CUDA_VISIBLE_DEVICES: "0"
+        CUDA_VISIBLE_DEVICES: "0,1,2,3"
       }
     }
   ]

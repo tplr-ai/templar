@@ -494,6 +494,7 @@ class Comms(ChainManager):
         time_max: datetime | None = None,
         load_data: bool = True,
         show_progress: bool = True,
+        map_location: str | None = None,
     ):
         """Download object from S3 using asynchronous streaming.
 
@@ -507,6 +508,8 @@ class Comms(ChainManager):
                 If the object is newer, it's skipped. Defaults to None.
             load_data (bool, optional): If True, loads the object into memory.
                 If False, moves it to a local path. Defaults to True.
+            map_location (str | None, optional): Device to map tensors to when loading PyTorch files.
+                If None, defaults to self.config.device. Use "cpu" to avoid GPU OOM. Defaults to None.
 
         Returns:
             Any | None: The loaded data (e.g., dict from JSON, tensor from .pt),
@@ -598,9 +601,13 @@ class Comms(ChainManager):
                         data = await f.read()
                         loaded_data = json.loads(data)
                 else:
+                    # Use provided map_location or default to self.config.device
+                    device_location = (
+                        map_location if map_location is not None else self.config.device
+                    )
                     loaded_data = torch.load(
                         temp_file_path,
-                        map_location=self.config.device,
+                        map_location=device_location,
                         weights_only=True,
                     )
             else:
@@ -2175,8 +2182,9 @@ class Comms(ChainManager):
 
             # If we found a valid checkpoint, fetch it
             if latest_checkpoint:
+                # Load checkpoint to CPU to avoid OOM on rank 0
                 loaded_data = await self.s3_get_object(
-                    key=latest_checkpoint, bucket=bucket
+                    key=latest_checkpoint, bucket=bucket, map_location="cpu"
                 )
                 if loaded_data:
                     return loaded_data, max_window

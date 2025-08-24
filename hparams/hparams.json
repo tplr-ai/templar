@@ -7,7 +7,7 @@
     "batch_size": 384,
     "inner_steps": 15,
     "outer_learning_rate": 0.9,
-    "blocks_per_window": 131,
+    "blocks_per_window": 135,
     "windows_per_weights": 2,
     "momentum_decay": 0.999,
     "topk_compression": 32,

@@ -64,8 +64,7 @@ class Trainer:
             SamplerClass = tplr.EvalSampler
             kwargs = shared_args | dict(
                 batch_size=self.hparams.target_batch_size,
-                validation_bs=self.hparams.validator_sample_micro_bs
-                * self.hparams.micro_batch_size,
+                validation_bs=self.hparams.validator_sample_micro_bs,
             )
         else:
             SamplerClass = tplr.MinerSampler

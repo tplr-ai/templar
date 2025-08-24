@@ -78,7 +78,7 @@
     "cp_degree": 1,
 
     "dp_replicate": 1,
-    "dp_shard": 8,
+    "dp_shard": 4,
 
     "compile": true,
     "enable_cpu_offload": false,

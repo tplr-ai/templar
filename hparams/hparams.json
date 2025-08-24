@@ -18,7 +18,7 @@
     "model_size": "512M",
     "weight_decay": 0.1,
     "validator_offset": 1,
-    "checkpoint_frequency": 20,
+    "checkpoint_frequency": 500,
     "gather_peer_count": 20,
     "gather_share": 0.75,
     "gather_top_ratio": 2.0,

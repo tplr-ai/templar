@@ -457,6 +457,7 @@ class Miner(BaseNode, Trainer):
             dummy_gradient = {
                 "metadata": {"window": self.current_window, "dummy": True}
             }
+            time.sleep(1)
             await self.comms.put(
                 state_dict=dummy_gradient,
                 uid=str(self.uid),

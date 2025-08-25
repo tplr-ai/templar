@@ -17,6 +17,16 @@ from tplr.neurons import (
 )
 
 
+class _FakeComms:
+    def __init__(self):
+        self.peers = []
+        self.reserve_peers = []
+        self.get_peer_list = AsyncMock()
+        self.get = AsyncMock()
+        self.gather = AsyncMock()
+        self.gradient_timestamp = AsyncMock()
+
+
 class TestSlashingUtils(unittest.TestCase):
     def test_determine_slash_egregiousness(self):
         self.assertEqual(determine_slash_egregiousness(0.4), "high")
@@ -69,7 +79,7 @@ class TestCompareModelWithDebugDict(unittest.TestCase):
 class TestUpdatePeers(unittest.TestCase):
     def setUp(self):
         self.instance = MagicMock()
-        self.instance.comms = MagicMock()
+        self.instance.comms = _FakeComms()  # Use _FakeComms
         self.instance.comms.peers = []
         self.instance.next_peers = None
         self.instance.peers_update_window = 0
@@ -79,10 +89,8 @@ class TestUpdatePeers(unittest.TestCase):
     def test_update_peers_initial_fetch(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        self.instance.comms.get_peer_list.return_value = asyncio.Future()
-        self.instance.comms.get_peer_list.return_value.set_result(
-            ([1, 2, 3], [4, 5], 1)
-        )
+        # Directly set the return value for the AsyncMock
+        self.instance.comms.get_peer_list.return_value = ([1, 2, 3], [4, 5], 1)
 
         loop.run_until_complete(update_peers(self.instance, 1, 0.0))
 
@@ -246,10 +254,20 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.instance = MagicMock()
         self.instance.start_window = 0
         self.instance.current_window = 5
-        self.instance.comms = MagicMock()
-        self.instance.comms.metagraph.S = torch.tensor([0.1, 0.9])  # Leader is UID 1
+
+        # Initialize comms with _FakeComms instance
+        self.instance.comms = _FakeComms()
+        self.instance.comms.metagraph = MagicMock()
+        self.instance.comms.metagraph.S = torch.tensor(
+            [0.1, 0.9]
+        )  # Set S tensor on the fake metagraph
+
         self.instance.model = MagicMock()
         self.instance.outer_optimizer = MagicMock()
+
+        # Patch torch.cuda.is_available to avoid RuntimeError in CI
+        self.cuda_patch = patch("torch.cuda.is_available", return_value=False)
+        self.cuda_patch.start()
         self.instance.transformer = MagicMock()
         self.instance.compressor = MagicMock()
         self.instance.xshapes = {}
@@ -261,6 +279,9 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.instance.loop = MagicMock()
         self.instance.loop.run_in_executor = AsyncMock(return_value=12345)
         self.instance.query_block_timestamp = MagicMock(return_value=12345)
+
+    def tearDown(self):
+        self.cuda_patch.stop()
 
     @patch("torch.distributed.barrier")
     @patch("torch.distributed.broadcast")

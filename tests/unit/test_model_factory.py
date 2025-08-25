@@ -13,6 +13,7 @@ from tplr.model_factory import (
     _get_hf_config_from_titan,
     _get_unwrapped_model,
     convert_titan_to_hf,
+    create_parallel_dims,
     initialize_torchtitan_model,
 )
 
@@ -21,15 +22,31 @@ def setup_distributed_environment() -> None:
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = "12355"
     os.environ["RANK"] = "0"
+    os.environ["LOCAL_RANK"] = "0"
     os.environ["WORLD_SIZE"] = "1"
+    if torch.cuda.is_available():
+        torch.cuda.set_device(0)
 
 
+setup_distributed_environment()
+
+
+@patch("torch.cuda.is_available", return_value=False)
+@patch("torch.cuda.set_device", return_value=None)
 class TestModelFactory(unittest.TestCase):
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls, *args, **kwargs):
         setup_distributed_environment()
 
-    def test_get_unwrapped_model(self):
+    @patch("torch.distributed.is_initialized", return_value=True)
+    @patch("torch.distributed.get_world_size", return_value=1)
+    def test_get_unwrapped_model(
+        self,
+        mock_get_world_size,
+        mock_is_initialized,
+        mock_cuda_available,
+        mock_set_device,
+    ):
         """Test that the model unwrapping utility works correctly."""
         # Create a mock model
         hparams = SimpleNamespace(
@@ -43,13 +60,23 @@ class TestModelFactory(unittest.TestCase):
                 intermediate_size=20,
             ),
         )
-        inner_model = initialize_torchtitan_model(hparams, role="evaluator")
+        inner_model = initialize_torchtitan_model(
+            hparams, role="evaluator", world_size=1, device="cpu"
+        )
         # Test that the unwrapped model is the original model
         with patch("tplr.model_factory.isinstance", return_value=True):
             unwrapped = _get_unwrapped_model(inner_model)
             self.assertIs(unwrapped, inner_model)
 
-    def test_convert_titan_to_hf_with_titan_model(self):
+    @patch("torch.distributed.is_initialized", return_value=True)
+    @patch("torch.distributed.get_world_size", return_value=1)
+    def test_convert_titan_to_hf_with_titan_model(
+        self,
+        mock_get_world_size,
+        mock_is_initialized,
+        mock_cuda_available,
+        mock_set_device,
+    ):
         """Test conversion from a Titan model to a HuggingFace model."""
         # Mock hparams
         hparams = SimpleNamespace(
@@ -70,7 +97,9 @@ class TestModelFactory(unittest.TestCase):
         )
 
         # Mock Titan model and its args
-        titan_model = initialize_torchtitan_model(hparams, role="evaluator")
+        titan_model = initialize_torchtitan_model(
+            hparams, role="evaluator", world_size=1, device="cpu"
+        )
 
         with patch(
             "tplr.model_factory._get_actual_intermediate_size", return_value=128
@@ -95,7 +124,9 @@ class TestModelFactory(unittest.TestCase):
                 # Assertions
                 self.assertIsNone(hf_model)
 
-    def test_convert_titan_to_hf_with_model_args(self):
+    def test_convert_titan_to_hf_with_model_args(
+        self, mock_cuda_available, mock_set_device
+    ):
         """Test that provided model_args override model's own args."""
         hparams = SimpleNamespace()
         titan_model = MagicMock(spec=TitanLlama)
@@ -129,7 +160,15 @@ class TestModelFactory(unittest.TestCase):
             # Assertions
             self.assertIsNone(hf_model)
 
-    def test_get_hf_config_from_titan(self):
+    @patch("torch.distributed.is_initialized", return_value=True)
+    @patch("torch.distributed.get_world_size", return_value=1)
+    def test_get_hf_config_from_titan(
+        self,
+        mock_get_world_size,
+        mock_is_initialized,
+        mock_cuda_available,
+        mock_set_device,
+    ):
         """Test the helper function for creating HF config from a Titan model."""
         hparams = SimpleNamespace(
             model_size="150M",
@@ -144,7 +183,9 @@ class TestModelFactory(unittest.TestCase):
                 hidden_act="silu",
             ),
         )
-        titan_model = initialize_torchtitan_model(hparams, role="evaluator")
+        titan_model = initialize_torchtitan_model(
+            hparams, role="evaluator", world_size=1, device="cpu"
+        )
         state_dict = titan_model.state_dict()
 
         with patch(
@@ -153,6 +194,115 @@ class TestModelFactory(unittest.TestCase):
             config = _get_hf_config_from_titan(titan_model, hparams, state_dict)
             self.assertIsInstance(config, LlamaConfig)
             self.assertEqual(config.vocab_size, 100)
+
+
+class TestCreateParallelDims(unittest.TestCase):
+    def test_evaluator_role(self):
+        hparams = SimpleNamespace()
+        pdims = create_parallel_dims(world_size=1, hparams=hparams, role="evaluator")
+        self.assertEqual(pdims.dp_replicate, 1)
+        self.assertEqual(pdims.dp_shard, 1)
+        self.assertEqual(pdims.tp, 1)
+        self.assertEqual(pdims.pp, 1)
+        self.assertEqual(pdims.cp, 1)
+        self.assertEqual(pdims.ep, 1)
+        self.assertEqual(pdims.world_size, 1)
+
+        pdims = create_parallel_dims(world_size=4, hparams=hparams, role="evaluator")
+        self.assertEqual(pdims.dp_replicate, 1)
+        self.assertEqual(pdims.dp_shard, 4)
+        self.assertEqual(pdims.tp, 1)
+        self.assertEqual(pdims.pp, 1)
+        self.assertEqual(pdims.cp, 1)
+        self.assertEqual(pdims.ep, 1)
+        self.assertEqual(pdims.world_size, 4)
+
+    def test_validator_role(self):
+        hparams = SimpleNamespace()
+        pdims = create_parallel_dims(world_size=4, hparams=hparams, role="validator")
+        self.assertEqual(pdims.dp_replicate, 1)
+        self.assertEqual(pdims.dp_shard, 4)
+        self.assertEqual(pdims.tp, 1)
+        self.assertEqual(pdims.pp, 1)
+        self.assertEqual(pdims.cp, 1)
+        self.assertEqual(pdims.ep, 1)
+        self.assertEqual(pdims.world_size, 4)
+
+    def test_miner_role_default(self):
+        hparams = SimpleNamespace(torchtitan=SimpleNamespace())
+        pdims = create_parallel_dims(world_size=1, hparams=hparams, role="miner")
+        self.assertEqual(pdims.dp_replicate, 1)
+        self.assertEqual(pdims.dp_shard, 1)
+        self.assertEqual(pdims.tp, 1)
+        self.assertEqual(pdims.pp, 1)
+        self.assertEqual(pdims.cp, 1)
+        self.assertEqual(pdims.ep, 1)
+        self.assertEqual(pdims.world_size, 1)
+
+    def test_miner_role_custom_tp(self):
+        hparams = SimpleNamespace(torchtitan=SimpleNamespace(tp_degree=2))
+        pdims = create_parallel_dims(world_size=2, hparams=hparams, role="miner")
+        self.assertEqual(pdims.tp, 2)
+        self.assertEqual(pdims.world_size, 2)
+
+    def test_miner_role_invalid_dp_replicate_and_dp_shard(self):
+        hparams = SimpleNamespace(
+            torchtitan=SimpleNamespace(dp_replicate=2, dp_shard=2)
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "Specify either torchtitan.dp_replicate or torchtitan.dp_shard, but not both.",
+        ):
+            create_parallel_dims(world_size=4, hparams=hparams, role="miner")
+
+    def test_miner_role_invalid_dp_replicate_with_tp(self):
+        hparams = SimpleNamespace(
+            torchtitan=SimpleNamespace(dp_replicate=2, tp_degree=2)
+        )
+        with self.assertRaisesRegex(
+            ValueError, "dp_replicate can only be used when tp/pp/cp are all 1."
+        ):
+            create_parallel_dims(world_size=4, hparams=hparams, role="miner")
+
+    def test_miner_role_world_size_not_divisible_by_dp(self):
+        hparams = SimpleNamespace(torchtitan=SimpleNamespace(dp_shard=2))
+        with self.assertRaisesRegex(
+            ValueError,
+            "world_size .* must be divisible by the product of all parallel degrees",
+        ):
+            create_parallel_dims(world_size=3, hparams=hparams, role="miner")
+
+    def test_miner_role_world_size_not_divisible_by_tp(self):
+        hparams = SimpleNamespace(torchtitan=SimpleNamespace(tp_degree=2))
+        with self.assertRaisesRegex(
+            ValueError,
+            "world_size .* must be divisible by the product of all parallel degrees",
+        ):
+            create_parallel_dims(world_size=3, hparams=hparams, role="miner")
+
+    def test_zero_dp_replicate_or_dp_shard(self):
+        hparams_zero_dp_replicate = SimpleNamespace(
+            torchtitan=SimpleNamespace(dp_replicate=0)
+        )
+        with self.assertRaisesRegex(ValueError, "dp_replicate cannot be zero."):
+            create_parallel_dims(
+                world_size=1, hparams=hparams_zero_dp_replicate, role="miner"
+            )
+
+        hparams_zero_dp_shard = SimpleNamespace(torchtitan=SimpleNamespace(dp_shard=0))
+        with self.assertRaisesRegex(ValueError, "dp_shard cannot be zero."):
+            create_parallel_dims(
+                world_size=1, hparams=hparams_zero_dp_shard, role="miner"
+            )
+
+    def test_zero_tp_degree(self):
+        hparams_zero_tp_degree = SimpleNamespace(
+            torchtitan=SimpleNamespace(tp_degree=0)
+        )
+        with self.assertRaisesRegex(ValueError, "tp_degree cannot be zero."):
+            create_parallel_dims(
+                world_size=1, hparams=hparams_zero_tp_degree, role="miner"
+            )
 
 
 if __name__ == "__main__":

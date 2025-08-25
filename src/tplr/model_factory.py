@@ -224,9 +224,13 @@ def create_parallel_dims(
     Raises:
         ValueError: If parallelization parameters are invalid
     """
+    if world_size <= 0:
+        world_size = 1
     if role == "evaluator":
         # Evaluator: support both single and multi-GPU configurations
-        dp_shard = min(4, world_size)  # Use up to 4 GPUs for TP
+        # Evaluator: support both single and multi-GPU configurations
+        # Ensure dp_shard is at least 1 to prevent division by zero
+        dp_shard = max(1, min(4, world_size))
         if world_size % dp_shard != 0:
             raise ValueError(
                 f"World size ({world_size}) must be divisible by "
@@ -243,6 +247,7 @@ def create_parallel_dims(
         )
     elif role == "validator":
         # Validator: pipeline parallelism with data parallel replication
+        # Ensure dp_shard is at least 1 to prevent division by zero
         dp_shard = 4
         if world_size % dp_shard != 0:
             raise ValueError(
@@ -265,8 +270,27 @@ def create_parallel_dims(
         tp_degree = int(getattr(tt, "tp_degree", 1))
         pp_degree = int(getattr(tt, "pp_degree", 1))
         cp_degree = int(getattr(tt, "cp_degree", 1))
-        dp_replicate = int(getattr(tt, "dp_replicate", 1))
-        dp_shard = int(getattr(tt, "dp_shard", 1))
+        dp_replicate = getattr(tt, "dp_replicate", 1)
+        dp_shard = getattr(tt, "dp_shard", 1)
+
+        # Ensure divisors are not zero before coercion to 1 and modulo operations
+        if dp_replicate == 0:
+            raise ValueError("dp_replicate cannot be zero.")
+        if dp_shard == 0:
+            raise ValueError("dp_shard cannot be zero.")
+        if tp_degree == 0:
+            raise ValueError("tp_degree cannot be zero.")
+        if pp_degree == 0:
+            raise ValueError("pp_degree cannot be zero.")
+        if cp_degree == 0:
+            raise ValueError("cp_degree cannot be zero.")
+
+        # Coerce to int after zero checks
+        dp_replicate = int(dp_replicate)
+        dp_shard = int(dp_shard)
+        tp_degree = int(tp_degree)
+        pp_degree = int(pp_degree)
+        cp_degree = int(cp_degree)
 
         # Validation
         if dp_replicate > 1 and dp_shard > 1:
@@ -278,19 +302,18 @@ def create_parallel_dims(
         if dp_replicate > 1 and (tp_degree > 1 or pp_degree > 1 or cp_degree > 1):
             raise ValueError("dp_replicate can only be used when tp/pp/cp are all 1.")
 
-        dp_replicate = int(dp_replicate or 1)
-        dp_shard = int(dp_shard or 1)
-
-        if world_size % (dp_replicate * dp_shard) != 0:
+        # Ensure world_size is divisible by the product of all parallel degrees
+        total_parallel_degree = (
+            dp_replicate * dp_shard * tp_degree * pp_degree * cp_degree
+        )
+        if (
+            total_parallel_degree == 0
+        ):  # Should be caught by individual zero checks, but as a safeguard
+            raise ValueError("Product of parallel degrees cannot be zero.")
+        if world_size % total_parallel_degree != 0:
             raise ValueError(
-                f"world_size ({world_size}) must be divisible by "
-                f"dp_replicate × dp_shard ({dp_replicate}×{dp_shard})."
-            )
-
-        if world_size % tp_degree != 0:
-            raise ValueError(
-                f"World size ({world_size}) must be divisible by "
-                f"tensor-parallel degree ({tp_degree})"
+                f"world_size ({world_size}) must be divisible by the product of all parallel degrees "
+                f"({dp_replicate}x{dp_shard}x{tp_degree}x{pp_degree}x{cp_degree} = {total_parallel_degree})."
             )
 
         return ParallelDims(

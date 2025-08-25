@@ -172,7 +172,7 @@ def sync_exception_catcher(
 async_s3_exception_catcher = partial(
     async_exception_catcher, exceptions.handle_s3_exceptions
 )
-# s3_exception_catcher = partial(sync_exception_catcher, exceptions.handle_s3_exceptions)
+s3_exception_catcher = partial(sync_exception_catcher, exceptions.handle_s3_exceptions)
 async_general_exception_catcher = partial(
     async_exception_catcher, exceptions.handle_general_exceptions
 )

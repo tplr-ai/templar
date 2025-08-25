@@ -113,7 +113,11 @@ def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
     # We need to reverse engineer ffn_dim_multiplier from intermediate_size
     target_intermediate_size = hparams.model_config.intermediate_size
     base_ffn = int(8 * args.dim / 3)
-    args.ffn_dim_multiplier = target_intermediate_size / base_ffn
+    if base_ffn > 0:
+        args.ffn_dim_multiplier = target_intermediate_size / base_ffn
+    else:
+        # Avoid division by zero if dim is 0
+        args.ffn_dim_multiplier = 1.0
 
     tplr.logger.info(
         f"Custom config: dim={args.dim}, n_layers={args.n_layers}, "
@@ -222,7 +226,7 @@ def create_parallel_dims(
     """
     if role == "evaluator":
         # Evaluator: support both single and multi-GPU configurations
-        dp_shard = max(4, world_size)  # Use up to 4 GPUs for TP
+        dp_shard = min(4, world_size)  # Use up to 4 GPUs for TP
         if world_size % dp_shard != 0:
             raise ValueError(
                 f"World size ({world_size}) must be divisible by "
@@ -405,7 +409,8 @@ def initialize_torchtitan_model(
 
 def _get_unwrapped_model(model: nn.Module) -> "TitanLlama":
     """Recursively unwraps a model from DDP or FSDP wrappers."""
-    model = getattr(model, "module", model)
+    while hasattr(model, "module"):
+        model = model.module
     if not isinstance(model, TitanLlama):
         raise ValueError(
             f"Expected model to be a TitanLlama instance, got {type(model)} instead."
@@ -483,7 +488,7 @@ def convert_titan_to_hf(
     save_path: str | None = None,
     model_args: dict[str, Any] | None = None,
     is_master: bool = False,
-) -> LlamaForCausalLM:
+) -> None:
     """Convert TorchTitan model to HuggingFace format.
 
     This function converts a TorchTitan Llama model to HuggingFace format,
@@ -495,7 +500,7 @@ def convert_titan_to_hf(
         save_path: Optional path to save the converted HuggingFace model
 
     Returns:
-        LlamaForCausalLM: Converted HuggingFace model
+        None
 
     Raises:
         ValueError: If conversion fails
@@ -575,10 +580,13 @@ def convert_titan_to_hf(
 
             # Load converted state dict into HuggingFace model
             hf_model.load_state_dict(hf_state_dict, strict=is_master)
-            tplr.logger.info("Saving model state. For large models, this takes a while")
 
             # Save if path provided
             if save_path:
+                tplr.logger.info(
+                    "Saving model state. For large models, this takes a while"
+                )
+
                 hf_model.save_pretrained(save_path)
                 tplr.logger.info(
                     f"Successfully saved TorchTitan model in HuggingFace format to {save_path}"

@@ -20,7 +20,6 @@
 import asyncio
 from collections import defaultdict
 from types import SimpleNamespace
-from typing import Dict, Optional
 
 import bittensor as bt
 import numpy as np
@@ -42,8 +41,8 @@ class ChainManager:
         config,
         hparams=None,
         fetch_interval: int = 600,  # Fetch interval in seconds
-        wallet: Optional["bt.wallet"] = None,
-        bucket: Optional[Bucket] = None,
+        wallet: bt.wallet | None = None,
+        bucket: Bucket | None = None,
     ):
         """
         Initialize chain commitment handler.
@@ -112,7 +111,7 @@ class ChainManager:
                 self.subtensor.substrate.initialize()
             await asyncio.sleep(self.fetch_interval)
 
-    def get_bucket(self, uid: int) -> Optional[Bucket]:
+    def get_bucket(self, uid: int) -> Bucket | None:
         """Helper function to get the bucket for a given UID.
 
         Args:
@@ -123,7 +122,7 @@ class ChainManager:
         """
         return self.commitments.get(uid)
 
-    def get_all_buckets(self) -> Dict[int, Optional[Bucket]]:
+    def get_all_buckets(self) -> dict[int, Bucket | None]:
         """Helper function to get all buckets for all UIDs in the metagraph.
 
         Returns:
@@ -262,7 +261,7 @@ class ChainManager:
         bytes_tuple = commitment[next(iter(commitment.keys()))][0]
         return decoded_key, bytes(bytes_tuple).decode()
 
-    async def get_commitments(self, block: Optional[int] = None) -> Dict[int, Bucket]:
+    async def get_commitments(self, block: int | None = None) -> dict[int, Bucket]:
         """Retrieves all bucket commitments from the chain.
 
         Args:
@@ -322,7 +321,7 @@ class ChainManager:
             self.subtensor.substrate.initialize()
             return
 
-    async def get_bucket_for_neuron(self, wallet: "bt.wallet") -> Optional[Bucket]:
+    async def get_bucket_for_neuron(self, wallet: "bt.wallet") -> Bucket | None:
         """Get bucket configuration for a specific neuron's wallet
 
         Args:
@@ -350,7 +349,7 @@ class ChainManager:
         else:
             logger.warning("No commitments fetched.")
 
-    def get_hotkey(self, uid: int) -> Optional[str]:
+    def get_hotkey(self, uid: int) -> str | None:
         """Returns the hotkey for a given UID."""
         # Handle different data types for uids
         if isinstance(self.metagraph.uids, (np.ndarray, torch.Tensor)):

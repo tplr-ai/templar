@@ -30,7 +30,7 @@ def handle_s3_exceptions(
     elif isinstance(e, boto_excepts.ParamValidationError):
         tplr.logger.exception(f"{base_message} Parameter Validation Error: {e}")
     elif isinstance(e, asyncio.TimeoutError):
-        tplr.logger.exception(f"{base_message} ")
+        tplr.logger.exception(f"{base_message} Operation timed out: {e}")
     else:
         tplr.logger.exception(f"{base_message} An unexpected error occurred: {e}")
     return purge

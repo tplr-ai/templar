@@ -46,8 +46,10 @@ def setup_evaluator_with_mocks():
         evaluator.comms = MagicMock()
         evaluator.version = "test_version"
         evaluator.subtensor = MagicMock()
-        evaluator.hparams = MagicMock(blocks_per_window=100)
+        evaluator.hparams = MagicMock()
+        evaluator.hparams.blocks_per_window = 100
         evaluator.is_master = True
+        evaluator.current_window = 0  # Initialize current_window
 
         yield evaluator
 
@@ -66,7 +68,9 @@ async def test_evaluator_skips_old_checkpoints(evaluator):
     Test that load_latest_model skips checkpoints with window_number <= last_eval_window
     """
     # Mock subtensor to return current block
-    evaluator.subtensor.get_current_block = MagicMock(return_value=10100)  # window 101
+    evaluator.comms.subtensor.get_current_block.return_value = (
+        10100  # block 10100, window 101
+    )
 
     # Mock load_checkpoint to return failure (window <= last_eval_window)
     mock_load_checkpoint = AsyncMock(return_value=(False, 100))
@@ -94,7 +98,9 @@ async def test_evaluator_loads_new_checkpoints(evaluator):
     and calculates global step correctly
     """
     # Mock subtensor to return current block
-    evaluator.subtensor.get_current_block = MagicMock(return_value=11100)  # window 111
+    evaluator.comms.subtensor.get_current_block.return_value = (
+        11100  # block 11100, window 111
+    )
 
     # Mock load_checkpoint to return success with new checkpoint window
     mock_load_checkpoint = AsyncMock(return_value=(True, 110))

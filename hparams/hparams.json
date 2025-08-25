@@ -9,7 +9,7 @@
     "outer_learning_rate": 1,
     "blocks_per_window": 7,
     "windows_per_weights": 72,
-    "momentum_decay": 0.999,
+    "momentum_decay": 0.95,
     "topk_compression": 128,
     "target_chunk": 64,
     "use_dct": false,
@@ -54,7 +54,7 @@
       "learning_rate": 1e-3,
       "scheduler": {
         "warmup_steps": 500,
-        "t_max": 20000,
+        "t_max": 1945,
         "eta_min_factor": 0.1
       }
     },

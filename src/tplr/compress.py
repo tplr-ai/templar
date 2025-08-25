@@ -465,6 +465,10 @@ class TopKCompressor(Generic[Q]):
             raise ValueError(
                 f"Expected uint8 (packed) or int64 (unpacked) indices, got {idx.dtype}"
             )
+        # Ensure val has the same dtype as x for scatter operation
+        if val.dtype != x.dtype:
+            val = val.to(dtype=x.dtype)
+
         x.scatter_reduce_(
             dim=-1, index=idx_int64, src=val, reduce="mean", include_self=False
         ).reshape(xshape)

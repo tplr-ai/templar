@@ -501,7 +501,7 @@ class Evaluator:
 
     @decos.evaluator_exception_catcher()
     @decos.master_only
-    def _process_results(
+    async def _process_results(
         self,
         task_name: str,
         eval_results_dir: str,
@@ -708,7 +708,7 @@ class Evaluator:
                     process = False
 
                 if process:
-                    self._process_results(
+                    await self._process_results(
                         task_name=tasks,
                         eval_results_dir=eval_results_dir,
                         global_step=global_step,
@@ -757,7 +757,7 @@ class Evaluator:
                     process = False
 
                 if process:
-                    self._process_results(
+                    await self._process_results(
                         task_name="mmlu",
                         eval_results_dir=eval_results_dir,
                         global_step=global_step,
@@ -784,6 +784,10 @@ class Evaluator:
         # Synchronize all ranks after evaluation
         if dist.is_available() and dist.is_initialized():
             dist.barrier(device_ids=[self.local_rank])
+
+        # Clear cache again for after the huggingface tasks
+        tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
+        torch.cuda.empty_cache()
 
         self.last_eval_window = checkpoint_window
         self.last_block_number = block_number

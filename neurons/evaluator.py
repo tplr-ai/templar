@@ -26,20 +26,14 @@ Required Environment Variables:
 
 Usage Examples:
     Basic run:
-        $ WALLET_NAME=...
-        $ WALLET_HOTKEY=...
         $ torchrun --standalone --nnodes 1 --nproc_per_node 8 neurons/evaluator.py \\
             --device cuda \\
-            --netuid 3 \\
-            --wallet.name $WALLET_NAME  \\
-            --wallet.hotkey $WALLET_HOTKEY
+            --netuid 3
 
     Custom configuration:
         $ torchrun --standalone --nnodes 1 --nproc_per_node 8 neurons/evaluator.py \\
             --device cuda \\
             --netuid 3 \\
-            --wallet.name $WALLET_NAME  \\
-            --wallet.hotkey $WALLET_HOTKEY
             --tasks "arc_challenge,winogrande" \\
             --eval_interval 300 \\
             --custom_eval_path eval 
@@ -366,13 +360,26 @@ class Evaluator:
             self.comms.subtensor.get_current_block() // self.hparams.blocks_per_window
         )
 
-        # Use load_checkpoint which handles distributed loading properly
-        success, checkpoint_window = await self.comms.load_checkpoint(
-            model=self.model,
-            current_window=current_window,
-            init_version=self.version,
-            is_master=self.is_master,
-        )
+        checkpoint_locations = getattr(self, "checkpoint_locations", {})
+        if checkpoint_locations:
+            latest_unevaled_checkpoint = max(checkpoint_locations.keys())
+            key = checkpoint_locations.get(latest_checkpoint)
+
+            success = True
+            checkpoint_data = await self.comms.s3_get_object(key=key, bucket=self.bucket, load_data=False)
+            success = await self.comms._hack_load_checkpoint(model, checkpoint_data, self.is_master)
+            if not succeess:
+                raise ValueError("Model didn't work correctly somehow")
+
+        else:
+
+            # Use load_checkpoint which handles distributed loading properly
+            success, checkpoint_window = await self.comms.load_checkpoint(
+                model=self.model,
+                current_window=current_window,
+                init_version=self.version,
+                is_master=self.is_master,
+            )
 
         if not success:
             if self.is_master:
@@ -975,15 +982,26 @@ class Evaluator:
                 latest_block = self.comms.subtensor.get_current_block()
                 start_window = await self.comms.get_start_window()
 
+                available_checkpoints = await self.comms._list_bucket_checkpoints(
+                    bucket=self.comms.bucket,
+                    uid=self.uid,
+                    version=self.version,
+                )
+                unevaluated_checkpoints = set(available_checkpoints) - set(self.evaluated_checkpoints)
+                self.checkpoint_locations = {k:v for k,v in available_checkpoints if k not in unevaluated_checkpoints}
+                tplr.logger.info("Found uevaluated checkpoints")
+
                 should_evaluate = start_window is not None and (
                     latest_block > self.last_block_number
                     or start_window > self.last_eval_window
+                    or len(unevaluated_checkpoints) > 0
                 )
 
                 if should_evaluate:
                     tplr.logger.info(
                         f"New checkpoint detected (block: {latest_block}, window: {start_window}), executing benchmark..."
                     )
+
             else:
                 # Non-master ranks just wait for master's decision
                 should_evaluate = False

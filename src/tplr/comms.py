@@ -2112,6 +2112,116 @@ class Comms(ChainManager):
             tplr.logger.error(f"Error getting latest checkpoint: {e}")
             return None
 
+    def _load_latest_local_checkpoint(self, version: str) -> tuple[Any, int] | None:
+        """
+        Loads the most recent checkpoint file from the local filesystem.
+
+        This method scans the local checkpoint directory for files matching the
+        current UID and version, identifies the one with the highest window number,
+        and loads it into memory.
+
+        Args:
+            version (str): The templar version string to match against checkpoint files.
+
+        Returns:
+            tuple[Any, int] | None: A tuple containing the loaded checkpoint data and
+            its window number, or None if no local checkpoint is found.
+        """
+        try:
+            local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
+            pattern = rf"checkpoint-(\d+)-{self.uid}-v{re.escape(version)}\.pt$"
+
+            if not os.path.exists(local_dir):
+                return None
+
+            checkpoints = self._list_bucket_checkpoints(self.bucket, self.uid, version, pattern)
+
+            if checkpoints:
+                # choose the last modified checkpoint
+                latest = max(checkpoints, key=lambda x: x["modified"])
+                checkpoint_data = torch.load(latest["path"], weights_only=True)
+                return checkpoint_data, latest["window"]
+            else:
+                return None
+        except Exception as e:
+            tplr.logger.error(f"Error in local checkpoint loading: {e}")
+            return None
+
+    async def _list_bucket_checkpoints(
+        self,
+        bucket: Bucket,
+        uid: int,
+        version: str,
+        pat: str | None = None,
+    ) -> dict[int, str]:
+        """
+        Lists all checkpoint files in a given S3 bucket that match a specific pattern.
+
+        This method paginates through the objects in an S3 bucket, filtering for
+        files that match the provided regular expression pattern. It is used to
+        find all available checkpoints for a specific UID and version.
+
+        Args:
+            bucket (Bucket): The S3 bucket to search.
+            uid (int): The UID of the checkpoint owner.
+            version (str): The templar version string to match.
+            pat (str | None, optional): A regex pattern to filter checkpoint files.
+                If None, a default pattern is constructed. Defaults to None.
+
+        Returns:
+            dict[int, str]: A dictionary mapping window numbers to their corresponding
+            S3 object keys.
+
+        Raises:
+            Exception: Propagates exceptions from the S3 client.
+        """
+        pat = re.compile(pat or rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$")
+
+        try:
+            s3_client = await self._get_s3_client(bucket)
+
+            # Continuation token for pagination
+            continuation_token = None
+
+            checkpoints = {}
+            while True:
+                list_kwargs = {
+                    "Bucket": bucket.name,
+                    "Prefix": "checkpoint",
+                }
+                if continuation_token:
+                    list_kwargs["ContinuationToken"] = continuation_token
+
+                response = await s3_client.list_objects_v2(**list_kwargs)
+
+                # If no objects returned, stop checking
+                if not response.get("Contents"):
+                    break
+
+                # Iterate through returned objects to find valid checkpoints
+                for obj in response["Contents"]:
+                    key = obj.get("Key", "")
+                    match = pat.match(key)
+                    if match:
+                        window_number = int(match.group(1))
+                        checkpoints[window_number] = key
+
+                # Continue pagination if needed
+                if response.get("IsTruncated"):
+                    continuation_token = response.get("NextContinuationToken")
+                else:
+                    # No more pages
+                    break
+
+            return checkpoints
+
+        except (ConnectionClosedError, ClientError):
+            await self._purge_s3_client(bucket)
+            raise e
+        except Exception as e:
+            tplr.logger.error(f"Error in _list_bucket_checkpoints: {e}")
+            raise e
+
     async def _get_bucket_checkpoint(
         self, bucket: Bucket, uid: int, version: str
     ) -> tuple[Any, int] | None:
@@ -2136,52 +2246,18 @@ class Comms(ChainManager):
 
             pat = re.compile(rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$")
 
-            # We'll track the largest checkpoint window and its key
-            latest_checkpoint = None
-            max_window = -1
+            checkpoints = await self._list_bucket_checkpoints(
+                bucket=bucket, uid=uid, version=version, pat=pat
+            )
 
-            # Continuation token for pagination
-            continuation_token = None
+            # If we found valid checkpoints, fetch from max window
+            if checkpoints:
+                latest_checkpoint = max(checkpoints)
+                key = checkpoints[latest_checkpoint]
 
-            while True:
-                list_kwargs = {
-                    "Bucket": bucket.name,
-                    "Prefix": "checkpoint",
-                }
-                if continuation_token:
-                    list_kwargs["ContinuationToken"] = continuation_token
-
-                response = await s3_client.list_objects_v2(**list_kwargs)
-
-                # If no objects returned, stop checking
-                if not response.get("Contents"):
-                    break
-
-                # Iterate through returned objects to find valid checkpoints
-                for obj in response["Contents"]:
-                    key = obj.get("Key", "")
-                    match = pat.match(key)
-                    if match:
-                        window_number = int(match.group(1))
-                        if window_number > max_window:
-                            max_window = window_number
-                            latest_checkpoint = key
-
-                # Continue pagination if needed
-                if response.get("IsTruncated"):
-                    continuation_token = response.get("NextContinuationToken")
-                else:
-                    # No more pages
-                    break
-
-            # If we found a valid checkpoint, fetch it
-            if latest_checkpoint:
-                # Load checkpoint to CPU to avoid OOM on rank 0
-                loaded_data = await self.s3_get_object(
-                    key=latest_checkpoint, bucket=bucket, map_location="cpu"
-                )
+                loaded_data = await self.s3_get_object(key=key, bucket=bucket)
                 if loaded_data:
-                    return loaded_data, max_window
+                    return loaded_data, latest_checkpoint
 
             return None
 
@@ -2265,6 +2341,61 @@ class Comms(ChainManager):
                 dist.barrier()
 
         return True, int(sync_win)
+
+    def _hack_load_checkpoint(  
+        model,
+        checkpoint: dict[str, torch.Tensor],
+        # current_window: int,
+        # init_version: str | None = None,
+        is_master: bool = True,
+    ) -> tuple[bool, int]:
+
+        full_sd = checkpoint_data["model_state_dict"]
+        present = {k for k in full_sd.keys()}
+
+        # Prefer sync_window; fall back to current_window if older ckpt
+        sw = checkpoint_data.get("sync_window")
+        cw = checkpoint_data.get("current_window")
+        sync_win = int(
+            sw if sw is not None else cw if cw is not None else 0
+        )
+        ok = True
+
+        tplr.logger.info(
+            f"Checkpoint loaded on rank-0: "
+            f"start={checkpoint_data.get('start_window')}, "
+            f"current={cw}, "
+            f"sync={sync_win}"
+        )
+
+        # --------- broadcast tiny meta-object to all ranks ----------
+        if dist.is_available() and dist.is_initialized():
+            obj = [(bool(ok), int(sync_win), list(present))] if is_master else [None]
+            dist.broadcast_object_list(obj, src=0)
+            ok, sync_win, present_list = obj[0]
+            present = set(present_list or [])
+        if not ok:
+            return False
+
+        # --------- single fan-out of weights/buffers ----------
+        set_model_state_dict(
+            model,
+            full_sd,
+            options=StateDictOptions(
+                full_state_dict=True, broadcast_from_rank0=True, strict=True
+            ),
+        )
+
+        # Barrier for cleanliness
+        if dist.is_available() and dist.is_initialized():
+            # Get the current device for this rank
+            if torch.cuda.is_available():
+                device_id = torch.cuda.current_device()
+                dist.barrier(device_ids=[device_id])
+            else:
+                dist.barrier()
+
+        return True
 
     async def post_peer_list(
         self,

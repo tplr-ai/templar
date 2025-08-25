@@ -2830,11 +2830,22 @@ class Validator(BaseNode, Trainer):
 
             # Distribute gradient for DTensor or apply directly for regular tensors
             if isinstance(p, DT):
+                # Ensure full_grad_src has correct dtype on source rank
+                if on_src and full_grad_src.dtype != p.dtype:
+                    full_grad_src = full_grad_src.to(dtype=p.dtype)
+                
                 src_tensor = (
                     full_grad_src
                     if on_src
                     else torch.empty(p.shape, device=p.device, dtype=p.dtype)
                 )
+                
+                # Debug logging for dtype mismatch
+                if self.is_master:
+                    tplr.logger.info(
+                        f"Distributing gradient for {n}: src_tensor.dtype={src_tensor.dtype}, p.dtype={p.dtype}"
+                    )
+                
                 new_grad = distribute_tensor(
                     src_tensor,
                     device_mesh=p.device_mesh,

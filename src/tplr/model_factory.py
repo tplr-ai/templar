@@ -228,7 +228,6 @@ def create_parallel_dims(
         world_size = 1
     if role == "evaluator":
         # Evaluator: support both single and multi-GPU configurations
-        # Evaluator: support both single and multi-GPU configurations
         # Ensure dp_shard is at least 1 to prevent division by zero
         dp_shard = max(1, min(4, world_size))
         if world_size % dp_shard != 0:

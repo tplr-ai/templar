@@ -2730,7 +2730,7 @@ class Validator(BaseNode, Trainer):
             src_rank = 0
             on_src = self.is_master or not ddp
 
-            full_grad_src = torch.empty(1)
+            full_grad_src = torch.empty(1, dtype=p.dtype, device=p.device)
             has_valid_gradient = True
 
             # Build the full dense grad on the source rank only (or always in single GPU)

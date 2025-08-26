@@ -44,6 +44,9 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     set_model_state_dict,
 )
+import torch.distributed.checkpoint as dcp
+
+from torch.distributed.checkpoint.format_utils import dcp_to_torch_save, torch_save_to_dcp
 from tqdm import tqdm as std_tqdm
 
 import tplr
@@ -51,6 +54,7 @@ from tplr.chain import ChainManager
 from tplr.compress import TopKCompressor, unpack_12bit_indices
 from tplr.config import BUCKET_SECRETS, client_config
 from tplr.schemas import Bucket, CommsGetResult
+
 
 # Constants
 CF_REGION_NAME: str = "enam"
@@ -601,7 +605,7 @@ class Comms(ChainManager):
                     )
                     loaded_data = torch.load(
                         temp_file_path,
-                        map_location=device_location,
+                        map_location="cpu",
                         weights_only=True,
                     )
             else:
@@ -2255,7 +2259,7 @@ class Comms(ChainManager):
                 latest_checkpoint = max(checkpoints)
                 key = checkpoints[latest_checkpoint]
 
-                loaded_data = await self.s3_get_object(key=key, bucket=bucket)
+                loaded_data = await self.s3_get_object(key=key, bucket=bucket, map_location="cpu")
                 if loaded_data:
                     return loaded_data, latest_checkpoint
 
@@ -2323,11 +2327,17 @@ class Comms(ChainManager):
             return False, 0
 
         # --------- single fan-out of weights/buffers ----------
+        # app = AppState(model)
+        # dcp.load(
+        #     state_dict,
+        # )
         set_model_state_dict(
             model,
             full_sd,
             options=StateDictOptions(
-                full_state_dict=True, broadcast_from_rank0=True, strict=True
+                full_state_dict=True,
+                broadcast_from_rank0=True,
+                strict=True
             ),
         )
 
@@ -2343,30 +2353,41 @@ class Comms(ChainManager):
         return True, int(sync_win)
 
     def _hack_load_checkpoint(  
+        self,
         model,
-        checkpoint: dict[str, torch.Tensor],
+        checkpoint_path: str,
+        # checkpoint: dict[str, torch.Tensor],
         # current_window: int,
         # init_version: str | None = None,
         is_master: bool = True,
     ) -> tuple[bool, int]:
+        from neurons.trainer import AppState
 
-        full_sd = checkpoint_data["model_state_dict"]
-        present = {k for k in full_sd.keys()}
+        ok, sync_win, full_sd, present = False, 0, {}, set()
+        if is_master:
+            try:
+                # Load the checkpoint data from the provided path
+                checkpoint_data = torch.load(checkpoint_path, weights_only=True, map_location="cpu")
+                full_sd = checkpoint_data["model_state_dict"]
+                present = {k for k in full_sd.keys()}
 
-        # Prefer sync_window; fall back to current_window if older ckpt
-        sw = checkpoint_data.get("sync_window")
-        cw = checkpoint_data.get("current_window")
-        sync_win = int(
-            sw if sw is not None else cw if cw is not None else 0
-        )
-        ok = True
+                # Prefer sync_window; fall back to current_window if older ckpt
+                sw = checkpoint_data.get("sync_window")
+                cw = checkpoint_data.get("current_window")
+                sync_win = int(
+                    sw if sw is not None else cw if cw is not None else 0
+                )
+                ok = True
 
-        tplr.logger.info(
-            f"Checkpoint loaded on rank-0: "
-            f"start={checkpoint_data.get('start_window')}, "
-            f"current={cw}, "
-            f"sync={sync_win}"
-        )
+                tplr.logger.info(
+                    f"Checkpoint loaded on rank-0: "
+                    f"start={checkpoint_data.get('start_window')}, "
+                    f"current={checkpoint_data.get('current_window')}, " # Corrected variable name
+                    f"sync={sync_win}"
+                )
+            except Exception as e:
+                tplr.logger.error(f"[ckpt] parse/load failed on rank-0: {e}")
+                ok, sync_win, full_sd, present = False, 0, {}, set()
 
         # --------- broadcast tiny meta-object to all ranks ----------
         if dist.is_available() and dist.is_initialized():
@@ -2375,16 +2396,36 @@ class Comms(ChainManager):
             ok, sync_win, present_list = obj[0]
             present = set(present_list or [])
         if not ok:
-            return False
+            return False, 0
 
         # --------- single fan-out of weights/buffers ----------
-        set_model_state_dict(
-            model,
-            full_sd,
-            options=StateDictOptions(
-                full_state_dict=True, broadcast_from_rank0=True, strict=True
-            ),
+        if is_master:
+            tplr.logger.info("Converting")
+            torch_save_to_dcp(checkpoint_path, checkpoint_path)
+        
+        # Barrier for cleanliness
+        if dist.is_available() and dist.is_initialized():
+            # Get the current device for this rank
+            if torch.cuda.is_available():
+                device_id = torch.cuda.current_device()
+                dist.barrier(device_ids=[device_id])
+            else:
+                dist.barrier()
+
+        state_dict = { "app": AppState(model)}
+        dcp.load(
+            state_dict,
+            checkpoint_path,
         )
+        # set_model_state_dict(
+        #     model,
+        #     full_sd,
+        #     options=StateDictOptions(
+        #         full_state_dict=True, # Uncommented
+        #         broadcast_from_rank0=True, # Uncommented
+        #         strict=True,
+        #     ),
+        # )
 
         # Barrier for cleanliness
         if dist.is_available() and dist.is_initialized():
@@ -2395,7 +2436,7 @@ class Comms(ChainManager):
             else:
                 dist.barrier()
 
-        return True
+        return True, sync_win
 
     async def post_peer_list(
         self,

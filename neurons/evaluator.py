@@ -237,6 +237,8 @@ class Evaluator:
         self.wallet = bt.wallet(config=self.config)
 
         self.version = self.config.version or tplr.__version__
+        if self.version is None:
+            raise ValueError("Version cannot be None")
 
         # Mock for the comms class
         self.uid = 1
@@ -341,7 +343,7 @@ class Evaluator:
         self.comms.metagraph = self.comms.subtensor.metagraph(netuid=self.netuid)
         self.buckets = self.comms.get_all_buckets()
 
-    async def load_latest_model(self) -> tuple[bool, int, int]:
+    async def load_latest_model(self) -> tuple[bool, int]:
         """Load and prepare the latest model checkpoint for evaluation.
 
         This method:
@@ -353,12 +355,13 @@ class Evaluator:
             Tuple containing:
             - success (bool): Whether loading succeeded
             - checkpoint_window (int): Window number of checkpoint
-            - global_step (int): Global training step
         """
         # Get the current window to check against
         current_window = (
             self.comms.subtensor.get_current_block() // self.hparams.blocks_per_window
         )
+
+        # unevaluated_checkpoints = await self.get_unevaluated_checkpoints()
 
         checkpoint_locations = getattr(self, "checkpoint_locations", {})
         if checkpoint_locations:
@@ -366,20 +369,28 @@ class Evaluator:
             key = checkpoint_locations.get(latest_checkpoint)
 
             success = True
-            checkpoint_data = await self.comms.s3_get_object(key=key, bucket=self.bucket, load_data=False)
-            success = await self.comms._hack_load_checkpoint(model, checkpoint_data, self.is_master)
-            if not succeess:
-                raise ValueError("Model didn't work correctly somehow")
+            try:
+                checkpoint_path = await self.comms.s3_get_object(key=key, bucket=self.bucket, load_data=False)
+                success, checkpoint_window = await self.comms._hack_load_checkpoint(self.model, checkpoint_path, self.is_master)
+                if not succeess:
+                    raise ValueError("Model didn't load correctly")
+            except Exception as e:
+                tplr.logger.exception(e)
+                raise e
 
         else:
-
-            # Use load_checkpoint which handles distributed loading properly
-            success, checkpoint_window = await self.comms.load_checkpoint(
-                model=self.model,
-                current_window=current_window,
-                init_version=self.version,
-                is_master=self.is_master,
-            )
+            
+            try:
+                # Use load_checkpoint which handles distributed loading properly
+                success, checkpoint_window = await self.comms.load_checkpoint(
+                    model=getattr(self.model, "module", self.model),
+                    current_window=current_window,
+                    init_version=self.version,
+                    is_master=self.is_master,
+                )
+            except Exception as e:
+                tplr.logger.exception(e)
+                raise e
 
         if not success:
             if self.is_master:
@@ -387,7 +398,7 @@ class Evaluator:
                     f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket', 'unknown')}, "
                     f"key_prefix: {self.comms.key_prefix}"
                 )
-            return (False, 0, 0)
+            return (False, 0)
 
         if checkpoint_window <= self.last_eval_window:
             if self.is_master:
@@ -395,21 +406,13 @@ class Evaluator:
                     f"Checkpoint already evaluated (checkpoint window: {checkpoint_window}, "
                     f"last evaluated: {self.last_eval_window})."
                 )
-            return (False, checkpoint_window, 0)
-
-        # Calculate global step (assuming start_window is 0 for evaluator)
-        global_step = checkpoint_window
-
-        if self.is_master:
-            tplr.logger.info(
-                f"Loaded checkpoint (window={checkpoint_window}, global_step={global_step})"
-            )
+            return (False, checkpoint_window)
 
         # Synchronize all ranks after loading
         if dist.is_available() and dist.is_initialized():
             dist.barrier(device_ids=[self.local_rank])
 
-        return (True, checkpoint_window, global_step)
+        return (True, checkpoint_window)
 
     def _run_lm_eval(
         self,
@@ -598,6 +601,7 @@ class Evaluator:
         """
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
+        self.start_window = await self.comms.get_start_window()
 
         block_number = self.comms.subtensor.get_current_block() - 1
 
@@ -606,7 +610,6 @@ class Evaluator:
         (
             success,
             checkpoint_window,
-            global_step,
         ) = await self.load_latest_model()
 
         if not success and self.last_eval_window > 0:
@@ -625,7 +628,14 @@ class Evaluator:
         else:
             self.evaluated_checkpoints.append(checkpoint_window)
 
+        # Calculate global step (assuming start_window is 0 for evaluator)
+        global_step = checkpoint_window - self.start_window
+
         if self.is_master:
+
+            tplr.logger.info(
+                f"Loaded checkpoint (window={checkpoint_window}, global_step={global_step})"
+            )
             tplr.logger.info(
                 f"Starting benchmark run at global step {global_step} (checkpoint window: {checkpoint_window})"
             )
@@ -956,6 +966,16 @@ class Evaluator:
                 },
             )
 
+    async def get_unevaluated_checkpoints(self) -> list[str | int]:
+        available_checkpoints = await self.comms._list_bucket_checkpoints(
+            bucket=self.comms.bucket,
+            uid=self.uid,
+            version=self.version,
+        )
+        unevaluated_checkpoints = set(available_checkpoints) - set(self.evaluated_checkpoints)
+        self.checkpoint_locations = {k:v for k,v in available_checkpoints if k not in unevaluated_checkpoints}
+        return unevaluated_checkpoints
+
     @decos.async_evaluator_exception_catcher()
     async def run(self) -> None:
         """Main evaluation loop.
@@ -982,14 +1002,8 @@ class Evaluator:
                 latest_block = self.comms.subtensor.get_current_block()
                 start_window = await self.comms.get_start_window()
 
-                available_checkpoints = await self.comms._list_bucket_checkpoints(
-                    bucket=self.comms.bucket,
-                    uid=self.uid,
-                    version=self.version,
-                )
-                unevaluated_checkpoints = set(available_checkpoints) - set(self.evaluated_checkpoints)
-                self.checkpoint_locations = {k:v for k,v in available_checkpoints if k not in unevaluated_checkpoints}
-                tplr.logger.info("Found uevaluated checkpoints")
+                unevaluated_checkpoints = await self.get_unevaluated_checkpoints()
+                tplr.logger.info(f"Found unevaluated checkpoints: {unevaluated_checkpoints}")
 
                 should_evaluate = start_window is not None and (
                     latest_block > self.last_block_number

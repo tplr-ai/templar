@@ -92,7 +92,7 @@ elif [ "$NODE_TYPE" = "evaluator" ]; then
         neurons/evaluator.py \
         --netuid ${NETUID} \
         --device cuda \
-        --actual_batch_size ${EVAL_BATCH_SIZE:-8} \
+        --actual_batch_size ${EVAL_BATCH_SIZE} \
         --tasks "${EVAL_TASKS:-arc_challenge,arc_easy,openbookqa,winogrande,piqa,hellaswag,mmlu}" \
         --eval_interval ${EVAL_INTERVAL:-600} \
         ${CUSTOM_EVAL_PATH:+--custom_eval_path "${CUSTOM_EVAL_PATH}"} \

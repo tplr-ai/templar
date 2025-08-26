@@ -2729,7 +2729,7 @@ class Validator(BaseNode, Trainer):
             src_rank = 0
             on_src = self.is_master or not ddp
 
-            full_grad_src = torch.empty(1)
+            full_grad_src = torch.empty(1, dtype=p.dtype, device=p.device)
             has_valid_gradient = True
 
             # Build the full dense grad on the source rank only (or always in single GPU)
@@ -2829,11 +2829,16 @@ class Validator(BaseNode, Trainer):
 
             # Distribute gradient for DTensor or apply directly for regular tensors
             if isinstance(p, DT):
+                # Ensure full_grad_src has correct dtype on source rank
+                if on_src and full_grad_src.dtype != p.dtype:
+                    full_grad_src = full_grad_src.to(dtype=p.dtype)
+
                 src_tensor = (
                     full_grad_src
                     if on_src
                     else torch.empty(p.shape, device=p.device, dtype=p.dtype)
                 )
+
                 new_grad = distribute_tensor(
                     src_tensor,
                     device_mesh=p.device_mesh,

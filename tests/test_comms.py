@@ -9,9 +9,7 @@ from botocore.exceptions import ClientError
 import pytest
 import torch
 from types import SimpleNamespace
-from dotenv import load_dotenv
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from tplr import load_hparams
@@ -927,8 +925,8 @@ async def test_load_checkpoint_success(monkeypatch):
 
     monkeypatch.setattr(comms, "get_latest_checkpoint", _fake_get_latest_checkpoint)
 
-    # --- Call & unpack (must be 2 returns) ---------------------------------
-    success, sync_window = await comms.load_checkpoint(
+    # --- Call & unpack (must be 3 returns) ---------------------------------
+    success, sync_window, global_step = await comms.load_checkpoint(
         model=model,
         current_window=1,
     )
@@ -936,6 +934,7 @@ async def test_load_checkpoint_success(monkeypatch):
     # --- Assertions --------------------------------------------------------
     assert success is True
     assert sync_window == 7
+    assert global_step == 0  # Default when not in checkpoint
 
 
 @pytest.mark.asyncio
@@ -960,10 +959,11 @@ async def test_load_checkpoint_missing_data(comms_instance):
     mock_optimizer = MagicMock()
     mock_scheduler = MagicMock()
 
-    # load_checkpoint returns: success, sync_window
+    # load_checkpoint returns: success, sync_window, global_step
     (
         success,
         sync_window,
+        global_step,
     ) = await comms_instance.load_checkpoint(
         model=mock_model,
         current_window=1,
@@ -971,6 +971,7 @@ async def test_load_checkpoint_missing_data(comms_instance):
 
     assert not success
     assert sync_window == 0
+    assert global_step == 0
 
 
 async def test_gather_timeout(comms_instance, dummy_compressor):

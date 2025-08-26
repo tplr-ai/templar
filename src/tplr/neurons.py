@@ -660,7 +660,7 @@ async def catchup_with_aggregation_server(
 
         # If skipping, continue to next window without updating scheduler
         if skip_window:
-            instance.global_step = start_w - instance.start_window
+            # Don't increment global_step as no outer step was performed
             start_w += 1
             continue
 
@@ -763,7 +763,8 @@ async def catchup_with_aggregation_server(
         except Exception as exc:
             tplr.logger.warning(f"[catch‑up] debug‑dict processing error: {exc}")
 
-        instance.global_step = start_w - instance.start_window
+        # Increment global_step since we performed an outer step
+        instance.global_step += 1
         start_w += 1
 
         if dist.is_available() and dist.is_initialized():
@@ -774,7 +775,6 @@ async def catchup_with_aggregation_server(
         if instance.current_window > target_w:
             target_w = instance.current_window
 
-    instance.global_step = target_w - instance.start_window
     tplr.logger.info("Catch‑up finished – model now in sync.")
 
 

@@ -144,24 +144,14 @@ class Trainer:
         default_lr = 2e-4 if optimizer_type == "adamw" else 0.02
         effective_lr = opt_specific_config.get("learning_rate", default_lr)
 
-        inner_steps_before_outer_step = self.hparams.inner_steps * (
-            self.hparams.validator_offset + self.hparams.peer_list_window_margin + 1
-        )
-
         # Get scheduler parameters with optimizer-specific overrides
         warmup_steps = scheduler_config.get("warmup_steps", 750)
         t_max = scheduler_config.get("t_max", 20000)
         eta_min_factor = scheduler_config.get("eta_min_factor", 0.1)
 
-        init_scheduler = lr_scheduler.LinearLR(
-            self.inner_optimizer,
-            start_factor=0.1,
-            end_factor=0.1,
-            total_iters=inner_steps_before_outer_step,
-        )
         warmup_scheduler = lr_scheduler.LinearLR(
             self.inner_optimizer,
-            start_factor=0.1,
+            start_factor=0.0,
             end_factor=1.0,
             total_iters=warmup_steps,
         )
@@ -172,11 +162,8 @@ class Trainer:
         )
         inner_scheduler = lr_scheduler.SequentialLR(
             self.inner_optimizer,
-            schedulers=[init_scheduler, warmup_scheduler, cosine_scheduler],
-            milestones=[
-                inner_steps_before_outer_step,
-                inner_steps_before_outer_step + warmup_steps,
-            ],
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps],
         )
 
         tplr.logger.info(
@@ -410,6 +397,7 @@ class Trainer:
         self,
         loader: DataLoader,
         step_window: int,
+        null_round: bool = False,
     ) -> dict:
         """
         One inner-loop optimisation pass that is gradient-accumulation aware and
@@ -570,12 +558,17 @@ class Trainer:
                         log_loss = self._ddp_reduce(loss_item, op=dist.ReduceOp.AVG)
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
-                        # Unscale, clip, then step via GradScaler if using fp16
-                        self.scaler.unscale_(self.inner_optimizer)
-                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-                        self.scaler.step(self.inner_optimizer)
-                        self.scaler.update()
-                        self.inner_scheduler.step()
+                        if not null_round:
+                            # Unscale, clip, then step via GradScaler if using fp16
+                            self.scaler.unscale_(self.inner_optimizer)
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                            self.scaler.step(self.inner_optimizer)
+                            self.scaler.update()
+                            self.inner_scheduler.step()
+                        else:
+                            # Spin-up: don't step optimizer/scheduler, just clear gradients
+                            self.scaler.update()
+
                         self.inner_optimizer.zero_grad(set_to_none=True)
 
                         inner_step_count += 1
@@ -623,8 +616,9 @@ class Trainer:
                 if global_done:
                     if self.is_master:
                         tplr.logger.info("<Exhausted window: exiting synchronously>")
-                    for _ in range(inner_step_count, self.hparams.inner_steps):
-                        self.inner_scheduler.step()
+                    if not null_round:
+                        for _ in range(inner_step_count, self.hparams.inner_steps):
+                            self.inner_scheduler.step()
                     break
 
             await asyncio.sleep(0)

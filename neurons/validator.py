@@ -821,15 +821,6 @@ class Validator(BaseNode, Trainer):
                 await self.dataset_manager.swap_datasets()
                 self.set_dataloader(validator=True)
 
-            # --------------------------------------------------------------+
-            #  Simulate the miner’s *inner* loop so the LR schedule advances │
-            # --------------------------------------------------------------+
-            for _ in range(self.hparams.inner_steps):
-                self.inner_scheduler.step()
-
-            # current inner‑LR after simulation
-            current_inner_lr = self.inner_scheduler.get_last_lr()[0]
-
             self.sync_window += 1
             if self.is_master:
                 tplr.log_with_context(
@@ -1015,6 +1006,15 @@ class Validator(BaseNode, Trainer):
             if skip_window:
                 self.global_step += 1
                 continue
+
+            # --------------------------------------------------------------+
+            #  Simulate the miner’s *inner* loop so the LR schedule advances │
+            # --------------------------------------------------------------+
+            for _ in range(self.hparams.inner_steps):
+                self.inner_scheduler.step()
+
+            # current inner‑LR after simulation
+            current_inner_lr = self.inner_scheduler.get_last_lr()[0]
 
             # Only master performs additional gather processing
             if self.is_master and gather_result is not None:

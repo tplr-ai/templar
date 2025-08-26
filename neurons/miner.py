@@ -278,6 +278,14 @@ class Miner(BaseNode, Trainer):
             f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
         )
 
+        # Calculate the number of warmup windows before the first real training step
+        self.warmup_windows = (
+            self.hparams.validator_offset + self.hparams.peer_list_window_margin - 1
+        )
+        tplr.logger.info(
+            f"[Init] Warmup windows before first real training: {self.warmup_windows}"
+        )
+
         # Init comms
         self.comms = tplr.comms.Comms(
             wallet=self.wallet,
@@ -504,8 +512,17 @@ class Miner(BaseNode, Trainer):
 
             # 3. Accumulate gradients over batches
             train_start = tplr.T()
-            tplr.logger.info("Start accumulating...")
-            res = await self.inner_steps(loader=self.loader, step_window=step_window)
+            # Check if we're in a null round (warmup phase)
+            null_round = self.global_step < self.warmup_windows
+            if null_round:
+                tplr.logger.info(
+                    f"Start accumulating... (null round: {self.global_step + 1}/{self.warmup_windows})"
+                )
+            else:
+                tplr.logger.info("Start accumulating...")
+            res = await self.inner_steps(
+                loader=self.loader, step_window=step_window, null_round=null_round
+            )
             training_time = tplr.T() - train_start
             window_entry_loss = res["window_entry_loss"]
             n_batches = res["batch_count"]

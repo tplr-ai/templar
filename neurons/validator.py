@@ -206,6 +206,27 @@ class Validator(BaseNode, Trainer):
         self.wallet = bt.wallet(config=self.config)
         super().__init__()
 
+        # Init comms
+        self.comms = tplr.comms.Comms(
+            wallet=self.wallet,
+            save_location="/tmp",
+            key_prefix="model",
+            config=self.config,
+            hparams=self.hparams,
+            uid=None,  # UID will be set after comms is initialized
+        )
+
+        self.current_hotkeys = dict(
+            zip(self.comms.metagraph.uids, self.comms.metagraph.hotkeys)
+        )
+        if self.wallet.hotkey.ss58_address not in self.comms.metagraph.hotkeys:
+            tplr.logger.error(
+                f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.comms.metagraph.netuid}[/bold]"
+            )
+            sys.exit()
+        self.uid = self.comms.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+        self.comms.uid = self.uid
+
         try:
             version = tplr.__version__
             tplr.logger = tplr.setup_loki_logger(
@@ -261,27 +282,6 @@ class Validator(BaseNode, Trainer):
             f"[Miner] code_version={tplr.__version__} "
             f"checkpoint_init_flag={self.bootstrap_version or '<none>'}"
         )
-
-        # Init comms
-        self.comms = tplr.comms.Comms(
-            wallet=self.wallet,
-            save_location="/tmp",
-            key_prefix="model",
-            config=self.config,
-            hparams=self.hparams,
-            uid=None,  # UID will be set after comms is initialized
-        )
-
-        self.current_hotkeys = dict(
-            zip(self.comms.metagraph.uids, self.comms.metagraph.hotkeys)
-        )
-        if self.wallet.hotkey.ss58_address not in self.comms.metagraph.hotkeys:
-            tplr.logger.error(
-                f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.comms.metagraph.netuid}[/bold]"
-            )
-            sys.exit()
-        self.uid = self.comms.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
-        self.comms.uid = self.uid
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
         self.comms.try_commit(self.wallet, self.bucket)

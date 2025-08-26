@@ -31,12 +31,15 @@ Usage Examples:
             --netuid 3
 
     Custom configuration:
-        $ torchrun --standalone --nnodes 1 --nproc_per_node 8 neurons/evaluator.py \\
-            --device cuda \\
-            --netuid 3 \\
-            --tasks "arc_challenge,winogrande" \\
-            --eval_interval 300 \\
-            --custom_eval_path eval 
+        $ 
+DOWNLOAD_MAX_WORKERS=64 torchrun --standalone --nnodes 1 --nproc_per_node 8 neurons/evaluator.py \
+--device cuda \
+--netuid 3 \
+--tasks "" \
+--eval_interval 300 \
+--custom_eval_path eval \
+--wallet.name templar_test \
+--wallet.hotkey M1
 
 For additional environment setup, refer to the miner documentation:
 https://github.com/tplr-ai/templar/blob/main/docs/miner.md
@@ -335,6 +338,7 @@ class Evaluator:
         self.task_list = []
         if self.config.tasks:
             self.task_list = self.config.tasks.split(",")
+        tplr.logger.info(f"Using tasks: {self.task_list}")
 
         # potentially sync before exiting init
         if dist.is_available() and dist.is_initialized():
@@ -347,7 +351,7 @@ class Evaluator:
         self.comms.metagraph = self.comms.subtensor.metagraph(netuid=self.netuid)
         self.buckets = self.comms.get_all_buckets()
 
-    async def load_latest_model(self) -> tuple[bool, int]:
+    async def load_latest_model(self) -> tuple[bool, int, str]:
         """Load and prepare the latest model checkpoint for evaluation.
 
         This method:
@@ -365,8 +369,9 @@ class Evaluator:
             self.comms.subtensor.get_current_block() // self.hparams.blocks_per_window
         )
 
-        # unevaluated_checkpoints = await self.get_unevaluated_checkpoints()
+        unevaluated_checkpoints = await self.get_unevaluated_checkpoints()
 
+        key = "null"
         checkpoint_locations = getattr(self, "checkpoint_locations", {})
         if checkpoint_locations:
             latest_unevaled_checkpoint = max(checkpoint_locations.keys())
@@ -402,7 +407,7 @@ class Evaluator:
                     f"No valid checkpoints found. Check bucket: {getattr(self.comms, 'bucket', 'unknown')}, "
                     f"key_prefix: {self.comms.key_prefix}"
                 )
-            return (False, 0)
+            return (False, 0, key)
 
         if checkpoint_window <= self.last_eval_window:
             if self.is_master:
@@ -410,13 +415,13 @@ class Evaluator:
                     f"Checkpoint already evaluated (checkpoint window: {checkpoint_window}, "
                     f"last evaluated: {self.last_eval_window})."
                 )
-            return (False, checkpoint_window)
+            return (False, checkpoint_window, key)
 
         # Synchronize all ranks after loading
         if dist.is_available() and dist.is_initialized():
             dist.barrier(device_ids=[self.local_rank])
 
-        return (True, checkpoint_window)
+        return (True, checkpoint_window, key)
 
     def _run_lm_eval(
         self,
@@ -614,6 +619,7 @@ class Evaluator:
         (
             success,
             checkpoint_window,
+            checkpoint_key
         ) = await self.load_latest_model()
 
         if not success and self.last_eval_window > 0:
@@ -621,16 +627,16 @@ class Evaluator:
             tplr.logger.info(
                 f"No new checkpoint to evaluate (last evaluated window: {self.last_eval_window})"
             )
-            return global_step
+            # is this global step?
+            return block_number - start_window
         elif not success and self.last_eval_window == 0:
             # First run with no checkpoint - use initialized model
             tplr.logger.info(
                 "Using initialized model for evaluation (no checkpoint available)"
             )
+            # This should check for whether we have a fresh run?
             checkpoint_window = 0
             global_step = 0
-        else:
-            self.evaluated_checkpoints.append(checkpoint_window)
 
         # Calculate global step (assuming start_window is 0 for evaluator)
         global_step = checkpoint_window - start_window
@@ -802,6 +808,10 @@ class Evaluator:
             # Synchronize all ranks after evaluation
             if dist.is_available() and dist.is_initialized():
                 dist.barrier(device_ids=[self.local_rank])
+            
+            # All ranks should clear cache again
+            tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
+            torch.cuda.empty_cache()
 
         self.last_eval_window = checkpoint_window
         self.last_block_number = block_number
@@ -813,6 +823,9 @@ class Evaluator:
 
         # Return to gpu for next cycle
         self.model = self.model.to(self.device)
+
+        # Remove the checkpoint from consideration
+        self.evaluated_checkpoints.append(checkpoint_key)
 
         return global_step
 

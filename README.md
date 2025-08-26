@@ -1,6 +1,6 @@
 <div align="center">
 
-# τemplar: Incentivized Wide-Internet Training
+# τemplar: Incentivized Internet-Wide AI Training
 
 </div>
 

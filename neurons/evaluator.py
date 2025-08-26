@@ -132,7 +132,7 @@ class Evaluator:
         parser.add_argument(
             "--actual_batch_size",
             type=int,
-            default=1,
+            default=4,
             help="Evaluation batch size.",
         )
         parser.add_argument(
@@ -680,7 +680,7 @@ class Evaluator:
                 exit_code, benchmark_runtime = self._run_lm_eval(
                     tasks=tasks,
                     output_dir=results_dir,
-                    batch_size="auto",
+                    batch_size=self.config.actual_batch_size,  # auto goes OOM
                 )
 
                 self.metrics_logger.log(

@@ -2026,8 +2026,8 @@ class Validator(BaseNode, Trainer):
 
                 if self.is_master:
                     # Then save asynchronously
-                    t = asyncio.create_task(
-                        self.comms.put(
+                    async def upload_and_cleanup():
+                        await self.comms.put(
                             state_dict=checkpoint_data,
                             uid=str(self.uid),
                             window=self.sync_window,
@@ -2035,7 +2035,15 @@ class Validator(BaseNode, Trainer):
                             global_step=self.global_step,
                             local=False,
                         )
-                    )
+                        # Clear checkpoint from memory after successful upload
+                        checkpoint_data.clear()
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Checkpoint uploaded and cleared from memory for global_step {self.global_step}",
+                            sync_window=self.sync_window,
+                        )
+
+                    t = asyncio.create_task(upload_and_cleanup())
                     self._bg_tasks.add(t)
                     t.add_done_callback(self._bg_tasks.discard)
 

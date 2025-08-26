@@ -71,26 +71,33 @@ async def download_files(shard_indices):
 
     # Build list of files to download based on shard indices
     files_to_download = []
+    skipped_files = []
     for idx in shard_indices:
-        files_to_download.extend(
-            [
-                (
-                    f"remote/tokenized/sample_ids_{idx:06d}.bin",
-                    f"remote/tokenized/sample_ids_{idx:06d}.bin",
-                ),
-                (
-                    f"remote/tokenized/train_{idx:06d}.npy",
-                    f"remote/tokenized/train_{idx:06d}.npy",
-                ),
-            ]
-        )
+        for filename in [
+            f"remote/tokenized/sample_ids_{idx:06d}.bin",
+            f"remote/tokenized/train_{idx:06d}.npy",
+        ]:
+            local_path = Path(filename)
+            if local_path.exists():
+                file_size = local_path.stat().st_size
+                print(f"✓ Skipping {filename} (already exists, size: {file_size:,} bytes)")
+                skipped_files.append(filename)
+            else:
+                files_to_download.append((filename, filename))
 
     # Create the output directory
     os.makedirs("remote/tokenized", exist_ok=True)
 
+    if not files_to_download:
+        print(f"All files for shards {sorted(shard_indices)} already exist locally.")
+        print(f"Skipped {len(skipped_files)} files.")
+        return
+    
     print(
         f"Downloading {len(files_to_download)} files from shards: {sorted(shard_indices)}"
     )
+    if skipped_files:
+        print(f"Skipping {len(skipped_files)} existing files")
     print(f"Bucket: {bucket_name}")
     print("-" * 40)
 

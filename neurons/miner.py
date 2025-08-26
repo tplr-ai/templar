@@ -280,7 +280,7 @@ class Miner(BaseNode, Trainer):
 
         # Calculate the number of warmup windows before the first real training step
         self.warmup_windows = (
-            self.hparams.validator_offset + self.hparams.peer_list_window_margin - 1
+            self.hparams.validator_offset + self.hparams.peer_list_window_margin
         )
         tplr.logger.info(
             f"[Init] Warmup windows before first real training: {self.warmup_windows}"
@@ -544,7 +544,9 @@ class Miner(BaseNode, Trainer):
 
             # 1️⃣ every rank builds its momentum shard
             compress_start = tplr.T()
-            shard_gradient, _, _ = tplr.prepare_gradient_dict(self, step_window)
+            shard_gradient, _, _ = tplr.prepare_gradient_dict(
+                self, step_window, null_round
+            )
             compression_time = tplr.T() - compress_start
             tplr.logger.info(
                 f"{tplr.P(step_window, compression_time)} "

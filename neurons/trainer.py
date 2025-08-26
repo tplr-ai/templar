@@ -151,7 +151,7 @@ class Trainer:
 
         warmup_scheduler = lr_scheduler.LinearLR(
             self.inner_optimizer,
-            start_factor=0.0,
+            start_factor=1e-6,
             end_factor=1.0,
             total_iters=warmup_steps,
         )

@@ -785,6 +785,10 @@ class Evaluator:
         if dist.is_available() and dist.is_initialized():
             dist.barrier(device_ids=[self.local_rank])
 
+        # Clear cache again for after the huggingface tasks
+        tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
+        torch.cuda.empty_cache()
+
         self.last_eval_window = checkpoint_window
         self.last_block_number = block_number
 

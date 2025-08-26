@@ -204,7 +204,8 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     gradient["metadata"] = {"window": step_window}
     return gradient, xshapes, totalks
 
@@ -350,7 +351,8 @@ def outer_step(
             local_view = new_grad.to_local()
             if not torch.isfinite(local_view).all():
                 del new_grad, local_view
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 continue
 
             p.grad = new_grad  # DTensor grad
@@ -375,13 +377,16 @@ def outer_step(
 
             if p.grad is not None and not torch.isfinite(p.grad).all():  # type: ignore[arg-type]
                 p.grad = None
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 continue
 
         # ---- apply update immediately for THIS param and free its grad ----
+        # ---- apply update immediately for THIS param and free its grad ----
         optimizer.step()
         p.grad = None  # free grad storage right away
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # optional W&B (master only)
     if (
@@ -400,7 +405,8 @@ def outer_step(
 
     # Extra safety: ensure no grads are left allocated
     optimizer.zero_grad(set_to_none=True)
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 async def update_peers(instance: NeuronT, window: int, peer_start: float) -> None:
@@ -510,7 +516,7 @@ async def catchup_with_aggregation_server(
     tplr.logger.info("Starting catch‑up using aggregated_gradients...")
     assert instance.start_window is not None
 
-    leader_uid: int = instance.metagraph.S.argmax().item()
+    leader_uid: int = instance.comms.metagraph.S.argmax().item()
 
     start_w = checkpoint_current_window + 1
     target_w = instance.current_window
@@ -670,8 +676,11 @@ async def catchup_with_aggregation_server(
         # Synchronize all ranks before applying the outer step to ensure
         # they're processing the same window together
         if dist.is_available() and dist.is_initialized():
-            device_id = torch.cuda.current_device()
-            dist.barrier(device_ids=[device_id])
+            if torch.cuda.is_available():
+                device_id = torch.cuda.current_device()
+                dist.barrier(device_ids=[device_id])
+            else:
+                dist.barrier()
 
         outer_step(
             instance.model,
@@ -695,7 +704,8 @@ async def catchup_with_aggregation_server(
             for _ in range(instance.hparams.inner_steps):
                 inner_sched.step()
 
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         # ──────────────────────────────────────────────────────────────────────
         # 3) Debug‑dict comparison to estimate “how many steps behind” we are
         # ──────────────────────────────────────────────────────────────────────
@@ -767,8 +777,11 @@ async def catchup_with_aggregation_server(
         start_w += 1
 
         if dist.is_available() and dist.is_initialized():
-            device_id = torch.cuda.current_device()
-            dist.barrier(device_ids=[device_id])
+            if torch.cuda.is_available():
+                device_id = torch.cuda.current_device()
+                dist.barrier(device_ids=[device_id])
+            else:
+                dist.barrier()
 
         # If the chain progressed while we were busy, extend the target.
         if instance.current_window > target_w:

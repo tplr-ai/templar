@@ -21,12 +21,14 @@ Unified model creation and initialization for TorchTitan models across
 evaluator, validator, and miner components.
 """
 
+from collections import OrderedDict
 from types import SimpleNamespace
-from typing import Literal
+from typing import Any, Literal, cast
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed._tensor import DTensor  # type: ignore[attr-defined]
 from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
     get_model_state_dict,
@@ -48,6 +50,7 @@ from torchtitan.models.llama3 import (
 )
 from torchtitan.models.llama3 import Transformer as TitanLlama
 from torchtitan.models.llama3.infra.parallelize import parallelize_llama
+from tqdm.auto import tqdm
 from transformers.models.llama import LlamaConfig, LlamaForCausalLM
 
 import tplr
@@ -110,7 +113,11 @@ def get_titan_model_args(hparams: SimpleNamespace) -> TransformerModelArgs:
     # We need to reverse engineer ffn_dim_multiplier from intermediate_size
     target_intermediate_size = hparams.model_config.intermediate_size
     base_ffn = int(8 * args.dim / 3)
-    args.ffn_dim_multiplier = target_intermediate_size / base_ffn
+    if base_ffn > 0:
+        args.ffn_dim_multiplier = target_intermediate_size / base_ffn
+    else:
+        # Avoid division by zero if dim is 0
+        args.ffn_dim_multiplier = 1.0
 
     tplr.logger.info(
         f"Custom config: dim={args.dim}, n_layers={args.n_layers}, "
@@ -217,9 +224,13 @@ def create_parallel_dims(
     Raises:
         ValueError: If parallelization parameters are invalid
     """
+    if world_size <= 0:
+        world_size = 1
     if role == "evaluator":
         # Evaluator: support both single and multi-GPU configurations
-        dp_shard = min(4, world_size)  # Use up to 4 GPUs for TP
+        # Evaluator: support both single and multi-GPU configurations
+        # Ensure dp_shard is at least 1 to prevent division by zero
+        dp_shard = max(1, min(4, world_size))
         if world_size % dp_shard != 0:
             raise ValueError(
                 f"World size ({world_size}) must be divisible by "
@@ -236,6 +247,7 @@ def create_parallel_dims(
         )
     elif role == "validator":
         # Validator: pipeline parallelism with data parallel replication
+        # Ensure dp_shard is at least 1 to prevent division by zero
         dp_shard = 4
         if world_size % dp_shard != 0:
             raise ValueError(
@@ -258,8 +270,27 @@ def create_parallel_dims(
         tp_degree = int(getattr(tt, "tp_degree", 1))
         pp_degree = int(getattr(tt, "pp_degree", 1))
         cp_degree = int(getattr(tt, "cp_degree", 1))
-        dp_replicate = int(getattr(tt, "dp_replicate", 1))
-        dp_shard = int(getattr(tt, "dp_shard", 1))
+        dp_replicate = getattr(tt, "dp_replicate", 1)
+        dp_shard = getattr(tt, "dp_shard", 1)
+
+        # Ensure divisors are not zero before coercion to 1 and modulo operations
+        if dp_replicate == 0:
+            raise ValueError("dp_replicate cannot be zero.")
+        if dp_shard == 0:
+            raise ValueError("dp_shard cannot be zero.")
+        if tp_degree == 0:
+            raise ValueError("tp_degree cannot be zero.")
+        if pp_degree == 0:
+            raise ValueError("pp_degree cannot be zero.")
+        if cp_degree == 0:
+            raise ValueError("cp_degree cannot be zero.")
+
+        # Coerce to int after zero checks
+        dp_replicate = int(dp_replicate)
+        dp_shard = int(dp_shard)
+        tp_degree = int(tp_degree)
+        pp_degree = int(pp_degree)
+        cp_degree = int(cp_degree)
 
         # Validation
         if dp_replicate > 1 and dp_shard > 1:
@@ -271,19 +302,18 @@ def create_parallel_dims(
         if dp_replicate > 1 and (tp_degree > 1 or pp_degree > 1 or cp_degree > 1):
             raise ValueError("dp_replicate can only be used when tp/pp/cp are all 1.")
 
-        dp_replicate = int(dp_replicate or 1)
-        dp_shard = int(dp_shard or 1)
-
-        if world_size % (dp_replicate * dp_shard) != 0:
+        # Ensure world_size is divisible by the product of all parallel degrees
+        total_parallel_degree = (
+            dp_replicate * dp_shard * tp_degree * pp_degree * cp_degree
+        )
+        if (
+            total_parallel_degree == 0
+        ):  # Should be caught by individual zero checks, but as a safeguard
+            raise ValueError("Product of parallel degrees cannot be zero.")
+        if world_size % total_parallel_degree != 0:
             raise ValueError(
-                f"world_size ({world_size}) must be divisible by "
-                f"dp_replicate × dp_shard ({dp_replicate}×{dp_shard})."
-            )
-
-        if world_size % tp_degree != 0:
-            raise ValueError(
-                f"World size ({world_size}) must be divisible by "
-                f"tensor-parallel degree ({tp_degree})"
+                f"world_size ({world_size}) must be divisible by the product of all parallel degrees "
+                f"({dp_replicate}x{dp_shard}x{tp_degree}x{pp_degree}x{cp_degree} = {total_parallel_degree})."
             )
 
         return ParallelDims(
@@ -330,6 +360,7 @@ def initialize_torchtitan_model(
     # Create model on meta device
     with torch.device("meta"):
         model = TitanLlama(titan_args)
+        model.args = titan_args
 
     # Parallelize the model
     model = parallelize_llama(
@@ -339,13 +370,13 @@ def initialize_torchtitan_model(
     )
 
     # Initialize weights via rank‑0 broadcast of a single full FP32 state (FSDP2/DCP)
-    target_device = "cpu" if role == "evaluator" else device
-    model.to_empty(device=target_device)
+    model.to_empty(device=device)
     if dist.is_available() and dist.is_initialized() and world_size > 1:
         rank = dist.get_rank()
         if rank == 0:
             with torch.device("meta"):
                 ref = TitanLlama(titan_args)  # unsharded reference
+                ref.args = titan_args
             ref.to_empty(device="cpu")
             torch.manual_seed(42)
             with torch.no_grad():
@@ -363,10 +394,12 @@ def initialize_torchtitan_model(
             ),
         )
         dist.barrier()
+
     else:
         # Single‑process path (e.g., 1‑GPU validator / CPU evaluator)
         with torch.device("meta"):
             ref = TitanLlama(titan_args)
+            ref.args = titan_args
         ref.to_empty(device="cpu")
         torch.manual_seed(42)
         with torch.no_grad():
@@ -379,9 +412,8 @@ def initialize_torchtitan_model(
             full_sd,
             options=StateDictOptions(full_state_dict=True, strict=True),
         )
-        assert not missing and not unexpected, (
-            f"Missing {missing}, unexpected {unexpected}"
-        )
+        if missing or unexpected:
+            raise ValueError(f"Missing {missing}, unexpected {unexpected}")
 
     # Log initialization details
     if role == "miner":
@@ -398,8 +430,19 @@ def initialize_torchtitan_model(
     return model
 
 
+def _get_unwrapped_model(model: nn.Module) -> "TitanLlama":
+    """Recursively unwraps a model from DDP or FSDP wrappers."""
+    while hasattr(model, "module"):
+        model = model.module
+    if not isinstance(model, TitanLlama):
+        raise ValueError(
+            f"Expected model to be a TitanLlama instance, got {type(model)} instead."
+        )
+    return model
+
+
 def _get_actual_intermediate_size(
-    titan_state_dict: dict, hparams: SimpleNamespace
+    titan_state_dict: "OrderedDict[str, torch.Tensor]", hparams: SimpleNamespace
 ) -> int:
     """Extract actual intermediate size from model state dict.
 
@@ -424,11 +467,51 @@ def _get_actual_intermediate_size(
     return hparams.model_config.intermediate_size
 
 
+def _get_hf_config_from_titan(
+    titan_model: nn.Module,
+    hparams: SimpleNamespace,
+    titan_state_dict: "OrderedDict[str, torch.Tensor]",
+) -> LlamaConfig:
+    """Builds a HuggingFace LlamaConfig from a TorchTitan model."""
+    unwrapped_titan_model = _get_unwrapped_model(titan_model)
+    titan_args = unwrapped_titan_model.args
+    if not isinstance(titan_args, TransformerModelArgs):
+        raise ValueError(
+            f"Expected unwrapped model to have TransformerModelArgs, "
+            f"got {type(titan_args)} instead."
+        )
+
+    actual_intermediate_size = _get_actual_intermediate_size(titan_state_dict, hparams)
+    tplr.logger.info(f"Using intermediate_size: {actual_intermediate_size}")
+
+    return LlamaConfig(
+        vocab_size=titan_args.vocab_size,
+        hidden_size=titan_args.dim,
+        intermediate_size=actual_intermediate_size,
+        num_hidden_layers=titan_args.n_layers,
+        num_attention_heads=titan_args.n_heads,
+        num_key_value_heads=titan_args.n_kv_heads,
+        hidden_act=getattr(hparams.model_config, "hidden_act", "silu"),
+        max_position_embeddings=hparams.sequence_length,
+        initializer_range=getattr(hparams.model_config, "initializer_range", 0.02),
+        rms_norm_eps=getattr(hparams.model_config, "rms_norm_eps", 1e-5),
+        use_cache=False,
+        rope_theta=getattr(hparams.model_config, "rope_theta", 10000.0),
+        rope_scaling=None,
+        attention_bias=False,
+        attention_dropout=0.0,
+        pretraining_tp=1,
+        tie_word_embeddings=False,
+    )
+
+
 def convert_titan_to_hf(
     titan_model: nn.Module,
     hparams: SimpleNamespace,
     save_path: str | None = None,
-) -> LlamaForCausalLM:
+    model_args: dict[str, Any] | None = None,
+    is_master: bool = False,
+) -> None:
     """Convert TorchTitan model to HuggingFace format.
 
     This function converts a TorchTitan Llama model to HuggingFace format,
@@ -440,75 +523,99 @@ def convert_titan_to_hf(
         save_path: Optional path to save the converted HuggingFace model
 
     Returns:
-        LlamaForCausalLM: Converted HuggingFace model
+        None
 
     Raises:
         ValueError: If conversion fails
     """
     try:
         # Get TorchTitan state dict
-        titan_state_dict = titan_model.state_dict()
-
-        # Determine actual intermediate size from model weights
-        actual_intermediate_size = _get_actual_intermediate_size(
-            titan_state_dict, hparams
-        )
-        tplr.logger.info(f"Using intermediate_size: {actual_intermediate_size}")
-
-        # Create HuggingFace config
-        hf_config = LlamaConfig(
-            vocab_size=hparams.model_config.vocab_size,
-            hidden_size=hparams.model_config.hidden_size,
-            intermediate_size=actual_intermediate_size,
-            num_hidden_layers=hparams.model_config.num_hidden_layers,
-            num_attention_heads=hparams.model_config.num_attention_heads,
-            num_key_value_heads=getattr(
-                hparams.model_config,
-                "num_key_value_heads",
-                hparams.model_config.num_attention_heads,
+        tplr.logger.info("Getting TorchTitan state dict")
+        titan_state_dict = get_model_state_dict(
+            titan_model,
+            options=StateDictOptions(
+                full_state_dict=True,
+                cpu_offload=True,  # Automatically offload to CPU
             ),
-            hidden_act=getattr(hparams.model_config, "hidden_act", "silu"),
-            max_position_embeddings=hparams.sequence_length,
-            initializer_range=getattr(hparams.model_config, "initializer_range", 0.02),
-            rms_norm_eps=getattr(hparams.model_config, "rms_norm_eps", 1e-5),
-            use_cache=False,
-            rope_theta=getattr(hparams.model_config, "rope_theta", 10000.0),
-            rope_scaling=None,
-            attention_bias=False,
-            attention_dropout=0.0,
-            pretraining_tp=1,
-            tie_word_embeddings=False,
         )
 
-        # Create HuggingFace model
-        hf_model = LlamaForCausalLM(hf_config)
+        if model_args:
+            hf_config = LlamaConfig(**model_args)
 
-        # Clean state dict (remove prefixes and special keys)
-        cleaned = {}
-        for k, v in titan_state_dict.items():
-            if "freqs_cis" in k:
-                continue
-            nk = k.replace("_orig_mod.", "").replace("module.", "")
-            cleaned[nk] = v
-
-        # Get TorchTitan args from predefined configs or custom hparams
-        titan_args = get_titan_model_args(hparams)
-
-        # Use official adapter for state dict conversion
-        adapter = Llama3StateDictAdapter(titan_args)
-        hf_state_dict = adapter.to_hf(cleaned)
-
-        # Load converted state dict into HuggingFace model
-        hf_model.load_state_dict(hf_state_dict, strict=True)
-
-        # Save if path provided
-        if save_path:
-            hf_model.save_pretrained(save_path)
+        elif isinstance(titan_model, TitanLlama):
+            # Directly get config from TitanLlama model if possible
+            tplr.logger.info("Using TorchTitan model args for HuggingFace config")
+            hf_config = _get_hf_config_from_titan(
+                titan_model, hparams, titan_state_dict
+            )
             tplr.logger.info(
-                f"Successfully saved TorchTitan model in HuggingFace format to {save_path}"
+                "Finished creating HuggingFace config from TorchTitan models"
             )
 
-        return hf_model
+        else:
+            tplr.logger.info("Using hparams.model_config to create HuggingFace config")
+            hf_config = LlamaConfig(
+                vocab_size=hparams.model_config.vocab_size,
+                hidden_size=hparams.model_config.hidden_size,
+                intermediate_size=_get_actual_intermediate_size(
+                    titan_state_dict, hparams
+                ),
+                num_hidden_layers=hparams.model_config.num_hidden_layers,
+                num_attention_heads=hparams.model_config.num_attention_heads,
+                num_key_value_heads=getattr(
+                    hparams.model_config,
+                    "num_key_value_heads",
+                    hparams.model_config.num_attention_heads,
+                ),
+                hidden_act=getattr(hparams.model_config, "hidden_act", "silu"),
+                max_position_embeddings=hparams.sequence_length,
+            )
+
+        # Create HuggingFace model
+        if is_master:
+            hf_model = LlamaForCausalLM(hf_config)
+
+            # Clean state dict (remove prefixes and special keys, and convert DTensors)
+            cleaned = {}
+            for k, v in titan_state_dict.items():
+                if "freqs_cis" in k:
+                    continue
+                nk = k.replace("_orig_mod.", "").replace("module.", "")
+                # Convert DTensor to full tensor
+                if isinstance(v, DTensor):
+                    if not v.is_cuda:
+                        raise ValueError(
+                            "DTensor must be on CUDA device for allgather. Try self.model.to(self.device)"
+                        )
+                    v = v.full_tensor()
+                cleaned[nk] = v
+
+            # Use official adapter for state dict conversion
+            unwrapped_titan_model = _get_unwrapped_model(titan_model)
+            titan_args = unwrapped_titan_model.args
+            if not isinstance(titan_args, TransformerModelArgs):
+                raise ValueError(
+                    "Expected unwrapped model to have TransformerModelArgs, "
+                    f"got {type(titan_args)} instead."
+                )
+            adapter = Llama3StateDictAdapter(titan_args)
+            hf_state_dict = adapter.to_hf(cleaned)
+
+            # Load converted state dict into HuggingFace model
+            hf_model.load_state_dict(hf_state_dict, strict=is_master)
+
+            # Save if path provided
+            if save_path:
+                tplr.logger.info(
+                    "Saving model state. For large models, this takes a while"
+                )
+
+                hf_model.save_pretrained(save_path)
+                tplr.logger.info(
+                    f"Successfully saved TorchTitan model in HuggingFace format to {save_path}"
+                )
+
+        return
 
     except Exception as e:
         tplr.logger.error(f"HF conversion failed: {e}", exc_info=True)

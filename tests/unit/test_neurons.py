@@ -17,6 +17,16 @@ from tplr.neurons import (
 )
 
 
+class _FakeComms:
+    def __init__(self):
+        self.peers = []
+        self.reserve_peers = []
+        self.get_peer_list = AsyncMock()
+        self.get = AsyncMock()
+        self.gather = AsyncMock()
+        self.gradient_timestamp = AsyncMock()
+
+
 class TestSlashingUtils(unittest.TestCase):
     def test_determine_slash_egregiousness(self):
         self.assertEqual(determine_slash_egregiousness(0.4), "high")
@@ -69,7 +79,7 @@ class TestCompareModelWithDebugDict(unittest.TestCase):
 class TestUpdatePeers(unittest.TestCase):
     def setUp(self):
         self.instance = MagicMock()
-        self.instance.comms = MagicMock()
+        self.instance.comms = _FakeComms()  # Use _FakeComms
         self.instance.comms.peers = []
         self.instance.next_peers = None
         self.instance.peers_update_window = 0
@@ -79,10 +89,8 @@ class TestUpdatePeers(unittest.TestCase):
     def test_update_peers_initial_fetch(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        self.instance.comms.get_peer_list.return_value = asyncio.Future()
-        self.instance.comms.get_peer_list.return_value.set_result(
-            ([1, 2, 3], [4, 5], 1)
-        )
+        # Directly set the return value for the AsyncMock
+        self.instance.comms.get_peer_list.return_value = ([1, 2, 3], [4, 5], 1)
 
         loop.run_until_complete(update_peers(self.instance, 1, 0.0))
 
@@ -246,10 +254,20 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.instance = MagicMock()
         self.instance.start_window = 0
         self.instance.current_window = 5
-        self.instance.metagraph.S = torch.tensor([0.1, 0.9])  # Leader is UID 1
-        self.instance.comms = MagicMock()
+
+        # Initialize comms with _FakeComms instance
+        self.instance.comms = _FakeComms()
+        self.instance.comms.metagraph = MagicMock()
+        self.instance.comms.metagraph.S = torch.tensor(
+            [0.1, 0.9]
+        )  # Set S tensor on the fake metagraph
+
         self.instance.model = MagicMock()
         self.instance.outer_optimizer = MagicMock()
+
+        # Patch torch.cuda.is_available to avoid RuntimeError in CI
+        self.cuda_patch = patch("torch.cuda.is_available", return_value=False)
+        self.cuda_patch.start()
         self.instance.transformer = MagicMock()
         self.instance.compressor = MagicMock()
         self.instance.xshapes = {}
@@ -262,9 +280,24 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.instance.loop.run_in_executor = AsyncMock(return_value=12345)
         self.instance.query_block_timestamp = MagicMock(return_value=12345)
 
+    def tearDown(self):
+        self.cuda_patch.stop()
+
+    @patch("torch.distributed.barrier")
+    @patch("torch.distributed.broadcast")
+    @patch("torch.distributed.is_initialized", return_value=True)
+    @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")
     @patch("tplr.neurons.compare_model_with_debug_dict")
-    def test_catchup_happy_path(self, mock_compare, mock_outer_step):
+    def test_catchup_happy_path(
+        self,
+        mock_compare,
+        mock_outer_step,
+        mock_get_backend,
+        mock_is_initialized,
+        mock_broadcast,
+        mock_barrier,
+    ):
         # Arrange
         self.instance.current_window = 3
         mock_get = AsyncMock()
@@ -287,9 +320,22 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.assertEqual(
             self.instance.comms.get.call_count, 4
         )  # Called for aggregator and debug dict
+        mock_broadcast.assert_called()
+        mock_barrier.assert_called()
 
+    @patch("torch.distributed.barrier")
+    @patch("torch.distributed.broadcast")
+    @patch("torch.distributed.is_initialized", return_value=True)
+    @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")
-    def test_catchup_fallback_to_live_gather(self, mock_outer_step):
+    def test_catchup_fallback_to_live_gather(
+        self,
+        mock_outer_step,
+        mock_get_backend,
+        mock_is_initialized,
+        mock_broadcast,
+        mock_barrier,
+    ):
         # Arrange
         self.instance.current_window = 2
         mock_get = AsyncMock(return_value=MagicMock(success=False, data=None))
@@ -309,9 +355,22 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         )  # Called for aggregator and debug dict
         self.instance.comms.gather.assert_called_once()
         mock_outer_step.assert_called_once()
+        mock_broadcast.assert_called()
+        mock_barrier.assert_called()
 
+    @patch("torch.distributed.barrier")
+    @patch("torch.distributed.broadcast")
+    @patch("torch.distributed.is_initialized", return_value=True)
+    @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")
-    def test_catchup_failed_fallback(self, mock_outer_step):
+    def test_catchup_failed_fallback(
+        self,
+        mock_outer_step,
+        mock_get_backend,
+        mock_is_initialized,
+        mock_broadcast,
+        mock_barrier,
+    ):
         # Arrange
         self.instance.current_window = 2
         mock_get = AsyncMock(return_value=MagicMock(success=False, data=None))
@@ -325,10 +384,24 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         self.assertEqual(self.instance.comms.get.call_count, 1)
         self.instance.comms.gather.assert_called_once()
         mock_outer_step.assert_not_called()
+        mock_broadcast.assert_called()
+        # mock_barrier.assert_called() # Barrier is skipped in this scenario
 
+    @patch("torch.distributed.barrier")
+    @patch("torch.distributed.broadcast")
+    @patch("torch.distributed.is_initialized", return_value=True)
+    @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")
     @patch("tplr.neurons.compare_model_with_debug_dict")
-    def test_catchup_skipped_window(self, mock_compare, mock_outer_step):
+    def test_catchup_skipped_window(
+        self,
+        mock_compare,
+        mock_outer_step,
+        mock_get_backend,
+        mock_is_initialized,
+        mock_broadcast,
+        mock_barrier,
+    ):
         # Arrange
         self.instance.current_window = 4
         mock_get = AsyncMock()
@@ -364,10 +437,24 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         # Assert
         self.assertEqual(self.instance.comms.get.call_count, 5)
         self.assertEqual(mock_outer_step.call_count, 2)  # Should only step on success
+        self.assertEqual(mock_broadcast.call_count, 3)  # One for each window iteration
+        mock_barrier.assert_called()
 
+    @patch("torch.distributed.barrier")
+    @patch("torch.distributed.broadcast")
+    @patch("torch.distributed.is_initialized", return_value=True)
+    @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")
     @patch("tplr.neurons.compare_model_with_debug_dict")
-    def test_chain_progression(self, mock_compare, mock_outer_step):
+    def test_chain_progression(
+        self,
+        mock_compare,
+        mock_outer_step,
+        mock_get_backend,
+        mock_is_initialized,
+        mock_broadcast,
+        mock_barrier,
+    ):
         # Arrange
         self.instance.current_window = 2
 
@@ -394,10 +481,24 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         # Assert
         self.assertEqual(self.instance.comms.get.call_count, 8)
         self.assertEqual(mock_outer_step.call_count, 4)
+        self.assertEqual(mock_broadcast.call_count, 4)  # One for each window iteration
+        mock_barrier.assert_called()
 
+    @patch("torch.distributed.barrier")
+    @patch("torch.distributed.broadcast")
+    @patch("torch.distributed.is_initialized", return_value=True)
+    @patch("torch.distributed.get_backend", return_value="gloo")  # Mock get_backend
     @patch("tplr.neurons.outer_step")
     @patch("tplr.neurons.compare_model_with_debug_dict")
-    def test_malformed_payload(self, mock_compare, mock_outer_step):
+    def test_malformed_payload(
+        self,
+        mock_compare,
+        mock_outer_step,
+        mock_get_backend,
+        mock_is_initialized,
+        mock_broadcast,
+        mock_barrier,
+    ):
         # Arrange
         self.instance.current_window = 3
         mock_get = AsyncMock()
@@ -425,6 +526,8 @@ class TestCatchupWithAggregationServer(unittest.TestCase):
         # Assert
         self.assertEqual(self.instance.comms.get.call_count, 3)
         self.assertEqual(mock_outer_step.call_count, 1)  # Should only step on success
+        self.assertEqual(mock_broadcast.call_count, 2)  # One for each window iteration
+        mock_barrier.assert_called()
 
 
 if __name__ == "__main__":

@@ -89,7 +89,7 @@ elif [ "$NODE_TYPE" = "evaluator" ]; then
         --standalone \
         --nnodes 1 \
         --nproc_per_node $NUM_GPUS \
-        scripts/evaluator.py \
+        neurons/evaluator.py \
         --netuid ${NETUID} \
         --device cuda \
         --actual_batch_size ${EVAL_BATCH_SIZE:-8} \

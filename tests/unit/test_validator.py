@@ -9,10 +9,12 @@ from neurons.validator import Validator
 
 class MockCompressor:
     def _dequantize_values(self, v, qp):
-        return v
+        return v.float()
 
     def maybe_dequantize_values(self, vals, quant_params, device):
-        return vals
+        if isinstance(vals, list):
+            return [v.float() for v in vals]
+        return vals.float()
 
 
 @pytest.fixture

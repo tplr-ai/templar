@@ -83,7 +83,7 @@
     "compile": true,
     "enable_cpu_offload": false,
 
-    "mixed_precision_param": "float32",
+    "mixed_precision_param": "bfloat16",
     "mixed_precision_reduce": "float32",
 
     "enable_async_tensor_parallel": false,

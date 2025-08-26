@@ -206,15 +206,6 @@ class Validator(BaseNode, Trainer):
         self.wallet = bt.wallet(config=self.config)
         super().__init__()
 
-        try:
-            version = tplr.__version__
-            tplr.logger = tplr.setup_loki_logger(
-                service="validator", uid=str(self.uid), version=version
-            )
-            tplr.logger.info(f"Loki logging enabled for validator UID: {self.uid}")
-        except Exception as e:
-            tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
-
         self.device = torch.device(self.config.device)
         tplr.logger.info(f"[Init] device set → {self.device}")
 
@@ -282,6 +273,15 @@ class Validator(BaseNode, Trainer):
             sys.exit()
         self.uid = self.comms.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         self.comms.uid = self.uid
+
+        try:
+            version = tplr.__version__
+            tplr.logger = tplr.setup_loki_logger(
+                service="validator", uid=str(self.uid), version=version
+            )
+            tplr.logger.info(f"Loki logging enabled for validator UID: {self.uid}")
+        except Exception as e:
+            tplr.logger.warning(f"Failed to initialize Loki logging: {e}")
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
         self.comms.try_commit(self.wallet, self.bucket)

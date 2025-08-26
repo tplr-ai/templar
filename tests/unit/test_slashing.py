@@ -32,10 +32,11 @@ def validator_instance(monkeypatch):
     validator.sync_window = 0
     validator.current_window = 0
 
-    # Mock metagraph and hotkeys
-    validator.metagraph = SimpleNamespace()
-    validator.metagraph.uids = [0, 1, 2, 3, 4, 5, 6]
-    validator.metagraph.hotkeys = [
+    # Mock comms and metagraph
+    validator.comms = SimpleNamespace()
+    validator.comms.metagraph = SimpleNamespace()
+    validator.comms.metagraph.uids = [0, 1, 2, 3, 4, 5, 6]
+    validator.comms.metagraph.hotkeys = [
         "hotkey_0",
         "hotkey_1",
         "hotkey_2",

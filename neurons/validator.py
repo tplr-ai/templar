@@ -204,16 +204,6 @@ class Validator(BaseNode, Trainer):
 
         # Init bittensor objects
         self.wallet = bt.wallet(config=self.config)
-        self.subtensor = bt.subtensor(config=self.config)
-        self.metagraph = self.subtensor.metagraph(cast(int, self.config.netuid))
-
-        self.current_hotkeys = dict(zip(self.metagraph.uids, self.metagraph.hotkeys))
-        if self.wallet.hotkey.ss58_address not in self.metagraph.hotkeys:
-            tplr.logger.error(
-                f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.metagraph.netuid}[/bold]"
-            )
-            sys.exit()
-        self.uid = self.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
         super().__init__()
 
         try:
@@ -278,18 +268,27 @@ class Validator(BaseNode, Trainer):
             save_location="/tmp",
             key_prefix="model",
             config=self.config,
-            netuid=self.config.netuid,
-            metagraph=self.metagraph,
             hparams=self.hparams,
-            uid=self.uid,
+            uid=None,  # UID will be set after comms is initialized
         )
+
+        self.current_hotkeys = dict(
+            zip(self.comms.metagraph.uids, self.comms.metagraph.hotkeys)
+        )
+        if self.wallet.hotkey.ss58_address not in self.comms.metagraph.hotkeys:
+            tplr.logger.error(
+                f"\n\t[bold]The wallet {self.wallet} is not registered on subnet: {self.comms.metagraph.netuid}[/bold]"
+            )
+            sys.exit()
+        self.uid = self.comms.metagraph.hotkeys.index(self.wallet.hotkey.ss58_address)
+        self.comms.uid = self.uid
 
         self.bucket = self.comms.get_own_bucket("gradients", "read")
         self.comms.try_commit(self.wallet, self.bucket)
         # self.comms.fetch_commitments()
 
         # Init state params
-        self.current_block = self.subtensor.block
+        self.current_block = self.comms.subtensor.block
         self.current_window = int(self.current_block / self.hparams.blocks_per_window)
         self.start_window = self.current_window  # Record the start window
         self.global_step = 0  # Initialize global_step to zero
@@ -734,7 +733,7 @@ class Validator(BaseNode, Trainer):
         # Handle start_window similar to miner - only master rank checks and posts
         if self.is_master:
             # Only post start window if you are the highest stake validator
-            if self.uid == self.metagraph.S.argmax().item():
+            if self.uid == self.comms.metagraph.S.argmax().item():
                 # Check if an existing start window already exists
                 try:
                     existing_start_window = await self.comms.get_start_window(retries=2)
@@ -821,15 +820,6 @@ class Validator(BaseNode, Trainer):
                 tplr.logger.info(f"Swapping dataset at window {self.current_window}")
                 await self.dataset_manager.swap_datasets()
                 self.set_dataloader(validator=True)
-
-            # --------------------------------------------------------------+
-            #  Simulate the miner’s *inner* loop so the LR schedule advances │
-            # --------------------------------------------------------------+
-            for _ in range(self.hparams.inner_steps):
-                self.inner_scheduler.step()
-
-            # current inner‑LR after simulation
-            current_inner_lr = self.inner_scheduler.get_last_lr()[0]
 
             self.sync_window += 1
             if self.is_master:
@@ -958,7 +948,7 @@ class Validator(BaseNode, Trainer):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                all_uids = list(range(1, len(self.metagraph.S)))
+                all_uids = list(range(1, len(self.comms.metagraph.S)))
                 self.comms.peers = [uid for uid in all_uids if uid != self.uid]
 
                 # For evaluation, also use all peers but track separately with equal initial weight
@@ -1016,6 +1006,15 @@ class Validator(BaseNode, Trainer):
             if skip_window:
                 self.global_step += 1
                 continue
+
+            # --------------------------------------------------------------+
+            #  Simulate the miner’s *inner* loop so the LR schedule advances │
+            # --------------------------------------------------------------+
+            for _ in range(self.hparams.inner_steps):
+                self.inner_scheduler.step()
+
+            # current inner‑LR after simulation
+            current_inner_lr = self.inner_scheduler.get_last_lr()[0]
 
             # Only master performs additional gather processing
             if self.is_master and gather_result is not None:
@@ -1654,7 +1653,7 @@ class Validator(BaseNode, Trainer):
                     positive_weighted_uids.append(self.burn_uid)
                     positive_weighted_uids.sort()
                 if positive_weighted_uids and self.is_master:
-                    self.subtensor.set_weights(
+                    self.comms.subtensor.set_weights(
                         wallet=self.wallet,
                         netuid=cast(int, self.config.netuid),
                         uids=positive_weighted_uids,
@@ -2027,8 +2026,8 @@ class Validator(BaseNode, Trainer):
 
                 if self.is_master:
                     # Then save asynchronously
-                    t = asyncio.create_task(
-                        self.comms.put(
+                    async def upload_and_cleanup():
+                        await self.comms.put(
                             state_dict=checkpoint_data,
                             uid=str(self.uid),
                             window=self.sync_window,
@@ -2036,7 +2035,15 @@ class Validator(BaseNode, Trainer):
                             global_step=self.global_step,
                             local=False,
                         )
-                    )
+                        # Clear checkpoint from memory after successful upload
+                        checkpoint_data.clear()
+                        tplr.log_with_context(
+                            level="info",
+                            message=f"Checkpoint uploaded and cleared from memory for global_step {self.global_step}",
+                            sync_window=self.sync_window,
+                        )
+
+                    t = asyncio.create_task(upload_and_cleanup())
                     self._bg_tasks.add(t)
                     t.add_done_callback(self._bg_tasks.discard)
 
@@ -2067,7 +2074,7 @@ class Validator(BaseNode, Trainer):
             # 1. Create a dictionary of active peers with non-zero incentive
             uid_to_incentive = {}
             for uid, incentive in zip(
-                self.metagraph.uids.tolist(), self.metagraph.I.tolist()
+                self.comms.metagraph.uids.tolist(), self.comms.metagraph.I.tolist()
             ):
                 if incentive > 0 and uid in self.comms.active_peers:
                     uid_to_incentive[uid] = float(incentive)
@@ -2158,30 +2165,30 @@ class Validator(BaseNode, Trainer):
 
     def select_next_peers(self) -> tuple[list[int], list[int]] | None:
         """
-        Peer selection that prioritizes the highest weights among peers with positive scores.
-        1) Get all active peers with positive scores
+        Simple peer selection that prioritizes the highest weights.
+        1) Get all active peers
         2) Sort them by weight (highest first)
-        3) Select up to gather_peer_count for gathering and reserve_peer_count for reserves
-        4) Return None if not enough peers meet the minimum requirement
+        3) Select up to gather_peer_count
+        4) If not enough high-weight peers, fill remaining with random active peers
         """
-        # Get all active peers with positive scores as a list
+        # Get all active peers as a list
         active_peers = [
             int(peer)
             for peer in self.comms.active_peers
-            if peer not in self.naughty_peers and self.final_scores[peer] > 0
+            if peer not in self.naughty_peers
         ]
 
-        # Check if we have enough active peers with positive scores
+        # Check if we have enough active peers
         if len(active_peers) < self.hparams.minimum_peers:
             tplr.log_with_context(
                 level="info",
-                message=f"Not enough active peers with positive scores ({len(active_peers)}) to meet minimum requirement ({self.hparams.minimum_peers})",
+                message=f"Not enough active peers ({len(active_peers)}) to meet minimum requirement ({self.hparams.minimum_peers})",
                 sync_window=self.sync_window,
                 current_window=self.current_window,
             )
             return None
 
-        # Create list of (peer_id, weight) tuples for peers with positive scores
+        # Create list of (peer_id, weight) tuples
         peer_weights = []
         for peer_id in active_peers:
             weight = float(self.weights.cpu()[peer_id])
@@ -2730,7 +2737,7 @@ class Validator(BaseNode, Trainer):
             src_rank = 0
             on_src = self.is_master or not ddp
 
-            full_grad_src = torch.empty(1)
+            full_grad_src = torch.empty(1, dtype=p.dtype, device=p.device)
             has_valid_gradient = True
 
             # Build the full dense grad on the source rank only (or always in single GPU)
@@ -2830,11 +2837,16 @@ class Validator(BaseNode, Trainer):
 
             # Distribute gradient for DTensor or apply directly for regular tensors
             if isinstance(p, DT):
+                # Ensure full_grad_src has correct dtype on source rank
+                if on_src and full_grad_src.dtype != p.dtype:
+                    full_grad_src = full_grad_src.to(dtype=p.dtype)
+
                 src_tensor = (
                     full_grad_src
                     if on_src
                     else torch.empty(p.shape, device=p.device, dtype=p.dtype)
                 )
+
                 new_grad = distribute_tensor(
                     src_tensor,
                     device_mesh=p.device_mesh,
@@ -3287,7 +3299,7 @@ class Validator(BaseNode, Trainer):
                 return {k: to_cpu(v) for k, v in obj.items()}
             return obj  # leave ints, floats, strings … untouched
 
-        if self.is_master and self.uid == self.metagraph.S.argmax().item():
+        if self.is_master and self.uid == self.comms.metagraph.S.argmax().item():
             try:
                 raw_state = gather_result.state_dict
                 # Accept both SimpleNamespace and plain dict
@@ -3339,7 +3351,9 @@ class Validator(BaseNode, Trainer):
             Updated idx_overlap_peers, keeping in mind deregistering
         """
         found_uids = list(idx_overlap_peers.keys())
-        latest_hotkeys = dict(zip(self.metagraph.uids, self.metagraph.hotkeys))
+        latest_hotkeys = dict(
+            zip(self.comms.metagraph.uids, self.comms.metagraph.hotkeys)
+        )
 
         for uid in found_uids:
             if (

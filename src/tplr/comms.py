@@ -80,8 +80,6 @@ class Comms(ChainManager):
         save_location: str = "/tmp",
         key_prefix: str = "model",
         config=None,
-        netuid: int | None = None,
-        metagraph=None,
         hparams=None,
         uid: int | None = None,
         **kwargs,
@@ -95,8 +93,6 @@ class Comms(ChainManager):
             save_location (str, optional): The base directory for saving local files. Defaults to "/tmp".
             key_prefix (str, optional): A prefix for keys used in storage. Defaults to "model".
             config (object, optional): Configuration object. Defaults to None.
-            netuid (int | None, optional): The network UID. Defaults to None.
-            metagraph (object, optional): The metagraph instance. Defaults to None.
             hparams (object, optional): Hyperparameters object. Defaults to None.
             uid (int | None, optional): The UID of the neuron. Defaults to None.
             **kwargs: Additional keyword arguments.
@@ -112,8 +108,6 @@ class Comms(ChainManager):
         # Now initialize ChainManager with the bucket
         super().__init__(
             config=config,
-            netuid=netuid,
-            metagraph=metagraph,
             hparams=hparams,
             wallet=self.wallet,
             bucket=self.bucket,

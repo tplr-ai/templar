@@ -132,7 +132,7 @@ class Evaluator:
         parser.add_argument(
             "--actual_batch_size",
             type=int,
-            default=1,
+            default=4,
             help="Evaluation batch size.",
         )
         parser.add_argument(
@@ -680,7 +680,7 @@ class Evaluator:
                 exit_code, benchmark_runtime = self._run_lm_eval(
                     tasks=tasks,
                     output_dir=results_dir,
-                    batch_size="auto",
+                    batch_size=self.config.actual_batch_size,  # auto goes OOM
                 )
 
                 self.metrics_logger.log(
@@ -784,6 +784,10 @@ class Evaluator:
         # Synchronize all ranks after evaluation
         if dist.is_available() and dist.is_initialized():
             dist.barrier(device_ids=[self.local_rank])
+
+        # Clear cache again for after the huggingface tasks
+        tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
+        torch.cuda.empty_cache()
 
         self.last_eval_window = checkpoint_window
         self.last_block_number = block_number

@@ -19,7 +19,7 @@
 # Global imports
 import asyncio
 from collections import defaultdict
-from typing import Dict, Optional
+from types import SimpleNamespace
 
 import bittensor as bt
 import numpy as np
@@ -39,29 +39,28 @@ class ChainManager:
     def __init__(
         self,
         config,
-        netuid: Optional[int] = None,
-        metagraph=None,
         hparams=None,
         fetch_interval: int = 600,  # Fetch interval in seconds
-        wallet: Optional["bt.wallet"] = None,
-        bucket: Optional[Bucket] = None,
+        wallet: bt.wallet | None = None,
+        bucket: Bucket | None = None,
     ):
         """
         Initialize chain commitment handler.
 
         Args:
-            subtensor (bt.Subtensor): Subtensor instance for chain operations
-            netuid (int): Network UID for chain operations
-            metagraph: Metagraph instance containing network state
-            hparams: Hyperparameters namespace containing model configuration
-            fetch_interval (int): Interval in seconds between fetching commitments
-            wallet (bt.wallet, optional): Wallet to sign commitments
-            bucket (Bucket, optional): Bucket configuration to commit
+            config: Bittensor config object.
+            hparams: Hyperparameters namespace containing model configuration.
+            fetch_interval (int): Interval in seconds between fetching commitments.
+            wallet (bt.wallet, optional): Wallet to sign commitments.
+            bucket (Bucket, optional): Bucket configuration to commit.
         """
         self.config = config
-        self.netuid = netuid
-        self.metagraph = metagraph
-        self.hparams = hparams or {}
+        self.netuid = self.config.netuid
+        self.hparams = hparams or SimpleNamespace()
+
+        # Bittensor objects
+        self.subtensor = bt.subtensor(config=self.config)
+        self.metagraph = self.subtensor.metagraph(self.netuid)
 
         # Block and window tracking
         self.current_block = 0
@@ -84,7 +83,6 @@ class ChainManager:
         # Store wallet and bucket
         self.wallet = wallet
         self.bucket = bucket
-        self.subtensor_sync = bt.subtensor(config=self.config)
 
     def start_commitment_fetcher(self):
         """Attach to the already-running event loop."""
@@ -99,7 +97,7 @@ class ChainManager:
             try:
                 # Create new subtensor instance for metagraph sync
                 await asyncio.to_thread(
-                    lambda: self.metagraph.sync(subtensor=self.subtensor_sync)
+                    lambda: self.metagraph.sync(subtensor=self.subtensor)
                 )
 
                 # Create new subtensor instance for commitments
@@ -109,11 +107,11 @@ class ChainManager:
                     logger.debug(f"Updated commitments: {self.commitments}")
             except Exception as e:
                 logger.error(f"Error fetching commitments: {e}")
-                self.subtensor_sync.substrate.close()
-                self.subtensor_sync.substrate.initialize()
+                self.subtensor.substrate.close()
+                self.subtensor.substrate.initialize()
             await asyncio.sleep(self.fetch_interval)
 
-    def get_bucket(self, uid: int) -> Optional[Bucket]:
+    def get_bucket(self, uid: int) -> Bucket | None:
         """Helper function to get the bucket for a given UID.
 
         Args:
@@ -124,7 +122,7 @@ class ChainManager:
         """
         return self.commitments.get(uid)
 
-    def get_all_buckets(self) -> Dict[int, Optional[Bucket]]:
+    def get_all_buckets(self) -> dict[int, Bucket | None]:
         """Helper function to get all buckets for all UIDs in the metagraph.
 
         Returns:
@@ -142,10 +140,11 @@ class ChainManager:
         concatenated = (
             bucket.account_id + bucket.access_key_id + bucket.secret_access_key
         )
-        self.subtensor_sync.commit(wallet, self.netuid, concatenated)
-        logger.info(
-            f"Committed bucket configuration to chain for hotkey {wallet.hotkey.ss58_address}"
-        )
+        if self.netuid is not None:
+            self.subtensor.commit(wallet, self.netuid, concatenated)
+            logger.info(
+                f"Committed bucket configuration to chain for hotkey {wallet.hotkey.ss58_address}"
+            )
 
     def try_commit(self, wallet: Wallet, bucket: Bucket) -> None:
         """Attempts to verify existing commitment matches current bucket config and commits if not.
@@ -189,8 +188,8 @@ class ChainManager:
                 f"Error while verifying commitment: {str(e)}\n"
                 "Committing the bucket details from the environment."
             )
-            self.subtensor_sync.substrate.close()
-            self.subtensor_sync.substrate.initialize()
+            self.subtensor.substrate.close()
+            self.subtensor.substrate.initialize()
             self.commit(wallet, bucket)
 
     def get_commitment(self, uid: int) -> Bucket:
@@ -235,8 +234,8 @@ class ChainManager:
         """
 
         try:
-            concatenated = self.subtensor_sync.get_commitment(self.netuid, uid)
-            logger.success(f"Commitment fetched: {concatenated}")
+            concatenated = self.subtensor.get_commitment(self.netuid, uid)
+            logger.info(f"Commitment fetched: {concatenated}")
         except Exception as e:
             raise Exception(f"Couldn't get commitment from uid {uid} because {e}")
         if len(concatenated) != 128:
@@ -262,7 +261,7 @@ class ChainManager:
         bytes_tuple = commitment[next(iter(commitment.keys()))][0]
         return decoded_key, bytes(bytes_tuple).decode()
 
-    async def get_commitments(self, block: Optional[int] = None) -> Dict[int, Bucket]:
+    async def get_commitments(self, block: int | None = None) -> dict[int, Bucket]:
         """Retrieves all bucket commitments from the chain.
 
         Args:
@@ -272,7 +271,7 @@ class ChainManager:
             Dict[int, Bucket]: Mapping of UIDs to their bucket configurations
         """
         try:
-            substrate = self.subtensor_sync.substrate
+            substrate = self.subtensor.substrate
             # Query commitments via substrate.query_map
             query_result = substrate.query_map(
                 module="Commitments",
@@ -318,11 +317,11 @@ class ChainManager:
 
             return commitments
         except Exception:
-            self.subtensor_sync.substrate.close()
-            self.subtensor_sync.substrate.initialize()
+            self.subtensor.substrate.close()
+            self.subtensor.substrate.initialize()
             return
 
-    async def get_bucket_for_neuron(self, wallet: "bt.wallet") -> Optional[Bucket]:
+    async def get_bucket_for_neuron(self, wallet: "bt.wallet") -> Bucket | None:
         """Get bucket configuration for a specific neuron's wallet
 
         Args:
@@ -350,7 +349,7 @@ class ChainManager:
         else:
             logger.warning("No commitments fetched.")
 
-    def get_hotkey(self, uid: int) -> Optional[str]:
+    def get_hotkey(self, uid: int) -> str | None:
         """Returns the hotkey for a given UID."""
         # Handle different data types for uids
         if isinstance(self.metagraph.uids, (np.ndarray, torch.Tensor)):
@@ -389,7 +388,7 @@ class ChainManager:
 
         logger.debug(f"Active peers: {active_peers}")
         logger.info(f"Newly inactive peers: {newly_inactive}")
-        logger.trace(f"Stakes: {uid_to_stake}")
+        logger.debug(f"Stakes: {uid_to_stake}")
 
         if not active_peers:
             logger.warning("No active peers found. Skipping update.")

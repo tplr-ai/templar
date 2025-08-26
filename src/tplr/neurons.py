@@ -42,11 +42,16 @@ if TYPE_CHECKING:
 NeuronT = TypeVar("NeuronT", "Miner", "Validator")
 
 
-def prepare_gradient_dict(miner: "Miner", step_window: int):
+def prepare_gradient_dict(miner: "Miner", step_window: int, null_round: bool = False):
     """
     DTensor-deadlock-safe:
     - All ranks: rendezvous on DTensor grads (GFULL) and DTensor params (PFULL).
     - Only owning ranks: momentum update, encode, compress, estimate/decode, EF update.
+
+    Args:
+        miner: Miner instance containing model, compressor, transformer, etc.
+        step_window: Current window number
+        null_round: If True, this is a null/warmup round and error feedback should be cleared
     """
 
     # ------------ helpers ------------
@@ -148,8 +153,12 @@ def prepare_gradient_dict(miner: "Miner", step_window: int):
             # Should already be on GPU from batch load, but handle edge cases
             error_feedback = error_feedback.to(p.device)
 
-        error_feedback.mul_(miner.hparams.momentum_decay)
-        error_feedback.add_(grad_full, alpha=lr)
+        # Clear error feedback during null rounds to prevent accumulation of invalid gradients
+        if null_round:
+            error_feedback.zero_()
+        else:
+            error_feedback.mul_(miner.hparams.momentum_decay)
+            error_feedback.add_(grad_full, alpha=lr)
 
         # --- 4) Encode & compress (owner only) ---
         encoded = miner.transformer.encode(error_feedback, use_dct=use_dct)

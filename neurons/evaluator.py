@@ -274,7 +274,7 @@ class Evaluator:
                 dist.init_process_group(
                     backend="nccl",
                     init_method="env://",
-                    timeout=timedelta(minutes=60*10),
+                    timeout=timedelta(minutes=60 * 10),
                     rank=self.rank,
                     world_size=self.world_size,
                 )
@@ -450,6 +450,7 @@ class Evaluator:
             "accelerate launch",
             "--dynamo_backend inductor",
             "--multi_gpu",
+            "--mixed_precision bf16",
             f"--num_processes {self.world_size}",
             "-m",
             "lm_eval",
@@ -459,6 +460,7 @@ class Evaluator:
             f"--device {device_arg}",
             f"--batch_size {batch_size}",
             f"--output_path {output_dir}",
+            f"--limit 0.5",
         ]
 
         if limit:
@@ -637,7 +639,6 @@ class Evaluator:
         )
 
         if self.task_list:
-
             # Only master rank runs lm-eval (command-line tool can't be distributed)
             if self.is_master:
                 os.makedirs(MODEL_PATH, exist_ok=True)
@@ -726,7 +727,7 @@ class Evaluator:
                         shutil.rmtree(results_dir)
                 else:
                     tplr.logger.info("No regular tasks to run")
-            
+
             # Synchronize all ranks after evaluation
             if dist.is_available() and dist.is_initialized():
                 dist.barrier(device_ids=[self.local_rank])
@@ -736,7 +737,6 @@ class Evaluator:
             torch.cuda.empty_cache()
 
             if self.is_master:
-
                 process = True
                 if should_run_mmlu_n_shot:
                     tplr.logger.info(f"Run #{self.eval_counter}: Running mmlu")

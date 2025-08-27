@@ -274,7 +274,7 @@ class Evaluator:
                 dist.init_process_group(
                     backend="nccl",
                     init_method="env://",
-                    timeout=timedelta(minutes=180),
+                    timeout=timedelta(minutes=60*10),
                     rank=self.rank,
                     world_size=self.world_size,
                 )
@@ -329,6 +329,7 @@ class Evaluator:
                 role="evaluator",
                 group="evaluations",
                 job_type="eval",
+                version=self.version,
             )
         else:
             self.buckets = None

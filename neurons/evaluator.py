@@ -741,6 +741,9 @@ class Evaluator:
             torch.cuda.empty_cache()
 
             if self.is_master:
+                results_dir = os.path.join(MODEL_PATH, "results")
+                os.makedirs(results_dir, exist_ok=True)
+
                 process = True
                 if should_run_mmlu_n_shot:
                     tplr.logger.info(f"Run #{self.eval_counter}: Running mmlu")

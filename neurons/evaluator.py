@@ -687,6 +687,7 @@ class Evaluator:
                 tasks = ",".join(regular_tasks)
 
                 eval_results_dir: str = os.path.join(results_dir, "models__eval")
+                os.makedirs(eval_results_dir, exist_ok=True)
                 process = True
                 if tasks:
                     exit_code, benchmark_runtime = self._run_lm_eval(
@@ -743,6 +744,7 @@ class Evaluator:
             if self.is_master:
                 results_dir = os.path.join(MODEL_PATH, "results")
                 os.makedirs(results_dir, exist_ok=True)
+                os.makedirs(eval_results_dir, exist_ok=True)
 
                 process = True
                 if should_run_mmlu_n_shot:

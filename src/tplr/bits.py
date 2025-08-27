@@ -1,12 +1,13 @@
+import asyncio
 import math
 from numpy._typing._array_like import NDArray
 import random
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from itertools import groupby
 from typing import Any, Literal
 
 import numpy as np
-from joblib import Parallel, delayed
 
 # ---------- Bit I/O ----------
 
@@ -345,7 +346,7 @@ class EncodeMeta:
     rows: list[dict[str, int]] | None = None
 
 
-def _encode_batch_per_row(
+async def _encode_batch_per_row(
     bw: BitWriter,
     rows: "np.ndarray[Any, Any]",
     C: int,
@@ -354,6 +355,9 @@ def _encode_batch_per_row(
     bitmap_threshold: int | None,
     meta_mode: str,
     padding_val: int = -1,
+    *,
+    executor: "ThreadPoolExecutor | None" = None,
+    semaphore: "asyncio.Semaphore | None" = None,
 ) -> EncodeMeta:
     """
     Processes a NumPy array input for the 'per_row' scheme.
@@ -376,11 +380,18 @@ def _encode_batch_per_row(
             meta.rows = []
         return meta
 
-    # Determine the best encoding parameters for each row without writing yet.
-    results = [
-        _best_row_variant(r, C, B_choices, use_dense_bitmap, bitmap_threshold)
-        for r in row_list
-    ]
+    loop = asyncio.get_running_loop()
+    
+    async def process_row(r):
+        async with semaphore:
+            return await loop.run_in_executor(
+                executor,
+                _best_row_variant,
+                r, C, B_choices, use_dense_bitmap, bitmap_threshold
+            )
+
+    tasks = [process_row(r) for r in row_list]
+    results = await asyncio.gather(*tasks)
 
     # Unpack the results: (best_B, meta, bw)
     _, per_row_meta, row_bws = zip(*results)
@@ -463,7 +474,7 @@ def _find_best_k_for_B_meta(B_meta, candidate_ks):
     return (best_bits_for_B, B_meta["B"], best_k_for_B)
 
 
-def _encode_batch_global(
+async def _encode_batch_global(
     bw: BitWriter,
     rows: "np.ndarray[Any, Any]",
     C: int,
@@ -474,6 +485,9 @@ def _encode_batch_global(
     meta_mode: str,
     heuristic_sample_size: int | None,
     padding_val: int = -1,
+    *,
+    executor: "ThreadPoolExecutor | None" = None,
+    semaphore: "asyncio.Semaphore | None" = None,
 ) -> "EncodeMeta":
     """NumPy-optimized helper for global scheme."""
     N, _ = rows.shape
@@ -487,15 +501,26 @@ def _encode_batch_global(
     candidate_Bs = [B_fixed] if B_fixed is not None else list(B_choices)
     candidate_ks = [k_fixed] if k_fixed is not None else list(range(0, 9))
 
-    B_metas = [
-        _get_s_counts_for_B(
-            B, C, N, valid_indices, row_indices_flat, bitmap_threshold
-        )
-        for B in candidate_Bs
-    ]
-    results = [
-        _find_best_k_for_B_meta(B_meta, candidate_ks) for B_meta in B_metas
-    ]
+    loop = asyncio.get_running_loop()
+
+    async def get_s_counts(B):
+        async with semaphore:
+            return await loop.run_in_executor(
+                executor,
+                _get_s_counts_for_B,
+                B, C, N, valid_indices, row_indices_flat, bitmap_threshold
+            )
+
+    async def find_best_k(B_meta):
+        async with semaphore:
+            return await loop.run_in_executor(
+                executor,
+                _find_best_k_for_B_meta,
+                B_meta, candidate_ks
+            )
+
+    B_metas = await asyncio.gather(*[get_s_counts(B) for B in candidate_Bs])
+    results = await asyncio.gather(*[find_best_k(B_meta) for B_meta in B_metas])
 
     # Phase 3: Reduce to find best overall
     if not results:
@@ -551,7 +576,7 @@ def _encode_batch_global(
     return meta
 
 
-def encode_batch(
+async def encode_batch(
     rows: "np.ndarray[Any, Any]",
     C: int = 4096,
     B_choices: tuple[int, ...] = (32, 64, 128),
@@ -563,6 +588,8 @@ def encode_batch(
     k_fixed: int | None = None,
     meta_mode: Literal["none", "summary", "compact", "full"] = "summary",
     heuristic_sample_size: int | None = None,
+    executor: "ThreadPoolExecutor | None" = None,
+    semaphore: "asyncio.Semaphore | None" = None,
 ) -> tuple[bytes, EncodeMeta]:
     """
     Encode a batch of rows (each row is an iterable of indices in [0,C)).
@@ -600,7 +627,7 @@ def encode_batch(
 
     if scheme == "global":
         bw.write_bits(1, 1)
-        meta = _encode_batch_global(
+        meta = await _encode_batch_global(
             bw,
             rows,
             C,
@@ -610,10 +637,12 @@ def encode_batch(
             k_fixed,
             meta_mode,
             heuristic_sample_size,
+            executor=executor,
+            semaphore=semaphore,
         )
     else:  # per_row
         bw.write_bits(0, 1)
-        meta = _encode_batch_per_row(
+        meta = await _encode_batch_per_row(
             bw,
             rows,
             C,
@@ -621,6 +650,8 @@ def encode_batch(
             use_dense_bitmap,
             bitmap_threshold,
             meta_mode,
+            executor=executor,
+            semaphore=semaphore,
         )
 
     return bw.flush(), meta

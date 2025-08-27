@@ -1,38 +1,32 @@
-import numpy as np
 import pytest
+import numpy as np
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from tplr.bits import encode_batch, decode_batch, gen_batch
 
-# Set numpy print options to be verbose for debugging
-np.set_printoptions(threshold=np.inf)
-
-from tplr.bits import decode_batch, encode_batch, gen_batch
-
-
-@pytest.mark.parametrize("scheme", ["global", "per_row"])
-@pytest.mark.parametrize("N", [10, 100])
-@pytest.mark.parametrize("s", [16, 32])
-@pytest.mark.parametrize("C", [4096])
 @pytest.mark.parametrize("clustered", [False, True])
-def test_numpy_roundtrip(scheme, N, s, C, clustered):
+@pytest.mark.parametrize("C", [4096])
+@pytest.mark.parametrize("B", [16, 32])
+@pytest.mark.parametrize("s", [10, 100])
+@pytest.mark.parametrize("scheme", ["global", "per_row"])
+@pytest.mark.asyncio
+async def test_numpy_roundtrip(clustered, C, B, s, scheme):
     """
-    Tests that encoding a NumPy array and decoding it back yields the original data.
+    Tests that encoding and then decoding a batch of rows
+    results in the original batch.
     """
-    # 1. Generate original data
-    original_rows_np = gen_batch(N=N, C=C, s=s, clustered=clustered, seed=0)
+    # Generate a batch of rows
+    N = 100  # Number of rows in the batch
+    batch = gen_batch(N=N, C=C, s=s, clustered=clustered, seed=0)
 
-    # 2. Encode the NumPy array
-    payload, meta = encode_batch(
-        original_rows_np,
-        C=C,
-        scheme=scheme,
-        meta_mode="full",
-    )
+    executor = ThreadPoolExecutor()
+    semaphore = asyncio.Semaphore(20)
 
-    # 3. Decode the payload back to a NumPy array
-    decoded_rows_np = decode_batch(payload, max_len=original_rows_np.shape[1])
+    # Encode the batch
+    payload, _ = await encode_batch(batch, C=C, B_choices=(B,), scheme=scheme, executor=executor, semaphore=semaphore)
 
-    # 4. Verify that the decoded data matches the original data
-    np.testing.assert_array_equal(
-        original_rows_np,
-        decoded_rows_np,
-        err_msg="Decoded NumPy array does not match the original.",
-    )
+    # Decode the batch
+    decoded_batch = decode_batch(payload, max_len=batch.shape[1])
+
+    # Check that the decoded batch is the same as the original
+    assert np.array_equal(batch, decoded_batch), "Decoded batch does not match original"

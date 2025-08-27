@@ -460,7 +460,7 @@ class Evaluator:
             f"--device {device_arg}",
             f"--batch_size {batch_size}",
             f"--output_path {output_dir}",
-            f"--limit 0.5",
+            f"--limit 0.2",
         ]
 
         if limit:

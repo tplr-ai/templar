@@ -228,7 +228,6 @@ def create_parallel_dims(
         world_size = 1
     if role == "evaluator":
         # Evaluator: support both single and multi-GPU configurations
-        # Evaluator: support both single and multi-GPU configurations
         # Ensure dp_shard is at least 1 to prevent division by zero
         dp_shard = max(1, min(4, world_size))
         if world_size % dp_shard != 0:
@@ -539,40 +538,42 @@ def convert_titan_to_hf(
             ),
         )
 
-        if model_args:
-            hf_config = LlamaConfig(**model_args)
-
-        elif isinstance(titan_model, TitanLlama):
-            # Directly get config from TitanLlama model if possible
-            tplr.logger.info("Using TorchTitan model args for HuggingFace config")
-            hf_config = _get_hf_config_from_titan(
-                titan_model, hparams, titan_state_dict
-            )
-            tplr.logger.info(
-                "Finished creating HuggingFace config from TorchTitan models"
-            )
-
-        else:
-            tplr.logger.info("Using hparams.model_config to create HuggingFace config")
-            hf_config = LlamaConfig(
-                vocab_size=hparams.model_config.vocab_size,
-                hidden_size=hparams.model_config.hidden_size,
-                intermediate_size=_get_actual_intermediate_size(
-                    titan_state_dict, hparams
-                ),
-                num_hidden_layers=hparams.model_config.num_hidden_layers,
-                num_attention_heads=hparams.model_config.num_attention_heads,
-                num_key_value_heads=getattr(
-                    hparams.model_config,
-                    "num_key_value_heads",
-                    hparams.model_config.num_attention_heads,
-                ),
-                hidden_act=getattr(hparams.model_config, "hidden_act", "silu"),
-                max_position_embeddings=hparams.sequence_length,
-            )
-
-        # Create HuggingFace model
         if is_master:
+            if model_args:
+                hf_config = LlamaConfig(**model_args)
+
+            elif isinstance(titan_model, TitanLlama):
+                # Directly get config from TitanLlama model if possible
+                tplr.logger.info("Using TorchTitan model args for HuggingFace config")
+                hf_config = _get_hf_config_from_titan(
+                    titan_model, hparams, titan_state_dict
+                )
+                tplr.logger.info(
+                    "Finished creating HuggingFace config from TorchTitan models"
+                )
+
+            else:
+                tplr.logger.info(
+                    "Using hparams.model_config to create HuggingFace config"
+                )
+                hf_config = LlamaConfig(
+                    vocab_size=hparams.model_config.vocab_size,
+                    hidden_size=hparams.model_config.hidden_size,
+                    intermediate_size=_get_actual_intermediate_size(
+                        titan_state_dict, hparams
+                    ),
+                    num_hidden_layers=hparams.model_config.num_hidden_layers,
+                    num_attention_heads=hparams.model_config.num_attention_heads,
+                    num_key_value_heads=getattr(
+                        hparams.model_config,
+                        "num_key_value_heads",
+                        hparams.model_config.num_attention_heads,
+                    ),
+                    hidden_act=getattr(hparams.model_config, "hidden_act", "silu"),
+                    max_position_embeddings=hparams.sequence_length,
+                )
+
+            # Create HuggingFace model
             hf_model = LlamaForCausalLM(hf_config)
 
             # Clean state dict (remove prefixes and special keys, and convert DTensors)

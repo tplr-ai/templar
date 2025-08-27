@@ -506,7 +506,7 @@ class Evaluator:
 
         return output
 
-    @decos.evaluator_exception_catcher()
+    @decos.async_evaluator_exception_catcher()
     @decos.master_only
     async def _process_results(
         self,
@@ -598,6 +598,7 @@ class Evaluator:
         """
         self.comms.commitments = await self.comms.get_commitments()
         self.comms.update_peers_with_buckets()
+        start_window = await self.comms.get_start_window()
 
         block_number = self.comms.subtensor.get_current_block() - 1
 
@@ -624,6 +625,9 @@ class Evaluator:
             global_step = 0
         else:
             self.evaluated_checkpoints.append(checkpoint_window)
+
+        # Calculate global step (assuming start_window is 0 for evaluator)
+        global_step = checkpoint_window - start_window
 
         if self.is_master:
             tplr.logger.info(

@@ -337,6 +337,10 @@ class Evaluator:
 
         self.evaluated_checkpoints = []
 
+        self.task_list = []
+        if self.config.tasks:
+            self.task_list = self.config.tasks.split(",")
+
         # potentially sync before exiting init
         if dist.is_available() and dist.is_initialized():
             dist.barrier(device_ids=[self.local_rank])
@@ -632,151 +636,163 @@ class Evaluator:
             block_number=block_number,
         )
 
-        # Only master rank runs lm-eval (command-line tool can't be distributed)
-        if self.is_master:
-            os.makedirs(MODEL_PATH, exist_ok=True)
+        if self.task_list:
 
-        # Convert TorchTitan model to HuggingFace format for lm-eval
-        try:
-            convert_titan_to_hf(
-                titan_model=self.model,
-                hparams=self.hparams,
-                save_path=MODEL_PATH,
-                is_master=self.is_master,
-            )
-            self.hparams.tokenizer.save_pretrained(MODEL_PATH)
-        except Exception as e:
-            tplr.logger.error(
-                f"Failed to convert model at step {global_step}: {e}. Skipping evaluation cycle."
-            )
-            return global_step
+            # Only master rank runs lm-eval (command-line tool can't be distributed)
+            if self.is_master:
+                os.makedirs(MODEL_PATH, exist_ok=True)
 
-        # Move to cpu to save space
-        self.model = self.model.to("cpu")
-
-        # All ranks should clear cache
-        tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
-        torch.cuda.empty_cache()
-
-        if self.is_master:
-            results_dir = os.path.join(MODEL_PATH, "results")
-            os.makedirs(results_dir, exist_ok=True)
-
-            self.eval_counter += 1
-
-            task_list: list[str] = []
-            if self.config.tasks:
-                task_list = self.config.tasks.split(",")
-
-            has_mmlu_task = "mmlu" in task_list
-            should_run_mmlu_n_shot = has_mmlu_task and (
-                self.config.skip_gaps or self.eval_counter % 4 == 0
-            )
-            regular_tasks = [t for t in task_list if t != "mmlu"]
-            tasks = ",".join(regular_tasks)
-
-            eval_results_dir: str = os.path.join(results_dir, "models__eval")
-            process = True
-            if tasks:
-                exit_code, benchmark_runtime = self._run_lm_eval(
-                    tasks=tasks,
-                    output_dir=results_dir,
-                    batch_size=self.config.actual_batch_size,  # auto goes OOM
+            # Convert TorchTitan model to HuggingFace format for lm-eval
+            try:
+                convert_titan_to_hf(
+                    titan_model=self.model,
+                    hparams=self.hparams,
+                    save_path=MODEL_PATH,
+                    is_master=self.is_master,
                 )
-
-                self.metrics_logger.log(
-                    measurement="benchmark_metrics",
-                    tags={
-                        "global_step": global_step,
-                        "window": checkpoint_window,
-                        "block": block_number,
-                        "tasks": tasks,
-                    },
-                    fields={
-                        "lm_eval_exit_code": float(exit_code),
-                        "benchmark_runtime_s": float(benchmark_runtime),
-                    },
+                self.hparams.tokenizer.save_pretrained(MODEL_PATH)
+            except Exception as e:
+                tplr.logger.error(
+                    f"Failed to convert model at step {global_step}: {e}. Skipping evaluation cycle."
                 )
+                return global_step
 
-                if exit_code != 0:
-                    tplr.logger.error("Benchmarking command failed")
-                    process = False
+            # Move to cpu to save space
+            self.model = self.model.to("cpu")
 
-                if not os.path.exists(eval_results_dir):
-                    tplr.logger.error(
-                        f"Results directory not found: {eval_results_dir}"
+            # All ranks should clear cache
+            tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
+            torch.cuda.empty_cache()
+
+            if self.is_master:
+                results_dir = os.path.join(MODEL_PATH, "results")
+                os.makedirs(results_dir, exist_ok=True)
+
+                self.eval_counter += 1
+
+                task_list: list[str] = []
+                if self.config.tasks:
+                    task_list = self.config.tasks.split(",")
+
+                has_mmlu_task = "mmlu" in task_list
+                should_run_mmlu_n_shot = has_mmlu_task and (
+                    self.config.skip_gaps or self.eval_counter % 4 == 0
+                )
+                regular_tasks = [t for t in task_list if t != "mmlu"]
+                tasks = ",".join(regular_tasks)
+
+                eval_results_dir: str = os.path.join(results_dir, "models__eval")
+                process = True
+                if tasks:
+                    exit_code, benchmark_runtime = self._run_lm_eval(
+                        tasks=tasks,
+                        output_dir=results_dir,
+                        batch_size=self.config.actual_batch_size,  # auto goes OOM
                     )
-                    process = False
 
-                if process:
-                    await self._process_results(
-                        task_name=tasks,
-                        eval_results_dir=eval_results_dir,
-                        global_step=global_step,
-                        checkpoint_window=checkpoint_window,
-                        block_number=block_number,
+                    self.metrics_logger.log(
+                        measurement="benchmark_metrics",
+                        tags={
+                            "global_step": global_step,
+                            "window": checkpoint_window,
+                            "block": block_number,
+                            "tasks": tasks,
+                        },
+                        fields={
+                            "lm_eval_exit_code": float(exit_code),
+                            "benchmark_runtime_s": float(benchmark_runtime),
+                        },
                     )
-                if os.path.exists(results_dir):
-                    shutil.rmtree(results_dir)
-            else:
-                tplr.logger.info("No regular tasks to run")
 
-            process = True
-            if should_run_mmlu_n_shot:
-                tplr.logger.info(f"Run #{self.eval_counter}: Running mmlu")
+                    if exit_code != 0:
+                        tplr.logger.error("Benchmarking command failed")
+                        process = False
 
-                exit_code, benchmark_runtime = self._run_lm_eval(
-                    tasks="mmlu",
-                    output_dir=results_dir,
-                    model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}",
-                    limit="0.15",
-                    num_fewshot=5,
-                )
+                    if not os.path.exists(eval_results_dir):
+                        tplr.logger.error(
+                            f"Results directory not found: {eval_results_dir}"
+                        )
+                        process = False
 
-                self.metrics_logger.log(
-                    measurement="benchmark_metrics",
-                    tags={
-                        "global_step": global_step,
-                        "window": checkpoint_window,
-                        "block": block_number,
-                        "tasks": "mmlu",
-                    },
-                    fields={
-                        "lm_eval_exit_code": float(exit_code),
-                        "benchmark_runtime_s": float(benchmark_runtime),
-                    },
-                )
+                    if process:
+                        await self._process_results(
+                            task_name=tasks,
+                            eval_results_dir=eval_results_dir,
+                            global_step=global_step,
+                            checkpoint_window=checkpoint_window,
+                            block_number=block_number,
+                        )
+                    if os.path.exists(results_dir):
+                        shutil.rmtree(results_dir)
+                else:
+                    tplr.logger.info("No regular tasks to run")
+            
+            # Synchronize all ranks after evaluation
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier(device_ids=[self.local_rank])
 
-                if exit_code != 0:
-                    tplr.logger.error("Benchmarking command failed")
-                    process = False
+            # Clear cache again for after the huggingface tasks
+            tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")
+            torch.cuda.empty_cache()
 
-                if not os.path.exists(eval_results_dir):
-                    tplr.logger.error(
-                        f"Results directory not found: {eval_results_dir}"
+            if self.is_master:
+
+                process = True
+                if should_run_mmlu_n_shot:
+                    tplr.logger.info(f"Run #{self.eval_counter}: Running mmlu")
+
+                    exit_code, benchmark_runtime = self._run_lm_eval(
+                        tasks="mmlu",
+                        output_dir=results_dir,
+                        model_args=f"pretrained={MODEL_PATH},tokenizer={MODEL_PATH}",
+                        limit="0.15",
+                        num_fewshot=5,
                     )
-                    process = False
 
-                if process:
-                    await self._process_results(
-                        task_name="mmlu",
-                        eval_results_dir=eval_results_dir,
-                        global_step=global_step,
-                        checkpoint_window=checkpoint_window,
-                        block_number=block_number,
+                    self.metrics_logger.log(
+                        measurement="benchmark_metrics",
+                        tags={
+                            "global_step": global_step,
+                            "window": checkpoint_window,
+                            "block": block_number,
+                            "tasks": "mmlu",
+                        },
+                        fields={
+                            "lm_eval_exit_code": float(exit_code),
+                            "benchmark_runtime_s": float(benchmark_runtime),
+                        },
                     )
-                if os.path.exists(results_dir):
-                    shutil.rmtree(results_dir)
 
-            elif has_mmlu_task:
-                tplr.logger.info(
-                    f"Skipping mmlu (run #{self.eval_counter}, next at run #{(self.eval_counter // 4 + 1) * 4})"
-                )
+                    if exit_code != 0:
+                        tplr.logger.error("Benchmarking command failed")
+                        process = False
 
-            if os.path.exists(MODEL_PATH):
-                shutil.rmtree(MODEL_PATH)
+                    if not os.path.exists(eval_results_dir):
+                        tplr.logger.error(
+                            f"Results directory not found: {eval_results_dir}"
+                        )
+                        process = False
 
-            tplr.logger.info(f"Removed {MODEL_PATH}")
+                    if process:
+                        await self._process_results(
+                            task_name="mmlu",
+                            eval_results_dir=eval_results_dir,
+                            global_step=global_step,
+                            checkpoint_window=checkpoint_window,
+                            block_number=block_number,
+                        )
+                    if os.path.exists(results_dir):
+                        shutil.rmtree(results_dir)
+
+                elif has_mmlu_task:
+                    tplr.logger.info(
+                        f"Skipping mmlu (run #{self.eval_counter}, next at run #{(self.eval_counter // 4 + 1) * 4})"
+                    )
+
+                if os.path.exists(MODEL_PATH):
+                    shutil.rmtree(MODEL_PATH)
+
+                tplr.logger.info(f"Removed {MODEL_PATH}")
 
         # All ranks should clear cache
         tplr.logger.info(f"Clearing GPU cache, {self.local_rank}")

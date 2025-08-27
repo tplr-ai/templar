@@ -17,6 +17,7 @@
 # type: ignore
 import asyncio
 import concurrent.futures
+import functools
 import json
 import math
 import os
@@ -31,7 +32,17 @@ from functools import partial
 
 # from .hparams import HParams
 from types import SimpleNamespace
-from typing import Any, Dict, List, Literal, Optional
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    TypeVar,
+    Union,
+)
 
 import aiofiles
 import bittensor as bt
@@ -45,10 +56,13 @@ from tqdm import tqdm as std_tqdm
 import tplr
 from tplr import __version__
 from tplr.chain import ChainManager
-from tplr.compress import TopKCompressor, unpack_12bit_indices
-from tplr.config import BUCKET_SECRETS, client_config
-from tplr.io import CF_REGION_NAME, S3Manager, get_own_bucket, async_s3_exception_catcher
+from tplr.config import BUCKET_SECRETS
+from tplr.io import (
+    S3Manager,
+    get_own_bucket,
+)
 from tplr.schemas import Bucket, CommsGetResult
+from tplr import decos, compress
 
 # Constants
 LOCAL_TMP_DIR = "/tmp"
@@ -57,7 +71,7 @@ CPU_COUNT = os.cpu_count() or 4
 CPU_MAX_CONNECTIONS = min(100, max(30, CPU_COUNT * 4))
 
 
-class Comms(ChainManager, S3Manager):
+class Comms(ChainManager):
     """Manage miner/vali communications"""
 
     def __init__(
@@ -70,6 +84,18 @@ class Comms(ChainManager, S3Manager):
         hparams=None,
         uid=None,
     ):
+        """
+        Initializes the Comms class.
+
+        Args:
+            wallet (bt.wallet | None): The bittensor wallet object.
+            key_prefix (str, optional): The prefix for the keys. Defaults to "model".
+            config (optional): The configuration object. Defaults to None.
+            netuid (optional): The network UID. Defaults to None.
+            metagraph (optional): The metagraph object. Defaults to None.
+            hparams (optional): The hyperparameters object. Defaults to None.
+            uid (optional): The UID of the node. Defaults to None.
+        """
         self.uid = uid
         self.wallet = wallet
 
@@ -89,16 +115,7 @@ class Comms(ChainManager, S3Manager):
             bucket=self.bucket,
         )
 
-        self.s3_manager = S3Manager(
-            # wallet,
-            # key_prefix,
-            # config,
-            # netuid,
-            # metagraph,
-            # hparams,
-            # uid,
-            save_location=LOCAL_TMP_DIR,
-        )
+        self.s3_manager = S3Manager(save_location=LOCAL_TMP_DIR)
 
         # Set base location
         self.save_location = LOCAL_TMP_DIR
@@ -108,9 +125,6 @@ class Comms(ChainManager, S3Manager):
             self.save_location = os.path.join("/tmp", f"hotkey_{hotkey}")
         os.makedirs(self.save_location, exist_ok=True)
         self.key_prefix = key_prefix
-
-        ## a single aiobotocore session and a dictionary of clients
-        # self.session = get_session()
 
         self.lock = asyncio.Lock()
         self.active_peers = set()  # Set to store active peers
@@ -123,11 +137,10 @@ class Comms(ChainManager, S3Manager):
         self.peers: list[int] = []
         self.reserve_peers: list[int] = []
 
-        # self.client_semaphore = asyncio.Semaphore(CPU_MAX_CONNECTIONS)
         self.gather_semaphore = asyncio.Semaphore(20)
 
     def start_background_tasks(self):
-        """Enable threadpooling"""
+        """Starts background tasks for the Comms class."""
         self.loop = asyncio.get_running_loop()
 
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=CPU_COUNT)
@@ -135,8 +148,8 @@ class Comms(ChainManager, S3Manager):
 
         # Start background tasks
         self.loop.create_task(self.track_active_peers())
-    
-    @async_s3_exception_catcher(on_error_return=0.0)
+
+    @decos.async_s3_exception_catcher(on_error_return=lambda x: 0.0)
     async def gradient_timestamp(
         self, uid: int, window: int, version: str = tplr.__version__
     ) -> float:
@@ -145,15 +158,14 @@ class Comms(ChainManager, S3Manager):
         or 0.0 if it does not exist / fails.
         """
         bucket = self.commitments.get(int(uid))
-        # if not bucket: # handled by wrapper
-        #     return 0.0
-        
-        s3 = await self._get_s3_client(bucket)
+        s3 = await self.s3_manager._get_s3_client(bucket)
         key = f"gradient-{window}-{uid}-v{version}.pt"
         hdr = await s3.head_object(Bucket=bucket.name, Key=key)
         return hdr["LastModified"].timestamp()
-    
-    @async_s3_exception_catcher(on_error_return=CommsGetResult(status="ERROR"))
+
+    @decos.async_s3_exception_catcher(
+        on_error_return=lambda x: CommsGetResult(status="ERROR")
+    )
     async def get(
         self,
         uid: str,
@@ -175,7 +187,7 @@ class Comms(ChainManager, S3Manager):
         try:
             if local:
                 # Local storage logic
-                await self.cleanup_local_data(
+                await self.s3_manager.cleanup_local_data(
                     uid=uid, current_window=window, stale_retention=stale_retention
                 )
                 local_path = os.path.join(
@@ -209,7 +221,7 @@ class Comms(ChainManager, S3Manager):
             if not bucket:
                 return CommsGetResult(status="NOT_FOUND")
 
-            loaded_data = await self.s3_get_object(
+            loaded_data = await self.s3_manager.s3_get_object(
                 key=filename,
                 bucket=bucket,
                 timeout=timeout,
@@ -222,14 +234,13 @@ class Comms(ChainManager, S3Manager):
 
             # Check for TOO_LATE/TOO_EARLY marker
             if isinstance(loaded_data, dict):
+                base_message = f"Object for UID {uid}, window {window}, key {key}"
                 if loaded_data.get("__status") == "TOO_LATE":
-                    tplr.logger.info(
-                        f"Object for UID {uid}, window {window}, key {key} was uploaded too late. Skipping."
-                    )
+                    tplr.logger.info(f"{base_message} was uploaded too late. Skipping.")
                     return CommsGetResult(status="TOO_LATE")
-                elif loaded_data.get("__status") == "TOO_EARLY":
+                if loaded_data.get("__status") == "TOO_EARLY":
                     tplr.logger.info(
-                        f"Object for UID {uid}, window {window}, key {key} was uploaded too early. Skipping."
+                        f"{base_message} was uploaded too early. Skipping."
                     )
                     return CommsGetResult(status="TOO_EARLY")
 
@@ -243,6 +254,7 @@ class Comms(ChainManager, S3Manager):
         finally:
             tplr.logger.debug(f"GET {filename} <--")
 
+    @decos.retry_on_failure(retries=100, timeout=60, delay=0.5)
     async def get_with_retry(
         self,
         uid: str,
@@ -253,65 +265,27 @@ class Comms(ChainManager, S3Manager):
         stale_retention: int = 10,
         time_min: datetime = None,
         time_max: datetime = None,
-    ) -> Optional[tuple[dict, int]]:
-        """GET with retry operation."""
-        start_time = time.time()
-        end_time = start_time + timeout
-        tried_after_time_max = False
-        time_max_grace_period = 3.0
+    ) -> None | tuple[dict, int]:
+        """Attempts to get data with a retry mechanism."""
 
-        while True:
-            # Check if we've timed out
-            if time.time() >= end_time:
-                tplr.logger.debug(f"GET {uid}/{window}/{key} timed out.")
-                return None
+        # Make the request
+        result = await self.get(
+            uid=uid,
+            window=window,
+            key=key,
+            local=local,
+            stale_retention=stale_retention,
+            # only spend 60 seconds total waiting by default
+        )
 
-            # Check if we're past time_max with grace period
-            now = datetime.now(timezone.utc)
+        if result.success:
+            return result.data, result.global_step
 
-            # Only consider it "past time_max" if we're 3 seconds beyond time_max
-            past_time_max = False
-            if time_max is not None and now > time_max:
-                seconds_past_time_max = (now - time_max).total_seconds()
-                past_time_max = seconds_past_time_max > time_max_grace_period
-
-            # If we're past time_max (with grace period) and already tried once, don't retry again
-            if past_time_max and tried_after_time_max:
-                tplr.logger.debug(
-                    f"Already tried once after time_max + {time_max_grace_period}s for UID {uid}, window {window}. Stopping retries."
-                )
-                return None
-
-            # If we're past time_max (with grace period), mark that we've tried once
-            if past_time_max:
-                tried_after_time_max = True
-                tplr.logger.debug(
-                    f"Past time_max + {time_max_grace_period}s for UID {uid}, window {window}. This is the final retry."
-                )
-
-            # Make the request
-            result = await self.get(
-                uid=uid,
-                window=window,
-                key=key,
-                local=local,
-                stale_retention=stale_retention,
-                time_min=time_min,
-                time_max=time_max,
+        if result.status == "TOO_LATE":
+            tplr.logger.info(
+                f"Gradient for UID {uid}, window {window} exists but was uploaded too late. Skipping."
             )
-
-            if result.success:
-                return result.data, result.global_step
-
-            if result.status == "TOO_LATE":
-                tplr.logger.info(
-                    f"Gradient for UID {uid}, window {window} exists but was uploaded too late. Skipping."
-                )
-                return None
-
-            # For NOT_FOUND, ERROR, or TOO_EARLY, we retry.
-            # Short delay before retrying
-            await asyncio.sleep(0.5)
+            return None
 
     async def gather(
         self,
@@ -322,14 +296,14 @@ class Comms(ChainManager, S3Manager):
         timeout: int,
         device: str,
         totalks: dict,
-        compressor: TopKCompressor,
+        compressor: compress.TopKCompressor,
         expected_compressed_params: set[str] | None = None,
         local: bool = True,
         stale_retention: int = 10,
         time_min: datetime | None = None,
         time_max: datetime | None = None,
     ) -> SimpleNamespace | None:
-        """Gather operation with individual gradient normalization and connection management."""
+        """Gathers data from multiple UIDs."""
         if not expected_compressed_params:
             expected_compressed_params = set()
 
@@ -609,23 +583,26 @@ class Comms(ChainManager, S3Manager):
         my_uid: int | None,
         gather_uids: list[int],
         reserve_uids: list[int],
+        key: str,
+        timeout: int,
+        device: str,
+        totalks: dict,
+        compressor: compress.TopKCompressor,
+        local: bool,
         expected_compressed_params: set[str] | None = None,
-        **kwargs,
+        stale_retention: int = 10,
+        time_min: datetime | None = None,
+        time_max: datetime | None = None,
+        window: int | None = None,
     ) -> SimpleNamespace | None:
-        """
-        1. Call `gather()` on the main `gather_uids`.
-        2. Any UID that fails (or is missing) is replaced *once* with the next
-           UID(s) from `reserve_uids`, then gathered again.
-        3. Results are *merged* so the caller receives a single object that
-           looks exactly like the old `gather()` return value.
-        """
+        """Gathers data with a fallback to reserve UIDs."""
+
         if len(gather_uids + reserve_uids) == 0:
             return None
 
         if not expected_compressed_params:
             expected_compressed_params = set()
 
-        window = kwargs.get("window", None)  # for contextual logs
         context_log = partial(tplr.log_with_context, level="info", window=window)
 
         context_log(
@@ -637,7 +614,16 @@ class Comms(ChainManager, S3Manager):
             my_uid=my_uid,
             uids=gather_uids,
             expected_compressed_params=expected_compressed_params,
-            **kwargs,
+            key=key,
+            timeout=timeout,
+            device=device,
+            local=local,
+            stale_retention=stale_retention,
+            totalks=totalks,
+            compressor=compressor,
+            time_min=time_min,
+            time_max=time_max,
+            window=window,
         )
 
         # Normalise to an empty shell if absolutely nothing came back
@@ -672,7 +658,21 @@ class Comms(ChainManager, S3Manager):
                     message=f"[gather_with_reserve] 🔄 retrying with reserve "
                     f"uids={replacements}"
                 )
-                fallback = await self.gather(my_uid=my_uid, uids=replacements, **kwargs)
+                fallback = await self.gather(
+                    my_uid=my_uid,
+                    uids=gather_uids,
+                    expected_compressed_params=expected_compressed_params,
+                    key=key,
+                    timeout=timeout,
+                    device=device,
+                    local=local,
+                    stale_retention=stale_retention,
+                    totalks=totalks,
+                    compressor=compressor,
+                    time_min=time_min,
+                    time_max=time_max,
+                    window=window,
+                )
                 if fallback:
                     # merge tensor‑lists inside the nested state_dict
                     for k, v in vars(fallback.state_dict).items():
@@ -703,7 +703,7 @@ class Comms(ChainManager, S3Manager):
         return primary
 
     ## Peer Management
-    @async_s3_exception_catcher(on_error_return=False)
+    @decos.async_s3_exception_catcher(on_error_return=lambda x: False)
     async def is_miner_active(self, uid: int, recent_windows: int = 3) -> bool:
         """Check if the miner has uploaded gradients in the last few windows."""
         tplr.logger.debug(f"Checking if UID {uid} is active")
@@ -718,7 +718,7 @@ class Comms(ChainManager, S3Manager):
             )
             return False
 
-        s3_client = await self._get_s3_client(peer_bucket)
+        s3_client = await self.s3_manager._get_s3_client(peer_bucket)
 
         if not hasattr(self, "current_window") or self.current_window is None:
             tplr.logger.error(
@@ -737,7 +737,7 @@ class Comms(ChainManager, S3Manager):
         return False
 
     async def track_active_peers(self):
-        """Background task to keep track of active peers."""
+        """Background task to track active peers."""
         while True:
             active_peers = set()
             max_concurrent = min(30, len(self.commitments) if self.commitments else 10)
@@ -753,7 +753,7 @@ class Comms(ChainManager, S3Manager):
                     if is_active:
                         active_peers.add(uid)
 
-            # Buffer the processing of commitments to avoid blocking the event loop (over resourcing)
+            # Buffer processing of commitments to avoid blocking the event loop (over resourcing)
             batch_size = 50
             commitment_uids = list(self.commitments.keys())
 
@@ -770,10 +770,49 @@ class Comms(ChainManager, S3Manager):
 
             await asyncio.sleep(self.active_check_interval)
 
-    # Checkpoint Operations
+    def update_peers_with_buckets(self):
+        """Updates peers for gradient gathering, evaluation peers, and tracks inactive peers."""
+        # Create mappings
+        uid_to_stake = dict(
+            zip(self.metagraph.uids.tolist(), self.metagraph.S.tolist())
+        )
 
-    async def _get_highest_stake_validator_bucket(self):
-        """Get the bucket for the validator with highest stake."""
+        # Get currently active peers
+        active_peers = set(int(uid) for uid in self.active_peers)
+
+        # Track inactive peers (previously active peers that are no longer active)
+        previously_active = set(
+            self.eval_peers.keys()
+        )  # since self.eval_peers is now a dict
+        newly_inactive = previously_active - active_peers
+        self.inactive_peers = newly_inactive
+
+        tplr.logger.debug(f"Active peers: {active_peers}")
+        tplr.logger.info(f"Newly inactive peers: {newly_inactive}")
+        tplr.logger.trace(f"Stakes: {uid_to_stake}")
+
+        if not active_peers:
+            tplr.logger.warning("No active peers found. Skipping update.")
+            return
+
+        # ---------------------------------------------------------------
+        # Convert self.eval_peers into a dict while retaining old counts
+        # for peers still active with stake <= 1000.
+        # ---------------------------------------------------------------
+        self.eval_peers = {
+            int(uid): self.eval_peers.get(int(uid), 1)
+            for uid in active_peers
+            if uid in uid_to_stake and uid_to_stake[uid] <= 20000
+        }
+
+        tplr.logger.debug(f"Filtered eval peers: {list(self.eval_peers.keys())}")
+
+        tplr.logger.info(f"Total evaluation peers: {len(self.eval_peers)}")
+        tplr.logger.info(f"Total inactive peers: {len(self.inactive_peers)}")
+
+    # Checkpoint Operations
+    async def _get_highest_stake_validator_bucket(self) -> tuple[None, None] | tuple[str, int | str]:
+        """Retrieves the bucket of the validator with the highest stake."""
         # Get validator with highest stake
         validator_uid = self.metagraph.S.argmax().item()
         tplr.logger.info(f"Found validator with highest stake: {validator_uid}")
@@ -789,7 +828,7 @@ class Comms(ChainManager, S3Manager):
         tplr.logger.info(f"Validator Bucket: {validator_bucket}")
         return validator_bucket, validator_uid
 
-    @async_s3_exception_catcher
+    @decos.async_s3_exception_catcher()
     async def get_latest_checkpoint(self, version):
         """
         Sequentially check:
@@ -814,9 +853,7 @@ class Comms(ChainManager, S3Manager):
         # 2. Check self R2 bucket
         self_bucket = self.bucket  # Use self.bucket saved in __init__
         if self_bucket:
-            result = await self._get_bucket_checkpoint(
-                self_bucket, self.uid, version
-            )
+            result = await self._get_bucket_checkpoint(self_bucket, self.uid, version)
             if result:
                 return result
 
@@ -825,13 +862,13 @@ class Comms(ChainManager, S3Manager):
         if local_result:
             return local_result
 
-        tplr.logger.info(
-            "No checkpoint found in validator / self R2 / local storage"
-        )
+        tplr.logger.info("No checkpoint found in validator / self R2 / local storage")
         return None
 
-    @async_s3_exception_catcher
-    def _load_latest_local_checkpoint(self, version: str):
+    @decos.async_s3_exception_catcher()
+    def _load_latest_local_checkpoint(self, version: str) -> None | tuple[Any, int]:
+        """Loads the latest checkpoint from local storage."""
+
         local_dir = os.path.join(LOCAL_TMP_DIR, str(self.uid))
         pattern = rf"checkpoint-(\d+)-{self.uid}-v{re.escape(version)}\.pt$"
 
@@ -866,10 +903,10 @@ class Comms(ChainManager, S3Manager):
         else:
             return None
 
-    @async_s3_exception_catcher
-    async def _get_bucket_checkpoint(self, bucket, uid, version: str):
-        """Helper to get checkpoint from a specific bucket."""
-        s3_client = await self._get_s3_client(bucket)
+    @decos.async_s3_exception_catcher()
+    async def _get_bucket_checkpoint(self, bucket, uid, version: str) -> None | tuple[Any, int]:
+        """Retrieves a checkpoint from a specific S3 bucket."""
+        s3_client = await self.s3_manager._get_s3_client(bucket)
 
         pat = re.compile(rf"^checkpoint-(\d+)-{uid}-v{re.escape(version)}\.pt$")
 
@@ -913,7 +950,7 @@ class Comms(ChainManager, S3Manager):
 
         # If we found a valid checkpoint, fetch it
         if latest_checkpoint:
-            loaded_data = await self.s3_get_object(
+            loaded_data = await self.s3_manager.s3_get_object(
                 key=latest_checkpoint, bucket=bucket
             )
             if loaded_data:
@@ -1011,7 +1048,7 @@ class Comms(ChainManager, S3Manager):
             async with aiofiles.open(temp_file, "w") as f:
                 await f.write(json.dumps(peers_and_weights))
 
-            await self.s3_put_object(key=key, file_path=temp_file)
+            await self.s3_manager.s3_put_object(key=key, file_path=temp_file)
             tplr.logger.info(f"PUT {key} <--")
         except Exception as e:
             tplr.logger.info(f"Failed to upload peer list: {e}")
@@ -1031,169 +1068,166 @@ class Comms(ChainManager, S3Manager):
             async with aiofiles.open(temp_file, "w") as f:
                 await f.write(json.dumps(start_window_data))
 
-            await self.s3_put_object(key=key, file_path=temp_file)
+            await self.s3_manager.s3_put_object(key=key, file_path=temp_file)
         finally:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
 
-    @async_s3_exception_catcher
+    @decos.async_s3_exception_catcher()
+    async def fetch_peer_list_attempt(
+        self, fetch_previous: bool = False
+    ) -> None | tuple[int, list, int]:
+        (
+            validator_bucket,
+            validator_uid,
+        ) = await self._get_highest_stake_validator_bucket()
+
+        if validator_bucket is None:
+            tplr.logger.warning(
+                "No highest staked validator bucket found. Retrying in 10 seconds."
+            )
+            return None
+
+        tplr.logger.info(
+            f"Attempting to fetch peer list from UID {validator_uid} bucket {validator_bucket.name}"
+        )
+
+        s3_client = await self.s3_manager._get_s3_client(validator_bucket)
+        pattern = (
+            rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{re.escape(__version__)}\.json$"
+        )
+        keys = []
+        continuation_token = None
+
+        while True:
+            list_args = {
+                "Bucket": validator_bucket.name,
+                "Prefix": PEERS_FILE_PREFIX,
+            }
+            if continuation_token:
+                list_args["ContinuationToken"] = continuation_token
+
+            response = await s3_client.list_objects_v2(**list_args)
+
+            for obj in response.get("Contents", []):
+                if re.match(pattern, obj["Key"]):
+                    keys.append(obj["Key"])
+
+            if response.get("IsTruncated"):
+                continuation_token = response.get("NextContinuationToken")
+            else:
+                break
+
+        if len(keys) == 0:
+            tplr.logger.info("No peer list files found")
+            return None
+
+        # Parse windows from all keys
+        window_to_key = {}
+        for key in keys:
+            match = re.match(pattern, key)
+            if match:
+                window = int(match.group("window"))
+                window_to_key[window] = key
+
+        if not window_to_key:
+            tplr.logger.error(
+                f"Failed to parse windows from peer list files. First "
+                f"{len(keys[:5])} peer list files are {keys[:5]}"
+            )
+            return None
+
+        # Sort windows to find the most recent or the previous one
+        window_to_keys = window_to_key.keys()
+
+        if len(window_to_keys) == 0:
+            return None
+
+        # If fetching previous, get the second most recent (if available)
+        selected_window = None
+        if fetch_previous and len(window_to_keys) > 1:
+            sorted_windows = sorted(window_to_keys, reverse=True)
+            selected_window = sorted_windows[1]  # Second most recent
+            tplr.logger.info(f"Selected previous window {selected_window}")
+        elif fetch_previous and len(window_to_keys) <= 1:
+            tplr.logger.info(f"Found no previous window {selected_window}")
+            return None
+        else:
+            selected_window = max(window_to_keys)  # Most recent
+            tplr.logger.info(f"Selected most recent window {selected_window}")
+
+        selected_key = window_to_key[selected_window]
+
+        peers_data = await self.s3_manager.s3_get_object(
+            key=selected_key, bucket=validator_bucket
+        )
+
+        if isinstance(peers_data, dict):
+            peers_dict = peers_data
+        else:
+            peers_dict = json.loads(peers_data.decode("utf-8"))
+
+        reserves = peers_dict.get("reserve_peers", [])
+        return (
+            peers_dict["peers"],
+            reserves,
+            peers_dict["first_effective_window"],
+        )
+
+    @decos.retry_on_failure(delay=10.0)
     async def get_peer_list(
         self, fetch_previous: bool = False
-    ) -> tuple[list[int], list[int], int] | None:
+    ) -> tuple[list[int], list[int], int]:
+        which_peerlist = "previous" if fetch_previous else "current"
         tplr.logger.info(
-            f"Looking for a {'previous' if fetch_previous else 'current'} peer list on a validator bucket"
+            f"Looking for a {which_peerlist} peer list on a validator bucket"
         )
-        while True:
-            try:
-                (
-                    validator_bucket,
-                    validator_uid,
-                ) = await self._get_highest_stake_validator_bucket()
+        return await self.fetch_peer_list_attempt(fetch_previous)
 
-                if validator_bucket is None:
-                    tplr.logger.warning(
-                        "No highest staked validator bucket found. Retrying in 10 seconds."
-                    )
-                    await asyncio.sleep(10)
-                    continue
+    @decos.async_s3_exception_catcher()
+    async def fetch_start_window_attempt(self) -> int | None:
+        (
+            validator_bucket,
+            validator_uid,
+        ) = await self._get_highest_stake_validator_bucket()
+        if validator_bucket is None:
+            tplr.logger.warning(
+                "No highest staked validator bucket found. Retrying soon"
+            )
+            return None
 
-                tplr.logger.info(
-                    f"Attempting to fetch peer list from UID {validator_uid} bucket {validator_bucket.name}"
-                )
+        tplr.logger.info(
+            f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name}"
+        )
 
-                s3_client = await self._get_s3_client(validator_bucket)
-                pattern = rf"^{PEERS_FILE_PREFIX}(?P<window>\d+)_v{re.escape(__version__)}\.json$"
-                keys = []
-                continuation_token = None
+        start_window_data = await self.s3_manager.s3_get_object(
+            key=f"start_window_v{__version__}.json", bucket=validator_bucket
+        )
 
-                while True:
-                    list_args = {
-                        "Bucket": validator_bucket.name,
-                        "Prefix": PEERS_FILE_PREFIX,
-                    }
-                    if continuation_token:
-                        list_args["ContinuationToken"] = continuation_token
+        if start_window_data is None:
+            tplr.logger.warning("start_window.json not found or empty. Retrying soon")
+        
+        else:
+            if isinstance(start_window_data, dict):
+                start_window_json = start_window_data
+            else:
+                start_window_json = json.loads(start_window_data.decode("utf-8"))
 
-                    response = await s3_client.list_objects_v2(**list_args)
+            start_window = start_window_json["start_window"]
+            tplr.logger.info(f"Fetched start_window: {start_window}")
+            return start_window
 
-                    for obj in response.get("Contents", []):
-                        if re.match(pattern, obj["Key"]):
-                            keys.append(obj["Key"])
+    @decos.retry_on_failure(retries=100, delay=10)
+    async def get_start_window(
+        self,
+    ) -> int:
+        return await self.fetch_start_window_attempt()
 
-                    if response.get("IsTruncated"):
-                        continuation_token = response.get("NextContinuationToken")
-                    else:
-                        break
-
-                if len(keys) == 0:
-                    tplr.logger.info("No peer list files found")
-                    return None
-
-                # Parse windows from all keys
-                window_to_key = {}
-                for key in keys:
-                    match = re.match(pattern, key)
-                    if match:
-                        window = int(match.group("window"))
-                        window_to_key[window] = key
-
-                if not window_to_key:
-                    tplr.logger.error(
-                        f"Failed to parse windows from peer list files. First "
-                        f"{len(keys[:5])} peer list files are {keys[:5]}"
-                    )
-                    return None
-
-                # Sort windows to find the most recent or the previous one
-                window_to_keys = window_to_key.keys()
-
-                if len(window_to_keys) == 0:
-                    return None
-
-                # If fetching previous, get the second most recent (if available)
-                selected_window = None
-                if fetch_previous and len(window_to_keys) > 1:
-                    sorted_windows = sorted(window_to_keys, reverse=True)
-                    selected_window = sorted_windows[1]  # Second most recent
-                    tplr.logger.info(f"Selected previous window {selected_window}")
-                elif fetch_previous and len(window_to_keys) <= 1:
-                    tplr.logger.info(f"Found no previous window {selected_window}")
-                    return None
-                else:
-                    selected_window = max(window_to_keys)  # Most recent
-                    tplr.logger.info(f"Selected most recent window {selected_window}")
-
-                selected_key = window_to_key[selected_window]
-
-                peers_data = await self.s3_get_object(
-                    key=selected_key, bucket=validator_bucket
-                )
-
-                if isinstance(peers_data, dict):
-                    peers_dict = peers_data
-                else:
-                    peers_dict = json.loads(peers_data.decode("utf-8"))
-
-                reserves = peers_dict.get("reserve_peers", [])
-                return (
-                    peers_dict["peers"],
-                    reserves,
-                    peers_dict["first_effective_window"],
-                )
-
-            except Exception as e:
-                tplr.logger.error(f"Error fetching peer list: {e}")
-                await asyncio.sleep(10)
-
-    async def get_start_window(self, retries: int = -1) -> int | None:
-        attempt = 0
-        while retries == -1 or attempt < retries:
-            try:
-                (
-                    validator_bucket,
-                    validator_uid,
-                ) = await self._get_highest_stake_validator_bucket()
-                if validator_bucket is None:
-                    tplr.logger.warning(
-                        "No highest staked validator bucket found. Retrying in 10 seconds"
-                    )
-                    attempt += 1
-                    await asyncio.sleep(10)
-                    continue
-
-                tplr.logger.info(
-                    f"Attempting to fetch start_window from UID {validator_uid} bucket {validator_bucket.name}"
-                )
-
-                start_window_data = await self.s3_get_object(
-                    key=f"start_window_v{__version__}.json", bucket=validator_bucket
-                )
-
-                if start_window_data is not None:
-                    if isinstance(start_window_data, dict):
-                        start_window_json = start_window_data
-                    else:
-                        start_window_json = json.loads(
-                            start_window_data.decode("utf-8")
-                        )
-
-                    start_window = start_window_json["start_window"]
-                    tplr.logger.info(f"Fetched start_window: {start_window}")
-                    return start_window
-
-                tplr.logger.warning(
-                    "start_window.json not found or empty. Retrying in 10 seconds"
-                )
-                attempt += 1
-                await asyncio.sleep(10)
-
-            except Exception as e:
-                tplr.logger.error(f"Error fetching start_window: {e}")
-                attempt += 1
-                await asyncio.sleep(10)
-
-        tplr.logger.warning("Max retries exceeded while trying to fetch start_window")
-        return None
+    @decos.retry_on_failure(retries=2, delay=10)
+    async def get_start_window_finite(
+        self,
+    ) -> int: 
+        return await self.fetch_start_window_attempt()
 
     async def save_checkpoint(
         self,
@@ -1205,7 +1239,7 @@ class Comms(ChainManager, S3Manager):
         current_window,
         start_window,
     ):
-        """Save checkpoint to R2 and local storage."""
+        """Saves a model checkpoint."""
         checkpoint_data = {
             "model_state_dict": {
                 k: v.cpu().clone() for k, v in model.state_dict().items()
@@ -1221,7 +1255,7 @@ class Comms(ChainManager, S3Manager):
         }
 
         # save locally
-        await self.put(
+        await self.s3_manager.put(
             state_dict=checkpoint_data,
             uid=str(self.uid),
             window=current_window,
@@ -1231,7 +1265,7 @@ class Comms(ChainManager, S3Manager):
         )
 
         # upload to R2
-        await self.put(
+        await self.s3_manager.put(
             state_dict=checkpoint_data,
             uid=str(self.uid),
             window=current_window,
@@ -1242,51 +1276,6 @@ class Comms(ChainManager, S3Manager):
 
         return True
 
-    # async def _gather_window_batch(
-    #     self,
-    #     batch_windows: List[int],
-    #     uid: str,
-    #     peers: List[int],
-    #     device: str,
-    #     totalks: dict,
-    #     global_step: int,
-    # ) -> Dict[int, SimpleNamespace]:
-    #     """Gather gradients for multiple windows in parallel."""
-    #     try:
-    #         gather_tasks = [
-    #             self.gather(
-    #                 my_uid=uid,
-    #                 uids=peers,
-    #                 window=w,
-    #                 key="gradient",
-    #                 timeout=30,
-    #                 device=device,
-    #                 totalks=totalks,
-    #                 local=False,
-    #                 stale_retention=100,
-    #                 # Needs compressor!
-    #             )
-    #             for w in batch_windows
-    #         ]
-    #         # Wait for all gather tasks to complete
-    #         batch_results = await asyncio.gather(*gather_tasks, return_exceptions=True)
-
-    #         # Filter out exceptions and create window->result mapping
-    #         result_dict = {w: None for w in batch_windows}  # Initialize with None
-    #         for window, result in zip(batch_windows, batch_results):
-    #             if not isinstance(result, Exception) and result is not None:
-    #                 result_dict[window] = result
-
-    #         return result_dict
-
-    #     except Exception as e:
-    #         tplr.logger.error(
-    #             f"Failed to gather window batch {batch_windows}: {str(e)}"
-    #         )
-    #         return {
-    #             w: None for w in batch_windows
-    #         }  # Return dict with None values on failure
-
     def check_compressed_indices(
         self,
         param_name: str,
@@ -1295,70 +1284,25 @@ class Comms(ChainManager, S3Manager):
         allowed_topk: int | None = None,
         vals: torch.Tensor | None = None,
     ) -> None:
-        allowed_topk = (
-            min(self.hparams.topk_compression, totalk)
-            if allowed_topk is None
-            else min(allowed_topk, totalk)
+        """Checks the validity of compressed indices."""
+        compress.check_compressed_indices(
+            self.hparams.topk_compression,
+            param_name,
+            idxs,
+            totalk,
+            allowed_topk,
+            vals,
         )
 
-        def _bounds_check(t: torch.Tensor):
-            """fast min/max bounds check"""
-            if t.numel() == 0:
-                raise ValueError(f"[{param_name}] empty index list")
-            if t.min().item() < 0 or t.max().item() >= totalk:
-                bad = t[(t < 0) | (t >= totalk)][0].item()
-                raise ValueError(
-                    f"[{param_name}] Index {bad} out of bounds (totalk = {totalk})"
-                )
-
-        # Handle 12-bit packed index format only
-        if isinstance(idxs, torch.Tensor):
-            if idxs.dtype != torch.uint8:
-                raise ValueError(
-                    f"[{param_name}] Expected uint8 for 12-bit packed indices, got {idxs.dtype}"
-                )
-            # 12-bit packed format is the only supported format
-            if vals is None:
-                raise ValueError(
-                    f"[{param_name}] Values tensor required to validate 12-bit packed indices"
-                )
-            if idxs.numel() == 0:
-                raise ValueError(f"[{param_name}] Empty packed indices tensor")
-
-            # Unpack using the values shape
-            try:
-                unpacked = unpack_12bit_indices(idxs, vals.shape)
-                # Validate that the last dimension matches allowed_topk
-                if unpacked.shape[-1] != allowed_topk:
-                    raise ValueError(
-                        f"[{param_name}] Invalid topk dimension: "
-                        f"shape[-1]={unpacked.shape[-1]} but expected {allowed_topk}"
-                    )
-                _bounds_check(unpacked)
-            except Exception as e:
-                raise ValueError(f"[{param_name}] Failed to unpack 12-bit indices: {e}")
-        else:
-            raise ValueError(f"[{param_name}] Expected tensor but got {type(idxs)}")
-
-    @async_s3_exception_catcher
+    @decos.async_s3_exception_catcher()
     async def get_debug_dict(self, window: int):
-        """
-        Get debug dictionary from validator bucket for a specific window.
-
-        Args:
-            window: Specific window to retrieve debug data for
-
-        Returns:
-            Debug dictionary or None if not found
-        """
+        """Retrieves a debug dictionary from the validator's bucket."""
         (
             validator_bucket,
             validator_uid,
         ) = await self._get_highest_stake_validator_bucket()
         if not validator_bucket or validator_uid is None:
-            tplr.logger.warning(
-                "No validator bucket - cannot proceed with debug fetch"
-            )
+            tplr.logger.warning("No validator bucket - cannot proceed with debug fetch")
             return
 
         key = f"debug-{window}-{validator_uid}-v{tplr.__version__}.pt"
@@ -1366,7 +1310,7 @@ class Comms(ChainManager, S3Manager):
             f"Attempting to retrieve debug dictionary for window {window} from validator {validator_uid}"
         )
 
-        result = await self.s3_get_object(
+        result = await self.s3_manager.s3_get_object(
             key=key,
             bucket=validator_bucket,
             timeout=20,
@@ -1374,23 +1318,15 @@ class Comms(ChainManager, S3Manager):
 
         if result is None:
             tplr.logger.warning(f"No debug dictionary found for window {window}")
-            return None
+        else:
+            tplr.logger.info(f"Successfully retrieved debug dictionary for window {window}")
 
-        tplr.logger.info(
-            f"Successfully retrieved debug dictionary for window {window}"
-        )
         return result
 
     def weighted_random_sample_no_replacement(
         self, candidates: list[int], weights: list[int], k: int
     ) -> list[int]:
-        """
-        Perform a weighted random sample (without replacement) of size k.
-        candidates: list of items (uids).
-        weights:    list of corresponding weights (integers or floats).
-        k:          number of items to sample.
-        Returns a list of selected items.
-        """
+        """Performs weighted random sampling without replacement."""
         tplr.logger.debug("Starting weighted random sampling")
         tplr.logger.debug(f"Candidates: {candidates}")
         tplr.logger.debug(f"Weights: {weights}")

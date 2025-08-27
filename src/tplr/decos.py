@@ -40,6 +40,9 @@ def retry_on_failure(
     retries: int = -1,
     timeout: int = -1,
     delay: float = 0.5,
+    none_is_valid_result: bool = False,
+    false_is_valid_result: bool = False,
+    truthiness_side_effect: Callable[..., bool] = lambda x: True,
 ):
     """
     An asynchronous decorator factory to handle retry logic with a timeout, a
@@ -53,6 +56,11 @@ def retry_on_failure(
         retries: The maximum number of retries. -1 for infinite retries.
         timeout: The maximum time in seconds to keep retrying. -1 for no timeout.
         delay: The time in seconds to wait between retries.
+        none_is_valid_result: A simple way of saying an expected result is None
+        false_is_valid_result: A simple way of saying an expected result is False
+        truthiness_side_effect: When a function returns an object that needs further
+            investigation to determine if a valid result, pass a function that 
+            checks the validity of that object and returns a bool
     """
 
     def decorator(
@@ -69,6 +77,13 @@ def retry_on_failure(
             attempts = 0
             func_name = func.__name__
 
+            if none_is_valid_result and false_is_valid_result:
+                raise ValueError("False and None cannot both be valid outputs")
+            
+            if retries == -1 and timeout == -1:
+                tplr.logger.debug("Not recommended to allow `retry_on_failure` deco unlimited retries")
+                tplr.logger.debug("Recommend adding limitation on retries or timeout")
+            
             while True:
                 base_message = f"Attempt {attempts + 1} on '{func_name}'"
                 # Check for max retries
@@ -98,16 +113,26 @@ def retry_on_failure(
                     )
                     return None
 
-                if result:  # and not result too_early/too_late?
-                    tplr.logger.info(f"{base_message}: Function call successful.")
-                    return result
+                success_message = f"{base_message}: Function call successful."
+                if result:
+                    if truthiness_side_effect(result):  # and not result too_early/too_late?
+                        tplr.logger.info(success_message)
+                        return result
+                    else:
+                        tplr.logger.info(f"Result of type {type(result)} did not pass truthiness_side_effect")
 
                 else:
+                    if none_is_valid_result and result is None:
+                        tplr.logger.info(success_message)
+                        return result
+                    elif false_is_valid_result and result is False:
+                        tplr.logger.info(success_message)
+                        return result
+                    
                     tplr.logger.info(f"{base_message} failed. Retrying in {delay}s...")
                     await asyncio.sleep(delay)
 
         return wrapper
-
     return decorator
 
 

@@ -314,7 +314,7 @@ class TopKCompressor(Generic[Q]):
         topk = self._clamp_topk(x, topk)
 
         idx_int64 = torch.topk(
-            x.abs(), k=topk, dim=-1, largest=True, sorted=False
+            input=x.abs(), k=topk, dim=-1, largest=True, sorted=False
         ).indices
         val = torch.gather(x, dim=-1, index=idx_int64)
 
@@ -638,3 +638,59 @@ def _get_smaller_split(n: int, close_to: int) -> int:
                 return val
             return all_divisors[ix - 1]
     return n
+
+
+def check_compressed_indices(
+    hparams_topk_compression,
+    param_name: str,
+    idxs: torch.Tensor,
+    totalk: int,
+    allowed_topk: int | None = None,
+    vals: torch.Tensor | None = None,
+) -> None:
+    """Checks the validity of compressed indices."""
+
+    allowed_topk = (
+        min(hparams_topk_compression, totalk)
+        if allowed_topk is None
+        else min(allowed_topk, totalk)
+    )
+
+    def _bounds_check(t: torch.Tensor):
+        """fast min/max bounds check"""
+        if t.numel() == 0:
+            raise ValueError(f"[{param_name}] empty index list")
+        if t.min().item() < 0 or t.max().item() >= totalk:
+            bad = t[(t < 0) | (t >= totalk)][0].item()
+            raise ValueError(
+                f"[{param_name}] Index {bad} out of bounds (totalk = {totalk})"
+            )
+
+    # Handle 12-bit packed index format only
+    if isinstance(idxs, torch.Tensor):
+        if idxs.dtype != torch.uint8:
+            raise ValueError(
+                f"[{param_name}] Expected uint8 for 12-bit packed indices, got {idxs.dtype}"
+            )
+        # 12-bit packed format is the only supported format
+        if vals is None:
+            raise ValueError(
+                f"[{param_name}] Values tensor required to validate 12-bit packed indices"
+            )
+        if idxs.numel() == 0:
+            raise ValueError(f"[{param_name}] Empty packed indices tensor")
+
+        # Unpack using the values shape
+        try:
+            unpacked = unpack_12bit_indices(idxs, vals.shape)
+            # Validate that the last dimension matches allowed_topk
+            if unpacked.shape[-1] != allowed_topk:
+                raise ValueError(
+                    f"[{param_name}] Invalid topk dimension: "
+                    f"shape[-1]={unpacked.shape[-1]} but expected {allowed_topk}"
+                )
+            _bounds_check(unpacked)
+        except Exception as e:
+            raise ValueError(f"[{param_name}] Failed to unpack 12-bit indices: {e}")
+    else:
+        raise ValueError(f"[{param_name}] Expected tensor but got {type(idxs)}")

@@ -676,7 +676,7 @@ class Validator(BaseNode, Trainer):
         if self.uid == self.metagraph.S.argmax().item():
             # Check if an existing start window already exists
             try:
-                existing_start_window = await self.comms.get_start_window(retries=2)
+                existing_start_window = await self.comms.get_start_window_finite()
             except Exception as e:
                 tplr.logger.warning(f"Error fetching existing start_window: {e}")
                 existing_start_window = None
@@ -1266,8 +1266,8 @@ class Validator(BaseNode, Trainer):
                 )
                 if (
                     eval_result is None
-                    or not isinstance(eval_result[0], dict)
-                    or eval_result[0].get("__status") in ["TOO_LATE", "TOO_EARLY"]
+                    or not isinstance(eval_result.data, dict)
+                    or eval_result.status in ["TOO_LATE", "TOO_EARLY"]
                 ):
                     tplr.log_with_context(
                         level="info",
@@ -1332,7 +1332,7 @@ class Validator(BaseNode, Trainer):
                     )
                     continue
 
-                state_dict, _ = eval_result
+                state_dict = eval_result.data
 
                 meta = state_dict.get("metadata", {})
                 self.log_digest_match(eval_uid, meta)
@@ -2353,7 +2353,7 @@ class Validator(BaseNode, Trainer):
                 "sync_score": 0.0,
             }
 
-        miner_debug_dict = cast(dict, debug_result[0])
+        miner_debug_dict = cast(dict, debug_result.data)
 
         # Validate debug dictionary format
         if miner_debug_dict is None or not isinstance(miner_debug_dict, dict):
@@ -2834,6 +2834,7 @@ class Validator(BaseNode, Trainer):
                     window=self.sync_window,
                     key="aggregator",
                     local=False,
+                    uid=None,
                 )
 
                 tplr.log_with_context(

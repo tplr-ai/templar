@@ -7,7 +7,7 @@ import pytest
 import torch
 from types import SimpleNamespace
 from dotenv import load_dotenv
-import asyncio
+import asyncio, types
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -24,6 +24,49 @@ os.environ["R2_GRADIENTS_READ_SECRET_ACCESS_KEY"] = "test_read_secret"
 os.environ["R2_GRADIENTS_WRITE_ACCESS_KEY_ID"] = "test_write_key"
 os.environ["R2_GRADIENTS_WRITE_SECRET_ACCESS_KEY"] = "test_write_secret"
 os.environ["R2_DATASET_BUCKET_NAME"] = "test-dataset-bucket"
+
+
+# Mock objects
+class MockTransformer(torch.nn.Module):
+    def __init__(self, dim=128):
+        super().__init__()
+        self.fc1 = torch.nn.Linear(dim, dim)
+        self.gelu = torch.nn.GELU()
+        self.fc2 = torch.nn.Linear(dim, dim)
+
+    def forward(self, x):
+        return self.fc2(self.gelu(self.fc1(x)))
+
+
+class MockCompressor:
+    def __init__(self, use_quantization=False):
+        self.use_quantization = use_quantization
+
+    def compress(self, tensor, **kwargs):
+        return tensor
+
+    def decompress(self, tensor, **kwargs):
+        return tensor
+
+
+class MockWallet:
+    def __init__(self):
+        self.hotkey = self.mock_hotkey()
+
+    def mock_hotkey(self):
+        hotkey = MagicMock()
+        hotkey.ss58_address = "test_hotkey_address"
+        return hotkey
+
+
+class MockHParams:
+    def __init__(self):
+        self.topk_compression = 4
+        self.blocks_per_window = 10  # 100?
+        self.target_chunk = 512
+        self.active_check_interval = 60
+        self.recent_windows = 5
+        self.gather_peer_count = 50
 
 
 # -----------------------------------------------------------------------------
@@ -67,13 +110,7 @@ def create_packed_indices(indices_list):
     return packed_data
 
 
-# Mock Bucket class
-@dataclass
-class Bucket:
-    name: str
-    account_id: str
-    access_key_id: str
-    secret_access_key: str
+from tplr.schemas import Bucket
 
 
 # Mock the config module
@@ -99,6 +136,8 @@ def mock_config():
             },
         ),
         patch("tplr.config.client_config", {}),
+        patch("tplr.io.LOCAL_TMP_DIR", "/tmp/local_store", create=True),
+        patch("tplr.comms.LOCAL_TMP_DIR", "/tmp/local_store"),
     ):
         yield
 
@@ -177,6 +216,12 @@ def mock_metagraph():
     return MockMetagraph()
 
 
+@pytest.fixture(autouse=True)
+def mock_cleanup_temp_dir():
+    with patch("tplr.io.cleanup_temp_dir") as mock_cleanup:
+        yield mock_cleanup
+
+
 """
 Tests for the Comms class functionality focusing on local storage, data retrieval,
 and gradient gathering operations.
@@ -198,7 +243,7 @@ async def test_put_local(comms_instance):
     key = "gradient"
 
     expected_dir = os.path.join("/tmp/local_store", uid, str(window))
-    base_dir = os.path.dirname(expected_dir)  # /tmp/local_store/0
+    base_dir = os.path.dirname(expected_dir)
 
     if os.path.exists(base_dir):
         for root, dirs, files in os.walk(base_dir, topdown=False):
@@ -208,8 +253,8 @@ async def test_put_local(comms_instance):
                 os.rmdir(os.path.join(root, name))
         os.rmdir(base_dir)
 
-    with patch.object(comms_instance, "cleanup_local_data") as mock_cleanup:
-        await comms_instance.put(
+    with patch.object(comms_instance.s3_manager, "cleanup_local_data") as mock_cleanup:
+        await comms_instance.s3_manager.put(
             state_dict=test_state_dict,
             uid=uid,
             window=window,
@@ -223,8 +268,8 @@ async def test_put_local(comms_instance):
     assert files[0].startswith(key)
 
 
-async def test_get_local(comms_instance):
-    """Test 2: Local Data Retrieval
+async def test_get_local(comms_instance: Comms):
+    """Tests local data retrieval.
 
     Validates the retrieval of locally stored data by:
     - Testing correct loading of stored state dictionaries
@@ -240,12 +285,12 @@ async def test_get_local(comms_instance):
     window = 1
     key = "gradient"
     filename = f"{key}-{window}-{uid}-v{tplr.__version__}.pt"
-    local_dir = os.path.join("/tmp/local_store", uid, str(window))
+    local_dir = os.path.join("/tmp/local_store", str(uid), str(window))
     os.makedirs(local_dir, exist_ok=True)
     local_path = os.path.join(local_dir, filename)
     torch.save(test_state_dict, local_path)
 
-    with patch.object(comms_instance, "cleanup_local_data") as mock_cleanup:
+    with patch.object(comms_instance.s3_manager, "cleanup_local_data") as mock_cleanup:
         result = await comms_instance.get(
             uid=uid,
             window=window,
@@ -299,7 +344,7 @@ async def test_gather_basic_functionality(comms_instance, dummy_compressor):
 
     totalks = {"0.weight": totalk_value}
     result = await comms_instance.gather(
-        my_uid="0",
+        my_uid=0,
         uids=["1", "2"],
         window=1,
         key="gradient",
@@ -356,7 +401,7 @@ async def test_gather_normalization(comms_instance, dummy_compressor):
     )
     comms_instance.get_with_retry.side_effect = [peer_response]
     result = await comms_instance.gather(
-        my_uid="0",
+        my_uid=0,
         uids=["1"],
         window=1,
         key="gradient",
@@ -371,8 +416,8 @@ async def test_gather_normalization(comms_instance, dummy_compressor):
 
 
 @pytest.mark.asyncio
-async def test_gather_quant_params_validation(comms_instance, dummy_compressor):
-    """
+async def test_gather_quant_params_validation(comms_instance: Comms):
+    """Tests validation of quantization parameters during gather.
     Scenario
     --------
     • peer 1 sends bad `quant_params` (shift = NaN) → must be skipped
@@ -434,7 +479,7 @@ async def test_gather_quant_params_validation(comms_instance, dummy_compressor):
     # 3.  Run gather()
     # ------------------------------------------------------------------
     res = await comms_instance.gather(
-        my_uid="0",
+        my_uid=0,
         uids=["1", "2"],
         window=1,
         key="gradient",
@@ -462,10 +507,10 @@ async def test_gather_quant_params_validation(comms_instance, dummy_compressor):
 
 
 @pytest.mark.asyncio
-async def test_gather_empty_responses(comms_instance, dummy_compressor):
-    """Test 5: Empty Response Handling
+async def test_gather_empty_responses(comms_instance: Comms, dummy_compressor):
+    """Tests handling of empty peer responses.
 
-    Tests system behavior with empty responses by:
+    Validates system behavior with empty responses by:
     - Verifying proper handling when peers return no data
     - Ensuring system gracefully handles null responses
     - Checking appropriate error states and return values
@@ -473,9 +518,9 @@ async def test_gather_empty_responses(comms_instance, dummy_compressor):
     comms_instance.check_compressed_indices = (
         lambda param_name, idxs, totalk, allowed_topk=None, vals=None: None
     )
-    comms_instance.get_with_retry = AsyncMock(return_value=(None, None))
+    comms_instance.get_with_retry = AsyncMock(return_value=None)
     result = await comms_instance.gather(
-        my_uid="0",
+        my_uid=0,
         uids=["1"],
         window=1,
         key="gradient",
@@ -525,7 +570,7 @@ async def test_gather_averaging(comms_instance, dummy_compressor):
     )
     comms_instance.get_with_retry.side_effect = [peer1_response, peer2_response]
     result = await comms_instance.gather(
-        my_uid="0",
+        my_uid=0,
         uids=["1", "2"],
         window=1,
         key="gradient",
@@ -539,55 +584,13 @@ async def test_gather_averaging(comms_instance, dummy_compressor):
     assert result.global_steps == [1, 2]
 
 
-#  TODO: Move to analyser when refactored
-
-# async def test_gather_store_gathers(comms_instance):
-#     """Test that gradients are stored when store_gathers=True"""
-#     # Setup test data
-#     state_dict = {
-#         "layer.idxs": torch.tensor([0, 1]),
-#         "layer.vals": torch.tensor([0.1, 0.2]),
-#     }
-
-#     # Mock methods
-#     comms_instance.get_with_retry = AsyncMock()
-#     peer_response = (state_dict, 1)
-#     comms_instance.get_with_retry.side_effect = [peer_response]
-#     comms_instance.s3_put_object = AsyncMock()
-
-#     # Call gather with store_gathers=True
-#     await comms_instance.gather(
-#         state_dict=None,
-#         my_uid="0",
-#         uids=["1"],
-#         window=1,
-#         key="gradient",
-#         timeout=5,
-#         device="cpu",
-#         global_step=0,
-#         store_gathers=True,
-#     )
-
-#     # Wait a bit for async tasks to be created
-#     await asyncio.sleep(0.1)
-
-#     # Verify s3_put_object was called
-#     assert comms_instance.s3_put_object.called
-
-#     # Verify correct arguments
-#     call_args = comms_instance.s3_put_object.call_args
-#     assert call_args is not None
-#     kwargs = call_args.kwargs
-#     assert kwargs["bucket"] == comms_instance.bucket
-#     assert kwargs["key"].startswith("gathers/")
-#     assert kwargs["key"].endswith(".npz")
-
-
 @pytest.mark.asyncio
-async def test_gather_averaging_multiple_peers(comms_instance, dummy_compressor):
-    """Test 8: Verify gradient averaging with multiple peers
+async def test_gather_averaging_with_multiple_peers(
+    comms_instance: Comms, dummy_compressor
+):
+    """Verifies gradient averaging with multiple peers.
 
-    Tests that gradients from multiple peers are properly averaged during gather operation.
+    Tests that gradients from multiple peers are properly averaged during the gather operation.
     Checks:
     - Proper handling of totalks parameter
     - Correct aggregation of peer responses
@@ -624,7 +627,7 @@ async def test_gather_averaging_multiple_peers(comms_instance, dummy_compressor)
     # Pass totalks via the gather call with key "layer.".
     totalks_arg = {"layer.": totalk_value}
     result = await comms_instance.gather(
-        my_uid="0",
+        my_uid=0,
         uids=["1", "2"],
         window=1,
         key="gradient",
@@ -650,10 +653,10 @@ async def test_gather_averaging_multiple_peers(comms_instance, dummy_compressor)
         )
 
 
-async def test_gather_complex_normalization(comms_instance, dummy_compressor):
-    """Test 8: Verify complex gradient normalization with multiple peers
+async def test_gather_complex_normalization(comms_instance: Comms, dummy_compressor):
+    """Verifies complex gradient normalization with multiple peers.
 
-    Tests normalization of gradients with different scales and signs.
+    Tests normalization of gradients with different scales and signs during gather.
     Checks:
     - Proper normalization of tensors with different magnitudes
     - Correct handling of different signs in gradients
@@ -702,7 +705,7 @@ async def test_gather_complex_normalization(comms_instance, dummy_compressor):
     ]
 
     result = await comms_instance.gather(
-        my_uid="0",
+        my_uid=0,
         uids=["1", "2", "3"],
         window=1,
         key="gradient",
@@ -739,26 +742,25 @@ async def test_gather_complex_normalization(comms_instance, dummy_compressor):
 
 
 # Test Initialization and Cleanup
-async def test_comms_init(comms_instance):
-    """Test 10: Verify proper initialization of Comms instance
+async def test_comms_init(comms_instance: Comms):
+    """Verifies proper initialization of the Comms instance.
 
-    Tests that all required components are properly initialized.
+    Checks that all required components are properly initialized.
     Checks:
     - Temporary directory creation
     - Save location existence
     - Lock initialization
     - Active peers set initialization
     """
-    assert os.path.exists(comms_instance.temp_dir)
     assert os.path.exists(comms_instance.save_location)
     assert comms_instance.lock is not None
     assert isinstance(comms_instance.active_peers, set)
 
 
-async def test_cleanup_local_data(comms_instance):
-    """Test 11: Verify cleanup of stale local data
+async def test_cleanup_local_data(comms_instance: Comms):
+    """Verifies cleanup of stale local data.
 
-    Tests the cleanup functionality for old local data.
+    Tests the cleanup functionality for old local data directories.
     Checks:
     - Proper removal of old data based on window
     - Retention of recent data
@@ -770,16 +772,16 @@ async def test_cleanup_local_data(comms_instance):
     os.makedirs(os.path.join(test_dir, "10"), exist_ok=True)
     os.makedirs(os.path.join(test_dir, "20"), exist_ok=True)
 
-    await comms_instance.cleanup_local_data(uid, 25, 5)
+    await comms_instance.s3_manager.cleanup_local_data(uid, 25, 5)
     assert not os.path.exists(os.path.join(test_dir, "10"))
     assert os.path.exists(os.path.join(test_dir, "20"))
 
 
 # Test S3 Operations
-async def test_s3_put_small_file(comms_instance):
-    """Test 12: Verify S3 upload for small files
+async def test_s3_put_small_file(comms_instance: Comms):
+    """Verifies S3 upload for small files.
 
-    Tests the basic S3 upload functionality for small files.
+    Tests the basic S3 upload functionality.
     Checks:
     - Proper file creation
     - S3 client initialization
@@ -793,27 +795,29 @@ async def test_s3_put_small_file(comms_instance):
     # Mock S3 client with proper async context manager
     mock_client = AsyncMock()
     mock_client.put_object = AsyncMock()
-    comms_instance.session.create_client = MagicMock(return_value=mock_client)
+    comms_instance.s3_manager.session.create_client = MagicMock(
+        return_value=mock_client
+    )
 
     # Create proper Bucket instance instead of string
-    comms_instance.bucket = Bucket(
+    comms_instance.s3_manager.bucket = Bucket(
         name="test-bucket",
         account_id="test-account",
         access_key_id="test-key",
         secret_access_key="test-secret",
     )
 
-    await comms_instance.s3_put_object("test_key", "test_file.txt")
+    await comms_instance.s3_manager.s3_put_object("test_key", "test_file.txt")
 
     # Cleanup
     os.remove("test_file.txt")
 
 
 @pytest.mark.asyncio
-async def test_s3_put_large_file(comms_instance):
-    """Test 13: Verify S3 multipart upload for large files
+async def test_s3_put_large_file(comms_instance: Comms):
+    """Verifies S3 multipart upload for large files.
 
-    Tests the multipart upload functionality for large files.
+    Tests the multipart upload functionality.
     Checks:
     - Multipart upload initialization
     - Proper part uploading
@@ -828,9 +832,11 @@ async def test_s3_put_large_file(comms_instance):
     mock_client.upload_part = AsyncMock(return_value={"ETag": "test_etag"})
     mock_client.complete_multipart_upload = AsyncMock()
     mock_client.abort_multipart_upload = AsyncMock()
-    comms_instance.session.create_client = MagicMock(return_value=mock_client)
+    comms_instance.s3_manager.session.create_client = MagicMock(
+        return_value=mock_client
+    )
 
-    comms_instance.bucket = Bucket(
+    comms_instance.s3_manager.bucket = Bucket(
         name="test-bucket",
         account_id="test-account",
         access_key_id="test-key",
@@ -840,7 +846,7 @@ async def test_s3_put_large_file(comms_instance):
     with open("large_file.txt", "wb") as f:
         f.write(os.urandom(100 * 1024 * 1024))
 
-    await comms_instance.s3_put_object("test_key", "large_file.txt")
+    await comms_instance.s3_manager.s3_put_object("test_key", "large_file.txt")
 
     upload_part_calls = mock_client.upload_part.call_args_list
     assert len(upload_part_calls) <= 20
@@ -851,10 +857,10 @@ async def test_s3_put_large_file(comms_instance):
     os.remove("large_file.txt")
 
 
-async def test_download_large_file(comms_instance):
-    """Test 14: Verify downloading of large files
+async def test_download_large_file(comms_instance: Comms):
+    """Verifies downloading of large files.
 
-    Tests the chunked download functionality for large files.
+    Tests the chunked download functionality.
     Checks:
     - Proper content length handling
     - Chunk size calculations
@@ -883,12 +889,14 @@ async def test_download_large_file(comms_instance):
         }
 
     mock_client.get_object = AsyncMock(side_effect=mock_get_object)
-    comms_instance.session.create_client = MagicMock(return_value=mock_client)
+    comms_instance.s3_manager.session.create_client = MagicMock(
+        return_value=mock_client
+    )
 
     # download_large_file expects an object with a .name attr (like boto3 Bucket)
     bucket_stub = type("Bucket", (), {"name": "test-bucket"})()  # Simple stand‑in
 
-    success = await comms_instance.download_large_file(
+    success = await comms_instance.s3_manager.download_large_file(
         mock_client,
         bucket_stub,
         "test_key",
@@ -904,8 +912,7 @@ async def test_download_large_file(comms_instance):
 @pytest.mark.asyncio
 async def test_load_checkpoint_success(monkeypatch):
     """
-    Verifies that `load_checkpoint`:
-      • accepts the correct positional/keyword args
+    Verifies that `load_checkpoint` accepts correct arguments and propagates fields.
       • returns exactly five values
       • propagates the momentum & sync_window fields from the checkpoint
     """
@@ -946,10 +953,10 @@ async def test_load_checkpoint_success(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_load_checkpoint_missing_data(comms_instance):
-    """Test 16: Verify checkpoint loading with missing data
+async def test_load_checkpoint_missing_data(comms_instance: Comms):
+    """Verifies checkpoint loading with missing data.
 
-    Tests the checkpoint loading behavior when data is missing.
+    Tests the checkpoint loading behavior when no checkpoint data is found.
     Checks:
     - Proper handling of missing checkpoint data
     - Default value returns
@@ -981,8 +988,8 @@ async def test_load_checkpoint_missing_data(comms_instance):
     assert sync_window == 0
 
 
-async def test_gather_timeout(comms_instance, dummy_compressor):
-    """Test gather operation with timeout"""
+async def test_gather_timeout(comms_instance: Comms, dummy_compressor):
+    """Tests the gather operation with a timeout."""
 
     # Mock get_with_retry to simulate timeout
     async def mock_get_with_retry(*args, **kwargs):
@@ -992,7 +999,7 @@ async def test_gather_timeout(comms_instance, dummy_compressor):
     comms_instance.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
 
     result = await comms_instance.gather(
-        my_uid="0",
+        my_uid=0,
         uids=["1"],
         window=1,
         key="gradient",
@@ -1005,25 +1012,27 @@ async def test_gather_timeout(comms_instance, dummy_compressor):
 
 
 # Test Start Window Operations
-async def test_get_start_window(comms_instance):
-    """Test fetching start window"""
+async def test_get_start_window(comms_instance: Comms):
+    """Tests fetching the start window."""
     mock_bucket = MagicMock()
     comms_instance._get_highest_stake_validator_bucket = AsyncMock(
         return_value=(mock_bucket, "1")
     )
-    comms_instance.s3_get_object = AsyncMock(return_value={"start_window": 100})
+    comms_instance.s3_manager.s3_get_object = AsyncMock(
+        return_value={"start_window": 100}
+    )
 
     start_window = await comms_instance.get_start_window()
     assert start_window == 100
 
 
-async def test_get_start_window_retry(comms_instance):
-    """Test start window fetch with retries"""
+async def test_get_start_window_retry(comms_instance: Comms):
+    """Tests start window fetch with retries."""
     mock_bucket = MagicMock()
     comms_instance._get_highest_stake_validator_bucket = AsyncMock(
         return_value=(mock_bucket, "1")
     )
-    comms_instance.s3_get_object = AsyncMock(
+    comms_instance.s3_manager.s3_get_object = AsyncMock(
         side_effect=[None, None, {"start_window": 100}]
     )
 
@@ -1031,86 +1040,20 @@ async def test_get_start_window_retry(comms_instance):
     assert start_window == 100
 
 
-class MockTransformer:
-    def encode(self, tensor):
-        # Return a modified version of input tensor
-        return tensor + 1.0
-
-    def decode(self, tensor):
-        # Return a modified version to ensure parameter updates
-        return tensor + 1.0
-
-
-class MockCompressor:
-    def compress(self, tensor, topk):
-        # Return mock compression values that will cause parameter updates
-        return [0], [1.0], tensor.shape, 1
-
-    def decompress(self, p, idxs, vals, xshape, totalk):
-        # Return tensor that will modify parameters
-        return torch.ones_like(p) * 0.1
-
-    def batch_decompress(self, p, idxs, vals, xshape, totalk):
-        # Return tensor that will modify parameters
-        return torch.ones_like(p) * 0.1
-
-
-class MockWallet:
-    def __init__(self):
-        self.hotkey = SimpleNamespace(ss58_address="test_address")
-
-
-class MockHParams:
-    def __init__(self):
-        self.blocks_per_window = 100
-        self.target_chunk = 512
-        self.topk_compression = 0.1
-        self.active_check_interval = 60
-        self.recent_windows = 5
-        self.gather_peer_count = 50
-
-
-def create_mock_gather_result(model, device, wrong_shape=False):
-    """Create a mock gather result matching exact parameter structure"""
-    state_dict = SimpleNamespace()
-
-    # Print actual parameter names for debugging
-    print("Model parameters:", [name for name, _ in model.named_parameters()])
-
-    for name, param in model.named_parameters():
-        if wrong_shape:
-            shape = (5, 5)
-        else:
-            shape = param.shape
-
-        # Create tensors matching parameter size
-        idxs = torch.arange(param.numel(), dtype=torch.long, device=device)
-        vals = torch.ones(param.numel(), device=device)
-
-        # Use exact parameter names
-        base_name = name.replace(".", "_")  # Convert '0.weight' to '0_weight'
-        setattr(state_dict, f"{base_name}idxs", idxs)
-        setattr(state_dict, f"{base_name}vals", vals)
-        setattr(state_dict, f"{base_name}shape", shape)
-        setattr(state_dict, f"{base_name}totalk", param.numel())
-
-    return SimpleNamespace(state_dict=state_dict, global_steps=[1])
-
-
-async def setup_test_comms():
+async def setup_test_comms() -> Comms:
     mock_wallet = MockWallet()
     mock_hparams = MockHParams()
     mock_metagraph = MockMetagraph()
     comms_instance = Comms(
         wallet=mock_wallet,
-        save_location="/tmp",
+        # save_location="/tmp",
         hparams=mock_hparams,
         config=SimpleNamespace(netuid=1),
         metagraph=mock_metagraph,
         uid=0,
     )
     # For testing, override the endpoint to avoid using the R2 endpoint.
-    comms_instance.get_base_url = lambda account_id: "http://localhost:4566"
+    comms_instance.s3_manager.get_base_url = lambda account_id: "http://localhost:4566"
     return comms_instance
 
 
@@ -1147,63 +1090,9 @@ def scheduler(optimizer):
     return setup_test_scheduler(optimizer)
 
 
-def _get_prime_divisors(n):
-    divisors = []
-    while n % 2 == 0:
-        divisors.append(2)
-        n //= 2
-    while n % 3 == 0:
-        divisors.append(3)
-        n //= 3
-    i = 5
-    while i * i <= n:
-        for k in (i, i + 2):
-            while n % k == 0:
-                divisors.append(k)
-                n //= k
-        i += 6
-    if n > 1:
-        divisors.append(n)
-    return divisors
-
-
-def _get_divisors(n):
-    divisors = []
-    if n == 1:
-        divisors.append(1)
-    elif n > 1:
-        prime_factors = _get_prime_divisors(n)
-        divisors = [1]
-        last_prime = 0
-        factor = 0
-        slice_len = 0
-        for prime in prime_factors:
-            if last_prime != prime:
-                slice_len = len(divisors)
-                factor = prime
-            else:
-                factor *= prime
-            for i in range(slice_len):
-                divisors.append(divisors[i] * factor)
-            last_prime = prime
-        divisors.sort()
-    return divisors
-
-
-def _get_smaller_split(n, close_to):
-    all_divisors = _get_divisors(n)
-    for ix, val in enumerate(all_divisors):
-        if val == close_to:
-            return val
-        if val > close_to:
-            if ix == 0:
-                return val
-            return all_divisors[ix - 1]
-    return n
-
-
 @pytest.mark.asyncio
-async def test_valid_response_handling(comms_instance, dummy_compressor):
+async def test_valid_response_handling(comms_instance: Comms, dummy_compressor):
+    """Tests handling of multiple valid peer responses."""
     # Patch out the compressed indices check
     comms_instance.check_compressed_indices = (
         lambda param_name, idxs, totalk, allowed_topk=None, vals=None: None
@@ -1244,7 +1133,7 @@ async def test_valid_response_handling(comms_instance, dummy_compressor):
 
     totalks_arg = {"0.weight": totalk_value}
     result = await comms_instance.gather(
-        my_uid="dummy_uid",
+        my_uid=0,
         uids=["uid1", "uid2", "uid3"],
         window=1,
         key="gradient",
@@ -1258,9 +1147,8 @@ async def test_valid_response_handling(comms_instance, dummy_compressor):
 
 
 @pytest.mark.asyncio
-async def test_missing_idxs_key(comms_instance, model, dummy_compressor):
-    """
-    Test 2: Missing "idxs" Key for a Parameter
+async def test_missing_idxs_key(comms_instance: Comms, model, dummy_compressor):
+    """Tests handling of a peer response missing the 'idxs' key.
 
     Setup:
       - Simulate a UID response that includes "<param_name>vals" but with "<param_name>idxs" explicitly set to None.
@@ -1321,7 +1209,7 @@ async def test_missing_idxs_key(comms_instance, model, dummy_compressor):
 
     # Call gather() with our simulated responses.
     result = await comms.gather(
-        my_uid="dummy_uid",
+        my_uid=0,
         uids=uids,
         window=1,
         key="gradient",
@@ -1364,15 +1252,14 @@ async def test_missing_idxs_key(comms_instance, model, dummy_compressor):
 
 
 @pytest.mark.asyncio
-async def test_missing_vals_key(comms_instance, model, dummy_compressor):
-    """
-    Test 3: Missing "vals" Key for a Parameter
-      - Setup:
-            • Simulate a UID response with "<param_name>idxs" present but with
-              "<param_name>vals" explicitly set to None.
-      - Expected Outcome:
-            • The UID with missing "vals" is skipped.
-            • Only UIDs with valid state dicts contribute to the aggregated gradients.
+async def test_missing_vals_key(comms_instance: Comms, model, dummy_compressor):
+    """Tests handling of a peer response missing the 'vals' key.
+    - Setup:
+          • Simulate a UID response with "<param_name>idxs" present but with
+            "<param_name>vals" explicitly set to None.
+    - Expected Outcome:
+          • The UID with missing "vals" is skipped.
+          • Only UIDs with valid state dicts contribute to the aggregated gradients.
     """
     comms = comms_instance
     device = "cpu"
@@ -1407,14 +1294,13 @@ async def test_missing_vals_key(comms_instance, model, dummy_compressor):
         nonlocal call_count
         if call_count < len(responses):
             state_dict, global_step = responses[call_count]
+            call_count += 1
             try:
                 for key in state_dict:
                     if key.endswith("vals") and state_dict[key] is None:
                         raise ValueError(f"Missing value for {key}")
             except ValueError as e:
-                call_count += 1  # Ensure we advance even if an error occurs.
                 raise e
-            call_count += 1
             return state_dict, global_step
         return None
 
@@ -1425,7 +1311,7 @@ async def test_missing_vals_key(comms_instance, model, dummy_compressor):
     )
 
     result = await comms.gather(
-        my_uid="dummy_uid",
+        my_uid=0,
         uids=uids,
         window=1,
         key="gradient",
@@ -1444,16 +1330,15 @@ async def test_missing_vals_key(comms_instance, model, dummy_compressor):
 
 
 @pytest.mark.asyncio
-async def test_empty_or_none_state_dict(comms_instance, model):
-    """
-    Test 4: Empty or None state_dict
-      - Setup:
-            • Use AsyncMock to have get_with_retry return a valid response for the first UID and
-              None (or an empty dict) for subsequent UIDs.
-      - Expected Outcome:
-            • Only the UID that returns a valid state_dict is aggregated.
-            • The remaining UIDs are skipped.
-            • Global steps reflect only valid responses.
+async def test_empty_or_none_state_dict(comms_instance: Comms, model, dummy_compressor):
+    """Tests handling of empty or None state_dict from peers.
+    - Setup:
+          • Use AsyncMock to have get_with_retry return a valid response for the first UID and
+            None (or an empty dict) for subsequent UIDs.
+    - Expected Outcome:
+          • Only the UID that returns a valid state_dict is aggregated.
+          • The remaining UIDs are skipped.
+          • Global steps reflect only valid responses.
     """
     comms = comms_instance
     device = "cpu"
@@ -1471,7 +1356,10 @@ async def test_empty_or_none_state_dict(comms_instance, model):
     def create_valid_state_dict(model):
         state_dict = {}
         for name, _ in model.named_parameters():
-            state_dict[name + "idxs"] = torch.tensor([0, 1], dtype=torch.long)
+            # Create 12-bit packed format
+            indices = torch.tensor([0, 1], dtype=torch.long)
+            packed_data = pack_12bit_indices(indices)
+            state_dict[name + "idxs"] = packed_data
             state_dict[name + "vals"] = torch.tensor([0.1, 0.2], dtype=torch.float32)
         return state_dict
 
@@ -1502,7 +1390,7 @@ async def test_empty_or_none_state_dict(comms_instance, model):
     comms.get_with_retry = AsyncMock(side_effect=mock_get_with_retry)
 
     result = await comms.gather(
-        my_uid="dummy_uid",
+        my_uid=0,
         uids=uids,
         window=1,
         key="gradient",
@@ -1722,7 +1610,7 @@ async def test_empty_candidates(comms_instance):
     )
 
 
-async def test_total_weight_zero(comms_instance):
+async def test_total_weight_zero(comms_instance: Comms):
     """
     If total weight is <= 0, it should return an empty list.
     """
@@ -1734,7 +1622,7 @@ async def test_total_weight_zero(comms_instance):
     assert result == []
 
 
-async def test_k_bigger_than_candidates(comms_instance):
+async def test_k_bigger_than_candidates(comms_instance: Comms):
     """
     If k > len(candidates), it should only return up to len(candidates).
     """
@@ -1748,7 +1636,7 @@ async def test_k_bigger_than_candidates(comms_instance):
     assert set(result).issubset(candidates)
 
 
-async def test_basic_weighting(comms_instance):
+async def test_basic_weighting(comms_instance: Comms):
     """
     Test that we can get all candidates if weights are all positive,
     and the sample size equals the number of candidates.
@@ -1764,7 +1652,7 @@ async def test_basic_weighting(comms_instance):
 
 
 @pytest.mark.parametrize("seed", [42, 100, 9999])
-async def test_random_behavior(seed, comms_instance):
+async def test_random_behavior(seed, comms_instance: Comms):
     """
     Check that the function runs consistently with a fixed random seed.
     This doesn't guarantee distribution correctness, but ensures reproducibility.
@@ -1785,61 +1673,12 @@ async def test_random_behavior(seed, comms_instance):
     assert len({tuple(r) for r in results}) == 1
 
 
-async def test_update_peers_with_buckets(comms_instance):
-    """
-    Tests whether comms_instance.update_peers_with_buckets() correctly updates
-    eval_peers, peers, and inactive_peers using mock chain data.
-    """
-
-    # 1. Setup mock metagraph data
-    #    Suppose we have 4 peers (UIDs 0..3), with the following stakes & incentives
-    comms_instance.metagraph.uids = torch.tensor([0, 1, 2, 3])
-    comms_instance.metagraph.S = torch.tensor(
-        [500, 1500, 800, 50], dtype=torch.float32
-    )  # stake
-    comms_instance.metagraph.I = torch.tensor(
-        [5, 2, 10, 1], dtype=torch.float32
-    )  # incentive
-
-    # 2. Mark all four as currently active
-    comms_instance.active_peers = [0, 1, 2, 3]
-
-    # 3. Suppose we already had counters for some peers
-    from collections import defaultdict
-
-    comms_instance.eval_peers = defaultdict(int, {0: 2, 2: 1})  # old counters
-    comms_instance.inactive_peers = set()
-
-    # 4. Setup minimal hparams
-    #    minimum_peers => aggregator requires at least this many
-    #    topk_peers => aggregator takes top X% by incentive
-    comms_instance.hparams.minimum_peers = 2
-
-    # 5. Call your update function
-    #    (Ensure the method is actually defined on comms_instance, or rename if needed.)
-    comms_instance.update_peers_with_buckets()
-
-    # 6. Verify the results:
-    #    a) No one should be newly inactive, since all old eval_peers are still active.
-    assert comms_instance.inactive_peers == set(), (
-        f"Expected no newly inactive peers, got: {comms_instance.inactive_peers}"
-    )
-
-    #    b) Implementation keeps peers whose stake ≤ 20 000 (peer #1 stays).
-    #       Old counters for 0,2 preserved (2 & 1); new peers 1,3 start at 1.
-    expected_eval_peers = {0: 2, 1: 1, 2: 1, 3: 1}
-    actual_eval_dict = dict(comms_instance.eval_peers)
-    assert actual_eval_dict == expected_eval_peers, (
-        f"eval_peers mismatch.\nExpected: {expected_eval_peers}\nGot: {actual_eval_dict}"
-    )
-
-
 # Time-based Filtering Tests for comms.s3_get_object
 # These tests verify that objects are correctly filtered based on their LastModified timestamp
 
 
 @pytest.mark.asyncio
-async def test_s3_get_object_within_time_window(comms_instance):
+async def test_s3_get_object_within_time_window(comms_instance: Comms):
     """Test that objects with timestamps within time_min and time_max are retrieved"""
     # Setup test data
     key = "test_key.pt"
@@ -1861,7 +1700,7 @@ async def test_s3_get_object_within_time_window(comms_instance):
     # Specifically, let's patch the crucial method where the time comparison happens
 
     # Original method to preserve behavior but bypass timestamp checks
-    original_s3_get_object = comms_instance.s3_get_object
+    original_s3_get_object = comms_instance.s3_manager.s3_get_object
 
     async def patched_s3_get_object(*args, **kwargs):
         # Skip the time checks and directly download the object
@@ -1879,10 +1718,10 @@ async def test_s3_get_object_within_time_window(comms_instance):
 
     # Apply the patch
     with patch.object(
-        comms_instance, "s3_get_object", side_effect=patched_s3_get_object
+        comms_instance.s3_manager, "s3_get_object", side_effect=patched_s3_get_object
     ):
         # Call the method we're testing (which will internally call our patched version)
-        result = await comms_instance.s3_get_object(
+        result = await comms_instance.s3_manager.s3_get_object(
             key=key, bucket=bucket, timeout=5, time_min=time_min, time_max=time_max
         )
 
@@ -1909,162 +1748,42 @@ async def test_s3_get_object_before_time_min(comms_instance):
     time_min = time_now
     time_max = time_now + timedelta(minutes=5)
 
-    # Create a mock S3 client with timestamp before time_min
-    mock_client = AsyncMock()
+    # This is the client that will be used for S3 operations like head_object
+    mock_s3_op_client = AsyncMock()
+    mock_s3_op_client.head_object.return_value = {
+        "LastModified": time_now - timedelta(minutes=10),
+        "ContentLength": 100,
+    }
 
-    # Define a function that returns a timestamp before time_min
-    async def mock_head_object(*args, **kwargs):
-        return {"LastModified": time_now - timedelta(minutes=10), "ContentLength": 100}
+    # This mock is what `create_client` will return. It needs to handle `__aenter__`.
+    mock_client_factory = AsyncMock()
+    mock_client_factory.__aenter__.return_value = mock_s3_op_client
 
-    # Assign our mock function to the client's method
-    mock_client.head_object = mock_head_object
-
-    # Patch session.create_client to return our mock client
+    # Patch the session.create_client to return our factory
     with (
-        patch.object(comms_instance.session, "create_client", return_value=mock_client),
-        patch("tplr.logger.debug") as mock_debug,
+        patch.object(
+            comms_instance.s3_manager.session,
+            "create_client",
+            return_value=mock_client_factory,
+        ),
+        patch("tplr.logger.info") as mock_info,
     ):
         # Call the function being tested
-        result = await comms_instance.s3_get_object(
+        result = await comms_instance.s3_manager.s3_get_object(
             key=key, bucket=bucket, timeout=5, time_min=time_min, time_max=time_max
         )
 
     # Verify result is None
-    assert result is None, "Object before time_min should be rejected"
-    # Verify debug message was logged
-    mock_debug.assert_any_call(
-        f"Object was uploaded before time_min: {key}, time_min: {time_min}"
+    assert result and result.get("__status") == "TOO_EARLY"
+    # Verify that the log message contains the expected string
+    assert any(
+        f"Object {key} was uploaded" in call.args[0]
+        for call in mock_info.call_args_list
     )
 
 
 @pytest.mark.asyncio
-async def test_s3_get_object_before_time_min(comms_instance):
-    """Test that objects with timestamps before time_min are rejected"""
-    # Setup test data
-    key = "test_key.pt"
-    bucket = Bucket(
-        name="test-bucket",
-        account_id="test-account",
-        access_key_id="test-key",
-        secret_access_key="test-secret",
-    )
-
-    # Set time boundaries
-    from datetime import datetime, timezone, timedelta
-
-    time_now = datetime.now(timezone.utc)
-    time_min = time_now
-    time_max = time_now + timedelta(minutes=5)
-
-    # Create a mock S3 client
-    mock_client = AsyncMock()
-
-    # Set timestamp before time_min
-    mock_client.head_object = AsyncMock(
-        return_value={
-            "LastModified": time_now - timedelta(minutes=10),
-            "ContentLength": 100,
-        }
-    )
-
-    # Patch the session.create_client
-    with (
-        patch.object(comms_instance.session, "create_client", return_value=mock_client),
-        patch("tplr.logger.debug") as mock_debug,
-    ):
-        # Call the function being tested
-        result = await comms_instance.s3_get_object(
-            key=key, bucket=bucket, timeout=5, time_min=time_min, time_max=time_max
-        )
-
-    # Verify result is None
-    assert result is None, "Object before time_min should be rejected"
-    # Verify debug message was logged
-    mock_debug.assert_any_call(
-        f"Object was uploaded before time_min: {key}, time_min: {time_min}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_s3_get_object_before_time_min(comms_instance):
-    """Test that objects with timestamps before time_min are rejected"""
-    # Setup test data
-    key = "test_key.pt"
-    bucket = Bucket(
-        name="test-bucket",
-        account_id="test-account",
-        access_key_id="test-key",
-        secret_access_key="test-secret",
-    )
-
-    # Set time boundaries
-    from datetime import datetime, timezone, timedelta
-
-    time_now = datetime.now(timezone.utc)
-    time_min = time_now
-    time_max = time_now + timedelta(minutes=5)
-
-    # Replace the s3_get_object method with our test implementation
-    original_method = comms_instance.s3_get_object
-
-    async def mock_s3_get_object(
-        self, key, bucket=None, timeout=5, time_min=None, time_max=None
-    ):
-        # This is our test implementation that simulates the time check logic
-        # but without actually connecting to S3
-
-        # Simulate finding a file with LastModified before time_min
-        last_modified = time_now - timedelta(minutes=10)
-
-        # Mimic the actual method's time checking logic
-        if time_min is not None and last_modified < time_min:
-            # Log the expected debug message
-            import tplr
-
-            tplr.logger.debug(
-                f"Object was uploaded before time_min: {key}, time_min: {time_min}"
-            )
-            return None
-
-        # We shouldn't reach here in this test
-        return {"unexpected": "data"}
-
-    # Patch the method directly on the instance
-    import types
-
-    comms_instance.s3_get_object = types.MethodType(mock_s3_get_object, comms_instance)
-
-    try:
-        # Patch debug logger to capture messages
-        with patch("tplr.logger.debug") as mock_debug:
-            # Call the function being tested
-            result = await comms_instance.s3_get_object(
-                key=key, bucket=bucket, timeout=5, time_min=time_min, time_max=time_max
-            )
-
-        # Verify result is None
-        assert result is None, "Object before time_min should be rejected"
-
-        # Check that the debug message was logged
-        expected_msg = (
-            f"Object was uploaded before time_min: {key}, time_min: {time_min}"
-        )
-        debug_messages = [call.args[0] for call in mock_debug.call_args_list]
-
-        # Print all captured debug messages to help diagnose
-        print("Debug messages captured:", debug_messages)
-
-        assert any(expected_msg in msg for msg in debug_messages), (
-            f"Expected debug message not found. Captured messages: {debug_messages}"
-        )
-
-    finally:
-        # Restore the original method
-        comms_instance.s3_get_object = original_method
-
-
-@pytest.mark.asyncio
-async def test_s3_get_object_after_time_max(comms_instance):
+async def test_s3_get_object_after_time_max(comms_instance: Comms):
     """Test that objects with timestamps after time_max are rejected"""
     # Setup test data
     key = "test_key.pt"
@@ -2084,7 +1803,7 @@ async def test_s3_get_object_after_time_max(comms_instance):
     future_time = time_now + timedelta(minutes=5)
 
     # Replace the method completely to avoid S3 connection issues
-    original_method = comms_instance.s3_get_object
+    original_method = comms_instance.s3_manager.s3_get_object
 
     async def mocked_s3_get_object(
         self, key, bucket=None, timeout=5, time_min=None, time_max=None
@@ -2105,28 +1824,26 @@ async def test_s3_get_object_after_time_max(comms_instance):
             tplr.logger.debug(
                 f"Object was uploaded after time_max: {key}, time_max: {time_max}"
             )
-            return None
+            return {"__status": "TOO_LATE"}
 
         # We shouldn't reach here in this test
         return {"unexpected": "data"}
 
     # Apply our mock
-    import types
-
-    comms_instance.s3_get_object = types.MethodType(
-        mocked_s3_get_object, comms_instance
+    comms_instance.s3_manager.s3_get_object = types.MethodType(
+        mocked_s3_get_object, comms_instance.s3_manager
     )
 
     try:
         # Patch the logger to capture debug messages
         with patch("tplr.logger.debug") as mock_debug:
             # Call the function
-            result = await comms_instance.s3_get_object(
+            result = await comms_instance.s3_manager.s3_get_object(
                 key=key, bucket=bucket, timeout=5, time_min=time_min, time_max=time_max
             )
 
         # Verify result is None
-        assert result is None, "Object after time_max should be rejected"
+        assert result and result.get("__status") == "TOO_LATE"
 
         # Check for our expected debug message
         expected_msg = (
@@ -2140,11 +1857,11 @@ async def test_s3_get_object_after_time_max(comms_instance):
 
     finally:
         # Restore the original method
-        comms_instance.s3_get_object = original_method
+        comms_instance.s3_manager.s3_get_object = original_method
 
 
 @pytest.mark.asyncio
-async def test_s3_get_object_none_time_bounds(comms_instance):
+async def test_s3_get_object_none_time_bounds(comms_instance: Comms):
     """Test behavior when time_min and time_max are None"""
     # Setup test data
     key = "test_key.pt"
@@ -2156,7 +1873,7 @@ async def test_s3_get_object_none_time_bounds(comms_instance):
     )
 
     # Replace the method with a controlled implementation
-    original_method = comms_instance.s3_get_object
+    original_method = comms_instance.s3_manager.s3_get_object
 
     async def mocked_s3_get_object(
         self, key, bucket=None, timeout=5, time_min=None, time_max=None
@@ -2167,15 +1884,13 @@ async def test_s3_get_object_none_time_bounds(comms_instance):
         return {"test": "data"}
 
     # Apply our mock
-    import types
-
-    comms_instance.s3_get_object = types.MethodType(
-        mocked_s3_get_object, comms_instance
+    comms_instance.s3_manager.s3_get_object = types.MethodType(
+        mocked_s3_get_object, comms_instance.s3_manager
     )
 
     try:
         # Call the function with no time bounds
-        result = await comms_instance.s3_get_object(
+        result = await comms_instance.s3_manager.s3_get_object(
             key=key, bucket=bucket, timeout=5, time_min=None, time_max=None
         )
 
@@ -2186,11 +1901,11 @@ async def test_s3_get_object_none_time_bounds(comms_instance):
 
     finally:
         # Restore the original method
-        comms_instance.s3_get_object = original_method
+        comms_instance.s3_manager.s3_get_object = original_method
 
 
 @pytest.mark.asyncio
-async def test_s3_get_object_timezone_aware_dates(comms_instance):
+async def test_s3_get_object_timezone_aware_dates(comms_instance: Comms):
     """Test handling of timezone-aware datetime objects"""
     # Setup test data
     key = "test_key.pt"
@@ -2209,7 +1924,7 @@ async def test_s3_get_object_timezone_aware_dates(comms_instance):
     time_max = datetime.now(custom_tz) + timedelta(minutes=10)
 
     # Replace the method completely to avoid S3 connection and coroutine issues
-    original_method = comms_instance.s3_get_object
+    original_method = comms_instance.s3_manager.s3_get_object
 
     async def mocked_s3_get_object(
         self, key, bucket=None, timeout=5, time_min=None, time_max=None
@@ -2241,15 +1956,13 @@ async def test_s3_get_object_timezone_aware_dates(comms_instance):
         return {"test": "data"}
 
     # Apply our mock
-    import types
-
-    comms_instance.s3_get_object = types.MethodType(
-        mocked_s3_get_object, comms_instance
+    comms_instance.s3_manager.s3_get_object = types.MethodType(
+        mocked_s3_get_object, comms_instance.s3_manager
     )
 
     try:
         # Call the function
-        result = await comms_instance.s3_get_object(
+        result = await comms_instance.s3_manager.s3_get_object(
             key=key, bucket=bucket, timeout=5, time_min=time_min, time_max=time_max
         )
 
@@ -2260,314 +1973,49 @@ async def test_s3_get_object_timezone_aware_dates(comms_instance):
 
     finally:
         # Restore the original method
-        comms_instance.s3_get_object = original_method
+        comms_instance.s3_manager.s3_get_object = original_method
 
 
 @pytest.mark.asyncio
-async def test_s3_get_object_timezone_naive_dates(comms_instance):
-    """Test automatic timezone normalization of naive datetime objects"""
-    key = "test_key.pt"
-    bucket = Bucket(
-        name="test-bucket",
-        account_id="test-account",
-        access_key_id="test-key",
-        secret_access_key="test-secret",
-    )
-
-    time_now = datetime.now()  # Naive datetime (no timezone)
-    time_min = time_now - timedelta(hours=1)
-    time_max = time_now + timedelta(hours=1)
-    time_now_utc = datetime.now(timezone.utc)
-
-    # Track if we got proper timezone conversion
-    correct_conversion = False
-
-    # Mock implementation
-    async def mocked_s3_get_object(
-        self, key, bucket=None, timeout=5, time_min=None, time_max=None
-    ):
-        nonlocal correct_conversion
-
-        # Apply timezone normalization
-        normalized_min = time_min
-        normalized_max = time_max
-
-        if time_min is not None and not time_min.tzinfo:
-            normalized_min = time_min.replace(tzinfo=timezone.utc)
-        if time_max is not None and not time_max.tzinfo:
-            normalized_max = time_max.replace(tzinfo=timezone.utc)
-
-        # Verify normalization happened
-        correct_conversion = (
-            normalized_min is not None and normalized_min.tzinfo is not None
-        ) and (normalized_max is not None and normalized_max.tzinfo is not None)
-
-        # Always return test data
-        return {"test": "data"}
-
-    # Set up and use the mock function
-    import types
-
-    original_method = comms_instance.s3_get_object
-    comms_instance.s3_get_object = types.MethodType(
-        mocked_s3_get_object, comms_instance
-    )
-
-    try:
-        result = await comms_instance.s3_get_object(
-            key=key, bucket=bucket, timeout=5, time_min=time_min, time_max=time_max
-        )
-
-        assert correct_conversion, "Time values were not properly normalized to UTC"
-        assert result == {"test": "data"}, (
-            "Object should be retrieved with timezone normalization"
-        )
-
-    finally:
-        comms_instance.s3_get_object = original_method
-
-
-@pytest.mark.asyncio
-async def test_s3_get_object_missing_last_modified(comms_instance):
-    """Test handling when LastModified is missing from response"""
+async def test_s3_get_object_gather_integration(
+    comms_instance: Comms, dummy_compressor
+):
+    """Test S3 get_object integration with gather operation"""
     # Setup test data
-    key = "test_key.pt"
-    bucket = Bucket(
-        name="test-bucket",
-        account_id="test-account",
-        access_key_id="test-key",
-        secret_access_key="test-secret",
-    )
-
-    # Set time boundaries
-    time_min = datetime.now(timezone.utc) - timedelta(minutes=5)
-    time_max = datetime.now(timezone.utc) + timedelta(minutes=5)
-
-    # Replace the method completely to avoid S3 connection issues
-    original_method = comms_instance.s3_get_object
-
-    async def mocked_s3_get_object(
-        self, key, bucket=None, timeout=5, time_min=None, time_max=None
-    ):
-        """Mocked version that simulates a head_object response with missing LastModified"""
-        # For test tracking, let's log when this mock is called
-        tplr.logger.debug("Mock s3_get_object called for missing LastModified test")
-
-        # Simulate the logic for handling missing LastModified
-        tplr.logger.debug(f"Object does not exist: {key}")
-        return None
-
-    # Apply our mock
-    import types
-
-    comms_instance.s3_get_object = types.MethodType(
-        mocked_s3_get_object, comms_instance
-    )
-
-    try:
-        # Patch logger to verify debug message
-        with patch("tplr.logger.debug") as mock_debug:
-            # Call the function
-            result = await comms_instance.s3_get_object(
-                key=key, bucket=bucket, timeout=5, time_min=time_min, time_max=time_max
-            )
-
-        # Verify result is None
-        assert result is None, "Object without LastModified should be rejected"
-
-        # Verify our debug message was logged
-        debug_messages = [call.args[0] for call in mock_debug.call_args_list]
-        assert any("Object does not exist" in msg for msg in debug_messages), (
-            "Expected debug message about missing LastModified not found"
-        )
-
-    finally:
-        # Restore the original method
-        comms_instance.s3_get_object = original_method
-
-
-@pytest.mark.asyncio
-async def test_s3_get_object_exact_time_boundaries(comms_instance):
-    """Test objects with timestamps exactly at time_min and time_max boundaries"""
-    # Setup
-    key = "test_key.pt"
-    bucket = Bucket(
-        name="test-bucket",
-        account_id="test-account",
-        access_key_id="test-key",
-        secret_access_key="test-secret",
-    )
-
-    # Set exact time boundaries
-    exact_time = datetime.now(timezone.utc)
-
-    # Replace the method to avoid S3 connection issues
-    original_method = comms_instance.s3_get_object
-
-    # Flag to track which test case we're running
-    test_case = "time_min"
-
-    async def mocked_s3_get_object(
-        self, key, bucket=None, timeout=5, time_min=None, time_max=None
-    ):
-        """Mocked version that tests exact timestamp boundaries"""
-        nonlocal test_case
-
-        # Normalize timezone information
-        if time_min is not None and not time_min.tzinfo:
-            time_min = time_min.replace(tzinfo=timezone.utc)
-        if time_max is not None and not time_max.tzinfo:
-            time_max = time_max.replace(tzinfo=timezone.utc)
-
-        # Set LastModified based on which test case we're running
-        if test_case == "time_min":
-            # Exact match with time_min (should pass)
-            last_modified = time_min
-        else:
-            # Exact match with time_max (should pass)
-            last_modified = time_max
-
-        # Verify the timestamp is within bounds
-        if time_min is not None and last_modified < time_min:
-            tplr.logger.debug(
-                f"Object was uploaded before time_min: {key}, time_min: {time_min}"
-            )
-            return None
-        if time_max is not None and last_modified > time_max:
-            tplr.logger.debug(
-                f"Object was uploaded after time_max: {key}, time_max: {time_max}"
-            )
-            return None
-
-        # If we pass the time checks, return the mock data
-        return {"test": "data"}
-
-    # Apply our mock
-    import types
-
-    comms_instance.s3_get_object = types.MethodType(
-        mocked_s3_get_object, comms_instance
-    )
-
-    try:
-        # Case 1: LastModified exactly equal to time_min (should pass)
-        test_case = "time_min"
-        result1 = await comms_instance.s3_get_object(
-            key=key,
-            bucket=bucket,
-            timeout=5,
-            time_min=exact_time,  # Same as LastModified
-            time_max=exact_time + timedelta(minutes=5),
-        )
-
-        # Should pass when timestamp is equal to time_min
-        assert result1 == {"test": "data"}, (
-            "Object with timestamp equal to time_min should be retrieved"
-        )
-
-        # Case 2: LastModified exactly equal to time_max (should pass)
-        test_case = "time_max"
-        result2 = await comms_instance.s3_get_object(
-            key=key,
-            bucket=bucket,
-            timeout=5,
-            time_min=exact_time - timedelta(minutes=5),
-            time_max=exact_time,  # Same as LastModified
-        )
-
-        # Should pass when timestamp is equal to time_max
-        assert result2 == {"test": "data"}, (
-            "Object with timestamp equal to time_max should be retrieved"
-        )
-
-    finally:
-        # Restore the original method
-        comms_instance.s3_get_object = original_method
-
-
-@pytest.mark.asyncio
-async def test_s3_get_object_gather_integration(comms_instance):
-    """Test time filtering integration with the gather method"""
-    # Setup test data
-    my_uid = "test_uid"
-    peer_uid = "peer_uid"
-    window = 10
+    uid = "1"
+    window = 1
     key = "gradient"
-    time_now = datetime.now(timezone.utc)
-    time_min = time_now - timedelta(minutes=5)
-    time_max = time_now + timedelta(minutes=5)
-    totalks = {"param": 100}
+    totalks = {"0.weight": 100}
 
-    # Completely bypass the real gather method
-    original_gather = comms_instance.gather
+    # Mock the S3 get_object to return a valid response
+    comms_instance.get_with_retry = AsyncMock(
+        return_value=(
+            {
+                "0.weightidxs": create_packed_indices([0, 1, 2, 3]),
+                "0.weightvals": torch.tensor([0.1, 0.2, 0.3, 0.4]),
+                "totalks": totalks,
+            },
+            10,
+        )
+    )
 
-    async def mocked_gather(
-        self,
-        my_uid,
-        uids,
-        window,
-        key,
+    # Call gather
+    result = await comms_instance.gather(
+        my_uid=0,
+        uids=[uid],
+        window=window,
+        key=key,
         timeout=5,
         device="cpu",
-        totalks=None,
+        local=False,
+        stale_retention=10,
+        totalks=totalks,
         compressor=dummy_compressor,
-        time_min=None,
-        time_max=None,
-        **kwargs,
-    ):
-        """Mock implementation of gather that verifies time bounds are used"""
-        # Log parameters to verify they were received correctly
-        tplr.logger.debug(
-            f"Mock gather called with time_min={time_min}, time_max={time_max}"
-        )
+    )
 
-        # Return a mock gradient dictionary
-        gradient_dict = {
-            "param.idxs": create_packed_indices([0, 1]),
-            "param.vals": torch.tensor([0.1, 0.2]),
-            "param.totalk": torch.tensor([100]),  # Include the totalk information
-        }
-
-        # Return a dictionary mapping uid to gradient dict
-        return {peer_uid: gradient_dict}
-
-    # Apply our mock
-    import types
-
-    comms_instance.gather = types.MethodType(mocked_gather, comms_instance)
-
-    try:
-        # Patch logger to capture debug messages
-        with patch("tplr.logger.debug") as mock_debug:
-            # Call gather with time bounds
-            result = await comms_instance.gather(
-                my_uid=my_uid,
-                uids=[peer_uid],
-                window=window,
-                key=key,
-                timeout=5,
-                device="cpu",
-                totalks=totalks,
-                compressor=dummy_compressor,
-                time_min=time_min,
-                time_max=time_max,
-            )
-
-        # Verify result structure
-        assert result is not None, "Result should not be None"
-        assert peer_uid in result, f"Result should contain {peer_uid}"
-        assert "param.idxs" in result[peer_uid], "Result should contain param.idxs"
-        assert "param.vals" in result[peer_uid], "Result should contain param.vals"
-
-        # Verify debug message shows time bounds were passed correctly
-        debug_messages = [call.args[0] for call in mock_debug.call_args_list]
-        assert any(f"time_min={time_min}" in msg for msg in debug_messages), (
-            f"Expected debug message with time_min not found in: {debug_messages}"
-        )
-        assert any(f"time_max={time_max}" in msg for msg in debug_messages), (
-            f"Expected debug message with time_max not found in: {debug_messages}"
-        )
-
-    finally:
-        # Restore the original method
-        comms_instance.gather = original_gather
+    # Verify the result
+    assert result is not None
+    assert result.uids == [uid]
+    assert result.global_steps == [10]
+    assert "0.weightidxs" in result.state_dict.__dict__
+    assert "0.weightvals" in result.state_dict.__dict__

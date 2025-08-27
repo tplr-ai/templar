@@ -1036,7 +1036,16 @@ class Validator(BaseNode, Trainer):
                     sync_window=self.sync_window,
                     current_window=self.current_window,
                 )
-                self.slash_from_overlap(idx_overlap)
+                # Skip overlap slashing for the first 20 global steps
+                if self.global_step >= 20:
+                    self.slash_from_overlap(idx_overlap)
+                else:
+                    tplr.log_with_context(
+                        level="info",
+                        message=f"Skipping overlap slashing at global step {self.global_step} (waiting until step 20)",
+                        sync_window=self.sync_window,
+                        current_window=self.current_window,
+                    )
 
                 skipped_uids = gather_result.skipped_uids
                 success_rate = gather_result.success_rate
